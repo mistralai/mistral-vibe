@@ -9,6 +9,7 @@ from textual.pilot import Pilot
 
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp
 from tests.snapshots.snap_compare import SnapCompare
+from vibe.app_server._projection import project_debug_logs
 from vibe.core.log_reader import LogReader
 
 _SAMPLE_LOGS = "\n".join([
@@ -38,11 +39,19 @@ atexit.register(shutil.rmtree, str(_TMP_DIR), True)
 class DebugConsoleSnapshotApp(BaseSnapshotTestApp):
     def __init__(self) -> None:
         super().__init__()
-        self._log_reader = LogReader(log_file=_LOG_FILE, poll_interval=0.1)
+        log_reader = LogReader(log_file=_LOG_FILE)
+
+        async def read_logs(*, limit: int = 100, offset: int = 0):
+            return project_debug_logs(log_reader.get_logs(limit=limit, offset=offset))
+
+        self._read_logs = read_logs
+
+    async def on_load(self) -> None:
+        await super().on_load()
+        self.app_server.resources.runtime.read_logs = self._read_logs
 
 
 def test_snapshot_debug_console_open(snap_compare: SnapCompare) -> None:
-    """Test that the debug console opens and shows log entries."""
     _LOG_FILE.write_text(_SAMPLE_LOGS + "\n")
 
     async def run_before(pilot: Pilot) -> None:
@@ -56,7 +65,6 @@ def test_snapshot_debug_console_open(snap_compare: SnapCompare) -> None:
 
 
 def test_snapshot_debug_console_live_append(snap_compare: SnapCompare) -> None:
-    """Test that appending a log line to the file shows the new entry."""
     _LOG_FILE.write_text(_SAMPLE_LOGS + "\n")
 
     async def run_before(pilot: Pilot) -> None:
@@ -75,7 +83,6 @@ def test_snapshot_debug_console_live_append(snap_compare: SnapCompare) -> None:
 
 
 def test_snapshot_debug_console_close(snap_compare: SnapCompare) -> None:
-    """Test that closing the debug console restores the normal UI."""
     _LOG_FILE.write_text(_SAMPLE_LOGS + "\n")
 
     async def run_before(pilot: Pilot) -> None:

@@ -4,13 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from vibe.core.types import (
-    FileImageSource,
-    ImageAttachment,
-    LLMMessage,
-    Role,
-    UserDisplayContentMetadata,
-)
+from vibe.core.types import FileImageSource, ImageAttachment, LLMMessage, Role
+from vibe.user_content import UserDisplayContent
 
 
 @pytest.fixture()
@@ -35,8 +30,8 @@ def _msg(content: str, images: list[ImageAttachment] | None = None) -> LLMMessag
     return LLMMessage(role=Role.assistant, content=content, images=images)
 
 
-def _display_content(host: str) -> UserDisplayContentMetadata:
-    return UserDisplayContentMetadata(
+def _display_content(host: str) -> UserDisplayContent:
+    return UserDisplayContent(
         version="1.0.0", host=host, content=[{"type": "text", "text": host}]
     )
 

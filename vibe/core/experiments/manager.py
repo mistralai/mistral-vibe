@@ -10,7 +10,7 @@ from vibe.core.experiments.models import (
     FeatureDefinition,
     TrackData,
 )
-from vibe.core.logger import logger
+from vibe.observability.logging import logger
 
 
 def hash_api_key(api_key: str) -> str:
@@ -19,13 +19,8 @@ def hash_api_key(api_key: str) -> str:
 
 
 class ExperimentManager:
-    def __init__(
-        self,
-        client: RemoteEvalClient | None = None,
-        overrides: dict[str, str] | None = None,
-    ) -> None:
+    def __init__(self, client: RemoteEvalClient | None = None) -> None:
         self._client = client if client is not None else RemoteEvalClient()
-        self._overrides = dict(overrides) if overrides else {}
         self._response: EvalResponse | None = None
 
     async def initialize(self, attributes: ExperimentAttributes) -> None:
@@ -59,8 +54,7 @@ class ExperimentManager:
         )
 
     def get_variant_or_none(self, name: ExperimentName) -> str | None:
-        if (override := self._overrides.get(name.value)) is not None:
-            return override
+        """Return GrowthBook's resolved value, including feature defaults."""
         if self._response is not None:
             feature = self._response.features.get(name.value)
             if feature is not None:
@@ -70,13 +64,31 @@ class ExperimentManager:
         return None
 
     def get_variant(self, name: ExperimentName) -> str:
+        """Return the resolved remote value, falling back to Vibe's default."""
         variant = self.get_variant_or_none(name)
         return variant if variant is not None else DEFAULT_VARIANTS[name]
 
+    def config_variants(self) -> dict[str, str]:
+        """Return experiment values allowed to override config layers."""
+        result = self.assignments()
+        if self._response is None:
+            return result
+
+        for name in ExperimentName:
+            if name.value in result:
+                continue
+            feature = self._response.features.get(name.value)
+            if feature is None:
+                continue
+            if (variant := self._forced_variant_or_none(feature)) is not None:
+                result[name.value] = variant
+        return result
+
     def assignments(self) -> dict[str, str]:
+        """Return confirmed experiment exposures for telemetry only."""
         result: dict[str, str] = {}
         if self._response is None:
-            return dict(self._overrides)
+            return {}
         for feature_key, feature in self._response.features.items():
             for rule in feature.rules:
                 for track in rule.tracks:
@@ -85,12 +97,14 @@ class ExperimentManager:
                     label = self._variant_label(feature, track)
                     if label:
                         result[feature_key] = label
-            override = self._overrides.get(feature_key)
-            if override is not None:
-                result[feature_key] = override
-        for key, value in self._overrides.items():
-            result.setdefault(key, value)
         return result
+
+    @staticmethod
+    def _forced_variant_or_none(feature: FeatureDefinition) -> str | None:
+        for rule in feature.rules:
+            if isinstance(rule.force, str):
+                return rule.force
+        return None
 
     @staticmethod
     def _variant_label(feature: FeatureDefinition, track: TrackData) -> str:

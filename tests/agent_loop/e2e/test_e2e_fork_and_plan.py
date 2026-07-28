@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from tests.agent_loop.e2e.conftest import MistralAPI, build_e2e_agent_loop
 from tests.backend.data.mistral import mistral_completion
 from tests.conftest import build_test_vibe_config
+from vibe.app_server._runtime import AgentRuntimeFactory
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.tools.builtins.ask_user_question import (
-    Answer,
     AskUserQuestionArgs,
     AskUserQuestionResult,
 )
-from vibe.core.types import PlanReviewEndedEvent, PlanReviewRequestedEvent, Role
+from vibe.core.types import (
+    BaseEvent,
+    PlanReviewEndedEvent,
+    PlanReviewRequestedEvent,
+    Role,
+    UserInputRequestEvent,
+)
 from vibe.core.utils.tags import VIBE_WARNING_TAG
+from vibe.questions import UserAnswer as Answer
 
 EXIT_PLAN_TOOL_CALL = [
     {
@@ -41,7 +49,7 @@ async def test_fork_copies_all_non_system_messages(mistral_api: MistralAPI) -> N
     agent = build_e2e_agent_loop()
     _ = [event async for event in agent.act("Hello")]
 
-    forked = await agent.fork()
+    forked = await AgentRuntimeFactory().fork(agent, None)
 
     non_system = [m for m in forked.messages if m.role != Role.system]
     assert [m.role for m in non_system] == [Role.user, Role.assistant]
@@ -60,7 +68,7 @@ async def test_fork_from_message_id_truncates_at_next_user_turn(
     _ = [event async for event in agent.act("Turn two")]
 
     first_user_id = _user_message_ids(agent)[0]
-    forked = await agent.fork(first_user_id)
+    forked = await AgentRuntimeFactory().fork(agent, first_user_id)
 
     contents = [m.content for m in forked.messages if m.role != Role.system]
     assert contents == ["Turn one", "First"]
@@ -74,7 +82,7 @@ async def test_fork_from_unknown_message_id_raises(mistral_api: MistralAPI) -> N
     _ = [event async for event in agent.act("Hello")]
 
     with pytest.raises(ValueError, match="unknown message_id"):
-        await agent.fork("does-not-exist")
+        await AgentRuntimeFactory().fork(agent, "does-not-exist")
 
 
 @pytest.mark.asyncio
@@ -86,7 +94,7 @@ async def test_fork_from_assistant_message_id_raises(mistral_api: MistralAPI) ->
 
     assistant_id = _assistant_message_id(agent)
     with pytest.raises(ValueError, match="only supported for user messages"):
-        await agent.fork(assistant_id)
+        await AgentRuntimeFactory().fork(agent, assistant_id)
 
 
 def _plan_agent(mistral_api: MistralAPI) -> Any:
@@ -100,6 +108,19 @@ def _plan_agent(mistral_api: MistralAPI) -> Any:
     )
 
 
+async def _act_with_user_input(
+    agent: Any,
+    handler: Callable[[AskUserQuestionArgs], Awaitable[AskUserQuestionResult]],
+) -> list[BaseEvent]:
+    events: list[BaseEvent] = []
+    async for event in agent.act("Make a plan"):
+        events.append(event)
+        if isinstance(event, UserInputRequestEvent):
+            result = await handler(cast(AskUserQuestionArgs, event.args))
+            agent.resolve_user_input_request(event.request_id, result)
+    return events
+
+
 @pytest.mark.asyncio
 async def test_plan_mode_emits_review_requested_and_ended_events(
     mistral_api: MistralAPI,
@@ -110,9 +131,7 @@ async def test_plan_mode_emits_review_requested_and_ended_events(
     async def stay_in_plan(_: AskUserQuestionArgs) -> AskUserQuestionResult:
         return AskUserQuestionResult(cancelled=True, answers=[])
 
-    agent.set_user_input_callback(stay_in_plan)
-
-    events = [event async for event in agent.act("Make a plan")]
+    events = await _act_with_user_input(agent, stay_in_plan)
 
     assert any(isinstance(e, PlanReviewRequestedEvent) for e in events)
     assert any(isinstance(e, PlanReviewEndedEvent) for e in events)
@@ -133,11 +152,12 @@ async def test_plan_mode_injects_updated_plan_when_file_changed(
         plan_path.write_text("# Updated plan\nStep 1")
         return AskUserQuestionResult(cancelled=True, answers=[])
 
-    agent.set_user_input_callback(edit_plan_then_decline)
-
     async for event in agent.act("Make a plan"):
         if isinstance(event, PlanReviewRequestedEvent):
             plan_path = event.file_path
+        elif isinstance(event, UserInputRequestEvent):
+            result = await edit_plan_then_decline(cast(AskUserQuestionArgs, event.args))
+            agent.resolve_user_input_request(event.request_id, result)
 
     injected = [m for m in agent.messages if getattr(m, "injected", False)]
     assert any(
@@ -165,8 +185,6 @@ async def test_plan_mode_exit_switches_agent_mid_turn(mistral_api: MistralAPI) -
             ],
         )
 
-    agent.set_user_input_callback(approve)
-
-    _ = [event async for event in agent.act("Make a plan")]
+    await _act_with_user_input(agent, approve)
 
     assert agent.agent_profile.name == BuiltinAgentName.DEFAULT

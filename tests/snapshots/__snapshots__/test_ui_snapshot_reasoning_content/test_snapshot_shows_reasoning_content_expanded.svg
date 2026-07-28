@@ -37,7 +37,6 @@
 .terminal-r3 { fill: #68a0b3 }
 .terminal-r4 { fill: #c5c8c6;font-weight: bold }
 .terminal-r5 { fill: #868887 }
-.terminal-r6 { fill: #98a84b }
     </style>
 
     <defs>
@@ -185,7 +184,7 @@
 </text><text class="terminal-r2" x="0" y="532.4" textLength="24.4" clip-path="url(#terminal-line-21)">&gt;&#160;</text><text class="terminal-r4" x="24.4" y="532.4" textLength="231.8" clip-path="url(#terminal-line-21)">What&#160;is&#160;the&#160;answer?</text><text class="terminal-r1" x="1464" y="532.4" textLength="12.2" clip-path="url(#terminal-line-21)">
 </text><text class="terminal-r5" x="0" y="556.8" textLength="1464" clip-path="url(#terminal-line-22)">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</text><text class="terminal-r1" x="1464" y="556.8" textLength="12.2" clip-path="url(#terminal-line-22)">
 </text><text class="terminal-r1" x="1464" y="581.2" textLength="12.2" clip-path="url(#terminal-line-23)">
-</text><text class="terminal-r6" x="0" y="605.6" textLength="12.2" clip-path="url(#terminal-line-24)">■</text><text class="terminal-r5" x="24.4" y="605.6" textLength="85.4" clip-path="url(#terminal-line-24)">Thought</text><text class="terminal-r5" x="122" y="605.6" textLength="12.2" clip-path="url(#terminal-line-24)">▼</text><text class="terminal-r1" x="1464" y="605.6" textLength="12.2" clip-path="url(#terminal-line-24)">
+</text><text class="terminal-r5" x="0" y="605.6" textLength="12.2" clip-path="url(#terminal-line-24)">⏷</text><text class="terminal-r5" x="24.4" y="605.6" textLength="85.4" clip-path="url(#terminal-line-24)">Thought</text><text class="terminal-r1" x="1464" y="605.6" textLength="12.2" clip-path="url(#terminal-line-24)">
 </text><text class="terminal-r5" x="24.4" y="630" textLength="1390.8" clip-path="url(#terminal-line-25)">Let&#160;me&#160;think&#160;about&#160;this&#160;step&#160;by&#160;step...&#160;First,&#160;I&#160;need&#160;to&#160;understand&#160;the&#160;question.&#160;Then&#160;I&#160;can&#160;formulate&#160;a&#160;response.</text><text class="terminal-r1" x="1464" y="630" textLength="12.2" clip-path="url(#terminal-line-25)">
 </text><text class="terminal-r1" x="1464" y="654.4" textLength="12.2" clip-path="url(#terminal-line-26)">
 </text><text class="terminal-r1" x="24.4" y="678.8" textLength="768.6" clip-path="url(#terminal-line-27)">The&#160;answer&#160;to&#160;your&#160;question&#160;is&#160;42.&#160;This&#160;is&#160;the&#160;ultimate&#160;answer.</text><text class="terminal-r1" x="1464" y="678.8" textLength="12.2" clip-path="url(#terminal-line-27)">

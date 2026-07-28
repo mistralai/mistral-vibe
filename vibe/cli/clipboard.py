@@ -10,7 +10,7 @@ import pyperclip
 from textual.app import App
 from textual.widgets import Input, TextArea
 
-from vibe.core.utils.io import decode_safe
+from vibe.utils.io import decode_safe
 
 
 def _copy_osc52(text: str) -> None:

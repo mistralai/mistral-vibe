@@ -5,64 +5,55 @@ from weakref import WeakKeyDictionary
 
 from textual.widget import Widget
 
+from vibe.app_server.models import PublicHistoryEntry
 from vibe.cli.textual_ui.windowing.history import (
-    build_tool_call_map,
     split_history_tail,
     visible_history_indices,
     visible_history_widgets_count,
 )
 from vibe.cli.textual_ui.windowing.state import SessionWindowing
-from vibe.core.types import LLMMessage
 
 
 @dataclass(frozen=True)
 class HistoryResumePlan:
-    tool_call_map: dict[str, str]
-    tail_messages: list[LLMMessage]
-    backfill_messages: list[LLMMessage]
+    tail_entries: list[PublicHistoryEntry]
+    backfill_entries: list[PublicHistoryEntry]
     tail_start_index: int
 
     @property
     def has_backfill(self) -> bool:
-        return bool(self.backfill_messages)
+        return bool(self.backfill_entries)
 
 
 def should_resume_history(messages_children: list[Widget]) -> bool:
-    """Check if there are no visible history widgets in the messages"""
     return visible_history_widgets_count(messages_children) == 0
 
 
 def create_resume_plan(
-    history_messages: list[LLMMessage], tail_size: int
+    history: list[PublicHistoryEntry], tail_size: int
 ) -> HistoryResumePlan | None:
-    if not history_messages:
+    if not history:
         return None
-    tail_messages, backfill_messages, tail_start_index = split_history_tail(
-        history_messages, tail_size
-    )
+    tail, backfill, tail_start_index = split_history_tail(history, tail_size)
     return HistoryResumePlan(
-        tool_call_map=build_tool_call_map(history_messages),
-        tail_messages=tail_messages,
-        backfill_messages=backfill_messages,
-        tail_start_index=tail_start_index,
+        tail_entries=tail, backfill_entries=backfill, tail_start_index=tail_start_index
     )
 
 
 def sync_backfill_state(
     *,
-    history_messages: list[LLMMessage],
+    history: list[PublicHistoryEntry],
     messages_children: list[Widget],
     history_widget_indices: WeakKeyDictionary[Widget, int],
     windowing: SessionWindowing,
-) -> tuple[bool, dict[str, str] | None]:
-    if not history_messages:
+) -> bool:
+    if not history:
         windowing.reset()
-        return False, None
+        return False
     visible_indices = visible_history_indices(messages_children, history_widget_indices)
-    visible_history_widgets = visible_history_widgets_count(messages_children)
-    has_backfill = windowing.recompute_backfill(
-        history_messages,
+    visible_widgets = visible_history_widgets_count(messages_children)
+    return windowing.recompute_backfill(
+        history,
         visible_indices=visible_indices,
-        visible_history_widgets_count=visible_history_widgets,
+        visible_history_widgets_count=visible_widgets,
     )
-    return has_backfill, build_tool_call_map(history_messages)

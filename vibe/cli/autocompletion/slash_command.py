@@ -3,7 +3,7 @@ from __future__ import annotations
 from textual import events
 
 from vibe.cli.autocompletion.base import CompletionResult, CompletionView
-from vibe.core.autocompletion.completers import CommandCompleter
+from vibe.cli.autocompletion.completers import CommandCompleter
 
 
 class SlashCommandController:

@@ -70,14 +70,12 @@ class AnthropicMapper:
 
     def _convert_assistant_message(self, msg: LLMMessage) -> dict[str, Any]:
         content: list[dict[str, Any]] = []
-        if msg.reasoning_content:
-            block: dict[str, Any] = {
+        if msg.reasoning_content and msg.reasoning_signature:
+            content.append({
                 "type": "thinking",
                 "thinking": msg.reasoning_content,
-            }
-            if msg.reasoning_signature:
-                block["signature"] = msg.reasoning_signature
-            content.append(block)
+                "signature": msg.reasoning_signature,
+            })
         if msg.content:
             content.append({"type": "text", "text": msg.content})
         if msg.tool_calls:

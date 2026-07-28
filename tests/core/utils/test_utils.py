@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from vibe.core.utils import compact_complete_display, get_server_url_from_api_base
-import vibe.core.utils.io as io_utils
-from vibe.core.utils.io import (
+from vibe.core.utils import compact_complete_display
+import vibe.utils.io as io_utils
+from vibe.utils.io import (
     _FILE_WRITE_LOCKS,
     decode_safe,
     encode_safe,
@@ -17,20 +17,6 @@ from vibe.core.utils.io import (
     read_safe,
     read_safe_async,
 )
-
-
-@pytest.mark.parametrize(
-    ("api_base", "expected"),
-    [
-        ("https://api.mistral.ai/v1", "https://api.mistral.ai"),
-        ("https://on-prem.example.com/v1", "https://on-prem.example.com"),
-        ("http://localhost:8080/v2", "http://localhost:8080"),
-        ("not-a-url", None),
-        ("ftp://example.com/v1", None),
-    ],
-)
-def test_get_server_url_from_api_base(api_base, expected):
-    assert get_server_url_from_api_base(api_base) == expected
 
 
 class TestCompactCompleteDisplay:

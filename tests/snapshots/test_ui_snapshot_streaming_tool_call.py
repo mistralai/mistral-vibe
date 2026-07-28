@@ -8,6 +8,8 @@ from textual.containers import VerticalScroll
 from textual.pilot import Pilot
 
 from tests.snapshots.snap_compare import SnapCompare
+from tests.stubs.app_server import CoreEventProjection
+from vibe.app_server.models import PublicEffectEntry
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage
 from vibe.core.tools.builtins.read_file import ReadFile, ReadFileArgs
@@ -20,16 +22,17 @@ class ToolCallStreamingUpdateTest(App):
     def __init__(self) -> None:
         super().__init__()
         self._widget: ToolCallMessage | None = None
+        self._projection = CoreEventProjection()
 
     def compose(self) -> ComposeResult:
         partial_event = ToolCallEvent(
             tool_call_id="tc_streaming",
             tool_call_index=0,
-            tool_name="read",
+            tool_name="read_file",
             tool_class=ReadFile,
             args=None,
         )
-        self._widget = ToolCallMessage(partial_event)
+        self._widget = ToolCallMessage(self._project_effect(partial_event))
 
         with VerticalScroll():
             yield self._widget
@@ -41,11 +44,17 @@ class ToolCallStreamingUpdateTest(App):
         full_event = ToolCallEvent(
             tool_call_id="tc_streaming",
             tool_call_index=0,
-            tool_name="read",
+            tool_name="read_file",
             tool_class=ReadFile,
             args=ReadFileArgs(file_path="/test/example.py"),
         )
-        self._widget.update_event(full_event)
+        self._widget.update_entry(self._project_effect(full_event))
+
+    def _project_effect(self, event: ToolCallEvent) -> PublicEffectEntry:
+        self._projection.project(event)
+        entry = self._projection.history[-1]
+        assert isinstance(entry, PublicEffectEntry)
+        return entry
 
 
 def test_snapshot_tool_call_partial(snap_compare: SnapCompare) -> None:

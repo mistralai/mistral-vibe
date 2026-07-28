@@ -3,16 +3,17 @@ from __future__ import annotations
 from datetime import datetime
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from tests.conftest import ConfigBuilder, OrchestratorLoader
+from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.stubs.app_server import start_test_app_server
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
-from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
-from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import ModelConfig, SessionLoggingConfig, VibeConfigSchema
+from vibe.acp.agent import SessionStarter, VibeAcpAgent
+from vibe.app_server.local import LocalHarnessOptions, ResumeSessionIntent
+from vibe.app_server.session import AppServerSession
+from vibe.core.config import ModelConfig, SessionLoggingConfig
 from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
 
 
@@ -27,8 +28,12 @@ def backend() -> FakeBackend:
     return backend
 
 
-def _create_acp_agent() -> VibeAcpAgentLoop:
-    vibe_acp_agent = VibeAcpAgentLoop()
+def _create_acp_agent(session_starter: SessionStarter | None = None) -> VibeAcpAgent:
+    vibe_acp_agent = (
+        VibeAcpAgent(session_starter=session_starter)
+        if session_starter is not None
+        else VibeAcpAgent()
+    )
     client = FakeClient()
 
     vibe_acp_agent.on_connect(client)
@@ -38,50 +43,53 @@ def _create_acp_agent() -> VibeAcpAgentLoop:
 
 
 @pytest.fixture
-def acp_agent_loop(backend: FakeBackend) -> VibeAcpAgentLoop:
-    class PatchedAgent(AgentLoop):
-        def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **kwargs, backend=backend)
+def acp_agent_loop(backend: FakeBackend) -> VibeAcpAgent:
+    async def start_session(options: LocalHarnessOptions) -> AppServerSession:
+        loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+        return await AppServerSession.start(
+            start_test_app_server(loop),
+            client_info=options.client.info,
+            capabilities=options.client.capabilities,
+            session_options=options.session_options,
+        )
 
-    patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgent).start()
-    return _create_acp_agent()
+    return _create_acp_agent(start_session)
 
 
 @pytest.fixture
 def acp_agent_with_session_config(
-    backend: FakeBackend,
-    temp_session_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    build_config: ConfigBuilder,
-    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
-) -> tuple[VibeAcpAgentLoop, FakeClient]:
+    backend: FakeBackend, temp_session_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[VibeAcpAgent, FakeClient]:
     session_config = SessionLoggingConfig(
         save_dir=str(temp_session_dir), session_prefix="session", enabled=True
     )
-    orchestrator = load_orchestrator(
-        build_config(
-            active_model="devstral-latest",
-            models=[
-                ModelConfig(
-                    name="devstral-latest", provider="mistral", alias="devstral-latest"
-                )
-            ],
-            session_logging=session_config,
-        )
+    config = build_test_vibe_config(
+        active_model="devstral-latest",
+        models=[
+            ModelConfig(
+                name="devstral-latest", provider="mistral", alias="devstral-latest"
+            )
+        ],
+        session_logging=session_config,
     )
 
-    class PatchedAgentLoop(AgentLoop):
-        def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **{**kwargs, "backend": backend})
-            self.agent_manager.invalidate_config()
+    async def start_session(options: LocalHarnessOptions) -> AppServerSession:
+        loop = build_test_agent_loop(
+            config=config, backend=backend, enable_streaming=True
+        )
+        return await AppServerSession.start(
+            start_test_app_server(loop),
+            client_info=options.client.info,
+            capabilities=options.client.capabilities,
+            session_options=options.session_options,
+            resume_session_id=(
+                options.session.session_id
+                if isinstance(options.session, ResumeSessionIntent)
+                else None
+            ),
+        )
 
-    async def _load_orchestrator(self: VibeAcpAgentLoop):
-        return orchestrator
-
-    monkeypatch.setattr("vibe.acp.acp_agent_loop.AgentLoop", PatchedAgentLoop)
-    monkeypatch.setattr(VibeAcpAgentLoop, "_load_orchestrator", _load_orchestrator)
-
-    vibe_acp_agent = VibeAcpAgentLoop()
+    vibe_acp_agent = VibeAcpAgent(session_starter=start_session)
     client = FakeClient()
     vibe_acp_agent.on_connect(client)
     client.on_connect(vibe_acp_agent)

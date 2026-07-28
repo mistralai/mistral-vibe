@@ -9,9 +9,9 @@ input, or should remain inspectable after the first tool call.
 - Hard foreground timeout: `bash(..., hard_timeout=true)` kills the process group when `timeout_seconds` expires and reports a timeout error.
 - Long polling: `bash_output(cursor=N, wait_seconds=N, max_bytes=N)` waits internally, aggregates output, and returns on process exit, output cap, kill/reset, or wait-window expiration. `cursor` is a byte offset into the log; pass the `next_cursor` from the previous call to resume without re-reading.
 - Interactive input: use `bash_stdin(session_id=..., text="...\n")` to press Enter or drive prompts, REPLs, and installers. Use `bash_stdin(control=["ctrl_c"])` for control bytes.
-- Session management: `bash_sessions(action="list"|"inspect"|"kill"|"reset")` to enumerate, inspect, terminate, or clear sessions (`reset(clear_logs=true)` also deletes stored logs).
+- Session management: `bash_sessions(action="list"|"inspect"|"kill"|"reset")` lists bash sessions, inspects one session, kills exactly one `session_id`, or resets all bash sessions. `inspect` and `kill` require a single `session_id`; `reset` ignores `session_id` (`reset(clear_logs=true)` also deletes stored logs).
 - Log files: `bash_log_file(action="read", session_id=...)` reads a session's full output file; `write`/`append` annotate it once the session has exited.
-- Spill files: full output is always stored under `~/.vibe/bash-tool/`.
+- Spill files: full output is always stored under `~/.vibe/shell-tool/sessions/`.
 
 **Prefer dedicated tools when available:**
 - Read files with `read`, not `cat`, `head`, `tail`, or `sed` through bash.

@@ -33,7 +33,6 @@ from mistralai.client.models import (
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 from mistralai.extra.observability.telemetry import configure_telemetry
 
-from vibe.core.config import resolve_api_key
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.types import (
@@ -47,8 +46,12 @@ from vibe.core.types import (
     StrToolChoice,
     ToolCall,
 )
-from vibe.core.utils import get_server_url_from_api_base
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.http import (
+    VibeAsyncHTTPClient,
+    build_ssl_context,
+    get_server_url_from_api_base,
+)
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
@@ -412,9 +415,12 @@ class MistralBackend:
             )
             correlation_id = stream.response.headers.get("mistral-correlation-id")
             async for chunk in stream:
+                # Some models terminate the stream with a usage-only chunk that
+                # carries no choices.
+                delta = chunk.data.choices[0].delta if chunk.data.choices else None
                 parsed = (
-                    self._mapper.parse_content(chunk.data.choices[0].delta.content)
-                    if chunk.data.choices[0].delta.content
+                    self._mapper.parse_content(delta.content)
+                    if delta and delta.content
                     else ParsedContent(content="", reasoning_content=None)
                 )
                 yield LLMChunk(
@@ -422,10 +428,8 @@ class MistralBackend:
                         role=Role.assistant,
                         content=parsed.content,
                         reasoning_content=parsed.reasoning_content,
-                        tool_calls=self._mapper.parse_tool_calls(
-                            chunk.data.choices[0].delta.tool_calls
-                        )
-                        if chunk.data.choices[0].delta.tool_calls
+                        tool_calls=self._mapper.parse_tool_calls(delta.tool_calls)
+                        if delta and delta.tool_calls
                         else None,
                     ),
                     usage=LLMUsage(

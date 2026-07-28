@@ -5,7 +5,7 @@ import logging
 import os
 import signal
 
-from vibe.core.utils.platform import is_windows
+from vibe.utils.platform import is_windows
 
 logger = logging.getLogger(__name__)
 

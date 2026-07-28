@@ -13,7 +13,6 @@ import tempfile
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal
 
-from vibe.core.session.session_id import shorten_session_id
 from vibe.core.session.session_loader import (
     MESSAGES_FILENAME,
     METADATA_FILENAME,
@@ -22,7 +21,8 @@ from vibe.core.session.session_loader import (
 from vibe.core.session.title_format import MAX_TITLE_LENGTH
 from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
 from vibe.core.utils import is_windows, utc_now
-from vibe.core.utils.io import read_safe, read_safe_async
+from vibe.utils.io import read_safe, read_safe_async
+from vibe.utils.session_id import shorten_session_id
 
 if TYPE_CHECKING:
     from vibe.core.agents.models import AgentProfile
@@ -35,11 +35,21 @@ TMP_CLEANUP_INTERVAL = timedelta(seconds=5)
 
 
 class SessionLogger:
-    def __init__(self, session_config: SessionLoggingConfig, session_id: str) -> None:
+    def __init__(
+        self,
+        session_config: SessionLoggingConfig,
+        session_id: str,
+        *,
+        cwd: Path | None = None,
+        session_dir: Path | None = None,
+    ) -> None:
         self.session_config = session_config
+        self.cwd = (cwd or Path.cwd()).resolve()
+        self._title: str | None = None
         self.enabled = session_config.enabled
         self._last_tmp_cleanup_at: datetime | None = None
         self._tmp_cleanup_lock = Lock()
+        self._persisted = False
         # Serializes writes so concurrent saves cannot interleave appends to
         # messages.jsonl or race on the metadata read-modify-write.
         self._save_lock = asyncio.Lock()
@@ -59,6 +69,9 @@ class SessionLogger:
         self.session_start_time = utc_now().isoformat()
 
         self.save_dir.mkdir(parents=True, exist_ok=True)
+        if session_dir is not None:
+            self.resume_existing_session(session_id, session_dir)
+            return
         self.session_dir = self.save_folder
         self.session_metadata = self._initialize_session_metadata()
 
@@ -74,6 +87,10 @@ class SessionLogger:
             f"{self.session_prefix}_{timestamp}_{shorten_session_id(self.session_id)}"
         )
         return self.save_dir / folder_name
+
+    @property
+    def persisted(self) -> bool:
+        return self._persisted
 
     def _get_session_info(self) -> tuple[Path, SessionMetadata] | None:
         if (
@@ -111,6 +128,7 @@ class SessionLogger:
                 encoding="utf-8",
                 errors="replace",
                 timeout=5.0,
+                cwd=self.cwd,
             )
             if result.returncode == 0 and result.stdout:
                 lines = result.stdout.strip().splitlines()
@@ -147,7 +165,7 @@ class SessionLogger:
             git_commit=git_commit,
             git_branch=git_branch,
             username=user_name,
-            environment={"working_directory": str(Path.cwd())},
+            environment={"working_directory": str(self.cwd)},
             title=None,
             title_source="auto",
         )
@@ -171,6 +189,7 @@ class SessionLogger:
     def _set_title_state(
         self, title: str | None, *, source: Literal["auto", "manual"]
     ) -> None:
+        self._title = title
         if self.session_metadata is None:
             return
 
@@ -188,8 +207,14 @@ class SessionLogger:
 
         self._set_title_state(normalized_title, source="manual")
 
+    @property
+    def title(self) -> str | None:
+        if self.session_metadata is not None:
+            return self.session_metadata.title
+        return self._title
+
     def needs_initial_auto_title(self) -> bool:
-        return self.session_metadata is not None and self.session_metadata.title is None
+        return self.title is None
 
     def set_initial_auto_title(self, title: str) -> bool:
         if not self.needs_initial_auto_title():
@@ -203,11 +228,8 @@ class SessionLogger:
         return True
 
     def _resolve_title(self, messages: Sequence[LLMMessage]) -> str | None:
-        if self.session_metadata is None:
-            return self._fallback_title_from_messages(messages)
-
-        if self.session_metadata.title is not None:
-            return self.session_metadata.title
+        if self.title is not None:
+            return self.title
 
         title = self._fallback_title_from_messages(messages)
         self._set_title_state(title, source="auto")
@@ -343,6 +365,7 @@ class SessionLogger:
                 session_metadata,
                 allow_empty,
             )
+            self._persisted = True
 
     def _save_interaction_sync(
         self,
@@ -393,7 +416,11 @@ class SessionLogger:
             and self._message_fingerprint(non_system_messages[old_total_messages - 1])
             == old_last_fingerprint
         )
-        if len(non_system_messages) == old_total_messages and boundary_unchanged:
+        if (
+            len(non_system_messages) == old_total_messages
+            and boundary_unchanged
+            and metadata_path.exists()
+        ):
             return
 
         try:
@@ -453,29 +480,37 @@ class SessionLogger:
         session_info = self._get_session_info()
         if session_info is None:
             return
-        session_dir, session_metadata = session_info
-        metadata_path = session_dir / METADATA_FILENAME
-        if not metadata_path.exists():
-            return
-        async with self._save_lock:
-            try:
-                raw = (await read_safe_async(metadata_path)).text
-                metadata = json.loads(raw)
-            except (OSError, json.JSONDecodeError) as e:
-                raise RuntimeError(
-                    f"Failed to read session metadata at {metadata_path}: {e}"
-                ) from e
-            metadata["loops"] = [
-                loop.model_dump(mode="json") for loop in session_metadata.loops
-            ]
-            await SessionLogger.persist_metadata(metadata, session_dir)
+        _, session_metadata = session_info
+        await self._persist_metadata_field(
+            "loops", [loop.model_dump(mode="json") for loop in session_metadata.loops]
+        )
 
     async def persist_experiments(self, response: EvalResponse | None) -> None:
         session_info = self._get_session_info()
         if session_info is None:
             return
-        session_dir, session_metadata = session_info
+        _, session_metadata = session_info
         session_metadata.experiments = response
+        await self._persist_metadata_field(
+            "experiments",
+            response.model_dump(mode="json") if response is not None else None,
+        )
+
+    async def persist_child_sessions(self) -> None:
+        session_info = self._get_session_info()
+        if session_info is None:
+            return
+        _, session_metadata = session_info
+        await self._persist_metadata_field(
+            "child_sessions",
+            [link.model_dump(mode="json") for link in session_metadata.child_sessions],
+        )
+
+    async def _persist_metadata_field(self, field: str, value: Any) -> None:
+        session_info = self._get_session_info()
+        if session_info is None:
+            return
+        session_dir, _ = session_info
         metadata_path = session_dir / METADATA_FILENAME
         if not metadata_path.exists():
             return
@@ -487,9 +522,7 @@ class SessionLogger:
                 raise RuntimeError(
                     f"Failed to read session metadata at {metadata_path}: {e}"
                 ) from e
-            metadata["experiments"] = (
-                response.model_dump(mode="json") if response is not None else None
-            )
+            metadata[field] = value
             await SessionLogger.persist_metadata(metadata, session_dir)
 
     def reset_session(
@@ -503,6 +536,7 @@ class SessionLogger:
         self.session_start_time = utc_now().isoformat()
         self.session_dir = self.save_folder
         self.session_metadata = self._initialize_session_metadata()
+        self._persisted = False
         if parent_session_id is not None:
             self.session_metadata.parent_session_id = parent_session_id
 
@@ -513,6 +547,8 @@ class SessionLogger:
         self.session_id = session_id
         self.session_dir = session_dir
         self.session_metadata = SessionLoader.load_metadata(session_dir)
+        self._title = self.session_metadata.title
+        self._persisted = True
 
         if self.session_metadata.start_time:
             self.session_start_time = self.session_metadata.start_time

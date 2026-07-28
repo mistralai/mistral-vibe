@@ -12,9 +12,9 @@ from pydantic import (
     BeforeValidator,
     Field,
     PrivateAttr,
+    ValidationInfo,
     model_validator,
 )
-from textual.theme import BUILTIN_THEMES
 
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config._defaults import (
@@ -54,7 +54,6 @@ from vibe.core.config.schema import (
     WithReplaceMerge,
     WithUnionMerge,
 )
-from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.prompts import (
     SystemPrompt,
@@ -63,7 +62,8 @@ from vibe.core.prompts import (
     load_system_prompt,
 )
 from vibe.core.types import Backend
-from vibe.core.utils.keyring import get_api_key_from_keyring
+from vibe.observability.logging import logger
+from vibe.utils.api_keys import resolve_api_key
 
 
 def _strip_bash_pattern_wildcard(pattern: str) -> str:
@@ -88,16 +88,6 @@ def load_dotenv_values(
             # An explicit non-empty process/shell value wins over the .env file.
             continue
         environ[key] = value
-
-
-def resolve_api_key(env_key: str) -> str | None:
-    """Resolve an API key value: process/.env environment first, then OS keyring."""
-    if not env_key:
-        return None
-    value = os.environ.get(env_key)
-    if value:
-        return value
-    return get_api_key_from_keyring(env_key)
 
 
 DEFAULT_PROVIDERS = [
@@ -189,15 +179,6 @@ def get_persisted_config() -> dict[str, Any]:
         raise RuntimeError(f"Invalid TOML in {file}: {e}") from e
     except OSError as e:
         raise RuntimeError(f"Cannot read {file}: {e}") from e
-
-
-def resolve_theme_name(value: Any) -> str:
-    if not isinstance(value, str) or not value:
-        return DEFAULT_THEME
-    if value not in BUILTIN_THEMES:
-        logger.warning("Unknown theme=%s; falling back to %s", value, DEFAULT_THEME)
-        return DEFAULT_THEME
-    return value
 
 
 def _unique_by(key: str) -> Callable[[list[Any]], list[Any]]:
@@ -412,21 +393,9 @@ class VibeConfigSchema(ConfigSchema):
         OtelRedactionMode.DEFAULT
     )
     console_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_CONSOLE_BASE_URL
-    experimental_bash_tool: Annotated[bool, WithReplaceMerge()] = Field(
-        default=False,
-        description=(
-            "Use the experimental managed bash implementation instead of the "
-            "legacy one-off bash tool."
-        ),
-    )
 
     # Top-level scalars
-    theme: Annotated[str, WithReplaceMerge(), BeforeValidator(resolve_theme_name)] = (
-        DEFAULT_THEME
-    )
-    experiment_overrides: Annotated[dict[str, str], WithReplaceMerge()] = Field(
-        default_factory=dict
-    )
+    theme: Annotated[str, WithReplaceMerge()] = DEFAULT_THEME
     applied_migrations: Annotated[list[str], WithConcatMerge()] = Field(
         default_factory=list
     )
@@ -438,6 +407,7 @@ class VibeConfigSchema(ConfigSchema):
     context_warnings: Annotated[bool, WithReplaceMerge()] = False
     voice_mode_enabled: Annotated[bool, WithReplaceMerge()] = False
     narrator_enabled: Annotated[bool, WithReplaceMerge()] = False
+    show_thinking_nodes: Annotated[bool, WithReplaceMerge()] = False
     bypass_tool_permissions: Annotated[bool, WithReplaceMerge()] = False
     raise_on_compaction_failure: Annotated[bool, WithReplaceMerge()] = False
     enable_telemetry: Annotated[bool, WithReplaceMerge()] = True
@@ -644,7 +614,9 @@ class VibeConfigSchema(ConfigSchema):
         return self
 
     @model_validator(mode="after")
-    def _check_api_key(self) -> VibeConfigSchema:
+    def _check_api_key(self, info: ValidationInfo) -> VibeConfigSchema:
+        if info.context is not None and not info.context.get("require_api_key", True):
+            return self
         try:
             provider = self.get_provider_for_model(self.get_active_model())
             api_key_env = provider.api_key_env_var

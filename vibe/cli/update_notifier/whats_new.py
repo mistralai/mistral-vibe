@@ -8,7 +8,7 @@ from vibe.cli.update_notifier.ports.update_cache_repository import (
     UpdateCache,
     UpdateCacheRepository,
 )
-from vibe.core.utils.io import read_safe
+from vibe.utils.io import read_safe
 
 
 async def should_show_whats_new(

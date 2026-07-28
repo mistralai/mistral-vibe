@@ -17,7 +17,7 @@ from tests.e2e.mock_server import StreamingMockServer
 from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.llm.backend.generic import GenericBackend
 from vibe.core.types import Backend, LLMMessage, Role
-from vibe.core.utils import build_ssl_context, configure_ssl_context
+from vibe.utils.http import build_ssl_context, configure_ssl_context
 
 
 @dataclass(frozen=True)

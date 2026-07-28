@@ -9,8 +9,7 @@ from urllib.parse import SplitResult, unquote, urlsplit
 
 import httpx
 
-from vibe.core.logger import logger
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.observability.logging import logger
 from vibe.setup.auth.browser_sign_in_gateway import (
     BrowserSignInError,
     BrowserSignInErrorCode,
@@ -18,6 +17,7 @@ from vibe.setup.auth.browser_sign_in_gateway import (
     BrowserSignInPollResult,
     BrowserSignInProcess,
 )
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 
 class CreateProcessPayload(TypedDict):

@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from enum import StrEnum, auto
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
 from vibe.core.tools.ui import ToolUIData
+
+
+class AuthStatus(StrEnum):
+    OK = auto()
+    NEEDS_AUTH = auto()
+    STATIC = auto()
+    STDIO = auto()
 
 
 class _OpenArgs(BaseModel):

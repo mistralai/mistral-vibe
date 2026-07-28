@@ -54,6 +54,10 @@ class ChatTextArea(TextArea):
         Binding("shift+backspace", "delete_left", "Delete character left", show=False),
         Binding("shift+delete", "delete_right", "Delete character right", show=False),
         Binding("ctrl+g", "open_external_editor", "External Editor", show=False),
+        Binding("alt+left", "cursor_word_left", "Word Left", show=False, priority=True),
+        Binding(
+            "alt+right", "cursor_word_right", "Word Right", show=False, priority=True
+        ),
         # Ctrl+V triggers an explicit clipboard-image paste on platforms where
         # we support it. On other platforms the binding is not registered, so
         # Textual's default text-paste action handles the key instead and the

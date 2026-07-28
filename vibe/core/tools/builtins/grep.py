@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 
 from vibe.core.tools.base import (
     BaseTool,
@@ -22,7 +22,8 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils import kill_async_subprocess
-from vibe.core.utils.io import decode_safe, read_safe
+from vibe.utils.io import decode_safe, read_safe
+from vibe.utils.tool_presentation import ToolEffectKind
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -137,6 +138,7 @@ class GrepMatch(BaseModel):
 class GrepResult(BaseModel):
     matches: str
     match_count: int
+    pattern: str = ""
     was_truncated: bool = Field(
         description="True if output was cut short by max_matches or max_output_bytes."
     )
@@ -154,6 +156,19 @@ class Grep(
     BaseTool[GrepArgs, GrepResult, GrepToolConfig, BaseToolState],
     ToolUIData[GrepArgs, GrepResult],
 ):
+    effect_kind = ToolEffectKind.FILE_SEARCH
+
+    @classmethod
+    def project_result(cls, result: GrepResult) -> JsonValue:
+        return {
+            "matches": result.matches,
+            "match_count": result.match_count,
+            "was_truncated": result.was_truncated,
+            "parsed_matches": [
+                match.model_dump(mode="json") for match in result.parsed_matches
+            ],
+        }
+
     def resolve_permission(self, args: GrepArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.path,
@@ -162,6 +177,9 @@ class Grep(
             denylist=self.config.denylist,
             config_permission=self.config.permission,
             sensitive_patterns=self.config.sensitive_patterns,
+            cwd=self.cwd,
+            project_roots=self.harness_files.project_roots,
+            scratchpad_dir=self.scratchpad_dir,
         )
 
     def _detect_backend(self) -> GrepBackend:
@@ -185,7 +203,7 @@ class Grep(
         stdout = await self._execute_search(cmd)
 
         yield self._parse_output(
-            stdout, args.max_matches or self.config.default_max_matches
+            stdout, args.max_matches or self.config.default_max_matches, args.pattern
         )
 
     def _validate_args(self, args: GrepArgs) -> None:
@@ -194,7 +212,7 @@ class Grep(
 
         path_obj = Path(args.path).expanduser()
         if not path_obj.is_absolute():
-            path_obj = Path.cwd() / path_obj
+            path_obj = self.cwd / path_obj
 
         if not path_obj.exists():
             raise ToolError(f"Path does not exist: {args.path}")
@@ -202,7 +220,7 @@ class Grep(
     def _collect_exclude_patterns(self) -> list[str]:
         patterns = list(self.config.exclude_patterns)
 
-        codeignore_path = Path.cwd() / self.config.codeignore_file
+        codeignore_path = self.cwd / self.config.codeignore_file
         if codeignore_path.is_file():
             patterns.extend(self._load_codeignore_patterns(codeignore_path))
 
@@ -279,7 +297,10 @@ class Grep(
     async def _execute_search(self, cmd: list[str]) -> str:
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.cwd,
             )
 
             try:
@@ -314,7 +335,9 @@ class Grep(
         except Exception as exc:
             raise ToolError(f"Error running grep: {exc}") from exc
 
-    def _parse_output(self, stdout: str, max_matches: int) -> GrepResult:
+    def _parse_output(
+        self, stdout: str, max_matches: int, pattern: str = ""
+    ) -> GrepResult:
         output_lines = stdout.splitlines() if stdout else []
 
         truncated_lines = output_lines[:max_matches]
@@ -330,19 +353,26 @@ class Grep(
         return GrepResult(
             matches=final_output,
             match_count=len(truncated_lines),
+            pattern=pattern,
             was_truncated=was_truncated,
         )
 
     @classmethod
     def format_call_display(cls, args: GrepArgs) -> ToolCallDisplay:
-        summary = f"Grepping '{args.pattern}'"
+        message = f"'{args.pattern}'"
         if args.path != ".":
-            summary += f" in {args.path}"
+            message += f" in {args.path}"
         if args.max_matches:
-            summary += f" (max {args.max_matches} matches)"
+            message += f" (max {args.max_matches} matches)"
         if not args.use_default_ignore:
-            summary += " [no-ignore]"
-        return ToolCallDisplay(summary=summary)
+            message += " [no-ignore]"
+        return ToolCallDisplay(
+            summary=f"Grepping {message}",
+            verb="Searching",
+            message=message,
+            settled_verb="Searched",
+            settled_message=message,
+        )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -351,10 +381,17 @@ class Grep(
                 success=False, message=event.error or event.skip_reason or "No result"
             )
 
-        message = f"Found {event.result.match_count} matches"
+        count = event.result.match_count
+        word = "match" if count == 1 else "matches"
+        pattern = event.result.pattern
         suffix = "(truncated)" if event.result.was_truncated else ""
 
-        return ToolResultDisplay(success=True, message=message, suffix=suffix)
+        return ToolResultDisplay(
+            success=True,
+            verb="Searched",
+            message=f"{pattern} ({count} {word})" if pattern else f"({count} {word})",
+            suffix=suffix,
+        )
 
     @classmethod
     def get_status_text(cls) -> str:

@@ -9,10 +9,10 @@ from textual.reactive import reactive
 from textual.widgets import Static
 
 from vibe import __version__
+from vibe.app_server.config import ConfigView
+from vibe.app_server.models import MCPSourceKind, MCPSourceStatus, MCPState
 from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import VibeConfigSchema
-from vibe.core.skills.manager import SkillManager
 
 
 def _pluralize(count: int, singular: str) -> str:
@@ -37,8 +37,9 @@ class Banner(Static):
 
     def __init__(
         self,
-        config: VibeConfigSchema,
-        skill_manager: SkillManager,
+        config: ConfigView,
+        skills_count: int,
+        mcp: MCPState | None = None,
         connectors_connected: int = 0,
         connectors_total: int = 0,
         hooks_count: int = 0,
@@ -48,7 +49,8 @@ class Banner(Static):
         self.can_focus = False
         self._initial_state = self._build_state(
             config=config,
-            skill_manager=skill_manager,
+            skills_count=skills_count,
+            mcp=mcp,
             connectors_connected=connectors_connected,
             connectors_total=connectors_total,
             hooks_count=hooks_count,
@@ -80,11 +82,15 @@ class Banner(Static):
     def watch_state(self) -> None:
         if not self.is_attached:
             return
-        self.query_one("#banner-model", NoMarkupStatic).update(self.state.active_model)
-        self.query_one("#banner-meta-counts", NoMarkupStatic).update(
-            self._format_meta_counts()
-        )
-        self.query_one("#banner-user-plan", NoMarkupStatic).update(self._format_plan())
+        widgets = {widget.id: widget for widget in self.query(NoMarkupStatic)}
+        model = widgets.get("banner-model")
+        counts = widgets.get("banner-meta-counts")
+        plan = widgets.get("banner-user-plan")
+        if model is None or counts is None or plan is None:
+            return
+        model.update(self.state.active_model)
+        counts.update(self._format_meta_counts())
+        plan.update(self._format_plan())
 
     def freeze_animation(self) -> None:
         if self._animated:
@@ -92,43 +98,55 @@ class Banner(Static):
 
     def set_state(
         self,
-        config: VibeConfigSchema,
-        skill_manager: SkillManager,
+        config: ConfigView,
+        skills_count: int,
+        mcp: MCPState | None = None,
         connectors_connected: int = 0,
         connectors_total: int = 0,
         hooks_count: int = 0,
         plan_description: str | None = None,
     ) -> None:
         self.state = self._build_state(
-            config,
-            skill_manager,
-            connectors_connected,
-            connectors_total,
-            hooks_count,
-            plan_description,
+            config=config,
+            skills_count=skills_count,
+            mcp=mcp,
+            connectors_connected=connectors_connected,
+            connectors_total=connectors_total,
+            hooks_count=hooks_count,
+            plan_description=plan_description,
         )
 
     @staticmethod
     def _build_state(
-        config: VibeConfigSchema,
-        skill_manager: SkillManager,
+        config: ConfigView,
+        skills_count: int,
+        mcp: MCPState | None = None,
         connectors_connected: int = 0,
         connectors_total: int = 0,
         hooks_count: int = 0,
         plan_description: str | None = None,
     ) -> BannerState:
-        all_servers = config.mcp_servers
-        enabled_servers = [s for s in all_servers if not s.disabled]
-
-        active_model = config.get_active_model()
+        servers = (
+            []
+            if mcp is None
+            else [
+                source for source in mcp.sources if source.kind is MCPSourceKind.SERVER
+            ]
+        )
+        enabled_servers = [
+            source
+            for source in servers
+            if source.status is not MCPSourceStatus.DISABLED
+        ]
+        active_model = config.active_model
         return BannerState(
             active_model=f"{active_model.alias}[{active_model.thinking}]",
             models_count=len(config.models),
             mcp_servers_enabled=len(enabled_servers),
-            mcp_servers_total=len(all_servers),
+            mcp_servers_total=len(servers),
             connectors_connected=connectors_connected,
             connectors_total=connectors_total,
-            skills_count=skill_manager.custom_skills_count,
+            skills_count=skills_count,
             hooks_count=hooks_count,
             plan_description=plan_description,
         )

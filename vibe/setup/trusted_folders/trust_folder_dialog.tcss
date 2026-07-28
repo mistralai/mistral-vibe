@@ -24,15 +24,6 @@ Screen {
     max-height: 10;
 }
 
-#trust-dialog-title {
-    width: 100%;
-    height: auto;
-    text-style: bold;
-    color: $warning;
-    text-align: center;
-    margin-bottom: 1;
-}
-
 #trust-dialog-path {
     width: 100%;
     height: auto;

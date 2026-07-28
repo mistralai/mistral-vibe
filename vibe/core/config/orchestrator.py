@@ -85,9 +85,10 @@ class ConfigOrchestrator[S: ConfigSchema]:
         layers: list[ConfigLayer[RawConfig]],
         default_layer_resolver: DefaultLayerResolver,
         bus: EventBus | None = None,
+        validation_context: dict[str, Any] | None = None,
     ) -> ConfigOrchestrator[S]:
         """Build an orchestrator from a schema and an ordered list of layers."""
-        builder = ConfigBuilder[S](schema)
+        builder = ConfigBuilder[S](schema, validation_context=validation_context)
         builder.add_layers(layers)
         config = await builder.build()
         instance = cls(builder, config, default_layer_resolver, bus)
@@ -102,6 +103,9 @@ class ConfigOrchestrator[S: ConfigSchema]:
             if layer.name == name:
                 return layer
         raise KeyError(f"No layer named {name!r}")
+
+    async def load_persistence_layer(self) -> RawConfig:
+        return await self._default_layer_resolver().load()
 
     async def reload(self) -> None:
         """Force-reload all layers and atomically replace the config snapshot."""
@@ -140,7 +144,7 @@ class ConfigOrchestrator[S: ConfigSchema]:
 
         # Simulate and validate final config
         try:
-            self.config.model_validate(
+            self._builder.validate(
                 apply_patch(
                     ensure_parent_paths(self._config.model_dump(), operations),
                     patch=[operation.to_json_patch() for operation in operations],
@@ -213,7 +217,6 @@ class ConfigOrchestrator[S: ConfigSchema]:
             raise DefaultLayerResolutionError(
                 f"Default layer resolver returned unknown layer {layer.name!r}"
             )
-
         return layer.name
 
     def subscribe(

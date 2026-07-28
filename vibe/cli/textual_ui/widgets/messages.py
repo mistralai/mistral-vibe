@@ -4,10 +4,14 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
 
-from vibe.core.hooks.models import HookMessageSeverity
-from vibe.core.logger import logger
-from vibe.core.types import FileImageSource, ImageAttachment, InlineImageSource
-from vibe.core.utils.io import read_safe_async
+from vibe.app_server.models import (
+    FileImageSource,
+    HookSeverity,
+    ImageAttachment,
+    InlineImageSource,
+)
+from vibe.observability.logging import logger
+from vibe.utils.io import read_safe_async
 
 if TYPE_CHECKING:
     from vibe.cli.textual_ui.app import ChatScroll
@@ -18,6 +22,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.css.query import NoMatches
+from textual.geometry import Size
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Link, Markdown, Static
@@ -27,7 +32,7 @@ from watchfiles import awatch
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.collapsible import (
     ClickWithoutDragMixin,
-    CollapsibleSection,
+    OverflowCollapsibleSection,
     lines_label,
 )
 from vibe.cli.textual_ui.widgets.no_markup_static import (
@@ -35,6 +40,7 @@ from vibe.cli.textual_ui.widgets.no_markup_static import (
     NonSelectableStatic,
 )
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
+from vibe.cli.textual_ui.widgets.tool_widgets import _clean_output
 
 
 class ExpandingBorder(NonSelectableStatic):
@@ -45,6 +51,12 @@ class ExpandingBorder(NonSelectableStatic):
     def set_row_colors(self, colors: dict[int, str]) -> None:
         self._row_colors = colors
         self.refresh()
+
+    # The border is always a single glyph column. Returning a constant avoids the
+    # default measurement, which renders the widget (reading self.size) during
+    # arrange and forces an O(N) compositor map rebuild on every layout pass.
+    def get_content_width(self, container: Size, viewport: Size) -> int:
+        return 1
 
     def render(self) -> Content | str:
         height = self.size.height
@@ -105,9 +117,10 @@ class UserMessageAttachment(Horizontal):
         )
         match self._attachment.source:
             case FileImageSource(path=path):
+                image_path = Path(path)
                 yield Link(
                     _attachment_label(self._attachment),
-                    url=path.as_uri(),
+                    url=image_path.as_uri(),
                     classes="user-message-attachment-link",
                 )
             case InlineImageSource():
@@ -126,7 +139,7 @@ class UserMessage(Static):
         self,
         content: str,
         pending: bool = False,
-        message_index: int | None = None,
+        history_entry_id: str | None = None,
         images: list[ImageAttachment] | None = None,
     ) -> None:
         super().__init__()
@@ -134,7 +147,7 @@ class UserMessage(Static):
         self._content = content
         self._pending = pending
         self._images = images or []
-        self.message_index: int | None = message_index
+        self.history_entry_id = history_entry_id
 
     def get_content(self) -> str:
         return self._content
@@ -321,38 +334,39 @@ class ReasoningMessage(ClickWithoutDragMixin, SpinnerMixin, StreamingMessageBase
     SPINNING_TEXT = "Thinking"
     COMPLETED_TEXT = "Thought"
 
-    def __init__(self, content: str, collapsed: bool = True) -> None:
+    def __init__(
+        self, content: str, collapsed: bool = True, *, completed: bool = False
+    ) -> None:
         super().__init__(content)
         self.add_class("reasoning-message")
         self.collapsed = collapsed
         self._indicator_widget: Static | None = None
-        self._triangle_widget: Static | None = None
         self._header_widget: Horizontal | None = None
         self.init_spinner()
+        self._is_spinning = not completed
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="reasoning-message-wrapper"):
             self._header_widget = Horizontal(classes="reasoning-message-header")
             with self._header_widget:
                 self._indicator_widget = NonSelectableStatic(
-                    self._spinner.current_frame(), classes="reasoning-indicator"
+                    self._spinner.current_frame() if self._is_spinning else "■",
+                    classes="reasoning-indicator",
                 )
                 yield self._indicator_widget
                 self._status_text_widget = NoMarkupStatic(
-                    self.SPINNING_TEXT, classes="reasoning-collapsed-text"
+                    self.SPINNING_TEXT if self._is_spinning else self.COMPLETED_TEXT,
+                    classes="reasoning-collapsed-text",
                 )
                 yield self._status_text_widget
-                self._triangle_widget = NonSelectableStatic(
-                    "▶" if self.collapsed else "▼", classes="reasoning-triangle"
-                )
-                yield self._triangle_widget
             markdown = Markdown("", classes="reasoning-message-content")
             markdown.display = not self.collapsed
             self._markdown = markdown
             yield markdown
 
     def on_mount(self) -> None:
-        self.start_spinner_timer()
+        if self._is_spinning:
+            self.start_spinner_timer()
 
     def on_resize(self) -> None:
         self.refresh_spinner()
@@ -360,7 +374,8 @@ class ReasoningMessage(ClickWithoutDragMixin, SpinnerMixin, StreamingMessageBase
     def stop_spinning(self, success: bool = True) -> None:
         super().stop_spinning(success)
         if self._indicator_widget:
-            self._indicator_widget.update("■")
+            self._indicator_widget.remove_class("success", "error")
+            self._indicator_widget.update("⏵" if self.collapsed else "⏷")
 
     def _is_click_on_toggle(self, event: events.Click) -> bool:
         return self._is_click_within(event, self._header_widget)
@@ -381,8 +396,8 @@ class ReasoningMessage(ClickWithoutDragMixin, SpinnerMixin, StreamingMessageBase
             return
 
         self.collapsed = collapsed
-        if self._triangle_widget:
-            self._triangle_widget.update("▶" if collapsed else "▼")
+        if self._indicator_widget and not self._is_spinning:
+            self._indicator_widget.update("⏵" if collapsed else "⏷")
         if self._markdown:
             self._markdown.display = not collapsed
             if not collapsed and self._content:
@@ -475,21 +490,26 @@ class BashOutputMessage(ClickWithoutDragMixin, SpinnerMixin, Static):
         self._queued = False
         self._output_widget: NoMarkupStatic | None = None
         self._overflow_widget: NoMarkupStatic | None = None
-        self._section: CollapsibleSection | None = None
+        self._section: OverflowCollapsibleSection | None = None
         self._output_container: Horizontal | None = None
         self._prompt_widget: NonSelectableStatic | None = None
         self._indicator_widget: Static | None = None
 
     QUEUED_PROMPT = "! "
 
+    def _clean_lines(self) -> list[str]:
+        # Sanitize captured output (ANSI escapes, \r redraws, control bytes)
+        # before splitting so it renders terminal-safe and line counts match.
+        return _clean_output(self._output).splitlines()
+
     def _preview_text(self) -> str:
-        return "\n".join(self._output.splitlines()[: self.PREVIEW_LINES])
+        return "\n".join(self._clean_lines()[: self.PREVIEW_LINES])
 
     def _overflow_text(self) -> str:
-        return "\n".join(self._output.splitlines()[self.PREVIEW_LINES :])
+        return "\n".join(self._clean_lines()[self.PREVIEW_LINES :])
 
     def _overflow_count(self) -> int:
-        return max(0, len(self._output.splitlines()) - self.PREVIEW_LINES)
+        return max(0, len(self._clean_lines()) - self.PREVIEW_LINES)
 
     def _refresh_output_widgets(self) -> None:
         count = self._overflow_count()
@@ -504,7 +524,8 @@ class BashOutputMessage(ClickWithoutDragMixin, SpinnerMixin, Static):
     def _update_spinner_frame(self) -> None:
         if not self._is_spinning or not self._prompt_widget or self._queued:
             return
-        self._prompt_widget.update(f"{self._spinner.next_frame()} ")
+        # Frames are all the same size, so skip the relayout.
+        self._prompt_widget.update(f"{self._spinner.next_frame()} ", layout=False)
 
     def on_mount(self) -> None:
         if self._pending and not self._queued:
@@ -550,7 +571,7 @@ class BashOutputMessage(ClickWithoutDragMixin, SpinnerMixin, Static):
             self._overflow_widget = NoMarkupStatic(
                 self._overflow_text(), classes="bash-output"
             )
-            self._section = CollapsibleSection(
+            self._section = OverflowCollapsibleSection(
                 self._overflow_widget, collapsed_label=lines_label(count, prefix="+")
             )
             self._section.display = count > 0
@@ -572,7 +593,7 @@ class BashOutputMessage(ClickWithoutDragMixin, SpinnerMixin, Static):
             return
         self._output_widget = NoMarkupStatic("", classes="bash-output")
         self._overflow_widget = NoMarkupStatic("", classes="bash-output")
-        self._section = CollapsibleSection(
+        self._section = OverflowCollapsibleSection(
             self._overflow_widget, collapsed_label=lines_label(0, prefix="+")
         )
         self._section.display = False
@@ -656,10 +677,10 @@ class HookRunContainer(Vertical):
         self.display = True
 
 
-_HOOK_SEVERITY_ICONS: dict[HookMessageSeverity, str] = {
-    HookMessageSeverity.OK: "✓",
-    HookMessageSeverity.WARNING: "⚠",
-    HookMessageSeverity.ERROR: "✗",
+_HOOK_SEVERITY_ICONS: dict[HookSeverity, str] = {
+    HookSeverity.OK: "✓",
+    HookSeverity.WARNING: "⚠",
+    HookSeverity.ERROR: "✗",
 }
 
 
@@ -668,7 +689,7 @@ class HookSystemMessageLine(Static):
         self,
         hook_name: str,
         content: str,
-        severity: HookMessageSeverity = HookMessageSeverity.WARNING,
+        severity: HookSeverity = HookSeverity.WARNING,
     ) -> None:
         super().__init__()
         self.add_class("hook-system-message")
@@ -679,7 +700,7 @@ class HookSystemMessageLine(Static):
 
     def compose(self) -> ComposeResult:
         icon = _HOOK_SEVERITY_ICONS.get(
-            self._severity, _HOOK_SEVERITY_ICONS[HookMessageSeverity.WARNING]
+            self._severity, _HOOK_SEVERITY_ICONS[HookSeverity.WARNING]
         )
         with Horizontal(classes="hook-system-container"):
             yield NonSelectableStatic(icon, classes="hook-system-icon")

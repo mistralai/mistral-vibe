@@ -262,58 +262,23 @@ async def test_auto_compact_emits_terminal_telemetry(
 
 
 @pytest.mark.asyncio
-async def test_auto_compact_observer_sees_user_msg_not_summary() -> None:
-    """Observer sees the original user message and final response.
-
-    Compact internals (summary request, LLM summary) are invisible
-    to the observer because they happen inside silent() / reset().
-    """
-    observed: list[tuple[Role, str | None]] = []
-
-    def observer(msg: LLMMessage) -> None:
-        observed.append((msg.role, msg.content))
-
+async def test_auto_compact_events_exclude_summary_messages() -> None:
     backend = FakeBackend([
         [mock_llm_chunk(content="<summary>done</summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
-    agent = build_test_agent_loop(
-        config=cfg, message_observer=observer, backend=backend
-    )
+    agent = build_test_agent_loop(config=cfg, backend=backend)
     agent.stats.context_tokens = 2
 
-    [_ async for _ in agent.act("Hello")]
+    events = [event async for event in agent.act("Hello")]
 
-    roles = [r for r, _ in observed]
-    assert roles == [Role.system, Role.user, Role.assistant]
-    assert observed[1][1] == "Hello"
-    assert observed[2][1] == "<final>"
-
-
-@pytest.mark.asyncio
-async def test_auto_compact_observer_does_not_see_summary_request() -> None:
-    """The compact summary request and LLM response must not leak to observer."""
-    observed: list[tuple[Role, str | None]] = []
-
-    def observer(msg: LLMMessage) -> None:
-        observed.append((msg.role, msg.content))
-
-    backend = FakeBackend([
-        [mock_llm_chunk(content="<summary>done</summary>")],
-        [mock_llm_chunk(content="<final>")],
-    ])
-    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
-    agent = build_test_agent_loop(
-        config=cfg, message_observer=observer, backend=backend
-    )
-    agent.stats.context_tokens = 2
-
-    [_ async for _ in agent.act("Hello")]
-
-    contents = [c for _, c in observed]
-    assert "<summary>" not in contents
-    assert all("compact" not in (c or "").lower() for c in contents)
+    messages = [
+        event.content
+        for event in events
+        if isinstance(event, UserMessageEvent | AssistantEvent)
+    ]
+    assert messages == ["Hello", "<final>"]
 
 
 @pytest.mark.asyncio

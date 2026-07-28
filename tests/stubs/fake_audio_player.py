@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from vibe.core.audio_player import AlreadyPlayingError
-from vibe.core.audio_player.audio_player_port import AudioFormat
+from vibe.cli.audio_player import AlreadyPlayingError
+from vibe.cli.audio_player.audio_player_port import AudioFormat
 
 
 class FakeAudioPlayer:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
-from vibe.core.session.session_id import shorten_session_id
+from vibe.utils.session_id import shorten_session_id
 
 
 class TestCompactMessage:

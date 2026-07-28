@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from textual.pilot import Pilot
 
+from tests.conftest import build_test_agent_loop
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
 from tests.snapshots.snap_compare import SnapCompare
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistryWithBrokenServer
-from vibe.core.config import MCPHttp, MCPStdio
+from vibe.core.agent_loop import AgentLoop
+from vibe.core.config import ConnectorConfig, MCPHttp, MCPStdio, VibeConfigSchema
 from vibe.core.tools.connectors import ConnectorAuthAction
 from vibe.core.tools.mcp.tools import RemoteTool
 
@@ -31,6 +33,16 @@ _FAKE_CONNECTOR_AUTH_ACTIONS = {
     "beta": ConnectorAuthAction.OAUTH,
     "zeta": ConnectorAuthAction.CREDENTIALS_SETUP,
 }
+
+
+def _build_connector_agent_loop(
+    config: VibeConfigSchema, registry: FakeConnectorRegistry
+) -> AgentLoop:
+    agent_loop = build_test_agent_loop(config=config)
+    agent_loop.connector_registry = registry
+    agent_loop.tool_manager.set_connector_registry(registry)
+    agent_loop.tool_manager.integrate_connectors()
+    return agent_loop
 
 
 class SnapshotTestAppNoMcpServers(BaseSnapshotTestApp):
@@ -179,8 +191,6 @@ def test_snapshot_mcp_escape_closes(snap_compare: SnapCompare) -> None:
 
 class SnapshotTestAppWithConnectors(BaseSnapshotTestApp):
     def __init__(self) -> None:
-        from vibe.core.config import ConnectorConfig
-
         config = default_config(
             mcp_servers=[MCPStdio(name="filesystem", transport="stdio", command="npx")],
             # Explicitly enable all fake connectors so they appear enabled in snapshots
@@ -189,17 +199,12 @@ class SnapshotTestAppWithConnectors(BaseSnapshotTestApp):
                 ConnectorConfig(name="slack", disabled=False),
             ],
         )
-        super().__init__(config=config)
         registry = FakeConnectorRegistry(connectors=_FAKE_CONNECTORS)
-        self.agent_loop.connector_registry = registry
-        self.agent_loop.tool_manager._connector_registry = registry
-        self.agent_loop.tool_manager.integrate_connectors()
+        super().__init__(agent_loop=_build_connector_agent_loop(config, registry))
 
 
 class SnapshotTestAppConnectorsOnly(BaseSnapshotTestApp):
     def __init__(self) -> None:
-        from vibe.core.config import ConnectorConfig
-
         config = default_config(
             mcp_servers=[],
             # Explicitly enable all fake connectors so they appear enabled in snapshots
@@ -208,17 +213,12 @@ class SnapshotTestAppConnectorsOnly(BaseSnapshotTestApp):
                 ConnectorConfig(name="slack", disabled=False),
             ],
         )
-        super().__init__(config=config)
         registry = FakeConnectorRegistry(connectors=_FAKE_CONNECTORS)
-        self.agent_loop.connector_registry = registry
-        self.agent_loop.tool_manager._connector_registry = registry
-        self.agent_loop.tool_manager.integrate_connectors()
+        super().__init__(agent_loop=_build_connector_agent_loop(config, registry))
 
 
 class SnapshotTestAppConnectorsMixedState(BaseSnapshotTestApp):
     def __init__(self) -> None:
-        from vibe.core.config import ConnectorConfig
-
         config = default_config(
             mcp_servers=[],
             # Explicitly enable connectors that should appear connected in snapshots
@@ -229,14 +229,11 @@ class SnapshotTestAppConnectorsMixedState(BaseSnapshotTestApp):
                 ConnectorConfig(name="zeta", disabled=False),
             ],
         )
-        super().__init__(config=config)
         registry = FakeConnectorRegistry(
             connectors=_FAKE_CONNECTORS_MIXED_CONNECTION,
             auth_actions=_FAKE_CONNECTOR_AUTH_ACTIONS,
         )
-        self.agent_loop.connector_registry = registry
-        self.agent_loop.tool_manager._connector_registry = registry
-        self.agent_loop.tool_manager.integrate_connectors()
+        super().__init__(agent_loop=_build_connector_agent_loop(config, registry))
 
 
 # ---------------------------------------------------------------------------

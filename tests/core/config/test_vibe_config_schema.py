@@ -5,12 +5,7 @@ from pathlib import Path
 import keyring
 import pytest
 
-from vibe.core.config import (
-    DEFAULT_THEME,
-    MissingAPIKeyError,
-    ModelConfig,
-    ProviderConfig,
-)
+from vibe.core.config import MissingAPIKeyError, ModelConfig, ProviderConfig
 from vibe.core.config.vibe_schema import VibeConfigSchema
 
 
@@ -125,6 +120,6 @@ def test_check_api_key_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> N
         VibeConfigSchema()
 
 
-def test_unknown_theme_falls_back_to_default() -> None:
+def test_theme_is_preserved_for_the_client_to_interpret() -> None:
     config = VibeConfigSchema(theme="totally-unknown-theme")
-    assert config.theme == DEFAULT_THEME
+    assert config.theme == "totally-unknown-theme"

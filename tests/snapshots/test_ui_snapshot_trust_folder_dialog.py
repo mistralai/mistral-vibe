@@ -2,23 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from tests.snapshots.snap_compare import SnapCompare
 from vibe.setup.trusted_folders.trust_folder_dialog import TrustFolderApp
-
-
-@pytest.fixture(autouse=True)
-def _pin_vibe_home(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The dialog renders TRUSTED_FOLDERS_FILE.path in its footer. Pin the
-    # default so the path is stable across runs. Setting the VIBE_HOME env
-    # var is not enough: _get_vibe_home() calls Path.resolve(), which on
-    # macOS rewrites /home/user via the /System/Volumes/Data firmlink.
-    monkeypatch.delenv("VIBE_HOME", raising=False)
-    monkeypatch.setattr(
-        "vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", Path("/home/user/.vibe")
-    )
-
 
 _DIALOG_CSS = str(
     Path(__file__).parents[2]
@@ -27,6 +12,7 @@ _DIALOG_CSS = str(
     / "trusted_folders"
     / "trust_folder_dialog.tcss"
 )
+_SETTINGS_PATH = "/home/user/.vibe/trusted_folders.toml"
 
 
 class TrustFolderDialogSnapshotApp(TrustFolderApp):
@@ -39,6 +25,7 @@ class TrustFolderDialogSnapshotApp(TrustFolderApp):
             cwd=Path("/home/user/projects/my-project"),
             repo_root=None,
             detected_files=["AGENTS.md", ".vibe/"],
+            settings_path=_SETTINGS_PATH,
         )
 
 
@@ -54,6 +41,7 @@ class TrustFolderDialogWithRepoSnapshotApp(TrustFolderApp):
             detected_files=["AGENTS.md"],
             repo_detected_files=[".vibe/", "src/AGENTS.md"],
             offer_repo_trust=True,
+            settings_path=_SETTINGS_PATH,
         )
 
 
@@ -69,6 +57,7 @@ class TrustFolderDialogUntrustedRepoSnapshotApp(TrustFolderApp):
             offer_repo_trust=False,
             repo_explicitly_untrusted=True,
             detected_files=["AGENTS.md"],
+            settings_path=_SETTINGS_PATH,
         )
 
 
@@ -81,6 +70,7 @@ class TrustFolderDialogManyFilesSnapshotApp(TrustFolderApp):
             cwd=Path("/home/user/projects/my-project"),
             repo_root=None,
             detected_files=detected,
+            settings_path=_SETTINGS_PATH,
         )
 
 

@@ -23,83 +23,12 @@ from vibe.core.agents.models import (
     AgentSafety,
     AgentType,
     BuiltinAgentName,
-    _deep_merge,
 )
 from vibe.core.config import VibeConfigSchema
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.manager import ToolManager
 from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
-
-
-class TestDeepMerge:
-    def test_simple_merge(self) -> None:
-        base = {"a": 1, "b": 2}
-        override = {"c": 3}
-        result = _deep_merge(base, override)
-        assert result == {"a": 1, "b": 2, "c": 3}
-
-    def test_override_existing_key(self) -> None:
-        base = {"a": 1, "b": 2}
-        override = {"b": 3}
-        result = _deep_merge(base, override)
-        assert result == {"a": 1, "b": 3}
-
-    def test_nested_dict_merge(self) -> None:
-        base = {"a": {"x": 1, "y": 2}}
-        override = {"a": {"y": 3, "z": 4}}
-        result = _deep_merge(base, override)
-        assert result == {"a": {"x": 1, "y": 3, "z": 4}}
-
-    def test_deeply_nested_merge(self) -> None:
-        base = {"a": {"b": {"c": 1}}}
-        override = {"a": {"b": {"d": 2}}}
-        result = _deep_merge(base, override)
-        assert result == {"a": {"b": {"c": 1, "d": 2}}}
-
-    def test_override_dict_with_non_dict(self) -> None:
-        base = {"a": {"x": 1}}
-        override = {"a": "replaced"}
-        result = _deep_merge(base, override)
-        assert result == {"a": "replaced"}
-
-    def test_override_non_dict_with_dict(self) -> None:
-        base = {"a": "string"}
-        override = {"a": {"x": 1}}
-        result = _deep_merge(base, override)
-        assert result == {"a": {"x": 1}}
-
-    def test_preserves_original_base(self) -> None:
-        base = {"a": 1, "b": {"c": 2}}
-        override = {"b": {"d": 3}}
-        _deep_merge(base, override)
-        assert base == {"a": 1, "b": {"c": 2}}
-
-    def test_empty_override(self) -> None:
-        base = {"a": 1, "b": 2}
-        override: dict = {}
-        result = _deep_merge(base, override)
-        assert result == {"a": 1, "b": 2}
-
-    def test_empty_base(self) -> None:
-        base: dict = {}
-        override = {"a": 1}
-        result = _deep_merge(base, override)
-        assert result == {"a": 1}
-
-    def test_lists_are_overridden_not_merged(self) -> None:
-        """Lists should be replaced entirely, not merged element-by-element."""
-        base = {"tools": ["read", "grep", "bash"]}
-        override = {"tools": ["write_file"]}
-        result = _deep_merge(base, override)
-        assert result == {"tools": ["write_file"]}
-
-    def test_nested_lists_are_overridden_not_merged(self) -> None:
-        """Nested lists in dicts should also be replaced, not merged."""
-        base = {"config": {"enabled_tools": ["a", "b", "c"], "other": 1}}
-        override = {"config": {"enabled_tools": ["x", "y"]}}
-        result = _deep_merge(base, override)
-        assert result == {"config": {"enabled_tools": ["x", "y"], "other": 1}}
 
 
 class TestAgentSafety:

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 from vibe.core.session.title_format import MentionSegment, TextSegment, TitleSegment
-from vibe.core.types import IMAGE_EXTENSIONS
+from vibe.utils.images import IMAGE_EXTENSIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,14 +90,15 @@ def _to_resource(candidate: str, base_dir: Path) -> PathResource | None:
 
     try:
         candidate_path = Path(candidate).expanduser()
-    except RuntimeError:
-        return None
-    resolved = (
-        candidate_path if candidate_path.is_absolute() else base_dir / candidate_path
-    )
-    resolved = resolved.resolve()
-
-    if not resolved.exists():
+        resolved = (
+            candidate_path
+            if candidate_path.is_absolute()
+            else base_dir / candidate_path
+        )
+        resolved = resolved.resolve()
+        if not resolved.exists():
+            return None
+    except (RuntimeError, OSError):
         return None
 
     kind: Literal["file", "folder", "image"]

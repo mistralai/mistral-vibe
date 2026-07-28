@@ -39,11 +39,16 @@ from vibe.core.tools.builtins.experimental_bash import (
     ExperimentalBash,
     ExperimentalBashArgs,
     ExperimentalBashToolConfig,
+    ManagedShellError,
     TerminalSession,
     TerminalSessionManager,
 )
-from vibe.core.tools.builtins.managed_bash.backend import ManagedBashBackend
+from vibe.core.tools.builtins.managed_shell.backend import (
+    ManagedShellBackend,
+    ManagedShellBackendError,
+)
 from vibe.core.tools.permissions import PermissionContext
+from vibe.core.tools.terminal_runtime import TerminalRuntime
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 from vibe.core.utils import is_windows
@@ -110,7 +115,7 @@ async def test_windows_cmd_spawn_ignores_non_cmd_comspec(monkeypatch):
     )
     monkeypatch.setenv("SystemRoot", "C:\\Windows")
     monkeypatch.setattr(
-        "vibe.core.utils.platform.shutil.which", lambda name, path=None: None
+        "vibe.utils.platform.shutil.which", lambda name, path=None: None
     )
 
     proc = object()
@@ -130,7 +135,7 @@ async def test_windows_cmd_spawn_ignores_non_cmd_comspec(monkeypatch):
         bash_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
     )
 
-    result = await bash_module._spawn_command("echo hello")
+    result = await bash_module.spawn_shell_command("echo hello")
 
     assert result is proc
     assert calls[0][0][:4] == (
@@ -183,27 +188,15 @@ async def test_cat_preserves_accents_from_latin1_encoded_file(bash, tmp_path):
     assert result.stdout == "café au lait\nthé glacé\n"
 
 
-class _SplitReadBackend:
+class _SplitReadTerminal:
     def __init__(self, fragments: list[bytes]) -> None:
         self._fragments = fragments
+        self.pid = 1
+        self.pty_backend = "fake"
 
-    def wait_readable(self, master_fd: int, timeout_seconds: float) -> bool:
-        return bool(self._fragments)
-
-    def read(self, master_fd: int, size: int) -> bytes:
-        return self._fragments.pop(0) if self._fragments else b""
-
-    def close_fd(self, fd: int) -> None:
-        pass
-
-    def terminate_process_group(
-        self, process: subprocess.Popen[bytes], *, force: bool, grace_seconds: float
-    ) -> None:
-        pass
-
-
-class _CompletedProcess:
-    returncode = 0
+    @property
+    def returncode(self) -> int | None:
+        return 0
 
     def poll(self) -> int:
         return 0
@@ -211,9 +204,61 @@ class _CompletedProcess:
     def wait(self, timeout: float | None = None) -> int:
         return 0
 
+    def wait_readable(self, timeout_seconds: float) -> bool:
+        return bool(self._fragments)
 
-class _RunningProcess:
-    returncode: int | None = None
+    def read(self, size: int) -> bytes:
+        return self._fragments.pop(0) if self._fragments else b""
+
+    def write(self, data: bytes) -> int:
+        return len(data)
+
+    def close(self) -> None:
+        pass
+
+
+class _UnusedBackend:
+    def request_termination(self, terminal) -> None:
+        pass
+
+    def force_terminate_terminal(self, terminal, *, timeout_seconds: float) -> None:
+        pass
+
+
+class _CompletedTerminal:
+    pid = 1
+    pty_backend = "fake"
+
+    @property
+    def returncode(self) -> int:
+        return 0
+
+    def poll(self) -> int:
+        return 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+    def wait_readable(self, timeout_seconds: float) -> bool:
+        return False
+
+    def read(self, size: int) -> bytes:
+        return b""
+
+    def write(self, data: bytes) -> int:
+        return len(data)
+
+    def close(self) -> None:
+        pass
+
+
+class _RunningTerminal:
+    pid = 1
+    pty_backend = "fake"
+
+    @property
+    def returncode(self) -> int | None:
+        return None
 
     def poll(self) -> int | None:
         return None
@@ -221,12 +266,174 @@ class _RunningProcess:
     def wait(self, timeout: float | None = None) -> int:
         raise subprocess.TimeoutExpired("running", timeout or 0)
 
+    def wait_readable(self, timeout_seconds: float) -> bool:
+        return False
+
+    def read(self, size: int) -> bytes:
+        return b""
+
+    def write(self, data: bytes) -> int:
+        return len(data)
+
+    def close(self) -> None:
+        pass
+
+
+class _ControllableTerminal:
+    pid = 1
+    pty_backend = "fake"
+
+    def __init__(self, name: str, *, exits_on_request: bool) -> None:
+        self.name = name
+        self.exits_on_request = exits_on_request
+        self.alive = True
+
+    @property
+    def returncode(self) -> int | None:
+        return None if self.alive else 0
+
+    def poll(self) -> int | None:
+        return None if self.alive else 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.alive:
+            raise subprocess.TimeoutExpired(self.name, timeout or 0)
+        return 0
+
+    def wait_readable(self, timeout_seconds: float) -> bool:
+        return False
+
+    def read(self, size: int) -> bytes:
+        return b""
+
+    def write(self, data: bytes) -> int:
+        return len(data)
+
+    def close(self) -> None:
+        pass
+
+
+class _RecordingTerminationBackend:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
+
+    def request_termination(self, terminal: _ControllableTerminal) -> None:
+        self.events.append(("request", terminal.name))
+        if terminal.exits_on_request:
+            terminal.alive = False
+
+    def force_terminate_terminal(
+        self, terminal: _ControllableTerminal, *, timeout_seconds: float
+    ) -> None:
+        self.events.append(("force", terminal.name))
+        terminal.alive = False
+
+
+def _fake_session(tmp_path, name: str, terminal) -> TerminalSession:
+    output_path = tmp_path / f"{name}.log"
+    output_path.touch()
+    return TerminalSession(
+        session_id=name,
+        command="fake",
+        cwd=tmp_path,
+        shell="fake",
+        terminal=terminal,
+        output_path=output_path,
+        manifest_path=tmp_path / f"{name}.json",
+        created_at=0,
+    )
+
+
+def test_manager_does_not_force_process_that_exits_during_grace(tmp_path):
+    backend = _RecordingTerminationBackend()
+    terminal = _ControllableTerminal("first", exits_on_request=True)
+    manager = TerminalSessionManager(
+        backend=cast(ManagedShellBackend, backend), session_prefix="test"
+    )
+
+    manager._terminate_sessions([_fake_session(tmp_path, "first", terminal)])
+
+    assert backend.events == [("request", "first")]
+
+
+def test_manager_requests_all_terminations_before_forcing_survivors(
+    tmp_path, monkeypatch
+):
+    backend = _RecordingTerminationBackend()
+    first = _ControllableTerminal("first", exits_on_request=False)
+    second = _ControllableTerminal("second", exits_on_request=False)
+    manager = TerminalSessionManager(
+        backend=cast(ManagedShellBackend, backend), session_prefix="test"
+    )
+    monkeypatch.setattr(
+        "vibe.core.tools.builtins.experimental_bash.KILL_GRACE_SECONDS", 0
+    )
+
+    manager._terminate_sessions([
+        _fake_session(tmp_path, "first", first),
+        _fake_session(tmp_path, "second", second),
+    ])
+
+    assert backend.events == [
+        ("request", "first"),
+        ("request", "second"),
+        ("force", "first"),
+        ("force", "second"),
+    ]
+
+
+class _UnkillableBackend:
+    def request_termination(self, terminal: _ControllableTerminal) -> None:
+        pass
+
+    def force_terminate_terminal(
+        self, terminal: _ControllableTerminal, *, timeout_seconds: float
+    ) -> None:
+        raise ManagedShellBackendError("taskkill failed")
+
+
+def _install_unkillable_manager(tmp_path, monkeypatch, name: str):
+    monkeypatch.setattr(
+        "vibe.core.tools.builtins.experimental_bash.KILL_GRACE_SECONDS", 0
+    )
+    monkeypatch.setattr(
+        "vibe.core.tools.builtins.experimental_bash.FORCE_TERMINATION_TIMEOUT_SECONDS",
+        0,
+    )
+    manager = TerminalSessionManager(
+        backend=cast(ManagedShellBackend, _UnkillableBackend()), session_prefix="test"
+    )
+    session = _fake_session(
+        tmp_path, name, _ControllableTerminal(name, exits_on_request=False)
+    )
+    manager._sessions[session.session_id] = session
+    return manager, session
+
+
+def test_kill_restores_running_status_when_termination_fails(tmp_path, monkeypatch):
+    manager, session = _install_unkillable_manager(tmp_path, monkeypatch, "stuck")
+
+    with pytest.raises(ManagedShellBackendError):
+        manager.kill(session.session_id)
+
+    assert session.status == "running"
+    assert manager.info(session.session_id).status == "running"
+
+
+def test_reset_restores_running_status_when_termination_fails(tmp_path, monkeypatch):
+    manager, session = _install_unkillable_manager(tmp_path, monkeypatch, "stuck")
+
+    with pytest.raises(ManagedShellBackendError):
+        manager.reset(clear_logs=False)
+
+    assert session.status == "running"
+
 
 @pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
 def test_posix_shell_resolution_prefers_zsh_fallback_but_honors_overrides(monkeypatch):
-    from vibe.core.tools.builtins.managed_bash import _posix
+    from vibe.core.tools.builtins.managed_shell import _posix
 
-    backend = _posix.PosixManagedBashBackend()
+    backend = _posix.PosixManagedShellBackend()
     calls: list[str] = []
     resolved_shells = {
         "requested": "/mock/requested",
@@ -255,8 +462,10 @@ def test_posix_shell_resolution_prefers_zsh_fallback_but_honors_overrides(monkey
 
 def test_reader_loop_preserves_multibyte_split_across_chunks(tmp_path):
     snowman = "☃".encode()
-    backend = _SplitReadBackend([snowman[:2], snowman[2:]])
-    manager = TerminalSessionManager(backend=cast(ManagedBashBackend, backend))
+    terminal = _SplitReadTerminal([snowman[:2], snowman[2:]])
+    manager = TerminalSessionManager(
+        backend=cast(ManagedShellBackend, _UnusedBackend())
+    )
     output_path = tmp_path / "out.log"
     output_path.touch()
     session = TerminalSession(
@@ -264,11 +473,11 @@ def test_reader_loop_preserves_multibyte_split_across_chunks(tmp_path):
         command="cmd",
         cwd=tmp_path,
         shell="/bin/sh",
-        process=cast(subprocess.Popen[bytes], _CompletedProcess()),
-        master_fd=1,
+        terminal=terminal,
         output_path=output_path,
         manifest_path=tmp_path / "split.json",
         created_at=0.0,
+        pty_backend=terminal.pty_backend,
     )
 
     manager._reader_loop(session)
@@ -308,8 +517,7 @@ def test_running_read_output_defers_incomplete_utf8_at_current_eof(tmp_path):
         command="cmd",
         cwd=tmp_path,
         shell="/bin/sh",
-        process=cast(subprocess.Popen[bytes], _RunningProcess()),
-        master_fd=1,
+        terminal=_RunningTerminal(),
         output_path=output_path,
         manifest_path=tmp_path / "running.json",
         created_at=0.0,
@@ -345,8 +553,7 @@ def test_inspect_session_does_not_split_multibyte_at_tail_boundary(tmp_path):
         command="cmd",
         cwd=tmp_path,
         shell="/bin/sh",
-        process=cast(subprocess.Popen[bytes], _CompletedProcess()),
-        master_fd=1,
+        terminal=_CompletedTerminal(),
         output_path=output_path,
         manifest_path=tmp_path / "tail.json",
         created_at=0.0,
@@ -445,8 +652,11 @@ def test_bash_output_display_describes_polling_and_running_result():
     )
 
     assert call.summary == "Waiting for bash session bash_1"
+    assert call.verb == "Waiting for"
+    assert call.message == "bash session bash_1"
     assert result.success is True
-    assert result.message == "Session bash_1 is still running"
+    assert result.verb == "Polled"
+    assert result.message == "session bash_1 is still running"
     assert result.suffix == "truncated"
 
 
@@ -472,8 +682,11 @@ def test_bash_stdin_display_describes_bytes_written():
     )
 
     assert call.summary == "Sending input to bash session bash_1"
+    assert call.verb == "Sending"
+    assert call.message == "input to bash session bash_1"
     assert result.success is True
-    assert result.message == "Sent 3 bytes to running session bash_1"
+    assert result.verb == "Sent"
+    assert result.message == "3 bytes to running session bash_1"
 
     completed = adapter.get_result_display(
         ToolResultEvent(
@@ -487,7 +700,8 @@ def test_bash_stdin_display_describes_bytes_written():
     )
 
     assert completed.success is True
-    assert completed.message == "Sent 3 bytes to completed session bash_1"
+    assert completed.verb == "Sent"
+    assert completed.message == "3 bytes to completed session bash_1"
 
 
 def test_bash_sessions_display_describes_actions():
@@ -509,9 +723,23 @@ def test_bash_sessions_display_describes_actions():
         )
     )
 
-    assert call.summary == "Killing bash session bash_1"
+    assert call.summary == "Killing one bash session bash_1"
+    assert call.verb == "Killing"
+    assert call.message == "one bash session bash_1"
     assert result.success is True
-    assert result.message == "Reset bash sessions; stopped 0 sessions"
+    assert result.verb == "Reset"
+    assert result.message == "all bash sessions; stopped 0 sessions"
+
+
+def test_bash_sessions_schema_distinguishes_kill_from_reset():
+    schema = BashSessionsArgs.model_json_schema()
+
+    action_description = schema["properties"]["action"]["description"]
+    session_id_description = schema["properties"]["session_id"]["description"]
+
+    assert "terminates exactly that one session" in action_description
+    assert "stops every session in this tool family" in action_description
+    assert "`kill` affects exactly this one session" in session_id_description
 
 
 def test_bash_log_file_display_describes_actions_and_truncation():
@@ -540,22 +768,30 @@ def test_bash_log_file_display_describes_actions_and_truncation():
     )
 
     assert call.summary == "Reading bash log bash_1"
+    assert call.verb == "Reading"
+    assert call.message == "bash log bash_1"
     assert result.success is True
-    assert result.message == "Read bash log bash_1.log"
+    assert result.verb == "Read"
+    assert result.message == "bash log bash_1.log"
     assert result.suffix == "truncated"
 
 
 @pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
 @pytest.mark.asyncio
 async def test_foreground_killed_session_is_reported_as_failure():
+    terminal_runtime = TerminalRuntime()
     tool = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        config_getter=lambda: ExperimentalBashToolConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
     )
     started = await collect_result(
         tool.run(ExperimentalBashArgs(command="sleep 30", background=True))
     )
     sessions = BashSessions(
-        config_getter=lambda: BashSessionsConfig(), state=BaseToolState()
+        config_getter=lambda: BashSessionsConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
     )
     await collect_result(
         sessions.run(BashSessionsArgs(action="kill", session_id=started.session_id))
@@ -579,7 +815,7 @@ def test_reset_clear_logs_kills_running_sessions(tmp_path):
 
     assert any(info.session_id == session.session_id for info in killed)
     assert manager._sessions == {}
-    assert session.process.poll() is not None
+    assert session.terminal.poll() is not None
 
 
 def test_manager_does_not_list_orphans_from_previous_vibe_session(
@@ -614,6 +850,115 @@ def test_manager_does_not_list_orphans_from_previous_vibe_session(
     assert manifest_path.exists()
 
 
+def test_manager_lists_only_own_family_orphaned_manifests(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    sessions_dir = tmp_path / "shell-tool" / "sessions"
+    sessions_dir.mkdir(parents=True)
+
+    for session_id in ("bash_old", "powershell_old"):
+        output_path = sessions_dir / f"{session_id}.log"
+        output_path.write_text(f"{session_id} output", encoding="utf-8")
+        (sessions_dir / f"{session_id}.json").write_text(
+            json.dumps({
+                "session_id": session_id,
+                "command": "echo old",
+                "cwd": str(tmp_path),
+                "shell": "/bin/sh",
+                "status": "running",
+                "exit_code": None,
+                "output_path": str(output_path),
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "reader_error": None,
+            }),
+            encoding="utf-8",
+        )
+
+    bash_manager = TerminalSessionManager(
+        backend=cast(ManagedShellBackend, _UnusedBackend()), session_prefix="bash"
+    )
+    windows_manager = TerminalSessionManager(
+        backend=cast(ManagedShellBackend, _UnusedBackend()),
+        shell_family="powershell",
+        session_prefix="powershell",
+    )
+
+    bash_sessions = bash_manager.list_sessions()
+    windows_sessions = windows_manager.list_sessions()
+
+    assert [session.session_id for session in bash_sessions] == ["bash_old"]
+    assert bash_sessions[0].status == "orphaned"
+    assert [session.session_id for session in windows_sessions] == ["powershell_old"]
+    assert windows_sessions[0].status == "orphaned"
+
+
+def test_manager_log_relative_path_stays_within_own_session_family(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    sessions_dir = tmp_path / "shell-tool" / "sessions"
+    sessions_dir.mkdir(parents=True)
+
+    for session_id in ("bash_old", "powershell_old"):
+        (sessions_dir / f"{session_id}.log").write_text(
+            f"{session_id} output", encoding="utf-8"
+        )
+
+    bash_manager = TerminalSessionManager(
+        backend=cast(ManagedShellBackend, _UnusedBackend()), session_prefix="bash"
+    )
+    windows_manager = TerminalSessionManager(
+        backend=cast(ManagedShellBackend, _UnusedBackend()),
+        shell_family="powershell",
+        session_prefix="powershell",
+    )
+
+    assert (
+        bash_manager.resolve_log_path(
+            session_id=None, relative_path="sessions/bash_old.log"
+        )
+        == (sessions_dir / "bash_old.log").resolve()
+    )
+    with pytest.raises(ManagedShellError):
+        bash_manager.resolve_log_path(
+            session_id=None, relative_path="sessions/powershell_old.log"
+        )
+
+    assert (
+        windows_manager.resolve_log_path(
+            session_id=None, relative_path="sessions/powershell_old.log"
+        )
+        == (sessions_dir / "powershell_old.log").resolve()
+    )
+    with pytest.raises(ManagedShellError):
+        windows_manager.resolve_log_path(
+            session_id=None, relative_path="sessions/bash_old.log"
+        )
+
+
+def test_reset_clear_logs_deletes_only_own_family_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    sessions_dir = tmp_path / "shell-tool" / "sessions"
+    sessions_dir.mkdir(parents=True)
+
+    for session_id in ("bash_old", "powershell_old"):
+        (sessions_dir / f"{session_id}.log").write_text(
+            f"{session_id} output", encoding="utf-8"
+        )
+        (sessions_dir / f"{session_id}.json").write_text("{}", encoding="utf-8")
+
+    manager = TerminalSessionManager(
+        backend=cast(ManagedShellBackend, _UnusedBackend()), session_prefix="bash"
+    )
+
+    manager.reset(clear_logs=True)
+
+    assert not (sessions_dir / "bash_old.log").exists()
+    assert not (sessions_dir / "bash_old.json").exists()
+    assert (sessions_dir / "powershell_old.log").exists()
+    assert (sessions_dir / "powershell_old.json").exists()
+
+
 def test_resolve_timeout_uses_shared_bash_default_timeout():
     config = ExperimentalBashToolConfig(default_timeout=300, max_timeout_seconds=600)
     bash_tool = ExperimentalBash(config_getter=lambda: config, state=BaseToolState())
@@ -637,8 +982,11 @@ def test_build_env_neutralizes_pagers_but_keeps_interactive_term(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_background_session_can_be_polled_and_killed():
+    terminal_runtime = TerminalRuntime()
     managed_bash = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        config_getter=lambda: ExperimentalBashToolConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
     )
     result = await collect_result(
         managed_bash.run(
@@ -646,10 +994,14 @@ async def test_background_session_can_be_polled_and_killed():
         )
     )
     output_tool = BashOutput(
-        config_getter=lambda: BashOutputConfig(), state=BaseToolState()
+        config_getter=lambda: BashOutputConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
     )
     sessions_tool = BashSessions(
-        config_getter=lambda: BashSessionsConfig(), state=BaseToolState()
+        config_getter=lambda: BashSessionsConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
     )
 
     try:
@@ -677,8 +1029,11 @@ async def test_background_session_can_be_polled_and_killed():
 
 @pytest.mark.asyncio
 async def test_stdin_can_drive_interactive_session():
+    terminal_runtime = TerminalRuntime()
     managed_bash = ExperimentalBash(
-        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        config_getter=lambda: ExperimentalBashToolConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
     )
     result = await collect_result(
         managed_bash.run(
@@ -688,13 +1043,19 @@ async def test_stdin_can_drive_interactive_session():
         )
     )
     stdin_tool = BashStdin(
-        config_getter=lambda: BashStdinConfig(), state=BaseToolState()
+        config_getter=lambda: BashStdinConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
     )
     output_tool = BashOutput(
-        config_getter=lambda: BashOutputConfig(), state=BaseToolState()
+        config_getter=lambda: BashOutputConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
     )
     sessions_tool = BashSessions(
-        config_getter=lambda: BashSessionsConfig(), state=BaseToolState()
+        config_getter=lambda: BashSessionsConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
     )
 
     try:
@@ -806,6 +1167,33 @@ def test_experimental_bash_quoted_outside_path_requires_approval(tmp_path, monke
     assert any(
         str(outside.parent) in required.label
         for required in permission.required_permissions
+    )
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
+@pytest.mark.parametrize("command", ["grep root", "find", "od -c"])
+def test_experimental_bash_readers_require_approval_for_outside_paths(
+    command, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside"
+    workdir.mkdir()
+    outside.mkdir()
+    outside_file = outside / "secret.txt"
+    outside_file.write_text("secret", encoding="utf-8")
+    monkeypatch.chdir(workdir)
+    bash_tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+
+    permission = bash_tool.resolve_permission(
+        ExperimentalBashArgs(command=f"{command} {outside_file}")
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        str(outside) in required.label for required in permission.required_permissions
     )
 
 
@@ -1089,7 +1477,7 @@ def test_new_read_only_commands_are_allowlisted():
 def _force_windows_bash(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(
-        "vibe.core.utils.platform.shutil.which",
+        "vibe.utils.platform.shutil.which",
         lambda name, path=None: (
             "C:\\Program Files\\Git\\bin\\bash.exe" if name == "bash" else None
         ),
@@ -1100,7 +1488,7 @@ def _force_windows_cmd(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     _hide_standard_git_installs(monkeypatch)
     monkeypatch.setattr(
-        "vibe.core.utils.platform.shutil.which", lambda name, path=None: None
+        "vibe.utils.platform.shutil.which", lambda name, path=None: None
     )
 
 

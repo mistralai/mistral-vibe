@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum, auto
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -13,12 +13,10 @@ from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
+from vibe.app_server.config import ConfigView
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-
-if TYPE_CHECKING:
-    from vibe.core.config import VibeConfigSchema
 
 
 class ConfigOptionKind(StrEnum):
@@ -64,11 +62,12 @@ class ConfigApp(Container):
     class OpenThinkingPicker(Message):
         pass
 
-    def __init__(self, config: VibeConfigSchema) -> None:
+    def __init__(self, config: ConfigView) -> None:
         super().__init__(id="config-app")
         self.config = config
         self.changes: dict[str, str] = {}
         self._toggle_settings: list[tuple[str, str]] = [
+            ("show_thinking_nodes", "Show thinking"),
             ("autocopy_to_clipboard", "Auto-copy"),
             (
                 "file_watcher_for_autocomplete",
@@ -78,7 +77,7 @@ class ConfigApp(Container):
         ]
 
     def _get_current_model(self) -> str:
-        return str(getattr(self.config, "active_model", ""))
+        return self.config.active_model.alias
 
     def _get_toggle_value(self, key: str) -> str:
         if key in self.changes:
@@ -95,10 +94,7 @@ class ConfigApp(Container):
         return text
 
     def _get_current_thinking(self) -> str:
-        try:
-            return str(self.config.get_active_model().thinking)
-        except ValueError:
-            return "off"
+        return str(self.config.active_model.thinking)
 
     def _thinking_prompt(self) -> Text:
         text = Text(no_wrap=True)

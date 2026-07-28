@@ -9,6 +9,7 @@ from rich import print as rprint
 from textual.app import App
 
 from vibe.cli.clipboard import try_copy_text_to_clipboard
+from vibe.cli.theme import resolve_auto_theme, resolve_theme, resolve_theme_name
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -51,6 +52,10 @@ class OnboardingApp(App[str | None]):
             config = OnboardingContext.from_config(config)
 
         self._config = config
+        self._initial_theme = resolve_theme_name(config.theme)
+        resolve_auto_theme()
+        self._resolved_theme = resolve_theme(self._initial_theme)
+        self._theme_selection_screen: ThemeSelectionScreen | None = None
         self._provider = config.provider
         self._vibe_base_url = config.vibe_base_url
         self._launch_context = launch_context
@@ -62,14 +67,15 @@ class OnboardingApp(App[str | None]):
         )
 
     def on_mount(self) -> None:
-        self.theme = "ansi-dark"
+        self.theme = self._resolved_theme
 
         theme_next = "auth_method" if self.supports_browser_sign_in else "api_key"
         welcome_screen = WelcomeScreen(next_screen="theme_selection")
         self.install_screen(welcome_screen, "welcome")
-        self.install_screen(
-            ThemeSelectionScreen(next_screen=theme_next), "theme_selection"
+        self._theme_selection_screen = ThemeSelectionScreen(
+            initial_theme=self._initial_theme, next_screen=theme_next
         )
+        self.install_screen(self._theme_selection_screen, "theme_selection")
         self.install_screen(
             ApiKeyScreen(
                 self._provider,
@@ -96,6 +102,12 @@ class OnboardingApp(App[str | None]):
     @property
     def supports_browser_sign_in(self) -> bool:
         return self._browser_sign_in_service_factory is not None
+
+    @property
+    def selected_theme(self) -> str:
+        if self._theme_selection_screen is None:
+            return self._initial_theme
+        return self._theme_selection_screen.selected_theme
 
     def _build_browser_sign_in_service_factory(
         self,
@@ -156,7 +168,11 @@ def run_onboarding(
             rprint(
                 '\nSetup complete 🎉. Run "vibe" to start using the Mistral Vibe CLI.\n'
             )
-    theme = onboarding_app.theme
+    theme = (
+        onboarding_app.selected_theme
+        if isinstance(onboarding_app, OnboardingApp)
+        else onboarding_app.theme
+    )
     orchestrator = asyncio.run(build_default_orchestrator())
     if theme is not None:
         asyncio.run(orchestrator.set_field("/theme", theme, reason="onboarding"))

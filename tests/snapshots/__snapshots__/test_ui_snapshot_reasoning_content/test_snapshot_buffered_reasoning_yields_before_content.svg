@@ -37,7 +37,6 @@
 .terminal-r3 { fill: #68a0b3 }
 .terminal-r4 { fill: #c5c8c6;font-weight: bold }
 .terminal-r5 { fill: #868887 }
-.terminal-r6 { fill: #98a84b }
     </style>
 
     <defs>
@@ -186,7 +185,7 @@
 </text><text class="terminal-r2" x="0" y="556.8" textLength="24.4" clip-path="url(#terminal-line-22)">&gt;&#160;</text><text class="terminal-r4" x="24.4" y="556.8" textLength="207.4" clip-path="url(#terminal-line-22)">Give&#160;me&#160;an&#160;answer</text><text class="terminal-r1" x="1464" y="556.8" textLength="12.2" clip-path="url(#terminal-line-22)">
 </text><text class="terminal-r5" x="0" y="581.2" textLength="1464" clip-path="url(#terminal-line-23)">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</text><text class="terminal-r1" x="1464" y="581.2" textLength="12.2" clip-path="url(#terminal-line-23)">
 </text><text class="terminal-r1" x="1464" y="605.6" textLength="12.2" clip-path="url(#terminal-line-24)">
-</text><text class="terminal-r6" x="0" y="630" textLength="12.2" clip-path="url(#terminal-line-25)">■</text><text class="terminal-r5" x="24.4" y="630" textLength="85.4" clip-path="url(#terminal-line-25)">Thought</text><text class="terminal-r5" x="122" y="630" textLength="12.2" clip-path="url(#terminal-line-25)">▶</text><text class="terminal-r1" x="1464" y="630" textLength="12.2" clip-path="url(#terminal-line-25)">
+</text><text class="terminal-r5" x="0" y="630" textLength="12.2" clip-path="url(#terminal-line-25)">⏵</text><text class="terminal-r5" x="24.4" y="630" textLength="85.4" clip-path="url(#terminal-line-25)">Thought</text><text class="terminal-r1" x="1464" y="630" textLength="12.2" clip-path="url(#terminal-line-25)">
 </text><text class="terminal-r1" x="1464" y="654.4" textLength="12.2" clip-path="url(#terminal-line-26)">
 </text><text class="terminal-r1" x="24.4" y="678.8" textLength="707.6" clip-path="url(#terminal-line-27)">Here&#160;is&#160;my&#160;carefully&#160;considered&#160;answer.&#160;I&#160;hope&#160;this&#160;helps!</text><text class="terminal-r1" x="1464" y="678.8" textLength="12.2" clip-path="url(#terminal-line-27)">
 </text><text class="terminal-r1" x="1464" y="703.2" textLength="12.2" clip-path="url(#terminal-line-28)">

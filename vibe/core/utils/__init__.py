@@ -1,6 +1,6 @@
 """Utilities package. Re-exports all public and test-used symbols from submodules.
 
-Import read_safe / read_safe_async / decode_safe (returns ReadSafeResult) from vibe.core.utils.io and create_slug from
+Import read_safe / read_safe_async / decode_safe (returns ReadSafeResult) from vibe.utils.io and create_slug from
 vibe.core.utils.slug when needed to avoid circular imports with config.
 """
 
@@ -12,27 +12,8 @@ from vibe.core.utils.concurrency import (
     ConversationLimitException,
     run_sync,
 )
-from vibe.core.utils.display import compact_complete_display
-from vibe.core.utils.http import (
-    VibeAsyncHTTPClient,
-    build_ssl_context,
-    configure_ssl_context,
-    get_server_url_from_api_base,
-    get_user_agent,
-)
 from vibe.core.utils.matching import name_matches
 from vibe.core.utils.merge import MergeConflictError, MergeStrategy
-from vibe.core.utils.paths import is_dangerous_directory
-from vibe.core.utils.platform import (
-    WindowsShell,
-    WindowsShellKind,
-    get_platform_display_name,
-    get_platform_id,
-    get_platform_version,
-    get_windows_bash_path,
-    is_windows,
-    resolve_windows_shell,
-)
 from vibe.core.utils.retry import async_generator_retry, async_retry
 from vibe.core.utils.sse import iter_sse_lines
 from vibe.core.utils.tags import (
@@ -47,6 +28,18 @@ from vibe.core.utils.tags import (
     is_user_cancellation_event,
 )
 from vibe.core.utils.time import utc_now
+from vibe.utils.display import compact_complete_display
+from vibe.utils.paths import is_dangerous_directory
+from vibe.utils.platform import (
+    WindowsShell,
+    WindowsShellKind,
+    get_platform_display_name,
+    get_platform_id,
+    get_platform_version,
+    get_windows_bash_path,
+    is_windows,
+    resolve_windows_shell,
+)
 
 __all__ = [
     "CANCELLATION_TAG",
@@ -60,19 +53,14 @@ __all__ = [
     "MergeConflictError",
     "MergeStrategy",
     "TaggedText",
-    "VibeAsyncHTTPClient",
     "WindowsShell",
     "WindowsShellKind",
     "async_generator_retry",
     "async_retry",
-    "build_ssl_context",
     "compact_complete_display",
-    "configure_ssl_context",
     "get_platform_display_name",
     "get_platform_id",
     "get_platform_version",
-    "get_server_url_from_api_base",
-    "get_user_agent",
     "get_user_cancellation_message",
     "get_windows_bash_path",
     "is_dangerous_directory",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, ClassVar, cast
 
 from rich.text import Text
@@ -10,10 +11,10 @@ from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
+from vibe.app_server.config import ThinkingLevel
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config.models import ThinkingLevel
 
 
 def _build_option_text(level: str, is_current: bool) -> Text:
@@ -43,7 +44,10 @@ class ThinkingPickerApp(Container):
         pass
 
     def __init__(
-        self, thinking_levels: list[str], current_thinking: str, **kwargs: Any
+        self,
+        thinking_levels: Sequence[ThinkingLevel],
+        current_thinking: ThinkingLevel,
+        **kwargs: Any,
     ) -> None:
         super().__init__(id="thinkingpicker-app", **kwargs)
         self._thinking_levels = thinking_levels

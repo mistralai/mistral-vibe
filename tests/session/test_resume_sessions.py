@@ -7,7 +7,7 @@ from vibe.core.session.resume_sessions import (
     session_latest_messages,
     short_session_id,
 )
-from vibe.core.session.session_id import shorten_session_id
+from vibe.utils.session_id import shorten_session_id
 
 
 class TestShortenSessionId:

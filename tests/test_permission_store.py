@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
@@ -13,7 +12,12 @@ from vibe.core.tools.permissions import (
     PermissionStore,
     RequiredPermission,
 )
-from vibe.core.types import ApprovalResponse, FunctionCall, ToolCall, ToolResultEvent
+from vibe.core.types import (
+    ApprovalRequestEvent,
+    FunctionCall,
+    ToolCall,
+    ToolResultEvent,
+)
 
 
 class TestPermissionStore:
@@ -118,17 +122,6 @@ class TestAgentLoopSharesStore:
         store = PermissionStore()
         parent = build_test_agent_loop(permission_store=store)
         await parent.approve_always("bash", None)
-        approval_requested = False
-
-        async def approval_callback(
-            tool_name: str,
-            args: BaseModel,
-            tool_call_id: str,
-            required_permissions: list[RequiredPermission] | None,
-        ) -> tuple[ApprovalResponse, str | None]:
-            nonlocal approval_requested
-            approval_requested = True
-            return ApprovalResponse.NO, None
 
         tool_call = ToolCall(
             id="call_1",
@@ -143,12 +136,11 @@ class TestAgentLoopSharesStore:
             ]),
             permission_store=store,
         )
-        subagent.set_approval_callback(approval_callback)
 
         events = [event async for event in subagent.act("run true")]
         tool_results = [event for event in events if isinstance(event, ToolResultEvent)]
 
-        assert not approval_requested
+        assert not any(isinstance(event, ApprovalRequestEvent) for event in events)
         assert len(tool_results) == 1
         assert tool_results[0].skipped is False
         assert "permission" not in subagent.config.tools.get("bash", {})

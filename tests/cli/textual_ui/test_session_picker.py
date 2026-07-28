@@ -4,33 +4,32 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import pytest
-from rich.text import Text
+from textual.content import Content
 from textual.widgets import OptionList
 
-from vibe.cli.textual_ui.shortcut_hints import SHORTCUT_STYLE
+from vibe.app_server.models import SavedSessionSummary
 from vibe.cli.textual_ui.widgets.session_picker import (
     SessionPickerApp,
     _format_relative_time,
 )
-from vibe.core.session.resume_sessions import ResumeSessionInfo
 
 
 @pytest.fixture
-def sample_sessions() -> list[ResumeSessionInfo]:
+def sample_sessions() -> list[SavedSessionSummary]:
     return [
-        ResumeSessionInfo(
+        SavedSessionSummary(
             session_id="session-a",
             cwd="/test",
             title="Session A",
             end_time=(datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
         ),
-        ResumeSessionInfo(
+        SavedSessionSummary(
             session_id="session-b",
             cwd="/test",
             title="Session B",
             end_time=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
         ),
-        ResumeSessionInfo(
+        SavedSessionSummary(
             session_id="session-c",
             cwd="/test",
             title="Session C",
@@ -97,7 +96,7 @@ class TestFormatRelativeTime:
 class TestSessionPickerAppInit:
     def test_init_sets_properties(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
     ) -> None:
         picker = SessionPickerApp(
@@ -116,7 +115,7 @@ class TestSessionPickerAppInit:
 
     def test_delete_confirmation_state_starts_empty(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
     ) -> None:
         picker = SessionPickerApp(
@@ -126,7 +125,7 @@ class TestSessionPickerAppInit:
 
     def test_has_sessions_tracks_session_list(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
     ) -> None:
         picker = SessionPickerApp(
@@ -177,7 +176,7 @@ class TestSessionPickerAppBindings:
 class TestSessionPickerSessionRemoval:
     def test_first_delete_request_enters_confirmation(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -195,12 +194,25 @@ class TestSessionPickerSessionRemoval:
         assert option_list.replaced_prompts[-1].option_id == "session-a"
         prompt = option_list.replaced_prompts[-1].prompt
         assert "Press d again to delete" in prompt.plain
-        assert any(span.style == SHORTCUT_STYLE for span in prompt.spans)
         assert posted_messages == []
+
+    def test_confirmation_prompt_highlights_shortcut_with_theme_variable(
+        self,
+        sample_sessions: list[SavedSessionSummary],
+        sample_latest_messages: dict[str, str],
+    ) -> None:
+        picker = SessionPickerApp(
+            sessions=sample_sessions, latest_messages=sample_latest_messages
+        )
+
+        prompt = picker._delete_confirmation_option_text(sample_sessions[0])
+
+        assert isinstance(prompt, Content)
+        assert any("$primary" in str(span.style) for span in prompt.spans)
 
     def test_second_delete_request_posts_delete_message(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -226,7 +238,7 @@ class TestSessionPickerSessionRemoval:
 
     def test_delete_confirmation_is_consumed_after_request(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -249,7 +261,7 @@ class TestSessionPickerSessionRemoval:
 
     def test_delete_request_shows_feedback_for_current_session(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -280,7 +292,7 @@ class TestSessionPickerSessionRemoval:
 
     def test_pending_delete_blocks_resume_selection(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -307,7 +319,7 @@ class TestSessionPickerSessionRemoval:
 
     def test_clear_pending_delete_restores_session_option(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -329,7 +341,7 @@ class TestSessionPickerSessionRemoval:
 
     def test_highlighting_another_session_clears_confirmation(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -350,7 +362,7 @@ class TestSessionPickerSessionRemoval:
 
     def test_highlighting_another_session_clears_delete_feedback(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -376,7 +388,7 @@ class TestSessionPickerSessionRemoval:
 
     def test_escape_clears_confirmation_before_cancelling(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -401,7 +413,7 @@ class TestSessionPickerSessionRemoval:
 
     def test_escape_clears_delete_feedback_before_cancelling(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -428,7 +440,7 @@ class TestSessionPickerSessionRemoval:
 
     def test_remove_session_updates_picker_state(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -452,7 +464,7 @@ class TestSessionPickerSessionRemoval:
 
     def test_remove_missing_session_returns_false(
         self,
-        sample_sessions: list[ResumeSessionInfo],
+        sample_sessions: list[SavedSessionSummary],
         sample_latest_messages: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -480,7 +492,7 @@ class FakeOptionEvent:
 
 
 class ReplacedPrompt:
-    def __init__(self, option_id: str, prompt: Text) -> None:
+    def __init__(self, option_id: str, prompt: Content) -> None:
         self.option_id = option_id
         self.prompt = prompt
 
@@ -498,5 +510,5 @@ class FakeOptionList:
     def remove_option(self, option_id: str) -> None:
         self.removed_option_ids.append(option_id)
 
-    def replace_option_prompt(self, option_id: str, prompt: Text) -> None:
+    def replace_option_prompt(self, option_id: str, prompt: Content) -> None:
         self.replaced_prompts.append(ReplacedPrompt(option_id, prompt))

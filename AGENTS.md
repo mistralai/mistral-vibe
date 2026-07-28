@@ -8,6 +8,8 @@ Layout: `vibe/core` is the engine (agent loop, tools, LLM backends, config); `vi
 
 Before architecture-affecting changes, read the matching ADRs. If a change fits the current code but conflicts with ADR direction, flag it to the user before implementing.
 
+When creating or editing an ADR, follow the `write-vibe-adr` skill and keep the standard sections.
+
 | Change area | ADR |
 | --- | --- |
 | Architecture principles, module boundaries, startup/runtime speed, simple changes | [0001 Architecture Principles](docs/adr/0001-architecture-principles.md) |
@@ -18,6 +20,8 @@ Before architecture-affecting changes, read the matching ADRs. If a change fits 
 | Session logging, resume, rewind, transcript metadata, or migrations | [0006 Local Sessions](docs/adr/0006-local-sessions.md) |
 | Skills, agents, subagents, hooks, MCP, connectors, custom tools, or discovery | [0007 Extension Mechanisms](docs/adr/0007-extension-mechanisms.md) |
 | Adding or changing analytics instrumentation, telemetry events, or event properties | [0008 Feature Instrumentation](docs/adr/0008-feature-instrumentation.md) |
+| App-server ownership, RPCs, lifecycle, projections, effects, callbacks, client tools, or delivery adapters | [0009 App Server Boundary](docs/adr/0009-app-server-boundary.md) |
+| Textual `Content` rendering, styled text, markup parsing, or theme variables in widgets | [0010 Textual Content Rendering](docs/adr/0010-textual-content-rendering.md) |
 
 ## Commands
 
@@ -36,7 +40,7 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 - Private modules are prefixed with `_` (e.g. `_settings.py`, `_config.py`).
 - Pydantic config models live in `models.py`; shared config defaults live in `_defaults.py`; the effective config schema lives in `vibe_schema.py`.
 - Abstract interfaces use the `_port.py` suffix (hexagonal-style ports).
-- Tests mirror the source layout: a test lives in the directory mirroring its source module's package. Tests for a `vibe/core` subpackage go under the matching `tests/core/<subpackage>/` (e.g. `vibe/core/utils/http.py` → `tests/core/utils/test_http_client.py`); tests for modules that sit directly in `vibe/core/` (e.g. `loop.py`, `types.py`) stay flat in `tests/core/`. No `__init__.py` is needed in test subdirectories — pytest runs in `--import-mode=importlib`. Test doubles in `tests/stubs/` are named `Fake*`.
+- Tests mirror the source layout: a test lives in the directory mirroring its source module's package. Tests for a `vibe/core` subpackage go under the matching `tests/core/<subpackage>/` (e.g. `vibe/core/utils/retry.py` → `tests/core/utils/test_retry.py`); tests for modules that sit directly in `vibe/core/` (e.g. `loop.py`, `types.py`) stay flat in `tests/core/`. No `__init__.py` is needed in test subdirectories — pytest runs in `--import-mode=importlib`. Test doubles in `tests/stubs/` are named `Fake*`.
 
 ## Python style
 
@@ -70,7 +74,8 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 - Never run CPU-heavy or I/O-bound code on the UI thread. The Textual TUI and the agent loop share one event loop, so anything blocking (large JSON/Pydantic serialization, `os.fsync`, subprocess calls, recursive globs) freezes the UI — offload it with `asyncio.to_thread`. Async file wrappers don't make blocking syscalls non-blocking.
 - Use `anyio.Path` for file I/O on async paths.
 - Streaming surfaces return `AsyncGenerator[Event, None]`, not coroutines.
-- When Vibe owns an HTTP client, use `VibeAsyncHTTPClient` from `vibe.core.utils.http` instead of `httpx.AsyncClient` so proxy env vars are handled consistently. Its CIDR `NO_PROXY` matching applies only to IP-literal request hosts; do not resolve DNS before proxy selection. Mock outbound HTTP with `respx` in tests.
+- Route core-to-TUI communication through `vibe.app_server`. Server requests such as approvals and user input become canonical Vibe events; neither the TUI nor app server may register callbacks, listeners, or message observers directly on the agent loop.
+- When Vibe owns an HTTP client, use `VibeAsyncHTTPClient` from `vibe.utils.http` instead of `httpx.AsyncClient` so proxy env vars are handled consistently. Its CIDR `NO_PROXY` matching applies only to IP-literal request hosts; do not resolve DNS before proxy selection. Mock outbound HTTP with `respx` in tests.
 
 ## Tools
 
@@ -81,7 +86,7 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 
 ## Logging & errors
 
-- Use `from vibe.core.logger import logger` — stdlib `logging` with `StructuredLogFormatter`, not `structlog`.
+- Use `from vibe.observability.logging import logger` — stdlib `logging` with `StructuredLogFormatter`, not `structlog`.
 - Configure via env: `LOG_LEVEL` (default `WARNING`), `LOG_MAX_BYTES`. Logs land in `~/.vibe/logs/vibe.log`.
 - Pass variables as `%s` positional args, not f-string interpolation: prefer `logger.error("Failed to fetch url=%s", url)` over `logger.error(f"Failed to fetch {url}")`. This defers formatting to the logging framework (only formats if the message is emitted) and keeps messages grep-friendly.
 - Define module-local exception hierarchies. Always chain with `raise NewError(...) from e`. Rich exceptions expose a `_fmt()` helper for human-readable output.
@@ -96,11 +101,13 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 
 - For selectable lists, use `NavigableOptionList` from `vibe/cli/textual_ui/widgets/navigable_option_list.py` instead of Textual's `OptionList`. It adds `j`/`k` cursor navigation on top of the arrow keys; the bare `OptionList` only handles arrows.
 - Keep feature-specific Textual state and helper functions with the feature's widget package. `app.py` should orchestrate mounting and message handling, not accumulate feature-local state models, defaulting helpers, or import factories.
+- Render tool headers as an explicit verb plus message in every state: progressive wording while a call is running, then a settled verb once any result arrives, including a failure. Preserve result metadata such as `(truncated)` or `(scratchpad)` immediately after the message and keep error details in the expandable result body.
 
 ## TCSS
 
 - When a rule sets `color: $text-muted;`, pair it with a nested `&:ansi { text-style: dim; }` so the muted intent survives under ANSI themes.
 - Never use `ansi_*` colors (e.g. `ansi_red`, `ansi_bright_blue`). Use Textual theme variables like `$primary`, `$foreground`, `$surface`, `$error`, etc. — see https://textual.textualize.io/guide/design/. ANSI themes are derived from these variables automatically.
+- Keep truncation and overflow behavior declarative in TCSS. Do not add resize handlers or explicit widget-width calculations solely to force an ellipsis; accept clipping or overflow when Textual cannot express the layout reliably.
 
 ## Cross-platform
 
@@ -111,6 +118,7 @@ Vibe ships on Linux, macOS, and Windows, but **CI runs the test suite on Linux o
 - Use `pathlib.Path` for path composition; never hardcode `/` or `\\`.
 - Test other-platform code paths **on Linux** by monkeypatching `sys.platform`, env vars, and probes like `shutil.which` — do not `@pytest.mark.skipif` them away. A Windows-only behavior with no Linux-runnable test is untested in CI.
 - When an assertion depends on the platform, force it explicitly (e.g. `monkeypatch.setattr(module, "is_windows", lambda: True)`) instead of letting the test pass only because of the host it happened to run on. A test that would flip its result on a different OS is a bug.
+- Treat terminal and PTY data as arbitrarily chunked streams: normalize CRLF before interpreting lone `\r` as an in-place redraw, buffer incomplete control sequences until their terminator arrives, and add Linux-runnable regression tests covering CRLF plus every split boundary of representative control sequences.
 
 ## Tests
 
@@ -119,6 +127,7 @@ Vibe ships on Linux, macOS, and Windows, but **CI runs the test suite on Linux o
 - Rely on the autouse fixtures in `tests/conftest.py` (`config_dir`, `tmp_working_directory`) for filesystem and home-dir isolation.
 - No docstrings on test functions, methods, or classes — descriptive names like `test_create_user_returns_403_when_unauthorized` carry the intent. Pytest displays docstrings instead of node IDs when present, which hurts.
 - Tests are exempt from the `ANN` and `PLR` ruff rules (see `per-file-ignores`).
+- Changes to managed shell tools, managed shell backends, shell prompts, or shell dependencies require focused POSIX/common validation and passing Windows shell CI. If Windows shell CI is unavailable, the PR notes must include manual native Windows commands and results.
 
 ## Git
 
@@ -146,9 +155,9 @@ Every external input to the build, CI, or install path must be pinned to an immu
 
 In Cursor / Pyright, the "Add import" quick fix is missing — use the workspace snippets `acpschema`, `acphelpers`, `vibetypes`, `vibeconfig` to insert the import line, then rename the symbol.
 
-
 ## Autoimprovement
 
 - Suggest to add new rules to AGENTS.md based on user input or PR comments, when a change request could be generalized as a rule.
 - Suggest updates to the README.md file according to feature changes or additions
 - Keep the builtin Vibe Skill (`vibe/core/skills/builtins/vibe.py`) up-to-date. It documents the CLI's features, such as args, flags, config options and persistence, commands, built-in agents, file discovery logic.
+- When adding or changing Vibe config fields, check whether Settings Manager's Vibe Code managed-config UI and Le Chat Web's backend allowlist/schema must be updated. If no update is needed, say so explicitly in the change notes.

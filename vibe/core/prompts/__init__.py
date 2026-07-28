@@ -6,7 +6,7 @@ from pathlib import Path
 
 from vibe import VIBE_ROOT
 from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.utils.io import read_safe
+from vibe.utils.io import read_safe
 
 PROMPTS_DIR = VIBE_ROOT / "core" / "prompts"
 

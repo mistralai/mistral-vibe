@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
@@ -22,7 +21,7 @@ from vibe.cli.voice_manager.voice_manager_port import (
     VoiceManagerListener,
     VoiceManagerPort,
 )
-from vibe.core.logger import logger
+from vibe.observability.logging import logger
 
 
 class _PromptSpinner(SpinnerMixin, Static):
@@ -44,6 +43,9 @@ class ChatInputBody(VoiceManagerListener, Widget):
             self.value = value
             super().__init__()
 
+    class CompletionResetRequested(Message):
+        pass
+
     def __init__(
         self,
         command_registry: CommandRegistry,
@@ -63,8 +65,6 @@ class ChatInputBody(VoiceManagerListener, Widget):
             self.history = HistoryManager(history_file)
         else:
             self.history = None
-
-        self._completion_reset: Callable[[], None] | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal():
@@ -235,14 +235,8 @@ class ChatInputBody(VoiceManagerListener, Widget):
         if self.input_widget:
             self.input_widget.focus()
 
-    def set_completion_reset_callback(
-        self, callback: Callable[[], None] | None
-    ) -> None:
-        self._completion_reset = callback
-
     def _notify_completion_reset(self) -> None:
-        if self._completion_reset:
-            self._completion_reset()
+        self.post_message(self.CompletionResetRequested())
 
     def replace_input(self, text: str, cursor_offset: int | None = None) -> None:
         if not self.input_widget:

@@ -1,21 +1,30 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
-from typing import cast
 
 import pytest
 
 from tests.conftest import build_test_vibe_config
-from vibe.core.config import VibeConfigSchema
+from vibe.core.tools import manager as tool_manager_module
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
-from vibe.core.tools.builtins.experimental_bash import _experimental_bash_enabled
-from vibe.core.tools.manager import NoSuchToolError, ToolManager
+from vibe.core.tools.manager import NoSuchToolError, ShellToolPolicy, ToolManager
+
+
+def _manager(
+    vibe_config, *, managed_shell: bool = False, local_managed_shell: bool = True
+) -> ToolManager:
+    return ToolManager(
+        lambda: vibe_config,
+        shell_policy=ShellToolPolicy(
+            managed_tools_enabled=lambda: managed_shell,
+            local_managed_tools_enabled=local_managed_shell,
+        ),
+    )
 
 
 @pytest.fixture
 def tool_manager(vibe_config):
-    return ToolManager(lambda: vibe_config)
+    return _manager(vibe_config)
 
 
 def test_returns_default_config_when_no_overrides(tool_manager):
@@ -33,19 +42,18 @@ def test_managed_bash_companion_tools_are_registered(tool_manager):
     tools = tool_manager.available_tools
 
     assert "bash" in tools
+    assert "windows_shell" not in tools
     assert "bash_output" not in tools
     assert "bash_stdin" not in tools
     assert "bash_sessions" not in tools
     assert "bash_log_file" not in tools
 
 
-def test_experimental_bash_companion_tools_are_registered():
+def test_managed_bash_companion_tools_are_registered_in_treatment():
     vibe_config = build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
-        experimental_bash_tool=True,
+        system_prompt_id="tests", include_project_context=False
     )
-    manager = ToolManager(lambda: vibe_config)
+    manager = _manager(vibe_config, managed_shell=True)
     tools = manager.available_tools
 
     assert "bash" in tools
@@ -56,75 +64,361 @@ def test_experimental_bash_companion_tools_are_registered():
     assert tools["bash"].__name__ == "ExperimentalBash"
 
 
+def test_managed_posix_uses_client_bash_when_local_managed_shell_is_disabled(
+    monkeypatch,
+):
+    from vibe.core.tools.builtins import experimental_bash
+    from vibe.core.tools.builtins.managed_shell import backend
+
+    monkeypatch.setattr(tool_manager_module, "is_windows", lambda: False)
+    monkeypatch.setattr(experimental_bash, "is_windows", lambda: False)
+    monkeypatch.setattr(
+        backend,
+        "managed_shell_supported",
+        lambda family=None: family in {"posix", None},
+    )
+    vibe_config = build_test_vibe_config(
+        system_prompt_id="tests", include_project_context=False
+    )
+    manager = _manager(vibe_config, managed_shell=True, local_managed_shell=False)
+    tools = manager.available_tools
+
+    assert tools["bash"].__name__ == "Bash"
+    assert "bash_output" not in tools
+    assert "bash_stdin" not in tools
+    assert "bash_sessions" not in tools
+    assert "bash_log_file" not in tools
+
+
 def test_get_rebuilds_instance_when_bash_variant_switches():
-    state = {"experimental": False}
+    state = {"managed": False}
 
     def config_getter():
         return build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            experimental_bash_tool=state["experimental"],
+            system_prompt_id="tests", include_project_context=False
         )
 
-    manager = ToolManager(config_getter)
+    manager = ToolManager(
+        config_getter,
+        shell_policy=ShellToolPolicy(managed_tools_enabled=lambda: state["managed"]),
+    )
     legacy = manager.get("bash")
     assert type(legacy).__name__ == "Bash"
 
-    state["experimental"] = True
+    state["managed"] = True
     experimental = manager.get("bash")
     assert type(experimental).__name__ == "ExperimentalBash"
     assert experimental is not legacy
 
 
 def test_experimental_bash_falls_back_when_backend_is_unsupported(monkeypatch):
-    from vibe.core.tools.builtins.managed_bash import backend
+    from vibe.core.tools.builtins.managed_shell import backend
 
-    monkeypatch.setattr(backend, "managed_bash_supported", lambda: False)
+    monkeypatch.setattr(backend, "managed_shell_supported", lambda family=None: False)
+    vibe_config = build_test_vibe_config(
+        system_prompt_id="tests", include_project_context=False
+    )
+    manager = _manager(vibe_config, managed_shell=True)
+    tools = manager.available_tools
+
+    assert "bash" in tools
+    assert "bash_output" not in tools
+    assert "bash_stdin" not in tools
+    assert "bash_sessions" not in tools
+    assert "bash_log_file" not in tools
+    assert tools["bash"].__name__ == "Bash"
+
+
+def test_old_experimental_bash_tool_config_key_has_no_effect():
     vibe_config = build_test_vibe_config(
         system_prompt_id="tests",
         include_project_context=False,
         experimental_bash_tool=True,
     )
-    manager = ToolManager(lambda: vibe_config)
+    manager = _manager(vibe_config)
     tools = manager.available_tools
 
     assert "bash" in tools
     assert "bash_output" not in tools
-    assert "bash_stdin" not in tools
-    assert "bash_sessions" not in tools
-    assert "bash_log_file" not in tools
     assert tools["bash"].__name__ == "Bash"
 
 
-def test_experimental_bash_enabled_returns_false_when_config_lacks_attribute():
-    stale_config = cast(VibeConfigSchema, SimpleNamespace())
-    assert _experimental_bash_enabled(stale_config) is False
+def _simulate_native_windows(
+    monkeypatch,
+    *,
+    git_bash_available: bool,
+    powershell_available: bool,
+    managed_supported: bool,
+) -> None:
+    from vibe.core.tools.builtins import bash, git_bash, windows_shell
+    from vibe.core.tools.builtins.managed_shell import backend
+
+    monkeypatch.setattr(tool_manager_module, "is_windows", lambda: True)
+    monkeypatch.setattr(bash, "is_windows", lambda: True)
+    monkeypatch.setattr(git_bash, "is_windows", lambda: True)
+    monkeypatch.setattr(
+        git_bash, "git_bash_shell_available", lambda: git_bash_available
+    )
+    monkeypatch.setattr(windows_shell, "is_windows", lambda: True)
+    monkeypatch.setattr(
+        windows_shell, "git_bash_shell_available", lambda: git_bash_available
+    )
+    monkeypatch.setattr(
+        windows_shell, "powershell_shell_available", lambda: powershell_available
+    )
+    monkeypatch.setattr(backend, "is_windows", lambda: True)
+
+    def fake_managed_shell_supported(family=None):
+        match family:
+            case "git_bash":
+                return managed_supported and git_bash_available
+            case "powershell":
+                return managed_supported and powershell_available
+            case "windows" | None:
+                return managed_supported
+            case _:
+                return False
+
+    monkeypatch.setattr(
+        backend, "managed_shell_supported", fake_managed_shell_supported
+    )
 
 
-def test_experimental_bash_falls_back_when_config_lacks_attribute(build_config):
-    config = build_config(system_prompt_id="tests", include_project_context=False)
-    del config.__dict__["experimental_bash_tool"]
-    assert not hasattr(config, "experimental_bash_tool")
-
-    manager = ToolManager(lambda: config)
+def test_native_windows_exposes_git_bash_fallback_first(monkeypatch):
+    _simulate_native_windows(
+        monkeypatch,
+        git_bash_available=True,
+        powershell_available=True,
+        managed_supported=False,
+    )
+    vibe_config = build_test_vibe_config(
+        system_prompt_id="tests", include_project_context=False
+    )
+    manager = _manager(vibe_config, managed_shell=True)
     tools = manager.available_tools
 
-    assert "bash" in tools
+    assert "bash" not in tools
+    assert "git_bash" in tools
+    assert "git_bash_output" not in tools
+    assert "powershell" not in tools
+    assert "windows_shell" not in tools
+    assert tools["git_bash"].__name__ == "GitBash"
+
+
+def test_native_windows_exposes_managed_git_bash_family_first(monkeypatch):
+    _simulate_native_windows(
+        monkeypatch,
+        git_bash_available=True,
+        powershell_available=True,
+        managed_supported=True,
+    )
+    vibe_config = build_test_vibe_config(
+        system_prompt_id="tests", include_project_context=False
+    )
+    manager = _manager(vibe_config, managed_shell=True)
+    tools = manager.available_tools
+
+    assert "bash" not in tools
     assert "bash_output" not in tools
-    assert "bash_stdin" not in tools
-    assert "bash_sessions" not in tools
-    assert "bash_log_file" not in tools
-    assert tools["bash"].__name__ == "Bash"
+    assert "windows_shell" not in tools
+    assert "git_bash" in tools
+    assert "git_bash_output" in tools
+    assert "git_bash_stdin" in tools
+    assert "git_bash_sessions" in tools
+    assert "git_bash_log_file" in tools
+    assert "powershell" not in tools
+    assert "powershell_output" not in tools
+    assert tools["git_bash"].__name__ == "ExperimentalGitBash"
+
+    specs = {spec.name: spec.description for spec in manager.available_tool_specs()}
+    for name in (
+        "git_bash",
+        "git_bash_output",
+        "git_bash_stdin",
+        "git_bash_sessions",
+        "git_bash_log_file",
+    ):
+        assert "git bash" in specs[name].lower() or "git_bash" in specs[name]
+        assert "powershell" not in specs[name].lower()
+        assert "windows_shell" not in specs[name].lower()
 
 
-def test_experimental_bash_inherits_bash_tool_config_permissions():
+def test_native_windows_uses_client_git_bash_when_local_managed_shell_is_disabled(
+    monkeypatch,
+):
+    _simulate_native_windows(
+        monkeypatch,
+        git_bash_available=True,
+        powershell_available=True,
+        managed_supported=True,
+    )
+    vibe_config = build_test_vibe_config(
+        system_prompt_id="tests", include_project_context=False
+    )
+    manager = _manager(vibe_config, managed_shell=True, local_managed_shell=False)
+    tools = manager.available_tools
+
+    assert tools["git_bash"].__name__ == "GitBash"
+    assert "git_bash_output" not in tools
+    assert "git_bash_stdin" not in tools
+    assert "git_bash_sessions" not in tools
+    assert "git_bash_log_file" not in tools
+
+
+def test_native_windows_exposes_powershell_fallback_only(monkeypatch):
+    _simulate_native_windows(
+        monkeypatch,
+        git_bash_available=False,
+        powershell_available=True,
+        managed_supported=False,
+    )
+    vibe_config = build_test_vibe_config(
+        system_prompt_id="tests", include_project_context=False
+    )
+    manager = _manager(vibe_config, managed_shell=True)
+    tools = manager.available_tools
+
+    assert "bash" not in tools
+    assert "bash_output" not in tools
+    assert "git_bash" not in tools
+    assert "windows_shell" not in tools
+    assert "powershell" in tools
+    assert "powershell_output" not in tools
+    assert tools["powershell"].__name__ == "WindowsShell"
+
+
+def test_native_windows_hides_bash_when_no_shell_candidate_in_treatment(monkeypatch):
+    _simulate_native_windows(
+        monkeypatch,
+        git_bash_available=False,
+        powershell_available=False,
+        managed_supported=False,
+    )
+    vibe_config = build_test_vibe_config(
+        system_prompt_id="tests", include_project_context=False
+    )
+    manager = _manager(vibe_config, managed_shell=True)
+    tools = manager.available_tools
+
+    assert "bash" not in tools
+    assert "bash_output" not in tools
+    assert "git_bash" not in tools
+    assert "powershell" not in tools
+    assert "windows_shell" not in tools
+
+
+def test_native_windows_exposes_managed_powershell_family(monkeypatch):
+    _simulate_native_windows(
+        monkeypatch,
+        git_bash_available=False,
+        powershell_available=True,
+        managed_supported=True,
+    )
+    vibe_config = build_test_vibe_config(
+        system_prompt_id="tests", include_project_context=False
+    )
+    manager = _manager(vibe_config, managed_shell=True)
+    tools = manager.available_tools
+
+    assert "bash" not in tools
+    assert "bash_output" not in tools
+    assert "git_bash" not in tools
+    assert "windows_shell" not in tools
+    assert "powershell" in tools
+    assert "powershell_output" in tools
+    assert "powershell_stdin" in tools
+    assert "powershell_sessions" in tools
+    assert "powershell_log_file" in tools
+    assert tools["powershell"].__name__ == "ExperimentalWindowsShell"
+
+    specs = {spec.name: spec.description for spec in manager.available_tool_specs()}
+    for name in (
+        "powershell",
+        "powershell_output",
+        "powershell_stdin",
+        "powershell_sessions",
+        "powershell_log_file",
+    ):
+        assert "bash" not in specs[name].lower()
+        assert "windows_shell" not in specs[name].lower()
+
+
+def test_native_windows_uses_client_powershell_when_local_managed_shell_is_disabled(
+    monkeypatch,
+):
+    _simulate_native_windows(
+        monkeypatch,
+        git_bash_available=False,
+        powershell_available=True,
+        managed_supported=True,
+    )
+    vibe_config = build_test_vibe_config(
+        system_prompt_id="tests", include_project_context=False
+    )
+    manager = _manager(vibe_config, managed_shell=True, local_managed_shell=False)
+    tools = manager.available_tools
+
+    assert tools["powershell"].__name__ == "WindowsShell"
+    assert "powershell_output" not in tools
+    assert "powershell_stdin" not in tools
+    assert "powershell_sessions" not in tools
+    assert "powershell_log_file" not in tools
+
+
+def test_native_windows_uses_powershell_config_not_bash(monkeypatch):
+    _simulate_native_windows(
+        monkeypatch,
+        git_bash_available=False,
+        powershell_available=True,
+        managed_supported=True,
+    )
     vibe_config = build_test_vibe_config(
         system_prompt_id="tests",
         include_project_context=False,
-        experimental_bash_tool=True,
+        tools={
+            "bash": {"permission": "never"},
+            "powershell": {"permission": "always", "shell": "powershell.exe"},
+        },
+    )
+    manager = _manager(vibe_config, managed_shell=True)
+
+    config = manager.get_tool_config("powershell")
+
+    assert config.permission == ToolPermission.ALWAYS
+    assert config.model_dump()["shell"] == "powershell.exe"
+
+
+def test_native_windows_uses_git_bash_config_not_bash_or_powershell(monkeypatch):
+    _simulate_native_windows(
+        monkeypatch,
+        git_bash_available=True,
+        powershell_available=True,
+        managed_supported=True,
+    )
+    vibe_config = build_test_vibe_config(
+        system_prompt_id="tests",
+        include_project_context=False,
+        tools={
+            "bash": {"permission": "never"},
+            "powershell": {"permission": "never"},
+            "git_bash": {"permission": "always", "shell": "C:/Git/bin/bash.exe"},
+        },
+    )
+    manager = _manager(vibe_config, managed_shell=True)
+
+    config = manager.get_tool_config("git_bash")
+
+    assert config.permission == ToolPermission.ALWAYS
+    assert config.model_dump()["shell"] == "C:/Git/bin/bash.exe"
+
+
+def test_managed_bash_inherits_bash_tool_config_permissions():
+    vibe_config = build_test_vibe_config(
+        system_prompt_id="tests",
+        include_project_context=False,
         tools={"bash": {"permission": "always"}},
     )
-    manager = ToolManager(lambda: vibe_config)
+    manager = _manager(vibe_config, managed_shell=True)
 
     config = manager.get_tool_config("bash")
 
@@ -546,3 +840,17 @@ class DummyTool(BaseTool[DummyArgs, DummyResult, BaseToolConfig, BaseToolState])
         final_class = available.get("dummy_tool")
         assert final_class is not None
         assert final_class.description == "Dummy tool v2"
+
+    def test_reexported_custom_tool_is_discovered(self, tmp_path: Path):
+        # A custom tool file may import/re-export a tool class defined in another
+        # module; its __module__ points at the origin, not the file. The builtin
+        # base-class dedup filter must not drop such tools from user/project dirs.
+        tools_dir = tmp_path / "tools"
+        tools_dir.mkdir()
+        (tools_dir / "reexport.py").write_text(
+            "from vibe.core.tools.builtins.todo import Todo\n"
+        )
+
+        classes = list(ToolManager._iter_tool_classes([tools_dir]))
+
+        assert any(c.get_name() == "todo" for c in classes)

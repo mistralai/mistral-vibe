@@ -34,8 +34,8 @@ from vibe.core.teleport.types import (
     TeleportStartingWorkflowEvent,
     TeleportYieldEvent,
 )
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 from vibe.core.vibe_code_project import VibeProjectsStore, is_saved_project_stale_error
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 
 class TeleportService:
@@ -117,6 +117,7 @@ class TeleportService:
         *,
         project_id: str | None = None,
         message_context: TeleportMessageContext | None = None,
+        conversation_id: str | None = None,
     ) -> AsyncGenerator[TeleportYieldEvent, TeleportSendEvent]:
         if not prompt:
             raise ServiceTeleportError("Teleport requires a non-empty prompt.")
@@ -158,6 +159,7 @@ class TeleportService:
                 git_info=git_info,
                 project_id=resolved_project_id,
                 message_context=message_context,
+                conversation_id=conversation_id,
             )
             result = await self._nuage_client.start(request)
         except ServiceTeleportError as e:
@@ -190,6 +192,7 @@ class TeleportService:
         git_info: GitRepoInfo,
         project_id: str,
         message_context: TeleportMessageContext | None = None,
+        conversation_id: str | None = None,
     ) -> NuageRequest:
         compressed = self._compress_diff(git_info.diff)
         diff = (
@@ -215,6 +218,7 @@ class TeleportService:
         return NuageRequest(
             project_id=project_id,
             idempotency_key=idempotency_key,
+            conversation_id=conversation_id,
             message=message,
             context=context,
         )

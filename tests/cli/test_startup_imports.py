@@ -17,7 +17,7 @@ blocked_prefixes = [
     "opentelemetry",
     "vibe.core.llm.backend.mistral",
     "vibe.core.llm.backend.generic",
-    "vibe.core.programmatic",
+    "vibe.cli.programmatic",
     "vibe.cli.textual_ui.app",
     "vibe.setup.onboarding",
     "vibe.setup.update_prompt",

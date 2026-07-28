@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from enum import StrEnum, auto
 import hashlib
 from typing import cast
 
@@ -16,11 +15,11 @@ from vibe.core.auth.mcp_oauth import (
     MCPOAuthLoginFailed,
     MCPOAuthTransientRefreshError,
     build_oauth_provider,
+    delete_oauth_credentials,
     perform_oauth_login,
     unwrap_oauth_refresh_error,
 )
 from vibe.core.config import MCPHttp, MCPOAuth, MCPServer, MCPStdio, MCPStreamableHttp
-from vibe.core.logger import logger
 from vibe.core.tools.base import BaseTool
 from vibe.core.tools.mcp.tools import (
     MCPHttpOAuthRuntime,
@@ -29,15 +28,9 @@ from vibe.core.tools.mcp.tools import (
     list_tools_http,
     list_tools_stdio,
 )
-from vibe.core.tools.remote import RemoteTool
+from vibe.core.tools.remote import AuthStatus, RemoteTool
 from vibe.core.utils import run_sync
-
-
-class AuthStatus(StrEnum):
-    OK = auto()
-    NEEDS_AUTH = auto()
-    STATIC = auto()
-    STDIO = auto()
+from vibe.observability.logging import logger
 
 
 class MCPRegistry:
@@ -432,10 +425,7 @@ class MCPRegistry:
     async def logout(self, alias: str) -> None:
         srv = self._require_oauth_server(alias)
         async with self.oauth_lock_for(alias):
-            storage = KeyringTokenStorage(alias=alias)
-            await storage.delete_tokens()
-            await storage.delete_client_info()
-            await Fingerprint.delete(alias)
+            await delete_oauth_credentials(alias)
             self._drop_alias_cache(alias)
             self.mark_needs_auth(alias)
             self._servers_by_alias[alias] = srv

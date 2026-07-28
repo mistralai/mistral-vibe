@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
+import asyncio
 from collections.abc import Mapping
 import os
 from pathlib import Path
@@ -33,42 +34,51 @@ class BaseTomlConfigLayer(ConfigLayer[RawConfig]):
         ...
 
     async def _build_config_snapshot(self) -> LayerConfigSnapshot:
-        path = self._target_path
-        if not path.exists():
-            return EMPTY_CONFIG_SNAPSHOT
-
-        with capture_stable_file(path) as (file, fingerprint):
-            data = tomllib.load(file)
-
-        data = _internal_toml_document(data)
-        return LayerConfigSnapshot(data=data, fingerprint=fingerprint)
+        return await asyncio.to_thread(_read_toml_snapshot, self._target_path)
 
     async def _save_to_store(self, next_config: RawConfig) -> str:
-        path = self._target_path
-        path.parent.mkdir(parents=True, exist_ok=True)
+        return await asyncio.to_thread(
+            _write_toml_snapshot, self._target_path, next_config
+        )
 
-        tmp_path: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="wb",
-                dir=path.parent,
-                prefix=f".{path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as tmp_file:
-                tmp_path = Path(tmp_file.name)
-                tomli_w.dump(_canonical_toml_document(next_config), tmp_file)
-                tmp_file.flush()  # Flush Python buffers.
-                os.fsync(tmp_file.fileno())  # Flush OS buffers.
-                fingerprint = create_file_fingerprint(tmp_file)
 
-            tmp_path.replace(path)
-            tmp_path = None
-        finally:
-            if tmp_path is not None:
-                tmp_path.unlink(missing_ok=True)
+def _read_toml_snapshot(path: Path) -> LayerConfigSnapshot:
+    if not path.exists():
+        return EMPTY_CONFIG_SNAPSHOT
 
-        return fingerprint
+    with capture_stable_file(path) as (file, fingerprint):
+        data = tomllib.load(file)
+
+    return LayerConfigSnapshot(
+        data=_internal_toml_document(data), fingerprint=fingerprint
+    )
+
+
+def _write_toml_snapshot(path: Path, next_config: RawConfig) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            tomli_w.dump(_canonical_toml_document(next_config), tmp_file)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+            fingerprint = create_file_fingerprint(tmp_file)
+
+        tmp_path.replace(path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+    return fingerprint
 
 
 def _canonical_toml_document(config: RawConfig) -> dict[str, object]:

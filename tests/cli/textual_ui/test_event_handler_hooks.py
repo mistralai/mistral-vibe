@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.stubs.app_server import CoreEventProjection
 from tests.stubs.fake_tool import FakeTool, FakeToolArgs
 import vibe.cli.textual_ui.handlers.event_handler as event_handler_module
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
@@ -57,9 +58,14 @@ async def test_hook_run_end_removes_empty_container(
     handler = EventHandler(
         mount_callback=mount_callback, get_tools_collapsed=lambda: False
     )
+    projection = CoreEventProjection()
 
-    await handler.handle_event(HookRunStartEvent())
-    await handler.handle_event(HookRunEndEvent())
+    await projection.dispatch(
+        HookRunStartEvent(scope=HookType.POST_AGENT), handler.handle_event
+    )
+    await projection.dispatch(
+        HookRunEndEvent(scope=HookType.POST_AGENT), handler.handle_event
+    )
 
     assert len(hook_container_factory) == 1
     hook_container_factory[0].remove.assert_awaited_once()
@@ -74,15 +80,27 @@ async def test_hook_run_end_keeps_container_with_messages(
     handler = EventHandler(
         mount_callback=mount_callback, get_tools_collapsed=lambda: False
     )
+    projection = CoreEventProjection()
 
-    await handler.handle_event(HookRunStartEvent())
-    await handler.handle_event(HookStartEvent(hook_name="post-turn"))
-    await handler.handle_event(
-        HookEndEvent(
-            hook_name="post-turn", status=HookMessageSeverity.OK, content="Hook output"
-        )
+    await projection.dispatch(
+        HookRunStartEvent(scope=HookType.POST_AGENT), handler.handle_event
     )
-    await handler.handle_event(HookRunEndEvent())
+    await projection.dispatch(
+        HookStartEvent(hook_name="post-turn", scope=HookType.POST_AGENT),
+        handler.handle_event,
+    )
+    await projection.dispatch(
+        HookEndEvent(
+            hook_name="post-turn",
+            status=HookMessageSeverity.OK,
+            content="Hook output",
+            scope=HookType.POST_AGENT,
+        ),
+        handler.handle_event,
+    )
+    await projection.dispatch(
+        HookRunEndEvent(scope=HookType.POST_AGENT), handler.handle_event
+    )
 
     assert len(hook_container_factory) == 1
     hook_container_factory[0].remove.assert_not_awaited()
@@ -110,29 +128,32 @@ def _tool_result_event(call_id: str) -> ToolResultEvent:
 
 
 @pytest.mark.asyncio
-async def test_pre_tool_container_scoped_to_tool_call_id(
+async def test_before_tool_container_scoped_to_tool_call_id(
     hook_container_factory: list[FakeHookRunContainer],
 ) -> None:
-    """Two concurrent tool calls each get their own pre_tool container."""
+    """Two concurrent tool calls each get their own before_tool container."""
     mount_callback = AsyncMock()
     handler = EventHandler(
         mount_callback=mount_callback, get_tools_collapsed=lambda: False
     )
+    projection = CoreEventProjection()
 
     # Two tool calls arrive
-    await handler.handle_event(_tool_call_event("call_A"))
-    await handler.handle_event(_tool_call_event("call_B"))
+    await projection.dispatch(_tool_call_event("call_A"), handler.handle_event)
+    await projection.dispatch(_tool_call_event("call_B"), handler.handle_event)
 
-    # pre_tool starts for both, interleaved
-    await handler.handle_event(
+    # before_tool starts for both, interleaved
+    await projection.dispatch(
         HookRunStartEvent(
             scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_A"
-        )
+        ),
+        handler.handle_event,
     )
-    await handler.handle_event(
+    await projection.dispatch(
         HookRunStartEvent(
             scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_B"
-        )
+        ),
+        handler.handle_event,
     )
 
     # Two distinct containers were created.
@@ -145,55 +166,61 @@ async def test_pre_tool_container_scoped_to_tool_call_id(
     )
 
     # End them — both are empty, both should be removed.
-    await handler.handle_event(
-        HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id="call_A")
+    await projection.dispatch(
+        HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id="call_A"),
+        handler.handle_event,
     )
-    await handler.handle_event(
-        HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id="call_B")
+    await projection.dispatch(
+        HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id="call_B"),
+        handler.handle_event,
     )
     assert "pre_tool:call_A" not in handler._hook_containers
     assert "pre_tool:call_B" not in handler._hook_containers
 
 
 @pytest.mark.asyncio
-async def test_post_tool_container_anchors_after_tool_result(
+async def test_after_tool_container_anchors_after_tool_result(
     hook_container_factory: list[FakeHookRunContainer],
 ) -> None:
     mount_callback = AsyncMock()
     handler = EventHandler(
         mount_callback=mount_callback, get_tools_collapsed=lambda: False
     )
+    projection = CoreEventProjection()
 
-    await handler.handle_event(_tool_call_event("call_X"))
-    await handler.handle_event(_tool_result_event("call_X"))
+    await projection.dispatch(_tool_call_event("call_X"), handler.handle_event)
+    await projection.dispatch(_tool_result_event("call_X"), handler.handle_event)
     # After-tool start mounts after the tool result, which is the current
     # anchor for this tool_call_id.
-    await handler.handle_event(
+    await projection.dispatch(
         HookRunStartEvent(
             scope=HookType.POST_TOOL, tool_name="stub_tool", tool_call_id="call_X"
-        )
+        ),
+        handler.handle_event,
     )
     assert "post_tool:call_X" in handler._hook_containers
 
-    # mount_callback was called with after=<tool_result_widget> for the post_tool
+    # mount_callback was called with after=<tool_result_widget> for the after_tool
     # container. Inspect the last call's kwargs.
     last_call = mount_callback.call_args_list[-1]
     assert last_call.kwargs.get("after") is not None
 
 
 @pytest.mark.asyncio
-async def test_pre_tool_container_for_unknown_tool_call_id(
+async def test_before_tool_container_for_unknown_tool_call_id(
     hook_container_factory: list[FakeHookRunContainer],
 ) -> None:
     mount_callback = AsyncMock()
     handler = EventHandler(
         mount_callback=mount_callback, get_tools_collapsed=lambda: False
     )
+    projection = CoreEventProjection()
 
-    await handler.handle_event(
+    await projection.dispatch(
         HookRunStartEvent(
             scope=HookType.PRE_TOOL, tool_name="bash", tool_call_id="unknown"
-        )
+        ),
+        handler.handle_event,
     )
     last_call = mount_callback.call_args_list[-1]
     assert last_call.kwargs.get("after") is None
@@ -201,21 +228,23 @@ async def test_pre_tool_container_for_unknown_tool_call_id(
 
 
 @pytest.mark.asyncio
-async def test_pre_tool_container_mounts_before_tool_call_widget(
+async def test_before_tool_container_mounts_before_tool_call_widget(
     hook_container_factory: list[FakeHookRunContainer],
 ) -> None:
     mount_callback = AsyncMock()
     handler = EventHandler(
         mount_callback=mount_callback, get_tools_collapsed=lambda: False
     )
+    projection = CoreEventProjection()
 
-    await handler.handle_event(_tool_call_event("call_Y"))
+    await projection.dispatch(_tool_call_event("call_Y"), handler.handle_event)
     tool_call_widget = handler._tool_call_anchors["call_Y"]
 
-    await handler.handle_event(
+    await projection.dispatch(
         HookRunStartEvent(
             scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_Y"
-        )
+        ),
+        handler.handle_event,
     )
 
     last_call = mount_callback.call_args_list[-1]
@@ -224,31 +253,46 @@ async def test_pre_tool_container_mounts_before_tool_call_widget(
 
 
 @pytest.mark.asyncio
-async def test_pre_tool_run_end_keeps_tool_call_widget_as_anchor(
+async def test_before_tool_run_end_keeps_tool_call_widget_as_anchor(
     hook_container_factory: list[FakeHookRunContainer],
 ) -> None:
     mount_callback = AsyncMock()
     handler = EventHandler(
         mount_callback=mount_callback, get_tools_collapsed=lambda: False
     )
+    projection = CoreEventProjection()
 
-    await handler.handle_event(_tool_call_event("call_Z"))
+    await projection.dispatch(_tool_call_event("call_Z"), handler.handle_event)
     tool_call_widget = handler._tool_call_anchors["call_Z"]
 
-    await handler.handle_event(
+    await projection.dispatch(
         HookRunStartEvent(
             scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_Z"
-        )
+        ),
+        handler.handle_event,
     )
-    await handler.handle_event(HookStartEvent(hook_name="before"))
-    await handler.handle_event(
-        HookEndEvent(hook_name="before", status=HookMessageSeverity.OK, content="ok")
+    await projection.dispatch(
+        HookStartEvent(
+            hook_name="before", scope=HookType.PRE_TOOL, tool_call_id="call_Z"
+        ),
+        handler.handle_event,
     )
-    await handler.handle_event(
-        HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id="call_Z")
+    await projection.dispatch(
+        HookEndEvent(
+            hook_name="before",
+            status=HookMessageSeverity.OK,
+            content="ok",
+            scope=HookType.PRE_TOOL,
+            tool_call_id="call_Z",
+        ),
+        handler.handle_event,
+    )
+    await projection.dispatch(
+        HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id="call_Z"),
+        handler.handle_event,
     )
 
-    # Even though the pre_tool container has content and stays in the DOM,
+    # Even though the before_tool container has content and stays in the DOM,
     # the anchor for the next widget (the tool result) must remain the call
     # widget — the container lives *above* the call, not below it.
     assert handler._tool_call_anchors["call_Z"] is tool_call_widget
@@ -262,46 +306,61 @@ async def test_hook_end_routes_to_matching_container_when_chains_interleave(
     handler = EventHandler(
         mount_callback=mount_callback, get_tools_collapsed=lambda: False
     )
+    projection = CoreEventProjection()
 
-    await handler.handle_event(_tool_call_event("call_A"))
-    await handler.handle_event(_tool_call_event("call_B"))
+    await projection.dispatch(_tool_call_event("call_A"), handler.handle_event)
+    await projection.dispatch(_tool_call_event("call_B"), handler.handle_event)
 
-    await handler.handle_event(
+    await projection.dispatch(
         HookRunStartEvent(
             scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_A"
-        )
+        ),
+        handler.handle_event,
     )
     assert len(hook_container_factory) == 1
     container_a = hook_container_factory[-1]
 
-    await handler.handle_event(HookStartEvent(hook_name="hook_a"))
-    await handler.handle_event(
+    await projection.dispatch(
+        HookStartEvent(
+            hook_name="hook_a", scope=HookType.PRE_TOOL, tool_call_id="call_A"
+        ),
+        handler.handle_event,
+    )
+    await projection.dispatch(
         HookRunStartEvent(
             scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_B"
-        )
+        ),
+        handler.handle_event,
     )
     assert len(hook_container_factory) == 2
     container_b = hook_container_factory[-1]
     assert container_a is not container_b
 
-    await handler.handle_event(
+    await projection.dispatch(
         HookEndEvent(
             hook_name="hook_a",
             status=HookMessageSeverity.OK,
             content="from A",
             scope=HookType.PRE_TOOL,
             tool_call_id="call_A",
-        )
+        ),
+        handler.handle_event,
     )
-    await handler.handle_event(HookStartEvent(hook_name="hook_b"))
-    await handler.handle_event(
+    await projection.dispatch(
+        HookStartEvent(
+            hook_name="hook_b", scope=HookType.PRE_TOOL, tool_call_id="call_B"
+        ),
+        handler.handle_event,
+    )
+    await projection.dispatch(
         HookEndEvent(
             hook_name="hook_b",
             status=HookMessageSeverity.OK,
             content="from B",
             scope=HookType.PRE_TOOL,
             tool_call_id="call_B",
-        )
+        ),
+        handler.handle_event,
     )
 
     assert len(container_a.messages) == 1
@@ -318,44 +377,60 @@ async def test_hook_end_after_other_chain_ended_still_routes_correctly(
     handler = EventHandler(
         mount_callback=mount_callback, get_tools_collapsed=lambda: False
     )
+    projection = CoreEventProjection()
 
-    await handler.handle_event(_tool_call_event("call_A"))
-    await handler.handle_event(_tool_call_event("call_B"))
-    await handler.handle_event(
+    await projection.dispatch(_tool_call_event("call_A"), handler.handle_event)
+    await projection.dispatch(_tool_call_event("call_B"), handler.handle_event)
+    await projection.dispatch(
         HookRunStartEvent(
             scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_A"
-        )
+        ),
+        handler.handle_event,
     )
     container_a = hook_container_factory[-1]
-    await handler.handle_event(HookStartEvent(hook_name="hook_a"))
+    await projection.dispatch(
+        HookStartEvent(
+            hook_name="hook_a", scope=HookType.PRE_TOOL, tool_call_id="call_A"
+        ),
+        handler.handle_event,
+    )
 
-    await handler.handle_event(
+    await projection.dispatch(
         HookRunStartEvent(
             scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_B"
-        )
+        ),
+        handler.handle_event,
     )
-    await handler.handle_event(HookStartEvent(hook_name="hook_b"))
-    await handler.handle_event(
+    await projection.dispatch(
+        HookStartEvent(
+            hook_name="hook_b", scope=HookType.PRE_TOOL, tool_call_id="call_B"
+        ),
+        handler.handle_event,
+    )
+    await projection.dispatch(
         HookEndEvent(
             hook_name="hook_b",
             status=HookMessageSeverity.OK,
             content="from B",
             scope=HookType.PRE_TOOL,
             tool_call_id="call_B",
-        )
+        ),
+        handler.handle_event,
     )
-    await handler.handle_event(
-        HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id="call_B")
+    await projection.dispatch(
+        HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id="call_B"),
+        handler.handle_event,
     )
 
-    await handler.handle_event(
+    await projection.dispatch(
         HookEndEvent(
             hook_name="hook_a",
             status=HookMessageSeverity.OK,
             content="from A",
             scope=HookType.PRE_TOOL,
             tool_call_id="call_A",
-        )
+        ),
+        handler.handle_event,
     )
 
     assert len(container_a.messages) == 1

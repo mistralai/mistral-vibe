@@ -14,8 +14,8 @@ from humanize import naturalsize
 
 from vibe.cli.constants import CLIPBOARD_IMAGE_PASTE_SUPPORTED_SYSTEM
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
-from vibe.core.logger import logger
-from vibe.core.types import MAX_IMAGE_BYTES
+from vibe.observability.logging import logger
+from vibe.utils.images import MAX_IMAGE_BYTES
 
 if TYPE_CHECKING:
     from vibe.cli.textual_ui.app import VibeApp
@@ -137,11 +137,8 @@ async def handle_clipboard_image_paste(
             severity="warning",
         )
         return
-    try:
-        active_model = app.agent_loop.config.get_active_model()
-    except ValueError:
-        active_model = None
-    if active_model is not None and not active_model.supports_images:
+    active_model = app.config.active_model
+    if not active_model.supports_images:
         app.notify(
             f"Model `{active_model.alias}` does not support images. "
             f"Switch with /model or ask me to enable image support for this model.",
@@ -149,9 +146,7 @@ async def handle_clipboard_image_paste(
         )
         return
     try:
-        path = write_clipboard_image(
-            data, session_dir=app.agent_loop.session_logger.session_dir
-        )
+        path = write_clipboard_image(data)
     except OSError as e:
         logger.warning("Failed to write pasted clipboard image: %r", e)
         app.notify("Failed to save pasted image to disk.", severity="warning")
@@ -170,11 +165,8 @@ async def handle_clipboard_image_paste(
     )
 
 
-def write_clipboard_image(data: bytes, *, session_dir: Path | None) -> Path:
-    if session_dir is not None:
-        target_dir = session_dir / "attachments"
-    else:
-        target_dir = Path(tempfile.gettempdir()) / "vibe-pasted-images"
+def write_clipboard_image(data: bytes) -> Path:
+    target_dir = Path(tempfile.gettempdir()) / "vibe-pasted-images"
     target_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
     path = target_dir / f"clipboard-{timestamp}.png"

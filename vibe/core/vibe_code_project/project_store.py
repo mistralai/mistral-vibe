@@ -8,9 +8,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 import tomli_w
 
-from vibe.core.logger import logger
 from vibe.core.paths import PROJECTS_FILE
 from vibe.core.vibe_code_project.selection import VibeCodeProjectLink
+from vibe.observability.logging import logger
 
 REMOTE_PROJECT_KIND = "remote"
 

@@ -5,6 +5,9 @@ from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict
 
+from vibe.utils import AgentEntrypoint
+from vibe.utils.terminal import TerminalEmulator
+
 
 class AttachmentKind(StrEnum):
     IMAGE = "image"
@@ -13,25 +16,6 @@ class AttachmentKind(StrEnum):
 class ClientMetadata(BaseModel):
     name: str
     version: str
-
-
-class TerminalEmulator(StrEnum):
-    VSCODE = "vscode"
-    VSCODE_INSIDERS = "vscode_insiders"
-    CURSOR = "cursor"
-    JETBRAINS = "jetbrains"
-    APPLE_TERMINAL = "apple_terminal"
-    ITERM2 = "iterm2"
-    WEZTERM = "wezterm"
-    GHOSTTY = "ghostty"
-    ALACRITTY = "alacritty"
-    KITTY = "kitty"
-    HYPER = "hyper"
-    WINDOWS_TERMINAL = "windows_terminal"
-    UNKNOWN = "unknown"
-
-
-AgentEntrypoint = Literal["cli", "acp", "programmatic", "unknown"]
 
 
 class LaunchContext(BaseModel):

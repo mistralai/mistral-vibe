@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from vibe.core.autocompletion.file_indexer.watcher import WatchController
+from vibe.cli.autocompletion.file_indexer.watcher import WatchController
 
 
 class TestWatchControllerIsWatching:

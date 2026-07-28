@@ -21,7 +21,7 @@ from tests.e2e.common import (
     wait_for_request_count,
 )
 from tests.e2e.mock_server import StreamingMockServer
-from vibe.core.utils.io import read_safe
+from vibe.utils.io import read_safe
 
 
 def _usage_by_run_factory(
@@ -179,7 +179,7 @@ def test_resumed_session_prints_only_fresh_token_usage_on_exit(
             request_count_getter=lambda: len(streaming_mock_server.requests),
         )
         _wait_for_saved_session_usage(
-            expected_prompt_tokens=2, expected_completion_tokens=1
+            expected_prompt_tokens=13, expected_completion_tokens=8
         )
 
         send_ctrl_c_until_quit_confirmation(resumed_child, resumed_captured, timeout=5)

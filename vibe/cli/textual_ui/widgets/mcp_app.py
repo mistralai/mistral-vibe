@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
-from enum import StrEnum, auto
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
+from typing import ClassVar
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -14,56 +13,15 @@ from textual.widgets import OptionList
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker
 
+from vibe.app_server.models import (
+    MCPSourceKind,
+    MCPSourceStatus,
+    MCPSourceSummary,
+    MCPState,
+)
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import ConnectorConfig, VibeConfigSchema
-from vibe.core.tools.connectors import ConnectorAuthAction, ConnectorRegistry
-from vibe.core.tools.mcp_settings import updated_tool_list
-from vibe.core.tools.remote import MCPTool
-
-if TYPE_CHECKING:
-    from vibe.core.config import MCPServer
-    from vibe.core.tools.manager import ToolManager
-    from vibe.core.tools.mcp import AuthStatus, MCPRegistry
-
-
-class MCPSourceKind(StrEnum):
-    SERVER = auto()
-    CONNECTOR = auto()
-
-
-class MCPToolIndex(NamedTuple):
-    server_tools: dict[str, list[tuple[str, type[MCPTool]]]]
-    connector_tools: dict[str, list[tuple[str, type[MCPTool]]]]
-    enabled_tools: dict[str, type[Any]]
-
-
-def collect_mcp_tool_index(
-    mcp_servers: Sequence[MCPServer],
-    tool_manager: ToolManager,
-    connector_names: Sequence[str] = (),
-) -> MCPToolIndex:
-    registered = tool_manager.registered_tools
-    available = tool_manager.available_tools
-    configured_servers = {server.name for server in mcp_servers}
-    connector_set = set(connector_names)
-    server_tools: dict[str, list[tuple[str, type[MCPTool]]]] = {}
-    connector_tools: dict[str, list[tuple[str, type[MCPTool]]]] = {}
-
-    for tool_name, cls in registered.items():
-        if not issubclass(cls, MCPTool):
-            continue
-        server_name = cls.get_server_name()
-        if server_name is None:
-            continue
-        if cls.is_connector() and server_name in connector_set:
-            connector_tools.setdefault(server_name, []).append((tool_name, cls))
-        elif server_name in configured_servers:
-            server_tools.setdefault(server_name, []).append((tool_name, cls))
-
-    return MCPToolIndex(server_tools, connector_tools, enabled_tools=available)
-
 
 _LIST_VIEW_HELP_TOOLS = (
     f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Show tools  "
@@ -77,8 +35,10 @@ _DETAIL_VIEW_HELP = (
     f"{shortcut('↑↓/jk')} Navigate  {shortcut('d')} Disable  "
     f"{shortcut('e')} Enable  {shortcut('Backspace')} Back  {shortcut('Esc')} Close"
 )
-_DETAIL_VIEW_HELP_NO_TOOLS = f"{shortcut('↑↓/jk')} Navigate  {shortcut('Backspace')} Back  {shortcut('Esc')} Close"
-
+_DETAIL_VIEW_HELP_NO_TOOLS = (
+    f"{shortcut('↑↓/jk')} Navigate  {shortcut('Backspace')} Back  "
+    f"{shortcut('Esc')} Close"
+)
 _BACKGROUND_REFRESH_INTERVAL_SECONDS = 60.0
 
 
@@ -95,8 +55,6 @@ class MCPApp(Container):
         pass
 
     class MCPToggled(Message):
-        """Posted when a server/connector or individual tool is toggled."""
-
         def __init__(
             self,
             name: str,
@@ -111,55 +69,26 @@ class MCPApp(Container):
             self.tool_name = tool_name
 
     class ConnectorAuthRequested(Message):
-        """Posted when a disconnected connector needs authentication."""
-
-        def __init__(
-            self,
-            connector_name: str,
-            connector_registry: ConnectorRegistry,
-            tool_manager: ToolManager,
-        ) -> None:
+        def __init__(self, connector_name: str) -> None:
             super().__init__()
             self.connector_name = connector_name
-            self.connector_registry = connector_registry
-            self.tool_manager = tool_manager
 
     class MCPOAuthRequested(Message):
-        """Posted when an OAuth MCP server needs authentication."""
-
-        def __init__(self, server_name: str, mcp_registry: MCPRegistry) -> None:
+        def __init__(self, server_name: str) -> None:
             super().__init__()
             self.server_name = server_name
-            self.mcp_registry = mcp_registry
 
     def __init__(
         self,
-        mcp_servers: Sequence[MCPServer],
-        tool_manager: ToolManager,
-        initial_server: str = "",
-        connector_registry: ConnectorRegistry | None = None,
-        mcp_registry: MCPRegistry | None = None,
-        get_vibe_config: Callable[[], VibeConfigSchema] | None = None,
+        state: MCPState,
+        initial_source: str = "",
+        state_getter: Callable[[], MCPState] | None = None,
         refresh_callback: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         super().__init__(id="mcp-app")
-        self._mcp_servers = mcp_servers
-        self._connector_registry = connector_registry
-        self._mcp_registry = mcp_registry
-        self._sync_mcp_registry()
-        self._get_vibe_config = get_vibe_config
-        connector_names = (
-            connector_registry.get_connector_names() if connector_registry else []
-        )
-        self._connector_names = connector_names
-        self._sorted_connector_names = _sort_connector_names_for_menu(
-            connector_names, connector_registry, self._current_disabled_names()
-        )
-        self._tool_manager = tool_manager
-        self._index = collect_mcp_tool_index(mcp_servers, tool_manager, connector_names)
-        # Track both the name and the kind to disambiguate entries that
-        # share the same normalised name.
-        self._viewing_server: str | None = initial_server.strip() or None
+        self._state = state.model_copy(deep=True)
+        self._state_getter = state_getter
+        self._viewing_name: str | None = initial_source.strip() or None
         self._viewing_kind: MCPSourceKind | None = None
         self._refresh_callback = refresh_callback
         self._refreshing = False
@@ -172,58 +101,60 @@ class MCPApp(Container):
             yield NoMarkupStatic("", id="mcp-help", classes="settings-help")
 
     def on_mount(self) -> None:
-        self._refresh_view(self._viewing_server)
+        self._refresh_view(self._viewing_name)
         self.query_one(OptionList).focus()
         if self._refresh_callback is not None:
             self._start_refresh()
             self.set_interval(_BACKGROUND_REFRESH_INTERVAL_SECONDS, self._start_refresh)
 
     def refresh_index(self) -> None:
-        """Re-snapshot the tool index (e.g. after deferred MCP discovery)."""
-        if self._connector_registry:
-            self._connector_names = self._connector_registry.get_connector_names()
-            self._sorted_connector_names = _sort_connector_names_for_menu(
-                self._connector_names,
-                self._connector_registry,
-                self._current_disabled_names(),
-            )
+        if self._state_getter is not None:
+            self._state = self._state_getter().model_copy(deep=True)
         self._rebuild_preserving_scroll()
 
     def on_descendant_blur(self, _event: DescendantBlur) -> None:
         self.query_one(OptionList).focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        option_id = event.option.id or ""
-        if option_id.startswith("server:"):
-            self._refresh_view(
-                option_id.removeprefix("server:"), kind=MCPSourceKind.SERVER
-            )
-        elif option_id.startswith("connector:"):
-            self._refresh_view(
-                option_id.removeprefix("connector:"), kind=MCPSourceKind.CONNECTOR
-            )
+        target = _source_from_option_id(event.option.id or "")
+        if target is not None:
+            name, kind = target
+            self._refresh_view(name, kind=kind)
 
     def on_option_list_option_highlighted(
         self, event: OptionList.OptionHighlighted
     ) -> None:
         option_list = self.query_one(OptionList)
         highlighted = option_list.highlighted
-        if highlighted is None or highlighted == 0:
-            return
-        # When the first enabled option is highlighted and all options above
-        # it are disabled headers, scroll to top so the header stays visible.
-        if all(option_list.get_option_at_index(i).disabled for i in range(highlighted)):
+        if (
+            highlighted is not None
+            and highlighted > 0
+            and all(
+                option_list.get_option_at_index(index).disabled
+                for index in range(highlighted)
+            )
+        ):
             option_list.scroll_to(y=0, animate=False, force=True, immediate=True)
-        # Update help text based on whether highlighted connector needs auth.
-        if self._viewing_server is None:
-            self._set_help_text(self._list_help_for_option(event.option))
+        if self._viewing_name is None:
+            source = self._source_for_option(event.option)
+            self._set_help_text(
+                _LIST_VIEW_HELP_AUTH
+                if source is not None and source.status is MCPSourceStatus.NEEDS_AUTH
+                else _LIST_VIEW_HELP_TOOLS
+            )
 
     def action_back(self) -> None:
-        if self._viewing_server is not None:
+        if self._viewing_name is not None:
             self._refresh_view(None)
 
     def action_close(self) -> None:
         self.post_message(self.MCPClosed())
+
+    def action_disable(self) -> None:
+        self._set_highlighted_disabled(disabled=True)
+
+    def action_enable(self) -> None:
+        self._set_highlighted_disabled(disabled=False)
 
     def _start_refresh(self) -> None:
         if self._refresh_callback is None or self._refreshing:
@@ -232,439 +163,239 @@ class MCPApp(Container):
         self.run_worker(self._run_refresh(), exclusive=True, group="refresh")
 
     async def _run_refresh(self) -> None:
-        if self._refresh_callback is None:
-            return
-        await self._refresh_callback()
+        if self._refresh_callback is not None:
+            await self._refresh_callback()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        if event.worker.group != "refresh":
+        if event.worker.group != "refresh" or not event.worker.is_finished:
             return
-        if event.worker.is_finished:
-            self._refreshing = False
-            if not self.is_attached:
-                return
+        self._refreshing = False
+        if self.is_attached:
             self.refresh_index()
 
-    def _list_help_for_option(self, option: Option) -> str:
-        """Return the appropriate list-view help text for the given option."""
-        option_id = option.id or ""
-        if option_id.startswith("connector:") and self._connector_registry:
-            name = option_id.removeprefix("connector:")
-            if (
-                not self._connector_registry.is_connected(name)
-                and self._connector_registry.get_auth_action(name)
-                == ConnectorAuthAction.OAUTH
-            ):
-                return _LIST_VIEW_HELP_AUTH
-        if option_id.startswith("server:"):
-            name = option_id.removeprefix("server:")
-            if self._server_needs_auth(name):
-                return _LIST_VIEW_HELP_AUTH
-        return _LIST_VIEW_HELP_TOOLS
-
-    def _set_help_text(self, text: str) -> None:
-        self.query_one("#mcp-help", NoMarkupStatic).update(shortcut_hint(text))
-
-    def _sync_mcp_registry(self) -> None:
-        if self._mcp_registry is None:
-            return
-        self._mcp_registry.sync_active_servers(list(self._mcp_servers))
-
-    def _server_auth_status(self, name: str) -> AuthStatus | None:
-        if self._mcp_registry is None:
-            return None
-        return self._mcp_registry.status().get(name)
-
-    def _server_needs_auth(self, name: str) -> bool:
-        from vibe.core.tools.mcp import AuthStatus
-
-        server = next((srv for srv in self._mcp_servers if srv.name == name), None)
-        if server is None or server.disabled:
-            return False
-        return self._server_auth_status(name) is AuthStatus.NEEDS_AUTH
-
-    def _connector_configs(self) -> list[ConnectorConfig]:
-        return self._get_vibe_config().connectors if self._get_vibe_config else []
-
-    def _find_connector_config(self, name: str) -> ConnectorConfig | None:
-        return next((c for c in self._connector_configs() if c.name == name), None)
-
-    def _current_disabled_names(self) -> set[str]:
-        config = self._get_vibe_config() if self._get_vibe_config else None
-        if config is None:
-            return set(self._connector_names)
-        by_name = config.connectors_by_name()
-        return {
-            n
-            for n in self._connector_names
-            if (cfg := by_name.get(n)) is None or cfg.disabled
-        }
-
-    def action_disable(self) -> None:
-        self._set_highlighted_disabled(disabled=True)
-
-    def action_enable(self) -> None:
-        self._set_highlighted_disabled(disabled=False)
-
     def _set_highlighted_disabled(self, *, disabled: bool) -> None:
-        """Set the disabled state for the highlighted server/connector or tool."""
-        # In detail view, set the individual tool state, not the parent.
-        if self._viewing_server is not None and self._viewing_kind is not None:
+        if self._viewing_name is not None and self._viewing_kind is not None:
             self._set_highlighted_tool_disabled(disabled=disabled)
             return
-
-        target = self._get_highlighted_target()
+        target = self._highlighted_source()
         if target is None:
             return
-        name, kind = target
-
-        if kind == MCPSourceKind.SERVER:
-            for srv in self._mcp_servers:
-                if srv.name == name:
-                    srv.disabled = disabled
-                    break
-        else:
-            cfg = self._find_connector_config(name)
-            if cfg is None:
-                cfg = ConnectorConfig(name=name, disabled=disabled)
-                self._connector_configs().append(cfg)
-            else:
-                cfg.disabled = disabled
-
-        self.post_message(self.MCPToggled(name=name, kind=kind, disabled=disabled))
+        target.status = (
+            MCPSourceStatus.DISABLED if disabled else MCPSourceStatus.ENABLED
+        )
+        self.post_message(
+            self.MCPToggled(name=target.name, kind=target.kind, disabled=disabled)
+        )
         self._rebuild_preserving_scroll()
 
     def _set_highlighted_tool_disabled(self, *, disabled: bool) -> None:
-        """Toggle a single tool inside a detail view."""
-        server_name = self._viewing_server
-        kind = self._viewing_kind
-        if server_name is None or kind is None:
-            return
-
+        source = self._viewing_source()
         option_list = self.query_one(OptionList)
         highlighted = option_list.highlighted
-        if highlighted is None:
+        if source is None or highlighted is None:
             return
-        option = option_list.get_option_at_index(highlighted)
-        option_id = option.id or ""
+        option_id = option_list.get_option_at_index(highlighted).id or ""
         if not option_id.startswith("tool:"):
             return
-        full_tool_name = option_id.removeprefix("tool:")
-
-        # Look up the remote name from the index.
-        tools_source = (
-            self._index.connector_tools
-            if kind == MCPSourceKind.CONNECTOR
-            else self._index.server_tools
-        )
-        remote_name: str | None = None
-        for t_name, cls in tools_source.get(server_name, []):
-            if t_name == full_tool_name:
-                remote_name = cls.get_remote_name()
-                break
-        if remote_name is None:
+        tool_name = option_id.removeprefix("tool:")
+        tool = next((tool for tool in source.tools if tool.name == tool_name), None)
+        if tool is None:
             return
-
-        # Update disabled_tools on the config object.
-        if kind == MCPSourceKind.SERVER:
-            for srv in self._mcp_servers:
-                if srv.name == server_name:
-                    srv.disabled_tools = updated_tool_list(
-                        srv.disabled_tools, remote_name, disabled
-                    )
-                    break
-        else:
-            cfg = self._find_connector_config(server_name)
-            if cfg is None:
-                cfg = ConnectorConfig(
-                    name=server_name, disabled_tools=[remote_name] if disabled else []
-                )
-                self._connector_configs().append(cfg)
-            else:
-                cfg.disabled_tools = updated_tool_list(
-                    cfg.disabled_tools, remote_name, disabled
-                )
-
+        tool.enabled = not disabled
         self.post_message(
             self.MCPToggled(
-                name=server_name, kind=kind, disabled=disabled, tool_name=remote_name
+                name=source.name,
+                kind=source.kind,
+                disabled=disabled,
+                tool_name=tool.name,
             )
         )
         self._rebuild_preserving_scroll()
 
     def _rebuild_preserving_scroll(self) -> None:
-        """Rebuild the tool index and refresh the view, preserving highlight and scroll."""
-        self._sync_mcp_registry()
         option_list = self.query_one(OptionList)
-        saved_option_id: str | None = None
-        if (idx := option_list.highlighted) is not None:
-            saved_option_id = option_list.get_option_at_index(idx).id
-        saved_scroll_y = option_list.scroll_offset.y
-
-        self._index = collect_mcp_tool_index(
-            self._mcp_servers, self._tool_manager, self._connector_names
-        )
-        self._sorted_connector_names = _sort_connector_names_for_menu(
-            self._connector_names,
-            self._connector_registry,
-            self._current_disabled_names(),
-        )
-        self._refresh_view(self._viewing_server, kind=self._viewing_kind)
-
-        if saved_option_id is not None:
+        selected_id: str | None = None
+        if (index := option_list.highlighted) is not None:
+            selected_id = option_list.get_option_at_index(index).id
+        scroll_y = option_list.scroll_offset.y
+        self._refresh_view(self._viewing_name, kind=self._viewing_kind)
+        if selected_id is not None:
             try:
-                new_index = option_list.get_option_index(saved_option_id)
-                option_list.highlighted = new_index
+                option_list.highlighted = option_list.get_option_index(selected_id)
             except OptionDoesNotExist:
                 pass
-        option_list.scroll_to(
-            y=saved_scroll_y, animate=False, force=True, immediate=True
+        option_list.scroll_to(y=scroll_y, animate=False, force=True, immediate=True)
+
+    def _refresh_view(
+        self, name: str | None, *, kind: MCPSourceKind | None = None
+    ) -> None:
+        option_list = self.query_one(OptionList)
+        option_list.clear_options()
+        source = self._find_source(name, kind)
+        if source is None:
+            self._show_list_view(option_list)
+            return
+        self._show_detail_view(option_list, source)
+
+    def _show_list_view(self, option_list: OptionList) -> None:
+        self._viewing_name = None
+        self._viewing_kind = None
+        servers = _sort_sources_for_menu(self._sources(MCPSourceKind.SERVER))
+        connectors = _sort_sources_for_menu(self._sources(MCPSourceKind.CONNECTOR))
+        self.query_one("#mcp-title", NoMarkupStatic).update(
+            "MCP Servers & Connectors" if connectors else "MCP Servers"
+        )
+        self._set_help_text(_LIST_VIEW_HELP_TOOLS)
+        if servers:
+            self._add_source_group(option_list, "Local MCP Servers", servers)
+        if connectors:
+            if servers:
+                option_list.add_option(Option(Text("", no_wrap=True), disabled=True))
+            self._add_source_group(option_list, "Workspace Connectors", connectors)
+        if not servers and not connectors:
+            option_list.add_option(
+                Option("No MCP servers or connectors configured", disabled=True)
+            )
+            return
+        option_list.highlighted = next(
+            (
+                index
+                for index, option in enumerate(option_list.options)
+                if not option.disabled
+            ),
+            0,
         )
 
-    def _get_highlighted_target(self) -> tuple[str, MCPSourceKind] | None:
-        """Return (name, kind) for the currently highlighted option, or None."""
-        # If we're inside a detail view, use the viewed server/connector.
-        if self._viewing_server is not None and self._viewing_kind is not None:
-            return self._viewing_server, self._viewing_kind
+    def _add_source_group(
+        self, option_list: OptionList, title: str, sources: Sequence[MCPSourceSummary]
+    ) -> None:
+        option_list.add_option(Option(Text(title, style="bold"), disabled=True))
+        max_name = max(len(source.name) for source in sources)
+        max_transport = max(len(source.transport) + 2 for source in sources)
+        tool_labels = {
+            source.name: _tool_count_text(
+                sum(tool.enabled for tool in source.tools), len(source.tools)
+            )
+            for source in sources
+        }
+        max_tools = max(len(label) for label in tool_labels.values())
+        for source in sources:
+            label = Text(no_wrap=True)
+            type_tag = f"[{source.transport}]"
+            label.append(f"  {source.name:<{max_name}}")
+            label.append(f"  {type_tag:<{max_transport}}", style="dim")
+            label.append(f"  {tool_labels[source.name]:<{max_tools}}", style="dim")
+            symbol, style, status = _source_status(source)
+            _append_status(label, symbol, style, status)
+            option_list.add_option(
+                Option(label, id=_source_option_id(source.name, source.kind))
+            )
 
+    def _show_detail_view(
+        self, option_list: OptionList, source: MCPSourceSummary
+    ) -> None:
+        self._viewing_name = source.name
+        self._viewing_kind = source.kind
+        prefix = "Connector" if source.kind is MCPSourceKind.CONNECTOR else "MCP Server"
+        self.query_one("#mcp-title", NoMarkupStatic).update(f"{prefix}: {source.name}")
+        if source.status is MCPSourceStatus.NEEDS_AUTH:
+            self._set_help_text(_DETAIL_VIEW_HELP_NO_TOOLS)
+            if source.kind is MCPSourceKind.CONNECTOR:
+                self.post_message(self.ConnectorAuthRequested(source.name))
+            else:
+                self.post_message(self.MCPOAuthRequested(source.name))
+            return
+        if source.status is MCPSourceStatus.NEEDS_SETUP:
+            self._set_help_text(_DETAIL_VIEW_HELP_NO_TOOLS)
+            option_list.add_option(
+                Option(
+                    shortcut_hint(
+                        "Set up credentials in the Mistral dashboard, then press "
+                        f"{shortcut('r')} to refresh."
+                    ),
+                    disabled=True,
+                )
+            )
+            return
+        self._set_help_text(
+            _DETAIL_VIEW_HELP if source.tools else _DETAIL_VIEW_HELP_NO_TOOLS
+        )
+        if not source.tools:
+            option_list.add_option(Option("No tools discovered", disabled=True))
+            return
+        for tool in sorted(source.tools, key=lambda item: item.name):
+            label = Text(no_wrap=True)
+            style = "bold" if tool.enabled else "dim"
+            label.append(tool.name, style=style)
+            if tool.description:
+                label.append(
+                    f"  -  {tool.description}", style=None if tool.enabled else "dim"
+                )
+            if not tool.enabled:
+                label.append("  (disabled)", style="dim italic")
+            option_list.add_option(Option(label, id=f"tool:{tool.name}"))
+        option_list.highlighted = 0
+
+    def _sources(self, kind: MCPSourceKind) -> list[MCPSourceSummary]:
+        return [source for source in self._state.sources if source.kind is kind]
+
+    def _find_source(
+        self, name: str | None, kind: MCPSourceKind | None
+    ) -> MCPSourceSummary | None:
+        if name is None:
+            return None
+        candidates = [source for source in self._state.sources if source.name == name]
+        if kind is not None:
+            return next((source for source in candidates if source.kind is kind), None)
+        return next(
+            (source for source in candidates if source.kind is MCPSourceKind.SERVER),
+            candidates[0] if candidates else None,
+        )
+
+    def _viewing_source(self) -> MCPSourceSummary | None:
+        return self._find_source(self._viewing_name, self._viewing_kind)
+
+    def _highlighted_source(self) -> MCPSourceSummary | None:
         option_list = self.query_one(OptionList)
         highlighted = option_list.highlighted
         if highlighted is None:
             return None
-        option = option_list.get_option_at_index(highlighted)
-        option_id = option.id or ""
-        if option_id.startswith("server:"):
-            return option_id.removeprefix("server:"), MCPSourceKind.SERVER
-        if option_id.startswith("connector:"):
-            return option_id.removeprefix("connector:"), MCPSourceKind.CONNECTOR
-        return None
+        return self._source_for_option(option_list.get_option_at_index(highlighted))
 
-    # ── list view ────────────────────────────────────────────────────
+    def _source_for_option(self, option: Option) -> MCPSourceSummary | None:
+        target = _source_from_option_id(option.id or "")
+        return self._find_source(*target) if target is not None else None
 
-    def _refresh_view(
-        self, server_name: str | None, *, kind: MCPSourceKind | None = None
-    ) -> None:
-        index = self._index
-        option_list = self.query_one(OptionList)
-        option_list.clear_options()
+    def _set_help_text(self, text: str) -> None:
+        self.query_one("#mcp-help", NoMarkupStatic).update(shortcut_hint(text))
 
-        server_names = {s.name for s in self._mcp_servers}
-        all_names = server_names | set(self._connector_names)
-        if server_name is None or server_name not in all_names:
-            self._show_list_view(option_list, index)
-            return
 
-        # Infer kind when not provided (e.g. initial_server from /mcp <name>).
-        # Prefer server over connector when the name is ambiguous.
-        if kind is None:
-            if server_name in server_names:
-                kind = MCPSourceKind.SERVER
-            else:
-                kind = MCPSourceKind.CONNECTOR
+def _source_option_id(name: str, kind: MCPSourceKind) -> str:
+    return f"{kind.value}:{name}"
 
-        self._show_detail_view(server_name, option_list, index, kind=kind)
 
-    def _show_list_view(self, option_list: OptionList, index: MCPToolIndex) -> None:
-        self._viewing_server = None
-        self._viewing_kind = None
-        has_connectors = bool(self._connector_names)
-        title = "MCP Servers & Connectors" if has_connectors else "MCP Servers"
-        self.query_one("#mcp-title", NoMarkupStatic).update(title)
-        self._set_help_text(_LIST_VIEW_HELP_TOOLS)
+def _source_from_option_id(value: str) -> tuple[str, MCPSourceKind] | None:
+    for kind in MCPSourceKind:
+        prefix = f"{kind.value}:"
+        if value.startswith(prefix):
+            return value.removeprefix(prefix), kind
+    return None
 
-        has_servers = bool(self._mcp_servers)
 
-        if has_servers:
-            self._list_mcp_servers(option_list, index)
-        if has_connectors:
-            if has_servers:
-                option_list.add_option(Option(Text("", no_wrap=True), disabled=True))
-            self._list_connectors(option_list=option_list, index=index)
-        if not has_servers and not has_connectors:
-            option_list.add_option(
-                Option("No MCP servers or connectors configured", disabled=True)
-            )
-
-        if has_servers or has_connectors:
-            # Skip disabled header options (e.g. section labels).
-            first_enabled = next(
-                (i for i, opt in enumerate(option_list.options) if not opt.disabled), 0
-            )
-            option_list.highlighted = first_enabled
-
-    def _list_mcp_servers(self, option_list: OptionList, index: MCPToolIndex) -> None:
-        from vibe.core.tools.mcp import AuthStatus
-
-        max_name = max(len(srv.name) for srv in self._mcp_servers)
-        max_type = max(len(srv.transport) + 2 for srv in self._mcp_servers)
-        tool_texts: dict[str, str] = {}
-        for srv in self._mcp_servers:
-            tools = index.server_tools.get(srv.name, [])
-            total = len(tools)
-            enabled = sum(1 for t, _ in tools if t in index.enabled_tools)
-            tool_texts[srv.name] = _tool_count_text(enabled, total)
-        max_tools = max(len(t) for t in tool_texts.values())
-        statuses = self._mcp_registry.status() if self._mcp_registry else {}
-        option_list.add_option(
-            Option(Text("Local MCP Servers", style="bold", no_wrap=True), disabled=True)
-        )
-        for srv in self._mcp_servers:
-            type_tag = f"[{srv.transport}]"
-            label = Text(no_wrap=True)
-            label.append(f"  {srv.name:<{max_name}}")
-            label.append(f"  {type_tag:<{max_type}}", style="dim")
-            label.append(f"  {tool_texts[srv.name]:<{max_tools}}", style="dim")
-            if srv.disabled:
-                _append_status(label, "○", "dim", "disabled")
-            else:
-                match statuses.get(srv.name):
-                    case AuthStatus.NEEDS_AUTH:
-                        _append_status(label, "○", "dim", "needs auth")
-                    case AuthStatus.OK:
-                        _append_status(label, "●", "green", "connected")
-                    case _:
-                        _append_status(label, "●", "green", "enabled")
-            option_list.add_option(Option(label, id=f"server:{srv.name}"))
-
-    def _list_connectors(self, option_list: OptionList, index: MCPToolIndex) -> None:
-        ordered_connector_names = self._sorted_connector_names
-        max_name = max(len(n) for n in ordered_connector_names)
-        type_tag = "[connector]"
-        type_width = len(type_tag)
-        tool_texts: dict[str, str] = {}
-        for n in ordered_connector_names:
-            tools = index.connector_tools.get(n, [])
-            total = len(tools)
-            enabled = sum(1 for t, _ in tools if t in index.enabled_tools)
-            tool_texts[n] = _tool_count_text(enabled, total)
-        max_tools = max(len(t) for t in tool_texts.values())
-        option_list.add_option(
-            Option(
-                Text("Workspace Connectors", style="bold", no_wrap=True), disabled=True
-            )
-        )
-        for cname in ordered_connector_names:
-            cfg = self._find_connector_config(cname)
-            is_disabled = cfg.disabled if cfg else True
-            connected = (
-                self._connector_registry.is_connected(cname)
-                if self._connector_registry
-                else False
-            )
-            label = Text(no_wrap=True)
-            label.append(f"  {cname:<{max_name}}")
-            label.append(f"  {type_tag:<{type_width}}", style="dim")
-            label.append(f"  {tool_texts[cname]:<{max_tools}}", style="dim")
-            auth_action = (
-                self._connector_registry.get_auth_action(cname)
-                if self._connector_registry
-                else ConnectorAuthAction.NONE
-            )
-            if is_disabled:
-                _append_status(label, "○", "dim", "disabled")
-            elif connected:
-                _append_status(label, "●", "green", "connected")
-            else:
-                match auth_action:
-                    case ConnectorAuthAction.OAUTH:
-                        text = "needs auth"
-                    case ConnectorAuthAction.CREDENTIALS_SETUP:
-                        text = "needs setup"
-                    case _:
-                        text = "error - try refreshing"
-                _append_status(label, "○", "dim", text)
-            option_list.add_option(Option(label, id=f"connector:{cname}"))
-
-    # ── detail view ──────────────────────────────────────────────────
-
-    def _show_detail_view(
-        self,
-        server_name: str,
-        option_list: OptionList,
-        index: MCPToolIndex,
-        *,
-        kind: MCPSourceKind = MCPSourceKind.SERVER,
-    ) -> None:
-        self._viewing_server = server_name
-        self._viewing_kind = kind
-        is_connector = kind == MCPSourceKind.CONNECTOR
-        title_prefix = "Connector" if is_connector else "MCP Server"
-        self.query_one("#mcp-title", NoMarkupStatic).update(
-            f"{title_prefix}: {server_name}"
-        )
-        tools_source = index.connector_tools if is_connector else index.server_tools
-        all_tools = sorted(tools_source.get(server_name, []), key=lambda t: t[0])
-        if not is_connector and self._server_needs_auth(server_name):
-            self._set_help_text(_DETAIL_VIEW_HELP_NO_TOOLS)
-            if self._mcp_registry is not None:
-                self.post_message(
-                    self.MCPOAuthRequested(
-                        server_name=server_name, mcp_registry=self._mcp_registry
-                    )
-                )
-            return
-        self._set_help_text(
-            _DETAIL_VIEW_HELP if all_tools else _DETAIL_VIEW_HELP_NO_TOOLS
-        )
-        if not all_tools:
-            if (
-                is_connector
-                and self._connector_registry
-                and not self._connector_registry.is_connected(server_name)
-            ):
-                auth_action = self._connector_registry.get_auth_action(server_name)
-                match auth_action:
-                    case ConnectorAuthAction.CREDENTIALS_SETUP:
-                        option_list.add_option(
-                            Option(
-                                shortcut_hint(
-                                    "Set up credentials in the Mistral dashboard, "
-                                    f"then press {shortcut('r')} to refresh."
-                                ),
-                                disabled=True,
-                            )
-                        )
-                    case ConnectorAuthAction.OAUTH:
-                        self.post_message(
-                            self.ConnectorAuthRequested(
-                                connector_name=server_name,
-                                connector_registry=self._connector_registry,
-                                tool_manager=self._tool_manager,
-                            )
-                        )
-                    case _:
-                        option_list.add_option(
-                            Option(
-                                shortcut_hint(
-                                    f"Connector unavailable; press {shortcut('r')} "
-                                    "to refresh."
-                                ),
-                                disabled=True,
-                            )
-                        )
-            else:
-                option_list.add_option(
-                    Option("No tools discovered for this server", disabled=True)
-                )
-            return
-        for tool_name, cls in all_tools:
-            is_tool_enabled = tool_name in index.enabled_tools
-            remote_name = cls.get_remote_name()
-            raw_desc = (
-                (cls.description or "").removeprefix(f"[{server_name}] ").split("\n")[0]
-            )
-            label = Text(no_wrap=True)
-            if is_tool_enabled:
-                label.append(remote_name, style="bold")
-                if raw_desc:
-                    label.append(f"  -  {raw_desc}")
-            else:
-                label.append(remote_name, style="dim")
-                if raw_desc:
-                    label.append(f"  -  {raw_desc}", style="dim")
-                label.append("  (disabled)", style="dim italic")
-            option_list.add_option(Option(label, id=f"tool:{tool_name}"))
-        option_list.highlighted = 0
+def _source_status(source: MCPSourceSummary) -> tuple[str, str, str]:
+    match source.status:
+        case MCPSourceStatus.CONNECTED:
+            return "●", "green", "connected"
+        case MCPSourceStatus.ENABLED:
+            return "●", "green", "enabled"
+        case MCPSourceStatus.NEEDS_AUTH:
+            return "○", "dim", "needs auth"
+        case MCPSourceStatus.NEEDS_SETUP:
+            return "○", "dim", "needs setup"
+        case MCPSourceStatus.UNAVAILABLE:
+            return "○", "dim", "error - try refreshing"
+        case MCPSourceStatus.DISABLED:
+            return "○", "dim", "disabled"
 
 
 def _append_status(label: Text, symbol: str, symbol_style: str, text: str) -> None:
@@ -673,26 +404,18 @@ def _append_status(label: Text, symbol: str, symbol_style: str, text: str) -> No
     label.append(f" {text}", style="dim")
 
 
-def _tool_count_text(enabled: int, total: int | None = None) -> str:
-    if total is not None and enabled < total:
-        noun = "tool" if total == 1 else "tools"
-        return f"{enabled}/{total} {noun}"
+def _tool_count_text(enabled: int, total: int) -> str:
+    if enabled < total:
+        return f"{enabled}/{total} {'tool' if total == 1 else 'tools'}"
     if enabled == 0:
         return "no tools"
-    noun = "tool" if enabled == 1 else "tools"
-    return f"{enabled} {noun}"
+    return f"{enabled} {'tool' if enabled == 1 else 'tools'}"
 
 
-def _sort_connector_names_for_menu(
-    connector_names: Sequence[str],
-    connector_registry: ConnectorRegistry | None,
-    disabled_names: set[str],
-) -> list[str]:
-    def key(name: str) -> tuple[bool, bool, str]:
-        is_disabled = name in disabled_names
-        is_connected = (
-            connector_registry.is_connected(name) if connector_registry else False
-        )
-        return (is_disabled, not is_connected, name.lower())
-
-    return sorted(connector_names, key=key)
+def _sort_sources_for_menu(
+    sources: Sequence[MCPSourceSummary],
+) -> list[MCPSourceSummary]:
+    return sorted(
+        sources,
+        key=lambda source: (not source.tools, source.name.casefold(), source.name),
+    )

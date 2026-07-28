@@ -17,6 +17,7 @@ from vibe.core.vibe_code_project import (
     VibeCodeProjectPickerInitialData,
     VibeCodeProjectPickerService,
     VibeCodeProjectPickerState,
+    VibeCodeProjectResolverError,
     VibeProjectsStore,
 )
 
@@ -685,3 +686,49 @@ async def test_headless_resolution_creates_project_when_matches_are_ambiguous(
         project_id="created",
         project_name="mistral-vibe",
     )
+
+
+_LINK_REPO = "https://github.com/mistralai/mistral-vibe.git"
+
+
+def _link_service(projects: list[VibeCodeProject]) -> VibeCodeProjectPickerService:
+    return VibeCodeProjectPickerService(
+        base_url="https://chat.example.com",
+        api_key="api-key",
+        repo_root=Path("/repo/mistral-vibe"),
+        page_fetcher=FakePageFetcher([
+            VibeCodeProjectPage(projects=projects, next_cursor=None)
+        ]),
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_linkable_project_returns_validated_project() -> None:
+    service = _link_service([_project("p1", "Mistral Vibe", _LINK_REPO)])
+
+    project = await service.find_linkable_project(project_id="p1", repo_url=_LINK_REPO)
+
+    assert project.project_id == "p1"
+
+
+@pytest.mark.asyncio
+async def test_find_linkable_project_rejects_unknown_project() -> None:
+    service = _link_service([_project("p1", "Mistral Vibe", _LINK_REPO)])
+
+    with pytest.raises(VibeCodeProjectResolverError):
+        await service.find_linkable_project(project_id="missing", repo_url=_LINK_REPO)
+
+
+@pytest.mark.asyncio
+async def test_find_linkable_project_rejects_read_only_or_unlinked() -> None:
+    read_only = _link_service([
+        _project("ro", "Read only", _LINK_REPO, is_read_only=True)
+    ])
+    with pytest.raises(VibeCodeProjectResolverError):
+        await read_only.find_linkable_project(project_id="ro", repo_url=_LINK_REPO)
+
+    unlinked = _link_service([
+        _project("other", "Other repo", "https://github.com/mistralai/other.git")
+    ])
+    with pytest.raises(VibeCodeProjectResolverError):
+        await unlinked.find_linkable_project(project_id="other", repo_url=_LINK_REPO)

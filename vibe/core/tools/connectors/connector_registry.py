@@ -11,9 +11,7 @@ import time
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import httpx
-from mistralai.client import Mistral
 
-from vibe.core.logger import logger
 from vibe.core.paths import CONNECTOR_BOOTSTRAP_CACHE_FILE
 from vibe.core.tools.base import (
     BaseTool,
@@ -26,7 +24,8 @@ from vibe.core.tools.remote import MCPTool, MCPToolResult, RemoteTool, _OpenArgs
 from vibe.core.tools.ui import ToolResultDisplay
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils import run_sync
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.observability.logging import logger
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -305,8 +304,11 @@ def create_connector_proxy_tool_class(
                     success=False,
                     message=event.error or event.skip_reason or "No result",
                 )
-            message = f"Connector tool {event.result.tool} completed"
-            return ToolResultDisplay(success=event.result.ok, message=message)
+            return ToolResultDisplay(
+                success=event.result.ok,
+                verb="Ran",
+                message=f"connector {event.result.tool}",
+            )
 
         @classmethod
         def get_status_text(cls) -> str:
@@ -627,6 +629,8 @@ class ConnectorRegistry:
                 verify=build_ssl_context(), follow_redirects=True
             )
             try:
+                from mistralai.client import Mistral
+
                 sdk_client = Mistral(
                     api_key=self._api_key,
                     server_url=self._server_url,

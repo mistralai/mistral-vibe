@@ -3,6 +3,16 @@ from __future__ import annotations
 import pytest
 from textual.app import App, ComposeResult
 
+from vibe.app_server.models import (
+    CompletedEffectState,
+    EffectCallDisplay,
+    EffectResultDisplay,
+    GenericEffectDetail,
+    PublicEffectEntry,
+    PublicEntryGenerationStatus,
+    WebSearchEffectOutput as WebSearchOutput,
+    WebSearchEffectSource as WebSearchSourceView,
+)
 from vibe.cli.textual_ui.widgets.links import (
     LinkStatic,
     link_content,
@@ -10,7 +20,6 @@ from vibe.cli.textual_ui.widgets.links import (
 )
 from vibe.cli.textual_ui.widgets.tool_widgets import WebSearchResultWidget
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage
-from vibe.core.tools.builtins.web_search import WebSearchResult, WebSearchSource
 
 
 def _click_actions(content: object) -> list[str]:
@@ -20,6 +29,27 @@ def _click_actions(content: object) -> list[str]:
         for span in spans
         if span.style.meta and "@click" in span.style.meta
     ]
+
+
+def _effect(tool_name: str) -> PublicEffectEntry:
+    return PublicEffectEntry(
+        id="call-1",
+        session_id="session-1",
+        turn_id="turn-1",
+        created_at=1,
+        updated_at=1,
+        generation_status=PublicEntryGenerationStatus.COMPLETED,
+        title=tool_name,
+        detail=GenericEffectDetail(
+            tool_name=tool_name,
+            display=EffectCallDisplay(
+                summary=tool_name, status_text=f"Running {tool_name}"
+            ),
+        ),
+        state=CompletedEffectState(
+            display=EffectResultDisplay(success=True, message="completed")
+        ),
+    )
 
 
 def test_link_content_encodes_url_in_action_and_keeps_label() -> None:
@@ -167,10 +197,10 @@ async def _rendered_lines(widget: WebSearchResultWidget) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_websearch_single_source_is_bulleted_without_header() -> None:
-    result = WebSearchResult(
+    result = WebSearchOutput(
         query="uv",
         answer="ans",
-        sources=[WebSearchSource(title="Docs", url="https://x.com")],
+        sources=[WebSearchSourceView(title="Docs", url="https://x.com")],
     )
     lines = await _rendered_lines(
         WebSearchResultWidget(result, success=True, message="m")
@@ -186,12 +216,12 @@ async def test_websearch_single_source_is_bulleted_without_header() -> None:
 
 @pytest.mark.asyncio
 async def test_websearch_multiple_sources_is_bulleted_plural() -> None:
-    result = WebSearchResult(
+    result = WebSearchOutput(
         query="uv",
         answer="ans",
         sources=[
-            WebSearchSource(title="A", url="https://a.com"),
-            WebSearchSource(title="B", url="https://b.com"),
+            WebSearchSourceView(title="A", url="https://a.com"),
+            WebSearchSourceView(title="B", url="https://b.com"),
         ],
     )
     lines = await _rendered_lines(
@@ -208,7 +238,7 @@ async def test_websearch_multiple_sources_is_bulleted_plural() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_call_message_set_result_text_renders_clickable_url() -> None:
-    call = ToolCallMessage(tool_name="web_fetch")
+    call = ToolCallMessage(_effect("web_fetch"))
 
     class _H(App):
         def compose(self) -> ComposeResult:
@@ -229,7 +259,7 @@ async def test_tool_call_message_set_result_text_renders_clickable_url() -> None
 
 @pytest.mark.asyncio
 async def test_tool_call_message_set_result_text_keeps_brackets_literal_off() -> None:
-    call = ToolCallMessage(tool_name="bash")
+    call = ToolCallMessage(_effect("bash"))
 
     class _H(App):
         def compose(self) -> ComposeResult:
@@ -255,7 +285,7 @@ async def test_tool_call_message_renders_malformed_markup_without_crashing(
 ) -> None:
     # A bash summary like `git tag [/foo bar]` reads as a broken Rich closing
     # tag and used to raise MarkupError when rendered into a markup=True widget.
-    call = ToolCallMessage(tool_name="bash")
+    call = ToolCallMessage(_effect("bash"))
 
     class _H(App):
         def compose(self) -> ComposeResult:

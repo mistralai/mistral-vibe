@@ -20,8 +20,8 @@ from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ProviderConfig
-from vibe.core.logger import logger
 from vibe.core.telemetry.types import LaunchContext
+from vibe.observability.logging import logger
 from vibe.setup.auth import (
     BrowserSignInAttemptStarted,
     BrowserSignInError,
@@ -428,23 +428,27 @@ class BrowserSignInScreen(OnboardingScreen):
             widgets.card.add_class(widget_class)
 
     def _update_active_step_detail(
-        self, detail: NoMarkupStatic, state: BrowserSignInViewState
+        self,
+        detail: NoMarkupStatic,
+        state: BrowserSignInViewState,
+        *,
+        layout: bool = True,
     ) -> None:
         if state.variant == "pending" and state.step == BrowserSignInStep.CONFIRM:
             content = Text()
             append_gradient_text(
                 content, WAITING_FOR_AUTHENTICATION_MESSAGE, self._gradient_offset
             )
-            detail.update(content)
+            detail.update(content, layout=layout)
             detail.add_class("pending")
             return
 
         if state.variant == "error":
-            detail.update(state.message)
+            detail.update(state.message, layout=layout)
             detail.add_class("error")
             return
 
-        detail.update(state.message)
+        detail.update(state.message, layout=layout)
         detail.add_class(state.variant)
 
     def _animate_gradient(self) -> None:
@@ -454,7 +458,7 @@ class BrowserSignInScreen(OnboardingScreen):
             and self.state.step == BrowserSignInStep.CONFIRM
         ):
             widgets = self._step_widgets[self.state.step]
-            self._update_active_step_detail(widgets.detail, self.state)
+            self._update_active_step_detail(widgets.detail, self.state, layout=False)
 
     async def _close_browser_sign_in(
         self, browser_sign_in: BrowserSignInService | None

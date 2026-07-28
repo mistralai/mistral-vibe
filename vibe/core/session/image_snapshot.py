@@ -5,13 +5,8 @@ import hashlib
 import mimetypes
 from pathlib import Path
 
-from vibe.core.types import (
-    IMAGE_EXTENSIONS,
-    MAX_IMAGE_BYTES,
-    FileImageSource,
-    ImageAttachment,
-    InlineImageSource,
-)
+from vibe.core.types import FileImageSource, ImageAttachment, InlineImageSource
+from vibe.utils.images import IMAGE_EXTENSIONS, MAX_IMAGE_BYTES
 
 _DEFAULT_MIME_BY_EXT = {
     ".png": "image/png",

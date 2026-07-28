@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable
 from http import HTTPStatus
 from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import httpx
-from pydantic import BaseModel
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
@@ -24,11 +22,11 @@ from vibe.core.middleware import (
 )
 from vibe.core.tools.builtins.todo import TodoArgs
 from vibe.core.types import (
+    ApprovalRequestEvent,
     ApprovalResponse,
     AssistantEvent,
     ContextTooLongError,
     FunctionCall,
-    LLMMessage,
     RateLimitError,
     ReasoningEvent,
     Role,
@@ -68,33 +66,16 @@ def make_config(
     )
 
 
-@pytest.fixture
-def observer_capture() -> tuple[
-    list[tuple[Role, str | None]], Callable[[LLMMessage], None]
-]:
-    observed: list[tuple[Role, str | None]] = []
-
-    def observer(msg: LLMMessage) -> None:
-        observed.append((msg.role, msg.content))
-
-    return observed, observer
-
-
 @pytest.mark.asyncio
-async def test_act_flushes_batched_messages_with_injection_middleware(
-    observer_capture,
-) -> None:
-    observed, observer = observer_capture
-
+async def test_act_flushes_batched_messages_with_injection_middleware() -> None:
     backend = FakeBackend([mock_llm_chunk(content="I can write very efficient code.")])
-    agent = build_test_agent_loop(
-        config=make_config(), message_observer=observer, backend=backend
-    )
+    agent = build_test_agent_loop(config=make_config(), backend=backend)
     agent.middleware_pipeline.add(InjectBeforeMiddleware())
 
     async for _ in agent.act("How can you help?"):
         pass
 
+    observed = [(message.role, message.content) for message in agent.messages]
     assert len(observed) == 4
     assert [r for r, _ in observed] == [
         Role.system,
@@ -109,20 +90,17 @@ async def test_act_flushes_batched_messages_with_injection_middleware(
 
 
 @pytest.mark.asyncio
-async def test_stop_action_flushes_user_msg_before_returning(observer_capture) -> None:
-    observed, observer = observer_capture
-
+async def test_stop_action_flushes_user_msg_before_returning() -> None:
     # max_turns=0 forces an immediate STOP on the first before_turn
     backend = FakeBackend([
         mock_llm_chunk(content="My response will never reach you...")
     ])
-    agent = build_test_agent_loop(
-        config=make_config(), message_observer=observer, max_turns=0, backend=backend
-    )
+    agent = build_test_agent_loop(config=make_config(), max_turns=0, backend=backend)
 
     async for _ in agent.act("Greet."):
         pass
 
+    observed = [(message.role, message.content) for message in agent.messages]
     assert len(observed) == 2
     # user's message should have been flushed before returning
     assert [r for r, _ in observed] == [Role.system, Role.user]
@@ -131,17 +109,14 @@ async def test_stop_action_flushes_user_msg_before_returning(observer_capture) -
 
 
 @pytest.mark.asyncio
-async def test_act_emits_user_and_assistant_msgs(observer_capture) -> None:
-    observed, observer = observer_capture
-
+async def test_act_emits_user_and_assistant_msgs() -> None:
     backend = FakeBackend([mock_llm_chunk(content="Pong!")])
-    agent = build_test_agent_loop(
-        config=make_config(), message_observer=observer, backend=backend
-    )
+    agent = build_test_agent_loop(config=make_config(), backend=backend)
 
     async for _ in agent.act("Ping?"):
         pass
 
+    observed = [(message.role, message.content) for message in agent.messages]
     assert len(observed) == 3
     assert [r for r, _ in observed] == [Role.system, Role.user, Role.assistant]
     assert observed[1][1] == "Ping?"
@@ -303,6 +278,76 @@ async def test_act_handles_tool_call_chunk_with_content() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chunk_content_yields_before_its_tool_call() -> None:
+    # A chunk that starts a tool call often also carries the trailing text delta
+    # that precedes it (e.g. the sentence's final "."). That text must be emitted
+    # before the tool call so it finishes the assistant block above it instead of
+    # being orphaned into a new block below the tool call.
+    tool_call = ToolCall(
+        id="tc_order",
+        index=0,
+        function=FunctionCall(name="todo", arguments='{"action": "read"}'),
+    )
+    backend = FakeBackend([mock_llm_chunk(content="On it.", tool_calls=[tool_call])])
+    agent = build_test_agent_loop(
+        config=make_config(
+            enabled_tools=["todo"], tools={"todo": {"permission": "always"}}
+        ),
+        backend=backend,
+        agent_name=BuiltinAgentName.AUTO_APPROVE,
+        enable_streaming=True,
+    )
+
+    events = [event async for event in agent.act("Order check.")]
+    types = [type(e).__name__ for e in events]
+
+    first_assistant = types.index("AssistantEvent")
+    first_tool_call = types.index("ToolCallEvent")
+    assert first_assistant < first_tool_call
+    assert cast(AssistantEvent, events[first_assistant]).content == "On it."
+
+
+@pytest.mark.asyncio
+async def test_reasoning_and_content_precede_tool_call_from_same_chunk() -> None:
+    todo_tool_call = ToolCall(
+        id="tc_order",
+        index=0,
+        function=FunctionCall(name="todo", arguments='{"action": "read"}'),
+    )
+    backend = FakeBackend([
+        [
+            mock_llm_chunk(
+                content="Checking now",
+                reasoning_content="Final thought.",
+                tool_calls=[todo_tool_call],
+            )
+        ],
+        [mock_llm_chunk(content="Done")],
+    ])
+    agent = build_test_agent_loop(
+        config=make_config(
+            enabled_tools=["todo"], tools={"todo": {"permission": "always"}}
+        ),
+        backend=backend,
+        agent_name=BuiltinAgentName.AUTO_APPROVE,
+        enable_streaming=True,
+    )
+
+    events = [event async for event in agent.act("Check ordering")]
+
+    assert [type(event) for event in events[:4]] == [
+        UserMessageEvent,
+        ReasoningEvent,
+        AssistantEvent,
+        ToolCallEvent,
+    ]
+    assert isinstance(events[1], ReasoningEvent)
+    assert isinstance(events[2], AssistantEvent)
+    assert events[1].content == "Final thought."
+    assert events[2].content == "Checking now"
+
+
+@pytest.mark.asyncio
 async def test_act_merges_streamed_tool_call_arguments() -> None:
     tool_call_part_one = ToolCall(
         id="tc_merge",
@@ -392,25 +437,32 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     middleware = CountingMiddleware()
     agent.middleware_pipeline.add(middleware)
 
-    async def _reject_callback(
-        _name: str, _args: BaseModel, _id: str, _rp: list | None = None
-    ) -> tuple[ApprovalResponse, str | None]:
-        return (
-            ApprovalResponse.NO,
-            str(get_user_cancellation_message(CancellationReason.OPERATION_CANCELLED)),
-        )
-
-    agent.set_approval_callback(_reject_callback)
     agent.session_logger.save_interaction = AsyncMock(return_value=None)
 
-    events = [event async for event in agent.act("Cancel mid stream?")]
+    events = []
+    async for event in agent.act("Cancel mid stream?"):
+        events.append(event)
+        if isinstance(event, ApprovalRequestEvent):
+            agent.resolve_approval_request(
+                event.request_id,
+                ApprovalResponse.NO,
+                str(
+                    get_user_cancellation_message(
+                        CancellationReason.OPERATION_CANCELLED
+                    )
+                ),
+            )
 
+    # The second chunk carries both content ("todo request") and the tool call;
+    # its content is emitted before the tool call, so both assistant deltas
+    # precede the tool-call events.
     assert [type(event) for event in events] == [
         UserMessageEvent,
         AssistantEvent,
-        ToolCallEvent,
         AssistantEvent,
         ToolCallEvent,
+        ToolCallEvent,
+        ApprovalRequestEvent,
         ToolResultEvent,
     ]
     assert middleware.before_calls == 1
@@ -423,27 +475,22 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
 
 
 @pytest.mark.asyncio
-async def test_act_flushes_and_logs_when_streaming_errors(observer_capture) -> None:
-    observed, observer = observer_capture
+async def test_act_flushes_and_logs_when_streaming_errors() -> None:
     backend = FakeBackend(exception_to_raise=RuntimeError("boom in streaming"))
     agent = build_test_agent_loop(
-        config=make_config(),
-        backend=backend,
-        message_observer=observer,
-        enable_streaming=True,
+        config=make_config(), backend=backend, enable_streaming=True
     )
     agent.session_logger.save_interaction = AsyncMock(return_value=None)
 
     with pytest.raises(RuntimeError, match="boom in streaming"):
         [_ async for _ in agent.act("Trigger stream failure")]
 
-    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert [message.role for message in agent.messages] == [Role.system, Role.user]
     assert agent.session_logger.save_interaction.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_rate_limit(observer_capture) -> None:
-    observed, observer = observer_capture
+async def test_rate_limit() -> None:
     response = httpx.Response(
         HTTPStatus.TOO_MANY_REQUESTS, request=httpx.Request("POST", "http://test")
     )
@@ -463,17 +510,14 @@ async def test_rate_limit(observer_capture) -> None:
     )
     backend = FakeBackend(exception_to_raise=backend_error)
     agent = build_test_agent_loop(
-        config=make_config(),
-        backend=backend,
-        message_observer=observer,
-        enable_streaming=True,
+        config=make_config(), backend=backend, enable_streaming=True
     )
     agent.session_logger.save_interaction = AsyncMock(return_value=None)
 
     with pytest.raises(RateLimitError):
         [_ async for _ in agent.act("Trigger rate limit failure while streaming")]
 
-    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert [message.role for message in agent.messages] == [Role.system, Role.user]
     assert agent.session_logger.save_interaction.await_count == 1
 
 
@@ -500,15 +544,13 @@ def _build_context_too_long_backend_error() -> BackendError:
 
 
 @pytest.mark.asyncio
-async def test_context_too_long_streaming(observer_capture) -> None:
-    observed, observer = observer_capture
+async def test_context_too_long_streaming() -> None:
     backend_error = _build_context_too_long_backend_error()
     backend = FakeBackend(exception_to_raise=backend_error)
     # Strict mode: no reactive compaction, so the overflow surfaces directly.
     agent = build_test_agent_loop(
         config=make_config(raise_on_compaction_failure=True),
         backend=backend,
-        message_observer=observer,
         enable_streaming=True,
     )
     agent.session_logger.save_interaction = AsyncMock(return_value=None)
@@ -516,20 +558,18 @@ async def test_context_too_long_streaming(observer_capture) -> None:
     with pytest.raises(ContextTooLongError):
         [_ async for _ in agent.act("Trigger context too long while streaming")]
 
-    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert [message.role for message in agent.messages] == [Role.system, Role.user]
     assert agent.session_logger.save_interaction.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_context_too_long_non_streaming(observer_capture) -> None:
-    observed, observer = observer_capture
+async def test_context_too_long_non_streaming() -> None:
     backend_error = _build_context_too_long_backend_error()
     backend = FakeBackend(exception_to_raise=backend_error)
     # Strict mode: no reactive compaction, so the overflow surfaces directly.
     agent = build_test_agent_loop(
         config=make_config(raise_on_compaction_failure=True),
         backend=backend,
-        message_observer=observer,
         enable_streaming=False,
     )
     agent.session_logger.save_interaction = AsyncMock(return_value=None)
@@ -537,7 +577,7 @@ async def test_context_too_long_non_streaming(observer_capture) -> None:
     with pytest.raises(ContextTooLongError):
         [_ async for _ in agent.act("Trigger context too long without streaming")]
 
-    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert [message.role for message in agent.messages] == [Role.system, Role.user]
     assert agent.session_logger.save_interaction.await_count == 1
 
 
@@ -549,40 +589,32 @@ class _NonRetryableError(Exception):
 
 
 @pytest.mark.asyncio
-async def test_non_retryable_passes_through_streaming(observer_capture) -> None:
-    observed, observer = observer_capture
+async def test_non_retryable_passes_through_streaming() -> None:
     backend = FakeBackend(exception_to_raise=_NonRetryableError("auth failed"))
     agent = build_test_agent_loop(
-        config=make_config(),
-        backend=backend,
-        message_observer=observer,
-        enable_streaming=True,
+        config=make_config(), backend=backend, enable_streaming=True
     )
     agent.session_logger.save_interaction = AsyncMock(return_value=None)
 
     with pytest.raises(_NonRetryableError, match="auth failed"):
         [_ async for _ in agent.act("Trigger non-retryable failure while streaming")]
 
-    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert [message.role for message in agent.messages] == [Role.system, Role.user]
     assert agent.session_logger.save_interaction.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_non_retryable_passes_through_non_streaming(observer_capture) -> None:
-    observed, observer = observer_capture
+async def test_non_retryable_passes_through_non_streaming() -> None:
     backend = FakeBackend(exception_to_raise=_NonRetryableError("auth failed"))
     agent = build_test_agent_loop(
-        config=make_config(),
-        backend=backend,
-        message_observer=observer,
-        enable_streaming=False,
+        config=make_config(), backend=backend, enable_streaming=False
     )
     agent.session_logger.save_interaction = AsyncMock(return_value=None)
 
     with pytest.raises(_NonRetryableError, match="auth failed"):
         [_ async for _ in agent.act("Trigger non-retryable failure without streaming")]
 
-    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert [message.role for message in agent.messages] == [Role.system, Role.user]
     assert agent.session_logger.save_interaction.await_count == 1
 
 
@@ -597,46 +629,38 @@ def _wrap_with_cause(message: str, cause: BaseException) -> RuntimeError:
 
 
 @pytest.mark.asyncio
-async def test_non_retryable_via_cause_chain_streaming(observer_capture) -> None:
-    observed, observer = observer_capture
+async def test_non_retryable_via_cause_chain_streaming() -> None:
     wrapped = _wrap_with_cause(
         "Activity task failed", _NonRetryableError("auth failed")
     )
     backend = FakeBackend(exception_to_raise=wrapped)
     agent = build_test_agent_loop(
-        config=make_config(),
-        backend=backend,
-        message_observer=observer,
-        enable_streaming=True,
+        config=make_config(), backend=backend, enable_streaming=True
     )
     agent.session_logger.save_interaction = AsyncMock(return_value=None)
 
     with pytest.raises(RuntimeError, match="Activity task failed"):
         [_ async for _ in agent.act("Trigger non-retryable via cause chain")]
 
-    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert [message.role for message in agent.messages] == [Role.system, Role.user]
     assert agent.session_logger.save_interaction.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_non_retryable_via_cause_chain_non_streaming(observer_capture) -> None:
-    observed, observer = observer_capture
+async def test_non_retryable_via_cause_chain_non_streaming() -> None:
     wrapped = _wrap_with_cause(
         "Activity task failed", _NonRetryableError("auth failed")
     )
     backend = FakeBackend(exception_to_raise=wrapped)
     agent = build_test_agent_loop(
-        config=make_config(),
-        backend=backend,
-        message_observer=observer,
-        enable_streaming=False,
+        config=make_config(), backend=backend, enable_streaming=False
     )
     agent.session_logger.save_interaction = AsyncMock(return_value=None)
 
     with pytest.raises(RuntimeError, match="Activity task failed"):
         [_ async for _ in agent.act("Trigger non-retryable via cause chain")]
 
-    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert [message.role for message in agent.messages] == [Role.system, Role.user]
     assert agent.session_logger.save_interaction.await_count == 1
 
 
