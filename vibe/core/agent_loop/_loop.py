@@ -1716,13 +1716,22 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 validated_args=ReadFileArgs(file_path=file_path),
                 call_id=call_id,
             )
-            yield ToolCallEvent(
+            call_event = ToolCallEvent(
                 tool_call_id=call_id,
                 tool_call_index=0,
                 tool_name="read_file",
                 tool_class=tool_class,
                 args=ReadFileArgs(file_path=file_path),
             )
+            call_event = call_event.model_copy(
+                update={
+                    "presentation": ToolUIDataAdapter(tool_class).get_call_presentation(
+                        call_event
+                    )
+                }
+            )
+            self._record_tool_call_presentation(call_event)
+            yield call_event
             async for event in self._process_one_tool_call(tool_call):
                 yield event
 

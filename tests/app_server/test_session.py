@@ -44,6 +44,7 @@ from vibe.app_server.models import (
     ApprovalDecisionType,
     CancelledCallbackState,
     CompletedEffectState,
+    FileReadEffectDetail,
     PublicCallbackEntry,
     PublicCheckpointEntry,
     PublicEffectEntry,
@@ -249,6 +250,36 @@ async def test_prepared_image_crosses_turn_start_boundary() -> None:
     )
     assert request_user.images is not None
     assert request_user.images[0].alias == "shot.png"
+
+
+@pytest.mark.asyncio
+async def test_at_file_mention_projects_without_presentation_snapshot() -> None:
+    Path("notes.md").write_text("hello world", encoding="utf-8")
+    backend = FakeBackend([mock_llm_chunk(content="done")])
+    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+    session = await create_test_app_server_session(agent_loop)
+
+    try:
+        await _consume(session.act("read @notes.md what does this do"))
+    finally:
+        await session.close()
+        await agent_loop.aclose()
+
+    read_effect = next(
+        entry
+        for entry in session.history
+        if isinstance(entry, PublicEffectEntry)
+        and isinstance(entry.detail, FileReadEffectDetail)
+    )
+    assert isinstance(read_effect.state, CompletedEffectState)
+
+    injected_call = next(
+        tool_call
+        for message in agent_loop.messages
+        for tool_call in message.tool_calls or []
+        if tool_call.function.name == "read_file"
+    )
+    assert injected_call.presentation is not None
 
 
 @pytest.mark.asyncio
