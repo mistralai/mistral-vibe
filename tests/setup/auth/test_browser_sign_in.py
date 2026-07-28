@@ -11,8 +11,8 @@ from urllib.parse import urlencode
 
 import pytest
 
-from tests.browser_sign_in.stubs import (
-    StubBrowserSignInGateway,
+from tests.stubs.fake_browser_sign_in_gateway import (
+    FakeBrowserSignInGateway,
     build_poll_failed_error,
     build_sign_in_process,
     noop_sleep,
@@ -48,20 +48,24 @@ def build_code_challenge(verifier: str) -> str:
 def build_test_service(
     *,
     poll_results: list[BrowserSignInPollResult | BrowserSignInError],
+    start_error: BrowserSignInError | None = None,
     exchange_error: BrowserSignInError | None = None,
     open_browser: Callable[[str], bool] | None = None,
+    raise_on_browser_open_failure: bool = True,
     sleep: Callable[[float], Awaitable[None]] = noop_sleep,
     now: Callable[[], datetime] | None = None,
     process_time: datetime = TEST_NOW,
-) -> tuple[StubBrowserSignInGateway, BrowserSignInService]:
-    gateway = StubBrowserSignInGateway(
+) -> tuple[FakeBrowserSignInGateway, BrowserSignInService]:
+    gateway = FakeBrowserSignInGateway(
         process=build_sign_in_process(process_time),
+        start_error=start_error,
         poll_results=poll_results,
         exchange_error=exchange_error,
     )
     service = BrowserSignInService(
         gateway,
         open_browser=open_browser or (lambda _: True),
+        raise_on_browser_open_failure=raise_on_browser_open_failure,
         sleep=sleep,
         now=now or (lambda: process_time),
         poll_interval=0,
@@ -147,12 +151,40 @@ async def test_authenticate_raises_when_polling_expires() -> None:
     _, service = build_test_service(
         poll_results=[BrowserSignInPollResult(status="expired")],
         open_browser=lambda url: opened_urls.append(url) or True,
+        raise_on_browser_open_failure=False,
     )
 
     with pytest.raises(BrowserSignInError, match="expired"):
         await service.authenticate()
 
     assert opened_urls == [TEST_SIGN_IN_URL]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("poll_result", "expected_code"),
+    [
+        (BrowserSignInPollResult(status="denied"), BrowserSignInErrorCode.DENIED),
+        (
+            BrowserSignInPollResult(
+                status="error", message="Provider rejected sign-in."
+            ),
+            BrowserSignInErrorCode.PROVIDER_ERROR,
+        ),
+    ],
+    ids=["denied", "provider_error"],
+)
+async def test_tolerant_browser_policy_preserves_terminal_poll_errors(
+    poll_result: BrowserSignInPollResult, expected_code: BrowserSignInErrorCode
+) -> None:
+    _, service = build_test_service(
+        poll_results=[poll_result], raise_on_browser_open_failure=False
+    )
+
+    with pytest.raises(BrowserSignInError) as err:
+        await service.authenticate()
+
+    assert err.value.code is expected_code
 
 
 @pytest.mark.asyncio
@@ -177,7 +209,8 @@ async def test_authenticate_fails_after_three_consecutive_poll_failures() -> Non
             build_poll_failed_error(),
             build_poll_failed_error(),
             build_poll_failed_error(),
-        ]
+        ],
+        raise_on_browser_open_failure=False,
     )
 
     with pytest.raises(
@@ -245,11 +278,13 @@ async def test_authenticate_raises_on_unknown_poll_state() -> None:
 @pytest.mark.asyncio
 async def test_authenticate_raises_when_browser_cannot_be_opened() -> None:
     events: list[BrowserSignInEvent] = []
-    _, service = build_test_service(poll_results=[], open_browser=lambda _: False)
+    gateway, service = build_test_service(poll_results=[], open_browser=lambda _: False)
 
-    with pytest.raises(BrowserSignInError, match="open browser"):
+    with pytest.raises(BrowserSignInError, match="open browser") as err:
         await service.authenticate(event_callback=events.append)
 
+    assert err.value.code is BrowserSignInErrorCode.OPEN_BROWSER_FAILED
+    assert gateway.polled_urls == []
     assert events == [
         BrowserSignInAttemptStarted(
             sign_in_url=TEST_SIGN_IN_URL,
@@ -260,18 +295,87 @@ async def test_authenticate_raises_when_browser_cannot_be_opened() -> None:
 
 
 @pytest.mark.asyncio
+async def test_authenticate_chains_browser_open_exception_by_default() -> None:
+    browser_error = OSError("no browser controller")
+
+    def raise_browser_error(_: str) -> bool:
+        raise browser_error
+
+    gateway, service = build_test_service(
+        poll_results=[], open_browser=raise_browser_error
+    )
+
+    with pytest.raises(BrowserSignInError, match="open browser") as err:
+        await service.authenticate()
+
+    assert err.value.code is BrowserSignInErrorCode.OPEN_BROWSER_FAILED
+    assert err.value.__cause__ is browser_error
+    assert gateway.polled_urls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "browser_error",
+    [None, OSError("no browser controller")],
+    ids=["false_result", "exception"],
+)
+async def test_authenticate_continues_after_tolerated_browser_open_failure(
+    browser_error: OSError | None,
+) -> None:
+    def open_browser(_: str) -> bool:
+        if browser_error is not None:
+            raise browser_error
+        return False
+
+    gateway, service = build_test_service(
+        poll_results=[
+            BrowserSignInPollResult(status="completed", exchange_token="exchange-1")
+        ],
+        open_browser=open_browser,
+        raise_on_browser_open_failure=False,
+    )
+
+    api_key = await service.authenticate()
+
+    assert api_key == "sk-browser-key"
+    assert gateway.process_number == 1
+    assert gateway.polled_urls == [TEST_POLL_URL]
+    assert gateway.exchange_requests[0].process_id == TEST_PROCESS_ID
+
+
+@pytest.mark.asyncio
+async def test_tolerant_browser_policy_preserves_start_failure() -> None:
+    start_error = BrowserSignInError(
+        "Failed to start browser sign-in.", code=BrowserSignInErrorCode.START_FAILED
+    )
+    _, service = build_test_service(
+        poll_results=[], start_error=start_error, raise_on_browser_open_failure=False
+    )
+
+    with pytest.raises(BrowserSignInError) as err:
+        await service.authenticate()
+
+    assert err.value is start_error
+
+
+@pytest.mark.asyncio
 async def test_authenticate_raises_when_exchange_fails() -> None:
+    exchange_error = BrowserSignInError(
+        "Failed to exchange browser sign-in for an API key.",
+        code=BrowserSignInErrorCode.EXCHANGE_FAILED,
+    )
     _, service = build_test_service(
         poll_results=[
             BrowserSignInPollResult(status="completed", exchange_token="exchange-1")
         ],
-        exchange_error=BrowserSignInError(
-            "Failed to exchange browser sign-in for an API key."
-        ),
+        exchange_error=exchange_error,
+        raise_on_browser_open_failure=False,
     )
 
-    with pytest.raises(BrowserSignInError, match="exchange"):
+    with pytest.raises(BrowserSignInError, match="exchange") as err:
         await service.authenticate()
+
+    assert err.value is exchange_error
 
 
 @pytest.mark.asyncio
@@ -349,7 +453,7 @@ async def test_authenticate_caps_sleep_to_remaining_sign_in_lifetime(
         sleep_durations.append(duration)
         current_time += timedelta(seconds=duration)
 
-    gateway = StubBrowserSignInGateway(
+    gateway = FakeBrowserSignInGateway(
         process=BrowserSignInProcess(
             process_id=TEST_PROCESS_ID,
             sign_in_url=TEST_SIGN_IN_URL,

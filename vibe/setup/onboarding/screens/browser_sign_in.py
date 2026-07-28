@@ -54,7 +54,7 @@ SUCCESS_EXIT_DELAY_SECONDS: float = 2.0
 SIGN_IN_URL_HELP_DELAY_SECONDS: float = 4.0
 WAITING_FOR_AUTHENTICATION_MESSAGE = "Waiting for authentication..."
 STEP_DESCRIPTIONS = [
-    ("Open browser", "Your browser should open automatically", "Browser opened"),
+    ("Open browser", "Your browser should open automatically", "Sign-in page ready"),
     ("Complete sign-in", WAITING_FOR_AUTHENTICATION_MESSAGE, "Sign-in confirmed."),
     ("Finished setup", "Vibe will start automatically", "Setup complete."),
 ]

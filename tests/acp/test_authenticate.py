@@ -5,7 +5,12 @@ from typing import Any
 
 import pytest
 
+from tests.stubs.fake_browser_sign_in_gateway import (
+    FakeBrowserSignInGateway,
+    build_sign_in_process,
+)
 from vibe.acp.agent import VibeAcpAgent as VibeAcpAgentLoop
+import vibe.acp.auth as acp_auth_module
 from vibe.acp.exceptions import InternalError, InvalidRequestError
 from vibe.core.config import ProviderConfig
 from vibe.core.types import Backend
@@ -14,6 +19,7 @@ from vibe.setup.auth import (
     BrowserSignInError,
     BrowserSignInErrorCode,
 )
+import vibe.setup.auth.browser_sign_in as browser_sign_in_module
 from vibe.setup.onboarding.context import OnboardingContext
 
 
@@ -162,6 +168,29 @@ class TestACPAuthenticate:
         }
         assert api_key_persister.saved == [(provider, "api-key")]
         assert browser_sign_in.close_count == 1
+
+    @pytest.mark.asyncio
+    async def test_authenticate_keeps_browser_open_failure_strict_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        gateway = FakeBrowserSignInGateway(
+            process=build_sign_in_process(datetime(2026, 3, 16, tzinfo=UTC))
+        )
+        monkeypatch.setattr(
+            acp_auth_module, "HttpBrowserSignInGateway", lambda **_: gateway
+        )
+        monkeypatch.setattr(browser_sign_in_module.webbrowser, "open", lambda _: False)
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=lambda: OnboardingContext(
+                provider=build_mistral_provider()
+            )
+        )
+
+        with pytest.raises(InternalError, match="Failed to open browser"):
+            await acp_agent_loop.authenticate("browser-auth")
+
+        assert gateway.polled_urls == []
+        assert gateway.closed is True
 
     @pytest.mark.asyncio
     async def test_authenticate_starts_delegated_browser_sign_in(self) -> None:
