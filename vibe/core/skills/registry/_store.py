@@ -10,10 +10,10 @@ import uuid
 import yaml
 
 from vibe.core.config.harness_files._paths import GLOBAL_REGISTRY_SKILLS_CACHE_DIR
-from vibe.core.logger import logger
 from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
 from vibe.core.skills.registry.models import RegistrySkillItem
-from vibe.core.utils.io import read_safe
+from vibe.observability.logging import logger
+from vibe.utils.io import read_safe
 
 _RESERVED_ENTRYPOINTS = frozenset({"skill.md", "skills.md"})
 _REGISTRY_SOURCE = "ai-registry"

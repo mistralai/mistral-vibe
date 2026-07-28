@@ -5,17 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import OrchestratorLoader, build_test_vibe_config
-from vibe.core.agents import AgentManager
-from vibe.core.config import VibeConfigSchema
 from vibe.core.experiments.active import ExperimentName
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
 from vibe.core.session.session_loader import SessionLoader
-from vibe.core.skills.manager import SkillManager
-from vibe.core.system_prompt import get_universal_system_prompt
-from vibe.core.tools.manager import ToolManager
 from vibe.core.types import SessionMetadata
 
 
@@ -107,16 +101,6 @@ def test_resume_old_session_without_experiments_field_falls_back_to_defaults(
     assert metadata.experiments is None
 
 
-def test_resume_overrides_still_win_over_hydrated_state() -> None:
-    response = _response_forcing("explore")
-    manager = ExperimentManager(
-        client=_StubClient(None), overrides={ExperimentName.SYSTEM_PROMPT.value: "lean"}
-    )
-    manager.hydrate(response)
-
-    assert manager.get_variant(ExperimentName.SYSTEM_PROMPT) == "lean"
-
-
 def test_session_metadata_round_trips_experiments_field() -> None:
     response = _response_forcing("explore")
     metadata = SessionMetadata(
@@ -135,37 +119,3 @@ def test_session_metadata_round_trips_experiments_field() -> None:
 
     assert restored.experiments is not None
     assert restored.experiments == response
-
-
-def _build_managers(
-    config: VibeConfigSchema, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
-):
-    return (
-        ToolManager(lambda: config),
-        SkillManager(lambda: config),
-        AgentManager(load_orchestrator(config)),
-    )
-
-
-@pytest.mark.asyncio
-async def test_graduated_experiment_with_deleted_variant_file_falls_back(
-    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
-) -> None:
-    config = build_test_vibe_config(
-        system_prompt_id="cli", include_model_info=False, include_commit_signature=False
-    )
-    response = _response_forcing("removed_after_graduation_2025_07")
-    manager = ExperimentManager(client=_StubClient(None))
-    manager.hydrate(response)
-
-    tool_manager, skill_manager, agent_manager = _build_managers(
-        config, load_orchestrator
-    )
-    prompt = get_universal_system_prompt(
-        tool_manager, config, skill_manager, agent_manager, experiment_manager=manager
-    )
-
-    default_prompt = get_universal_system_prompt(
-        tool_manager, config, skill_manager, agent_manager, experiment_manager=None
-    )
-    assert prompt == default_prompt

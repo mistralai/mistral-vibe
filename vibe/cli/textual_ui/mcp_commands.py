@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import shlex
 from typing import Literal
 
-from vibe.core.tools.mcp_settings import MCPAddTransport, parse_mcp_add_transport
+from vibe.utils.mcp import MCPAddTransport, parse_mcp_add_transport
 
 MCPSubcommandName = Literal["add", "login", "logout", "status"]
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 from abc import ABC
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterator, Sequence
-from contextlib import contextmanager
 import copy
 from enum import StrEnum, auto
 from pathlib import Path
@@ -12,7 +11,6 @@ from uuid import uuid4
 
 if TYPE_CHECKING:
     from vibe.core.tools.base import BaseTool
-    from vibe.core.tools.permissions import RequiredPermission
 else:
     BaseTool = Any
 
@@ -24,11 +22,13 @@ from pydantic import (
     JsonValue,
     PrivateAttr,
     computed_field,
-    field_validator,
     model_validator,
 )
 
 from vibe.core.experiments.models import EvalResponse
+from vibe.core.tools.models import RequiredPermission
+from vibe.user_content import UserDisplayContent, UserResource
+from vibe.utils.tool_presentation import ToolCallPresentation, ToolResultPresentation
 
 
 class ScheduledLoop(BaseModel):
@@ -149,6 +149,15 @@ class SessionInfo(BaseModel):
     save_dir: str
 
 
+class ChildSessionLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    tool_call_id: str
+    agent: str
+    relative_path: str | None = None
+
+
 class SessionMetadata(BaseModel):
     session_id: str
     parent_session_id: str | None = None
@@ -158,6 +167,7 @@ class SessionMetadata(BaseModel):
     git_branch: str | None
     environment: dict[str, str | None]
     username: str
+    child_sessions: list[ChildSessionLink] = Field(default_factory=list)
     loops: list[ScheduledLoop] = Field(default_factory=list)
     title: str | None = None
     title_source: Literal["auto", "manual"] = "auto"
@@ -188,6 +198,7 @@ class ToolCall(BaseModel):
     index: int | None = None
     function: FunctionCall = Field(default_factory=FunctionCall)
     type: Literal["function"] = "function"
+    presentation: ToolCallPresentation | None = None
 
 
 def _content_before(v: Any) -> str:
@@ -217,39 +228,6 @@ class Role(StrEnum):
 class ApprovalResponse(StrEnum):
     YES = "y"
     NO = "n"
-
-
-IMAGE_EXTENSIONS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
-MAX_IMAGE_BYTES: int = 10 * 1024 * 1024
-MAX_IMAGES_PER_MESSAGE: int = 8
-
-type UserDisplayContentItem = dict[str, JsonValue]
-
-
-class UserDisplayContentMetadata(BaseModel):
-    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
-
-    version: str = Field(min_length=1)
-    host: str = Field(min_length=1)
-    content: list[UserDisplayContentItem]
-
-    @field_validator("version")
-    @classmethod
-    def validate_version(cls, value: str) -> str:
-        version = value.strip()
-        if not version:
-            raise ValueError("version must not be blank")
-
-        return version
-
-    @field_validator("host")
-    @classmethod
-    def validate_host(cls, value: str) -> str:
-        host = value.strip()
-        if not host:
-            raise ValueError("host must not be blank")
-
-        return host
 
 
 class FileImageSource(BaseModel):
@@ -290,6 +268,31 @@ class ImageAttachment(BaseModel):
         return value
 
 
+class PersistedToolResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    output: dict[str, JsonValue]
+    duration: float | None = Field(default=None, ge=0)
+    cancelled: bool = False
+    presentation: ToolResultPresentation | None = None
+
+
+class ManualShellContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: str
+    command: str
+    cwd: str
+    stdout: str = ""
+    stderr: str = ""
+    output_text: str = ""
+    exit_code: int
+    timed_out: bool = False
+    interrupted: bool = False
+    duration_ms: float = Field(default=0.0, ge=0)
+    created_at: int
+
+
 class LLMMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -304,8 +307,12 @@ class LLMMessage(BaseModel):
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
     tool_call_id: str | None = None
+    tool_result: PersistedToolResult | None = None
     message_id: str | None = None
-    user_display_content: UserDisplayContentMetadata | None = None
+    user_display_content: UserDisplayContent | None = None
+    input_text: str | None = None
+    resources: list[UserResource] | None = None
+    manual_shell: ManualShellContext | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -331,10 +338,14 @@ class LLMMessage(BaseModel):
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),
+            "tool_result": getattr(v, "tool_result", None),
             "images": getattr(v, "images", None),
             "message_id": getattr(v, "message_id", None)
             or (str(uuid4()) if role != "tool" else None),
             "user_display_content": getattr(v, "user_display_content", None),
+            "input_text": getattr(v, "input_text", None),
+            "resources": getattr(v, "resources", None),
+            "manual_shell": getattr(v, "manual_shell", None),
         }
 
     def __add__(self, other: LLMMessage) -> LLMMessage:
@@ -404,10 +415,15 @@ class LLMMessage(BaseModel):
             tool_calls=list(tool_calls_map.values()) or None,
             name=self.name,
             tool_call_id=self.tool_call_id,
+            tool_result=self.tool_result or other.tool_result,
             message_id=self.message_id,
             user_display_content=self.user_display_content
             if self.user_display_content is not None
             else other.user_display_content,
+            input_text=(
+                self.input_text if self.input_text is not None else other.input_text
+            ),
+            resources=self.resources if self.resources is not None else other.resources,
         )
 
 
@@ -465,6 +481,9 @@ class BaseEvent(BaseModel, ABC):
 class UserMessageEvent(BaseEvent):
     content: str
     message_id: str
+    images: list[ImageAttachment] = Field(default_factory=list)
+    user_display_content: UserDisplayContent | None = None
+    resources: list[UserResource] = Field(default_factory=list)
 
 
 class AssistantEvent(BaseEvent):
@@ -492,6 +511,7 @@ class ToolCallEvent(BaseEvent):
     tool_class: type[BaseTool]
     tool_call_index: int | None = None
     args: BaseModel | None = None
+    presentation: ToolCallPresentation | None = None
 
 
 class ToolResultEvent(BaseEvent):
@@ -504,6 +524,7 @@ class ToolResultEvent(BaseEvent):
     cancelled: bool = False
     duration: float | None = None
     tool_call_id: str
+    presentation: ToolResultPresentation | None = None
 
 
 class ToolStreamEvent(BaseEvent):
@@ -516,6 +537,27 @@ class WaitingForInputEvent(BaseEvent):
     task_id: str
     label: str | None = None
     predefined_answers: list[str] | None = None
+
+
+class RequestEvent(BaseEvent):
+    request_id: str
+
+
+class ApprovalRequestEvent(RequestEvent):
+    tool_name: str
+    tool_args: BaseModel
+    tool_call_id: str
+    required_permissions: list[RequiredPermission] | None = None
+
+
+class UserInputRequestEvent(RequestEvent):
+    args: BaseModel
+    tool_call_id: str
+
+
+class TokenUsageUpdatedEvent(BaseEvent):
+    stats: AgentStats
+    context_window: int
 
 
 class CompactStartEvent(BaseEvent):
@@ -563,46 +605,18 @@ class SessionTitleUpdatedEvent(BaseEvent):
     title: str
 
 
-class OutputFormat(StrEnum):
-    TEXT = auto()
-    JSON = auto()
-    STREAMING = auto()
-
-
-type ApprovalCallback = Callable[
-    [str, BaseModel, str, list[RequiredPermission] | None],
-    Awaitable[tuple[ApprovalResponse, str | None]],
-]
-
-
-type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
-
 type SwitchAgentCallback = Callable[[str], Awaitable[None]]
 
 type ClearContextCallback = Callable[[], Awaitable[None]]
 
 
 class MessageList(Sequence[LLMMessage]):
-    def __init__(
-        self,
-        initial: list[LLMMessage] | None = None,
-        observer: Callable[[LLMMessage], None] | None = None,
-    ) -> None:
+    def __init__(self, initial: list[LLMMessage] | None = None) -> None:
         self._data: list[LLMMessage] = list(initial) if initial else []
-        self._observer = observer
         self._reset_hooks: list[Callable[[], None]] = []
-        self._silent = False
-        if self._observer:
-            for msg in self._data:
-                self._observer(msg)
-
-    def _notify(self, msg: LLMMessage) -> None:
-        if not self._silent and self._observer is not None:
-            self._observer(msg)
 
     def append(self, msg: LLMMessage) -> None:
         self._data.append(msg)
-        self._notify(msg)
 
     def insert(self, i: int, msg: LLMMessage) -> None:
         self._data.insert(i, msg)
@@ -621,7 +635,7 @@ class MessageList(Sequence[LLMMessage]):
         for hook in self._reset_hooks:
             hook()
 
-    def update_system_prompt(self, new: str, *, notify: bool = False) -> None:
+    def update_system_prompt(self, new: str) -> None:
         """Replace the system prompt, or insert it if none exists yet.
 
         Under deferred init the prompt can land after messages were already
@@ -632,18 +646,6 @@ class MessageList(Sequence[LLMMessage]):
             self._data[0] = msg
         else:
             self._data.insert(0, msg)
-        if notify:
-            self._notify(msg)
-
-    @contextmanager
-    def silent(self) -> Iterator[None]:
-        """Context manager that suppresses notifications."""
-        prev = self._silent
-        self._silent = True
-        try:
-            yield
-        finally:
-            self._silent = prev
 
     def __len__(self) -> int:
         return len(self._data)

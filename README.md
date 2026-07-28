@@ -94,7 +94,7 @@ pip install mistral-vibe
 - **Interactive Chat**: A conversational AI agent that understands your requests and breaks down complex tasks.
 - **Powerful Toolset**: A suite of tools for file manipulation, code searching, version control, and command execution, right from the chat prompt.
   - Read, write, and patch files (`read`, `write_file`, `edit`).
-  - Execute shell commands (`bash`), with an experimental managed PTY mode for polling and stdin helpers.
+  - Execute shell commands, with managed shell sessions, polling, and stdin helpers available during rollout.
   - Recursively search code with `grep` (with `ripgrep` support).
   - Manage a `todo` list to track the agent's work.
   - Ask interactive questions to gather user input (`ask_user_question`).
@@ -203,7 +203,8 @@ Most modern terminals should work, but older or minimal terminal emulators may h
    ```
 
 3. If this is your first time running Vibe, it will:
-   - Create a default configuration file at `~/.vibe/config.toml`
+   - Use built-in defaults without creating a configuration file until you
+     save a setting
    - Prompt you to enter your API key if it's not already configured
    - Save your API key to `~/.vibe/.env` for future use
 
@@ -410,6 +411,14 @@ Skills support the same pattern matching as tools (exact names, glob patterns, a
 
 Vibe is configured via a `config.toml` file. It looks for this file first in `./.vibe/config.toml` and then falls back to `~/.vibe/config.toml`.
 
+### Theme
+
+The default `auto` theme follows the terminal background when it can be detected, then the operating-system light/dark preference. Choose another theme with `/theme` or set it explicitly:
+
+```toml
+theme = "dracula"
+```
+
 ### API Key Configuration
 
 To use Vibe, you'll need a Mistral API key. You can obtain one by signing up at [https://console.mistral.ai](https://console.mistral.ai).
@@ -516,18 +525,40 @@ Note: This implies that you have set up a redteam prompt named `~/.vibe/prompts/
 
 ### Tool Management
 
-The built-in `bash` tool runs one-off shell commands by default. Set
-`experimental_bash_tool = true` to replace it with the experimental managed PTY
-implementation under the same `bash` tool name. In that mode, `bash` returns a
-`session_id`, inline output, a cursor for polling more output with `bash_output`,
-and a log path under `~/.vibe/bash-tool/`. Long-running commands can be left
-alive with `background = true`, and interactive commands can be driven with
-`bash_stdin`. Both implementations use the same permissions, allowlists, and
-denylists from `[tools.bash]`.
+The built-in shell surface is controlled by the `vibe_cli_managed_shell_tools`
+experiment. The default variant keeps the legacy one-shot `bash` tool, including
+its existing Windows behavior. The managed variant exposes OS-native shell tools:
+POSIX systems, including WSL where Vibe runs as Linux, get managed `bash`,
+`bash_output`, `bash_stdin`, `bash_sessions`, and `bash_log_file`; native Windows
+gets `git_bash`, `git_bash_output`, `git_bash_stdin`, `git_bash_sessions`, and
+`git_bash_log_file` when Git Bash is available. If Git Bash is unavailable,
+native Windows falls back to `powershell`, `powershell_output`,
+`powershell_stdin`, `powershell_sessions`, and `powershell_log_file`.
+
+Managed shell sessions return a `session_id`, inline output, a cursor for polling
+more output, and a log path under `~/.vibe/shell-tool/sessions/`. Long-running
+commands can be left alive with `background = true`, and interactive commands can
+be driven with the matching stdin tool.
+
+POSIX `bash` reads permissions, allowlists, and denylists from `[tools.bash]`.
+Native Windows `git_bash` reads them from `[tools.git_bash]`; native Windows
+`powershell` reads them from `[tools.powershell]`. Neither Windows tool reads
+`[tools.bash]`. Git Bash is preferred when Vibe can resolve a usable `bash.exe`
+from PATH, Git for Windows, or standard Git install locations. If Git Bash is
+unavailable, the PowerShell resolution order is `pwsh.exe`, then
+`powershell.exe`. `cmd.exe` is not used by the managed Windows shell tools.
 
 ```toml
-experimental_bash_tool = true
+[tools.git_bash]
+permission = "ask"
+shell = "C:\\Program Files\\Git\\bin\\bash.exe"
+
+[tools.powershell]
+permission = "ask"
+shell = "powershell.exe"
 ```
+
+The rollout assignment is server-managed and is not a `config.toml` option.
 
 #### Enable/Disable Tools with Patterns
 
@@ -558,7 +589,30 @@ Notes:
 
 You can configure MCP (Model Context Protocol) servers to extend Vibe's capabilities. Add MCP server configurations under the `mcp_servers` section:
 
-For hosted OAuth MCP servers, you can add the server from inside Vibe:
+Remote MCP servers can be added non-interactively from the shell. Static auth
+is selected when `--api-key-env` or `--header` is provided; otherwise the
+server uses OAuth and starts browser login by default.
+
+```bash
+vibe mcp add mistralai \
+  --url https://api.mistral.ai/mcp \
+  --transport streamable-http \
+  --api-key-env MISTRAL_API_KEY
+
+vibe mcp add linear \
+  --url https://mcp.linear.app/mcp
+
+vibe mcp remove mistralai
+```
+
+Use `--no-login` to persist an OAuth server without starting login. Static auth
+also supports repeatable `--header`, `--api-key-header`, `--api-key-format`,
+`--startup-timeout-sec`, and `--tool-timeout-sec`. Run `vibe mcp add --help`
+for the complete command reference. `vibe mcp remove <name>` removes the server
+from the user configuration. Removing an OAuth server also deletes its stored
+tokens, client information, and configuration fingerprint when available.
+
+Hosted OAuth MCP servers can also be added from inside Vibe:
 
 ```text
 /mcp add https://mcp.linear.app/mcp
@@ -569,8 +623,7 @@ For hosted OAuth MCP servers, you can add the server from inside Vibe:
 scopes and starts login by default. It uses `transport = "streamable-http"`
 unless you pass `--transport http`. Pass `--no-login` to add the server without
 starting OAuth login. The shortcut supports `streamable-http` and `http`
-transports. For API-key/static auth, edit `config.toml` using the static auth
-example below.
+transports.
 
 ```toml
 # Example MCP server configurations
@@ -578,7 +631,10 @@ example below.
 name = "my_http_server"
 transport = "http"
 url = "http://localhost:8000"
-headers = { "Authorization" = "Bearer my_token" }
+
+[mcp_servers.auth]
+type = "static"
+headers = { "X-Client" = "vibe" }
 api_key_env = "MY_API_KEY_ENV_VAR"
 api_key_header = "Authorization"
 api_key_format = "Bearer {token}"
@@ -587,7 +643,10 @@ api_key_format = "Bearer {token}"
 name = "my_streamable_server"
 transport = "streamable-http"
 url = "http://localhost:8001"
-headers = { "X-API-Key" = "my_api_key" }
+
+[mcp_servers.auth]
+type = "static"
+headers = { "X-Client" = "vibe" }
 
 [[mcp_servers]]
 name = "fetch_server"
@@ -616,8 +675,9 @@ Key fields:
 - `tool_timeout_sec`: Timeout in seconds for tool execution (default 60s)
 - `env`: Environment variables to set for the MCP server of transport type stdio
 
-HTTP MCP servers can use either static auth or OAuth. Static auth uses
-`api_key_env` / `headers` in `config.toml`; OAuth uses an `auth` block:
+HTTP MCP servers can use either static auth or OAuth. Both use an `auth` block;
+legacy top-level `api_key_env` / `headers` keys are still accepted and promoted
+to static auth when Vibe loads the configuration.
 
 ```toml
 [[mcp_servers]]

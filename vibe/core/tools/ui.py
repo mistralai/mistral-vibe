@@ -2,9 +2,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, JsonValue
+
+from vibe.utils.tool_presentation import (
+    EffectCallDisplay,
+    EffectResultDisplay as ToolResultDisplay,
+    ToolCallPresentation,
+    ToolEffectKind,
+    ToolResultPresentation,
+)
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -14,16 +22,15 @@ class ToolCallDisplay(BaseModel):
     summary: str  # Brief description: "Writing file.txt", "Patching code.py"
     content: str | None = None  # Optional content preview
     suffix: str = ""  # e.g. "(scratchpad)"
-
-
-class ToolResultDisplay(BaseModel):
-    success: bool
-    message: str
-    warnings: list[str] = Field(default_factory=list)
-    suffix: str = ""  # e.g. "(truncated)"
+    verb: str = ""
+    message: str | None = None
+    settled_verb: str = ""
+    settled_message: str | None = None
 
 
 class ToolUIData[TArgs: BaseModel, TResult: BaseModel](ABC):
+    effect_kind: ClassVar[ToolEffectKind] = ToolEffectKind.TOOL
+
     @classmethod
     def _display_name(cls) -> str:
         get_name = cast(Callable[[], str] | None, getattr(cls, "get_name", None))
@@ -62,6 +69,10 @@ class ToolUIData[TArgs: BaseModel, TResult: BaseModel](ABC):
         return ToolResultDisplay(success=True, message="Success")
 
     @classmethod
+    def project_result(cls, result: TResult) -> JsonValue:
+        return None
+
+    @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
         if event.result is None:
             return ToolResultDisplay(success=True, message="Success")
@@ -83,23 +94,44 @@ class ToolUIData[TArgs: BaseModel, TResult: BaseModel](ABC):
 
 
 class ToolUIDataAdapter:
-    def __init__(self, tool_class: Any) -> None:
+    def __init__(self, tool_class: Any | None) -> None:
         self.tool_class = tool_class
         self.ui_data_class: type[ToolUIData[Any, Any]] | None = (
-            tool_class if issubclass(tool_class, ToolUIData) else None
+            tool_class
+            if isinstance(tool_class, type) and issubclass(tool_class, ToolUIData)
+            else None
         )
+
+    @property
+    def effect_kind(self) -> ToolEffectKind:
+        if self.ui_data_class is None:
+            return ToolEffectKind.TOOL
+        return self.ui_data_class.effect_kind
 
     def get_call_display(self, event: ToolCallEvent) -> ToolCallDisplay:
         if self.ui_data_class:
-            return self.ui_data_class.get_call_display(event)
+            display = self.ui_data_class.get_call_display(event)
+        else:
+            args_dict = (
+                event.args.model_dump()
+                if event.args and hasattr(event.args, "model_dump")
+                else {}
+            )
+            args_str = ", ".join(f"{k}={v!r}" for k, v in list(args_dict.items())[:3])
+            display = ToolCallDisplay(summary=f"{event.tool_name}({args_str})")
 
-        args_dict = (
-            event.args.model_dump()
-            if event.args and hasattr(event.args, "model_dump")
-            else {}
-        )
-        args_str = ", ".join(f"{k}={v!r}" for k, v in list(args_dict.items())[:3])
-        return ToolCallDisplay(summary=f"{event.tool_name}({args_str})")
+        updates: dict[str, str] = {}
+        if display.message is None:
+            updates["message"] = display.summary
+        if not display.verb:
+            updates["verb"] = "Running"
+        if display.settled_message is None:
+            updates["settled_message"] = display.summary
+        if not display.settled_verb:
+            updates["settled_verb"] = "Ran"
+        if not updates:
+            return display
+        return display.model_copy(update=updates)
 
     def get_result_display(self, event: ToolResultEvent) -> ToolResultDisplay:
         if event.error:
@@ -119,5 +151,42 @@ class ToolUIDataAdapter:
         if self.ui_data_class:
             return self.ui_data_class.get_status_text()
 
-        tool_name = getattr(self.tool_class, "get_name", lambda: "tool")()
+        tool_name = (
+            getattr(self.tool_class, "get_name", lambda: "tool")()
+            if self.tool_class is not None
+            else "tool"
+        )
         return f"Running {tool_name}"
+
+    def get_call_presentation(self, event: ToolCallEvent) -> ToolCallPresentation:
+        display = self.get_call_display(event)
+        return ToolCallPresentation(
+            kind=self.effect_kind,
+            display=EffectCallDisplay(
+                summary=display.summary,
+                content=display.content,
+                suffix=display.suffix,
+                verb=display.verb,
+                message=display.message,
+                settled_verb=display.settled_verb,
+                settled_message=display.settled_message,
+                status_text=self.get_status_text(),
+            ),
+        )
+
+    def get_result_presentation(self, event: ToolResultEvent) -> ToolResultPresentation:
+        display = self.get_result_display(event)
+        projected_output: JsonValue = None
+        if self.ui_data_class is not None and event.result is not None:
+            projected_output = self.ui_data_class.project_result(event.result)
+        return ToolResultPresentation(
+            kind=self.effect_kind,
+            display=ToolResultDisplay(
+                success=display.success,
+                verb=display.verb,
+                message=display.message,
+                warnings=display.warnings,
+                suffix=display.suffix,
+            ),
+            projected_output=projected_output,
+        )

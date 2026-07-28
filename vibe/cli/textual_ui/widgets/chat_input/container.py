@@ -8,6 +8,8 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message
 
+from vibe.app_server.models import AgentSafety
+from vibe.cli.autocompletion.completers import CommandCompleter, PathCompleter
 from vibe.cli.autocompletion.path_completion import PathCompletionController
 from vibe.cli.autocompletion.slash_command import SlashCommandController
 from vibe.cli.commands import CommandRegistry
@@ -18,8 +20,6 @@ from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.voice_manager.voice_manager_port import VoiceManagerPort
-from vibe.core.agents import AgentSafety
-from vibe.core.autocompletion.completers import CommandCompleter, PathCompleter
 
 SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
     AgentSafety.SAFE: "border-safe",
@@ -99,10 +99,14 @@ class ChatInputContainer(Vertical):
         if not self._body:
             return
 
-        self._body.set_completion_reset_callback(self._completion_manager.reset)
         if self._body.input_widget:
             self._body.input_widget.set_completion_manager(self._completion_manager)
             self._body.focus_input()
+
+    def on_chat_input_body_completion_reset_requested(
+        self, _event: ChatInputBody.CompletionResetRequested
+    ) -> None:
+        self._completion_manager.reset()
 
     @property
     def input_widget(self) -> ChatTextArea | None:

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from vibe.core.config import ProviderConfig
 from vibe.core.types import Backend
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from vibe.core.config import ProviderConfig
     from vibe.core.llm.types import BackendLike
 
 
@@ -39,8 +39,9 @@ def create_backend(
     retry_max_elapsed_time: float = 300.0,
     enable_otel: bool = False,
 ) -> BackendLike:
-    factory = BACKEND_FACTORY[provider.backend]
-    if provider.backend == Backend.MISTRAL:
+    backend = Backend(provider.backend)
+    factory = BACKEND_FACTORY[backend]
+    if backend == Backend.MISTRAL:
         return factory(
             provider=provider,
             timeout=timeout,

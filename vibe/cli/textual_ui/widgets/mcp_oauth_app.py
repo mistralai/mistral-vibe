@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import StrEnum, auto
-from typing import ClassVar
+from typing import ClassVar, Protocol
 import webbrowser
 
 from rich.text import Text
@@ -15,10 +16,9 @@ from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 from textual.worker import Worker
 
+from vibe.app_server.protocol import MCPAuthUrlParams
 from vibe.cli.clipboard import copy_text_to_clipboard
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.auth import MCPOAuthError
-from vibe.core.tools.mcp import MCPRegistry
 
 _HELP = "R Retry  Backspace Back"
 _OPTION_PADDING = "  "
@@ -36,6 +36,10 @@ class _LoginResult:
     error: str | None = None
 
 
+class MCPLoginClient(Protocol):
+    def login(self, name: str) -> AsyncIterator[MCPAuthUrlParams]: ...
+
+
 class MCPOAuthApp(Container):
     can_focus_children = True
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -50,10 +54,10 @@ class MCPOAuthApp(Container):
             self.refreshed = refreshed
             self.server_name = server_name
 
-    def __init__(self, server_name: str, mcp_registry: MCPRegistry) -> None:
+    def __init__(self, server_name: str, mcp: MCPLoginClient) -> None:
         super().__init__(id="mcpoauth-app")
         self._server_name = server_name
-        self._mcp_registry = mcp_registry
+        self._mcp = mcp
         self._auth_url: str | None = None
         self._auth_url_visible = False
         self._status_message: str | None = None
@@ -107,12 +111,10 @@ class MCPOAuthApp(Container):
         self.run_worker(self._run_login(), exclusive=True, group="mcp_oauth_login")
 
     async def _run_login(self) -> _LoginResult:
-        async def on_url(url: str) -> None:
-            self._on_auth_url_available(url)
-
         try:
-            await self._mcp_registry.login(self._server_name, on_url=on_url)
-        except (MCPOAuthError, ValueError) as exc:
+            async for event in self._mcp.login(self._server_name):
+                self._on_auth_url_available(event.url)
+        except Exception as exc:
             return _LoginResult(authenticated=False, error=str(exc))
         return _LoginResult(authenticated=True)
 

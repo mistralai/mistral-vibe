@@ -3,7 +3,7 @@ from __future__ import annotations
 from textual.message import Message
 
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
-from vibe.core.utils import compact_complete_display
+from vibe.utils.display import compact_complete_display
 
 
 class CompactMessage(StatusMessage):

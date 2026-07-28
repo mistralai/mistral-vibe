@@ -6,6 +6,12 @@ from textual.pilot import Pilot
 
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp
 from tests.snapshots.snap_compare import SnapCompare
+from vibe.app_server.models import (
+    EffectCallDisplay,
+    EffectDetail,
+    FileEditEffectDetail,
+    FileEditEffectInput,
+)
 from vibe.core.tools.builtins.edit import EditArgs
 
 FILE_CONTENT = "\n".join([
@@ -15,6 +21,14 @@ FILE_CONTENT = "\n".join([
     "MAX_USERS = 100",
     "TIMEOUT = 30",
 ])
+
+
+def _edit_effect(args: EditArgs) -> EffectDetail:
+    return FileEditEffectDetail(
+        tool_name="edit",
+        input=FileEditEffectInput.model_validate(args, from_attributes=True),
+        display=EffectCallDisplay(summary="edit", status_text="Editing file"),
+    )
 
 
 class EditApprovalApp(BaseSnapshotTestApp):
@@ -31,7 +45,7 @@ class EditApprovalApp(BaseSnapshotTestApp):
             old_string="MAX_USERS = 100\nTIMEOUT = 30",
             new_string="MAX_USERS = 200\nTIMEOUT = 30",
         )
-        await self._switch_to_approval_app("edit", args)
+        await self._switch_to_approval_app(_edit_effect(args))
 
 
 class EditApprovalAnsiApp(EditApprovalApp):
@@ -67,7 +81,7 @@ class EditReplaceAllApprovalApp(BaseSnapshotTestApp):
             new_string="count = 1",
             replace_all=True,
         )
-        await self._switch_to_approval_app("edit", args)
+        await self._switch_to_approval_app(_edit_effect(args))
 
 
 LONG_OLD = "    message = " + " + ".join(f'"word_{i}"' for i in range(40))
@@ -89,7 +103,7 @@ class EditOverflowApprovalApp(BaseSnapshotTestApp):
             old_string=f"{LONG_OLD}\n    return message",
             new_string=f"{LONG_NEW}\n    return message.upper()",
         )
-        await self._switch_to_approval_app("edit", args)
+        await self._switch_to_approval_app(_edit_effect(args))
 
 
 def test_snapshot_edit_approval_diff(snap_compare: SnapCompare) -> None:

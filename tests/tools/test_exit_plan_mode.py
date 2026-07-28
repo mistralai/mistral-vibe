@@ -7,10 +7,10 @@ from pydantic import BaseModel
 import pytest
 
 from tests.mock.utils import collect_result
+from tests.stubs.fake_interaction_requests import FakeInteractionRequests
 from vibe.core.agents.models import AgentProfile, AgentSafety, BuiltinAgentName
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
 from vibe.core.tools.builtins.ask_user_question import (
-    Answer,
     AskUserQuestionArgs,
     AskUserQuestionResult,
 )
@@ -23,6 +23,7 @@ from vibe.core.tools.builtins.exit_plan_mode import (
     ExitPlanModeArgs,
     ExitPlanModeConfig,
 )
+from vibe.questions import UserAnswer as Answer
 
 
 @dataclass
@@ -76,12 +77,13 @@ def plan_manager() -> MockAgentManager:
     return MockAgentManager(active_profile=_plan_profile())
 
 
-class MockCallback:
+class MockInteractionRequests(FakeInteractionRequests):
     def __init__(self, result: AskUserQuestionResult) -> None:
         self._result = result
         self.received_args: BaseModel | None = None
+        super().__init__(user_input=self._respond)
 
-    async def __call__(self, args: BaseModel) -> BaseModel:
+    async def _respond(self, args: BaseModel) -> BaseModel:
         self.received_args = args
         return self._result
 
@@ -91,7 +93,7 @@ class TestErrorCases:
     async def test_requires_agent_manager(self, tool: ExitPlanMode) -> None:
         ctx = InvokeContext(
             tool_call_id="t1",
-            user_input_callback=MockCallback(
+            interaction_requests=MockInteractionRequests(
                 AskUserQuestionResult(answers=[], cancelled=True)
             ),
         )
@@ -104,7 +106,7 @@ class TestErrorCases:
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=manager,  # type: ignore[arg-type]
-            user_input_callback=MockCallback(
+            interaction_requests=MockInteractionRequests(
                 AskUserQuestionResult(answers=[], cancelled=True)
             ),
         )
@@ -150,11 +152,11 @@ class TestClearContextOption:
     async def test_always_prepends_clear_option(
         self, tool: ExitPlanMode, plan_manager: MockAgentManager
     ) -> None:
-        cb = MockCallback(AskUserQuestionResult(answers=[], cancelled=True))
+        cb = MockInteractionRequests(AskUserQuestionResult(answers=[], cancelled=True))
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
-            user_input_callback=cb,
+            interaction_requests=cb,
         )
         await collect_result(tool.run(ExitPlanModeArgs(), ctx))
         assert isinstance(cb.received_args, AskUserQuestionArgs)
@@ -170,7 +172,7 @@ class TestClearContextOption:
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
-            user_input_callback=MockCallback(_answer(LABEL_CLEAR_AUTO)),
+            interaction_requests=MockInteractionRequests(_answer(LABEL_CLEAR_AUTO)),
             switch_agent_callback=switch_cb,
             request_clear_context_callback=clear_cb,
         )
@@ -188,7 +190,7 @@ class TestClearContextOption:
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
-            user_input_callback=MockCallback(_answer(LABEL_MANUAL)),
+            interaction_requests=MockInteractionRequests(_answer(LABEL_MANUAL)),
             switch_agent_callback=switch_cb,
             request_clear_context_callback=clear_cb,
         )
@@ -206,7 +208,7 @@ class TestClearContextOption:
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
-            user_input_callback=MockCallback(_answer(LABEL_AUTO)),
+            interaction_requests=MockInteractionRequests(_answer(LABEL_AUTO)),
             switch_agent_callback=switch_cb,
             request_clear_context_callback=clear_cb,
         )
@@ -224,7 +226,7 @@ class TestClearContextOption:
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
-            user_input_callback=MockCallback(_answer(LABEL_CLEAR_AUTO)),
+            interaction_requests=MockInteractionRequests(_answer(LABEL_CLEAR_AUTO)),
             switch_agent_callback=MockSwitchAgentCallback(),
             request_clear_context_callback=MockClearContextCallback(),
             plan_file_path=plan_file,
@@ -241,7 +243,7 @@ class TestAnswerHandling:
         self, tool: ExitPlanMode, plan_manager: MockAgentManager
     ) -> None:
         switch_cb = MockSwitchAgentCallback()
-        cb = MockCallback(
+        cb = MockInteractionRequests(
             AskUserQuestionResult(
                 answers=[
                     Answer(
@@ -256,7 +258,7 @@ class TestAnswerHandling:
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
-            user_input_callback=cb,
+            interaction_requests=cb,
             switch_agent_callback=switch_cb,
         )
         result = await collect_result(tool.run(ExitPlanModeArgs(), ctx))
@@ -268,7 +270,7 @@ class TestAnswerHandling:
     async def test_yes_falls_back_to_switch_profile(
         self, tool: ExitPlanMode, plan_manager: MockAgentManager
     ) -> None:
-        cb = MockCallback(
+        cb = MockInteractionRequests(
             AskUserQuestionResult(
                 answers=[
                     Answer(
@@ -283,7 +285,7 @@ class TestAnswerHandling:
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
-            user_input_callback=cb,
+            interaction_requests=cb,
         )
         result = await collect_result(tool.run(ExitPlanModeArgs(), ctx))
         assert result.switched is True
@@ -293,7 +295,7 @@ class TestAnswerHandling:
     async def test_no_stays_in_plan_mode(
         self, tool: ExitPlanMode, plan_manager: MockAgentManager
     ) -> None:
-        cb = MockCallback(
+        cb = MockInteractionRequests(
             AskUserQuestionResult(
                 answers=[Answer(question="q", answer="No", is_other=False)],
                 cancelled=False,
@@ -302,7 +304,7 @@ class TestAnswerHandling:
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
-            user_input_callback=cb,
+            interaction_requests=cb,
         )
         result = await collect_result(tool.run(ExitPlanModeArgs(), ctx))
         assert result.switched is False
@@ -312,11 +314,11 @@ class TestAnswerHandling:
     async def test_cancelled_stays(
         self, tool: ExitPlanMode, plan_manager: MockAgentManager
     ) -> None:
-        cb = MockCallback(AskUserQuestionResult(answers=[], cancelled=True))
+        cb = MockInteractionRequests(AskUserQuestionResult(answers=[], cancelled=True))
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
-            user_input_callback=cb,
+            interaction_requests=cb,
         )
         result = await collect_result(tool.run(ExitPlanModeArgs(), ctx))
         assert result.switched is False
@@ -326,7 +328,7 @@ class TestAnswerHandling:
     async def test_other_includes_feedback(
         self, tool: ExitPlanMode, plan_manager: MockAgentManager
     ) -> None:
-        cb = MockCallback(
+        cb = MockInteractionRequests(
             AskUserQuestionResult(
                 answers=[
                     Answer(question="q", answer="Add error handling", is_other=True)
@@ -337,7 +339,7 @@ class TestAnswerHandling:
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
-            user_input_callback=cb,
+            interaction_requests=cb,
         )
         result = await collect_result(tool.run(ExitPlanModeArgs(), ctx))
         assert result.switched is False
@@ -352,11 +354,11 @@ class TestPlanFile:
         plan_file = tmp_path / "plan.md"
         plan_file.write_text("# My Plan\n\n- Step 1\n- Step 2\n")
 
-        cb = MockCallback(AskUserQuestionResult(answers=[], cancelled=True))
+        cb = MockInteractionRequests(AskUserQuestionResult(answers=[], cancelled=True))
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
-            user_input_callback=cb,
+            interaction_requests=cb,
             plan_file_path=plan_file,
         )
         await collect_result(tool.run(ExitPlanModeArgs(), ctx))
@@ -372,7 +374,7 @@ class TestPlanFile:
         plan_file = tmp_path / "plan.md"
         plan_file.write_text("# My Plan\n\n- Step 1\n- Step 2\n")
 
-        cb = MockCallback(
+        cb = MockInteractionRequests(
             AskUserQuestionResult(
                 answers=[
                     Answer(
@@ -387,7 +389,7 @@ class TestPlanFile:
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
-            user_input_callback=cb,
+            interaction_requests=cb,
             plan_file_path=plan_file,
         )
         result = await collect_result(tool.run(ExitPlanModeArgs(), ctx))

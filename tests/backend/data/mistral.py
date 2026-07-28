@@ -182,3 +182,29 @@ STREAMED_TOOL_CONVERSATION_PARAMS: list[tuple[Url, list[Chunk], list[ResultData]
         ],
     )
 ]
+
+
+# GLM models routed through the Mistral provider terminate the stream with a
+# usage-only chunk carrying `choices: []` instead of attaching usage to the
+# final content chunk.
+STREAMED_EMPTY_CHOICES_PARAMS: list[tuple[Url, list[Chunk], list[ResultData]]] = [
+    (
+        "https://api.mistral.ai",
+        [
+            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}',
+            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Some content"},"finish_reason":null}]}',
+            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}]}',
+            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"glm-4.6","choices":[],"usage":{"prompt_tokens":100,"total_tokens":300,"completion_tokens":200}}',
+            rb"data: [DONE]",
+        ],
+        [
+            {"message": "", "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
+            {
+                "message": "Some content",
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+            },
+            {"message": "", "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
+            {"message": "", "usage": {"prompt_tokens": 100, "completion_tokens": 200}},
+        ],
+    )
+]

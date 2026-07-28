@@ -32,19 +32,60 @@ from tests.backend.data.fireworks import (
 )
 from tests.backend.data.mistral import (
     SIMPLE_CONVERSATION_PARAMS as MISTRAL_SIMPLE_CONVERSATION_PARAMS,
+    STREAMED_EMPTY_CHOICES_PARAMS as MISTRAL_STREAMED_EMPTY_CHOICES_PARAMS,
     STREAMED_SIMPLE_CONVERSATION_PARAMS as MISTRAL_STREAMED_SIMPLE_CONVERSATION_PARAMS,
     STREAMED_TOOL_CONVERSATION_PARAMS as MISTRAL_STREAMED_TOOL_CONVERSATION_PARAMS,
     TOOL_CONVERSATION_PARAMS as MISTRAL_TOOL_CONVERSATION_PARAMS,
 )
 from tests.constants import CHAT_COMPLETIONS_PATH
 from vibe.core.config import ModelConfig, ProviderConfig
+from vibe.core.llm.backend.base import build_chat_payload
 from vibe.core.llm.backend.factory import BACKEND_FACTORY, create_backend
-from vibe.core.llm.backend.generic import GenericBackend
+from vibe.core.llm.backend.generic import GenericBackend, OpenAIAdapter
 from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper
 from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder
 from vibe.core.llm.types import BackendLike
 from vibe.core.types import Backend, FunctionCall, LLMChunk, LLMMessage, Role, ToolCall
-from vibe.core.utils import get_user_agent
+from vibe.utils.http import get_user_agent
+from vibe.utils.tool_presentation import (
+    EffectCallDisplay,
+    ToolCallPresentation,
+    ToolEffectKind,
+)
+
+
+def test_internal_tool_presentation_is_not_sent_to_provider() -> None:
+    message = LLMMessage(
+        role=Role.assistant,
+        tool_calls=[
+            ToolCall(
+                id="call-1",
+                function=FunctionCall(name="bash", arguments='{"command":"pwd"}'),
+                presentation=ToolCallPresentation(
+                    kind=ToolEffectKind.SHELL,
+                    display=EffectCallDisplay(
+                        summary="bash: pwd", status_text="Running command"
+                    ),
+                ),
+            )
+        ],
+    )
+
+    request = OpenAIAdapter().prepare_request(
+        model_name="model",
+        messages=[message],
+        temperature=0.0,
+        tools=None,
+        max_tokens=None,
+        tool_choice=None,
+        enable_streaming=False,
+        provider=ProviderConfig(
+            name="provider", api_base="https://example.com/v1", api_key_env_var=""
+        ),
+    )
+
+    payload = json.loads(request.body)
+    assert "presentation" not in payload["messages"][0]["tool_calls"][0]
 
 
 class TestBackend:
@@ -134,6 +175,7 @@ class TestBackend:
             *FIREWORKS_STREAMED_TOOL_CONVERSATION_PARAMS,
             *MISTRAL_STREAMED_SIMPLE_CONVERSATION_PARAMS,
             *MISTRAL_STREAMED_TOOL_CONVERSATION_PARAMS,
+            *MISTRAL_STREAMED_EMPTY_CHOICES_PARAMS,
         ],
     )
     async def test_backend_complete_streaming(
@@ -653,6 +695,29 @@ class TestMistralMapperPrepareMessage:
         msg = LLMMessage(role=Role.assistant, content="Hello!")
         result = mapper.prepare_message(msg)
         assert result.content == "Hello!"
+
+
+class TestGenericBackendReasoningEffort:
+    @pytest.mark.parametrize(
+        ("thinking", "expect_in_payload"),
+        [("off", False), ("low", True), ("medium", True), ("high", True)],
+    )
+    def test_build_payload_reasoning_effort(
+        self, thinking: str, expect_in_payload: bool
+    ) -> None:
+        payload = build_chat_payload(
+            model_name="test-model",
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.7,
+            tools=None,
+            max_tokens=None,
+            tool_choice=None,
+            thinking=thinking,
+        )
+        if expect_in_payload:
+            assert payload["reasoning_effort"] == thinking
+        else:
+            assert "reasoning_effort" not in payload
 
 
 class TestMistralBackendReasoningEffort:

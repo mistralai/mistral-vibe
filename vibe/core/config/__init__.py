@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from vibe.core.config._defaults import (
+    AUTO_THEME,
     DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
     DEFAULT_API_TIMEOUT,
     DEFAULT_AUTO_COMPACT_THRESHOLD,
@@ -11,8 +12,12 @@ from vibe.core.config._defaults import (
     DEFAULT_MISTRAL_SERVER_URL,
     DEFAULT_THEME,
     DEFAULT_VIBE_BASE_URL,
+    FALLBACK_THEME,
 )
-from vibe.core.config.default_orchestrator import build_default_orchestrator
+from vibe.core.config.default_orchestrator import (
+    build_default_orchestrator,
+    build_user_config_orchestrator,
+)
 from vibe.core.config.layer import (
     ConfigLayer,
     ConfigLayerError,
@@ -28,6 +33,7 @@ from vibe.core.config.layer import (
 from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.config.layers.default import DefaultConfigLayer
 from vibe.core.config.layers.discovered import DiscoveredConfigLayer
+from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.models import (
     THINKING_LEVELS,
     ConnectorConfig,
@@ -92,13 +98,13 @@ from vibe.core.config.vibe_schema import (
     get_persisted_config,
     load_dotenv_values,
     resolve_api_key,
-    resolve_theme_name,
 )
 from vibe.core.prompts import MissingPromptFileError
 
 VibeConfigSchemaType = type[VibeConfigSchema]
 
 __all__ = [
+    "AUTO_THEME",
     "DEFAULT_ACTIVE_MODEL_CONFIG",
     "DEFAULT_API_RETRY_MAX_ELAPSED_TIME",
     "DEFAULT_API_TIMEOUT",
@@ -116,6 +122,7 @@ __all__ = [
     "DEFAULT_TTS_MODELS",
     "DEFAULT_TTS_PROVIDERS",
     "DEFAULT_VIBE_BASE_URL",
+    "FALLBACK_THEME",
     "MISSING_BACKING_STORE_DATA_FINGERPRINT",
     "THINKING_LEVELS",
     "AddOperationPatch",
@@ -135,6 +142,7 @@ __all__ = [
     "DuplicateMergeMetadataError",
     "EmptyLayerError",
     "ExperimentsConfig",
+    "GrowthbookLayer",
     "LayerConfigSnapshot",
     "LayerImplementationError",
     "LayerNotLoadedError",
@@ -176,9 +184,9 @@ __all__ = [
     "WithShallowMerge",
     "WithUnionMerge",
     "build_default_orchestrator",
+    "build_user_config_orchestrator",
     "create_default_config",
     "get_persisted_config",
     "load_dotenv_values",
     "resolve_api_key",
-    "resolve_theme_name",
 ]

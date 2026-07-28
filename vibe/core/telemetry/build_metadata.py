@@ -13,7 +13,7 @@ from vibe.core.telemetry.types import (
     TerminalEmulator,
 )
 from vibe.core.types import LLMMessage
-from vibe.core.utils.platform import get_platform_id, get_platform_version
+from vibe.utils.platform import get_platform_id, get_platform_version
 
 
 def build_base_metadata(

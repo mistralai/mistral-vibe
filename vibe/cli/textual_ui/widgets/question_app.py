@@ -12,6 +12,12 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Input
 
+from vibe.app_server.models import (
+    QuestionChoice,
+    UserAnswer,
+    UserQuestion,
+    UserQuestionRequest,
+)
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
@@ -21,14 +27,6 @@ _INPUT_GRACE_PERIOD_S = 0.5
 
 if TYPE_CHECKING:
     from textual.widget import Widget
-
-    from vibe.core.tools.builtins.ask_user_question import (
-        AskUserQuestionArgs,
-        Choice,
-        Question,
-    )
-
-from vibe.core.tools.builtins.ask_user_question import Answer
 
 
 class QuestionApp(VimNavigationMixin, Container):
@@ -46,14 +44,14 @@ class QuestionApp(VimNavigationMixin, Container):
     ]
 
     class Answered(Message):
-        def __init__(self, answers: list[Answer]) -> None:
+        def __init__(self, answers: list[UserAnswer]) -> None:
             super().__init__()
             self.answers = answers
 
     class Cancelled(Message):
         pass
 
-    def __init__(self, args: AskUserQuestionArgs) -> None:
+    def __init__(self, args: UserQuestionRequest) -> None:
         super().__init__(id="question-app")
         self.args = args
         self.questions = args.questions
@@ -74,7 +72,7 @@ class QuestionApp(VimNavigationMixin, Container):
         self._mount_time: float = 0.0
 
     @property
-    def _current_question(self) -> Question:
+    def _current_question(self) -> UserQuestion:
         return self.questions[self.current_question_idx]
 
     @property
@@ -223,7 +221,7 @@ class QuestionApp(VimNavigationMixin, Container):
         self,
         widget: NoMarkupStatic,
         idx: int,
-        opt: Choice,
+        opt: QuestionChoice,
         is_multi: bool,
         is_focused: bool,
         is_selected: bool,
@@ -555,11 +553,11 @@ class QuestionApp(VimNavigationMixin, Container):
         return all(i in self.answers for i in range(len(self.questions)))
 
     def _submit(self) -> None:
-        result: list[Answer] = []
+        result: list[UserAnswer] = []
         for i, q in enumerate(self.questions):
             answer_text, is_other = self.answers.get(i, ("", False))
             result.append(
-                Answer(question=q.question, answer=answer_text, is_other=is_other)
+                UserAnswer(question=q.question, answer=answer_text, is_other=is_other)
             )
         self.post_message(self.Answered(answers=result))
 

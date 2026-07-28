@@ -6,6 +6,37 @@ from typing import TYPE_CHECKING
 
 from textual.widget import Widget
 
+from vibe.app_server.events import (
+    AppServerEvent,
+    HistoryEntryAdded,
+    HistoryEntryUpdated,
+)
+from vibe.app_server.models import (
+    AgentChangedNoticeDetail,
+    CancelledEffectState,
+    CompactionDetails,
+    CompletedEffectState,
+    ContextClearedNoticeDetail,
+    FailedEffectState,
+    HookNoticeDetail,
+    HookScope,
+    HookSeverity,
+    JsonPatchOperation,
+    PlanReviewEndedNoticeDetail,
+    PlanReviewStartedNoticeDetail,
+    PublicCallbackEntry,
+    PublicCheckpointEntry,
+    PublicEffectEntry,
+    PublicEntryGenerationStatus,
+    PublicHistoryEntry,
+    PublicMessageEntry,
+    PublicNoticeEntry,
+    PublicReasoningEntry,
+    ScheduledLoopFiredNoticeDetail,
+    SessionTitleUpdatedNoticeDetail,
+    SkippedEffectState,
+    WaitingForInputNoticeDetail,
+)
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.loading import DEFAULT_LOADING_STATUS
 from vibe.cli.textual_ui.widgets.messages import (
@@ -14,39 +45,23 @@ from vibe.cli.textual_ui.widgets.messages import (
     HookSystemMessageLine,
     PlanFileMessage,
     ReasoningMessage,
+    UserCommandMessage,
 )
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
-from vibe.core.hooks.models import (
-    HookEndEvent,
-    HookEvent,
-    HookRunEndEvent,
-    HookRunStartEvent,
-    HookStartEvent,
-    HookType,
+from vibe.cli.textual_ui.widgets.tools import (
+    ToolCallMessage,
+    ToolGroup,
+    ToolResultMessage,
 )
-from vibe.core.tools.ui import ToolUIDataAdapter
-from vibe.core.types import (
-    AgentProfileChangedEvent,
-    AssistantEvent,
-    BaseEvent,
-    CompactEndEvent,
-    CompactStartEvent,
-    ContextClearedEvent,
-    PlanReviewEndedEvent,
-    PlanReviewRequestedEvent,
-    ReasoningEvent,
-    SessionTitleUpdatedEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-    ToolStreamEvent,
-    UserMessageEvent,
-    WaitingForInputEvent,
-)
-from vibe.core.utils import TaggedText
+from vibe.utils.tool_presentation import ToolEffectKind
 
 if TYPE_CHECKING:
     from vibe.cli.textual_ui.widgets.loading import LoadingWidget
+
+
+_NON_GROUPED_EFFECT_KINDS = frozenset({
+    ToolEffectKind.FILE_EDIT,
+    ToolEffectKind.FILE_WRITE,
+})
 
 
 class EventHandler:
@@ -55,199 +70,308 @@ class EventHandler:
         mount_callback: Callable,
         get_tools_collapsed: Callable[[], bool],
         on_profile_changed: Callable[[], None] | None = None,
+        get_show_thinking: Callable[[], bool] | None = None,
         on_context_cleared: Callable[[Path | None], Awaitable[None]] | None = None,
     ) -> None:
         self.mount_callback = mount_callback
         self.get_tools_collapsed = get_tools_collapsed
         self.on_profile_changed = on_profile_changed
+        self.get_show_thinking = get_show_thinking or (lambda: True)
         self.on_context_cleared = on_context_cleared
         self.tool_calls: dict[str, ToolCallMessage] = {}
         self.current_compact: CompactMessage | None = None
         self.current_streaming_message: AssistantMessage | None = None
         self.current_streaming_reasoning: ReasoningMessage | None = None
+        self.current_tool_group: ToolGroup | None = None
         self.plan_file_message: PlanFileMessage | None = None
-        # Keyed by "agent_turn", "pre_tool:{call_id}", "post_tool:{call_id}"
         self._hook_containers: dict[str, HookRunContainer] = {}
-        # Per-tool-call anchor for correct widget ordering during concurrent calls.
         self._tool_call_anchors: dict[str, Widget] = {}
-        # Errored results shown muted while their verdict is unknown: a follow-up
-        # tool call confirms them recoverable (stay muted), turn end escalates
-        # them to hard errors.
         self._pending_error_results: list[ToolResultMessage] = []
 
-    async def _handle_hook_event(
-        self, event: HookEvent, loading_widget: LoadingWidget | None = None
-    ) -> None:
+    async def handle_event(
+        self, event: AppServerEvent, loading_widget: LoadingWidget | None = None
+    ) -> ToolCallMessage | None:
         match event:
-            case HookRunStartEvent():
-                await self._handle_hook_run_start(event)
-            case HookRunEndEvent():
-                await self._handle_hook_run_end(event)
-            case HookStartEvent():
+            case HistoryEntryAdded(entry=entry):
+                return await self._handle_entry_added(entry, loading_widget)
+            case HistoryEntryUpdated() as update:
+                await self._handle_entry_updated(update, loading_widget)
+            case _:
+                pass
+        return None
+
+    async def _handle_entry_added(
+        self, entry: PublicHistoryEntry, loading_widget: LoadingWidget | None
+    ) -> ToolCallMessage | None:
+        if self.current_tool_group is not None and not _entry_keeps_tool_group(entry):
+            self._finalize_tool_group()
+
+        match entry:
+            case PublicMessageEntry(role="assistant"):
+                await self._handle_assistant_delta(entry.text, loading_widget)
+                if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
+                    await self.finalize_streaming()
+            case PublicMessageEntry(role="user"):
                 await self.finalize_streaming()
-                if loading_widget:
-                    loading_widget.set_status(f"Running hook {event.hook_name}")
-            case HookEndEvent():
-                if event.content:
-                    key = self._hook_container_key(event.scope, event.tool_call_id)
-                    container = self._hook_containers.get(key)
-                    if container is not None:
-                        widget = HookSystemMessageLine(
-                            hook_name=event.hook_name,
-                            content=event.content,
-                            severity=event.status,
-                        )
-                        await container.add_message(widget)
-                        if event.scope == HookType.PRE_TOOL and event.tool_call_id:
-                            tool_call = self.tool_calls.get(event.tool_call_id)
-                            if tool_call is not None:
-                                tool_call.add_class("no-gap")
-                if loading_widget:
+            case PublicMessageEntry(role="system"):
+                pass
+            case PublicReasoningEntry():
+                await self._handle_reasoning_delta(entry.text, loading_widget)
+                if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
+                    await self.finalize_streaming()
+            case PublicEffectEntry():
+                await self.finalize_streaming()
+                tool_call = await self._handle_effect_started(entry, loading_widget)
+                if _effect_is_terminal(entry):
+                    await self._handle_effect_completed(entry, loading_widget)
+                return tool_call
+            case PublicCheckpointEntry(kind="compaction"):
+                await self.finalize_streaming()
+                await self._handle_compact_start()
+                if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
+                    await self._handle_compact_end(entry)
+            case PublicNoticeEntry():
+                await self._handle_notice(entry, loading_widget)
+            case PublicCallbackEntry():
+                await self.finalize_streaming()
+            case _:
+                raise TypeError(
+                    f"Unsupported public history entry: {type(entry).__name__}"
+                )
+        return None
+
+    async def _handle_entry_updated(
+        self, update: HistoryEntryUpdated, loading_widget: LoadingWidget | None
+    ) -> None:
+        entry = update.entry
+        match entry:
+            case PublicMessageEntry(role="assistant"):
+                if delta := _appended_text(update.patch, "/content/0/text"):
+                    await self._handle_assistant_delta(delta, loading_widget)
+                if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
+                    await self.finalize_streaming()
+            case PublicReasoningEntry():
+                if delta := _appended_text(update.patch, "/text"):
+                    await self._handle_reasoning_delta(delta, loading_widget)
+                if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
+                    await self.finalize_streaming()
+            case PublicEffectEntry():
+                call = self.tool_calls.get(entry.id)
+                if call is not None:
+                    call.update_entry(entry)
+                    if output := _appended_text(update.patch, "/state/outputText"):
+                        call.set_stream_message(output)
+                if _effect_became_terminal(update):
+                    await self.finalize_streaming()
+                    await self._handle_effect_completed(entry, loading_widget)
+                elif loading_widget is not None:
+                    loading_widget.set_status(entry.detail.display.status_text)
+            case PublicCheckpointEntry(kind="compaction"):
+                if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
+                    await self.finalize_streaming()
+                    await self._handle_compact_end(entry)
+            case _:
+                pass
+
+    async def _handle_effect_started(
+        self, entry: PublicEffectEntry, loading_widget: LoadingWidget | None
+    ) -> ToolCallMessage:
+        existing = self.tool_calls.get(entry.id)
+        if existing is not None:
+            existing.update_entry(entry)
+            tool_call = existing
+        else:
+            self._resolve_pending_errors(escalate=False)
+            tool_call = ToolCallMessage(entry)
+            self.tool_calls[entry.id] = tool_call
+            self._tool_call_anchors[entry.id] = tool_call
+            if entry.detail.kind in _NON_GROUPED_EFFECT_KINDS:
+                self._finalize_tool_group()
+                await self.mount_callback(tool_call)
+            else:
+                group = await self._ensure_tool_group()
+                await self._mount_in_group(group, tool_call)
+        if loading_widget is not None:
+            loading_widget.set_status(entry.detail.display.status_text)
+        return tool_call
+
+    async def _handle_effect_completed(
+        self, entry: PublicEffectEntry, loading_widget: LoadingWidget | None
+    ) -> None:
+        call_widget = self.tool_calls.get(entry.id)
+        anchor = self._tool_call_anchors.get(entry.id) or call_widget
+        result = ToolResultMessage(entry, call_widget)
+        await self.mount_callback(result, after=anchor)
+        if isinstance(entry.state, FailedEffectState):
+            self._pending_error_results.append(result)
+        self._tool_call_anchors[entry.id] = result
+        self.tool_calls.pop(entry.id, None)
+        if loading_widget is not None and not self.tool_calls:
+            loading_widget.set_status(DEFAULT_LOADING_STATUS)
+
+    async def _handle_assistant_delta(
+        self, content: str, loading_widget: LoadingWidget | None
+    ) -> None:
+        if self.current_streaming_reasoning is not None:
+            self.current_streaming_reasoning.stop_spinning()
+            await self.current_streaming_reasoning.stop_stream()
+            self.current_streaming_reasoning = None
+        if self.current_streaming_message is None:
+            if loading_widget is not None:
+                loading_widget.set_status(DEFAULT_LOADING_STATUS)
+            message = AssistantMessage(content)
+            self.current_streaming_message = message
+            await self.mount_callback(message)
+            return
+        await self.current_streaming_message.append_content(content)
+
+    async def _handle_reasoning_delta(
+        self, content: str, loading_widget: LoadingWidget | None
+    ) -> None:
+        if loading_widget is not None:
+            loading_widget.set_status("Thinking")
+        if self.current_streaming_message is not None:
+            await self.current_streaming_message.stop_stream()
+            if self.current_streaming_message.is_stripped_content_empty():
+                await self.current_streaming_message.remove()
+            self.current_streaming_message = None
+        if self.current_streaming_reasoning is None:
+            message = ReasoningMessage(content, collapsed=self.get_tools_collapsed())
+            self.current_streaming_reasoning = message
+            group = await self._ensure_tool_group()
+            await self._mount_in_group(group, message)
+            if not self.get_show_thinking():
+                message.display = False
+                group.sync_visibility()
+            return
+        await self.current_streaming_reasoning.append_content(content)
+
+    async def _handle_notice(
+        self, entry: PublicNoticeEntry, loading_widget: LoadingWidget | None
+    ) -> None:
+        match entry.detail:
+            case HookNoticeDetail() as detail:
+                await self._handle_hook_notice(detail, loading_widget)
+            case AgentChangedNoticeDetail():
+                if self.on_profile_changed is not None:
+                    self.on_profile_changed()
+            case ContextClearedNoticeDetail(plan_file_path=plan_file_path):
+                await self.finalize_streaming()
+                if self.on_context_cleared is not None:
+                    path = Path(plan_file_path) if plan_file_path is not None else None
+                    await self.on_context_cleared(path)
+            case PlanReviewStartedNoticeDetail(file_path=file_path):
+                await self._handle_start_plan_review(Path(file_path))
+            case PlanReviewEndedNoticeDetail():
+                self._handle_stop_plan_review()
+            case WaitingForInputNoticeDetail():
+                await self.finalize_streaming()
+            case ScheduledLoopFiredNoticeDetail():
+                await self.finalize_streaming()
+                await self.mount_callback(UserCommandMessage(entry.message))
+            case SessionTitleUpdatedNoticeDetail():
+                pass
+
+    async def _handle_hook_notice(
+        self, detail: HookNoticeDetail, loading_widget: LoadingWidget | None
+    ) -> None:
+        match detail.kind:
+            case "hook_run_started":
+                await self._handle_hook_run_start(detail)
+            case "hook_run_completed":
+                await self._handle_hook_run_end(detail)
+            case "hook_started":
+                await self.finalize_streaming()
+                if loading_widget is not None:
+                    loading_widget.set_status(
+                        f"Running hook {detail.hook_name or ''}".rstrip()
+                    )
+            case "hook_completed":
+                await self._handle_hook_completed(detail)
+                if loading_widget is not None:
                     loading_widget.set_status(DEFAULT_LOADING_STATUS)
 
     @staticmethod
-    def _hook_container_key(scope: HookType, tool_call_id: str | None) -> str:
-        if scope == HookType.POST_AGENT:
+    def _hook_container_key(scope: HookScope, tool_call_id: str | None) -> str:
+        if scope is HookScope.POST_AGENT:
             return "agent_turn"
         return f"{scope.value}:{tool_call_id or ''}"
 
-    async def _handle_hook_run_start(self, event: HookRunStartEvent) -> None:
+    async def _handle_hook_run_start(self, details: HookNoticeDetail) -> None:
         container = HookRunContainer()
-        key = self._hook_container_key(event.scope, event.tool_call_id)
+        key = self._hook_container_key(details.scope, details.tool_call_id)
         self._hook_containers[key] = container
-
-        if event.scope == HookType.PRE_TOOL:
-            container.add_class("hook-pre-tool")
-
-        anchor = self._tool_call_anchors.get(event.tool_call_id or "")
-        if event.scope == HookType.PRE_TOOL and anchor is not None:
-            # Mount *above* the tool call widget so it reads as a precondition.
+        if details.scope is HookScope.PRE_TOOL:
+            container.add_class("hook-before-tool")
+        anchor = self._tool_call_anchors.get(details.tool_call_id or "")
+        if details.scope is HookScope.PRE_TOOL and anchor is not None:
             await self.mount_callback(container, before=anchor)
-        elif event.scope == HookType.POST_TOOL and anchor is not None:
+        elif details.scope is HookScope.POST_TOOL and anchor is not None:
             await self.mount_callback(container, after=anchor)
         else:
             await self.mount_callback(container)
 
-    async def _handle_hook_run_end(self, event: HookRunEndEvent) -> None:
-        key = self._hook_container_key(event.scope, event.tool_call_id)
+    async def _handle_hook_run_end(self, details: HookNoticeDetail) -> None:
+        key = self._hook_container_key(details.scope, details.tool_call_id)
         container = self._hook_containers.pop(key, None)
         if container is None:
             return
         if container.display:
-            # PRE_TOOL containers mount *above* the call widget, so they
-            # must not become the anchor — the result still needs to land
-            # after the call widget, not after the hook container.
-            if event.scope != HookType.PRE_TOOL and event.tool_call_id:
-                self._tool_call_anchors[event.tool_call_id] = container
-        else:
-            await container.remove()
+            if details.scope is not HookScope.PRE_TOOL and details.tool_call_id:
+                self._tool_call_anchors[details.tool_call_id] = container
+            return
+        await container.remove()
 
-    async def handle_event(  # noqa: PLR0912
-        self, event: BaseEvent, loading_widget: LoadingWidget | None = None
-    ) -> ToolCallMessage | None:
-        match event:
-            case ReasoningEvent():
-                await self._handle_reasoning_message(event)
-            case AssistantEvent():
-                await self._handle_assistant_message(event)
-            case ToolCallEvent():
-                await self.finalize_streaming()
-                return await self._handle_tool_call(event, loading_widget)
-            case ToolResultEvent():
-                await self.finalize_streaming()
-                sanitized_event = self._sanitize_event(event)
-                await self._handle_tool_result(sanitized_event)
-            case ToolStreamEvent():
-                await self._handle_tool_stream(event)
-            case CompactStartEvent():
-                await self.finalize_streaming()
-                await self._handle_compact_start()
-            case CompactEndEvent():
-                await self.finalize_streaming()
-                await self._handle_compact_end(event)
-            case AgentProfileChangedEvent():
-                if self.on_profile_changed:
-                    self.on_profile_changed()
-            case ContextClearedEvent():
-                await self.finalize_streaming()
-                if self.on_context_cleared:
-                    await self.on_context_cleared(event.plan_file_path)
-            case SessionTitleUpdatedEvent():
-                pass
-            case UserMessageEvent():
-                await self.finalize_streaming()
-            case HookEvent():
-                await self._handle_hook_event(event, loading_widget)
-            case PlanReviewRequestedEvent():
-                await self._handle_start_plan_review(file_path=event.file_path)
-            case PlanReviewEndedEvent():
-                self._handle_stop_plan_review()
-            case WaitingForInputEvent():
-                await self.finalize_streaming()
-            case _:
-                await self.finalize_streaming()
-                await self._handle_unknown_event(event)
-        return None
-
-    def _sanitize_event(self, event: ToolResultEvent) -> ToolResultEvent:
-        if isinstance(event, ToolResultEvent):
-            return ToolResultEvent(
-                tool_name=event.tool_name,
-                tool_class=event.tool_class,
-                result=event.result,
-                error=TaggedText.from_string(event.error).message
-                if event.error
-                else None,
-                skipped=event.skipped,
-                skip_reason=TaggedText.from_string(event.skip_reason).message
-                if event.skip_reason
-                else None,
-                cancelled=event.cancelled,
-                duration=event.duration,
-                tool_call_id=event.tool_call_id,
+    async def _handle_hook_completed(self, details: HookNoticeDetail) -> None:
+        if not details.content or details.hook_name is None:
+            return
+        key = self._hook_container_key(details.scope, details.tool_call_id)
+        container = self._hook_containers.get(key)
+        if container is None:
+            return
+        await container.add_message(
+            HookSystemMessageLine(
+                hook_name=details.hook_name,
+                content=details.content,
+                severity=details.status or HookSeverity.WARNING,
             )
-        return event
+        )
+        if details.scope is HookScope.PRE_TOOL and details.tool_call_id:
+            tool_call = self.tool_calls.get(details.tool_call_id)
+            if tool_call is not None:
+                tool_call.add_class("no-gap")
 
-    async def _handle_tool_call(
-        self, event: ToolCallEvent, loading_widget: LoadingWidget | None = None
-    ) -> ToolCallMessage | None:
-        tool_call_id = event.tool_call_id
-        existing_tool_call = self.tool_calls.get(tool_call_id) if tool_call_id else None
-        if existing_tool_call:
-            existing_tool_call.update_event(event)
-            tool_call = existing_tool_call
+    def _finalize_tool_group(self) -> None:
+        self.current_tool_group = None
+
+    async def _ensure_tool_group(self) -> ToolGroup:
+        if self.current_tool_group is None:
+            group = ToolGroup()
+            self.current_tool_group = group
+            await self.mount_callback(group)
+        return self.current_tool_group
+
+    async def _mount_in_group(self, group: ToolGroup, widget: Widget) -> None:
+        children = list(group.content_container.children)
+        if children:
+            await self.mount_callback(widget, after=children[-1])
         else:
-            # A follow-up tool call is the recovery signal: leave prior errors muted.
-            self._resolve_pending_errors(escalate=False)
-            tool_call = ToolCallMessage(event)
-            if tool_call_id:
-                self.tool_calls[tool_call_id] = tool_call
-                self._tool_call_anchors[tool_call_id] = tool_call
-            await self.mount_callback(tool_call)
+            await self.mount_callback(widget, container=group.content_container)
+        group.sync_visibility()
 
-        if loading_widget and event.tool_class:
-            adapter = ToolUIDataAdapter(event.tool_class)
-            loading_widget.set_status(adapter.get_status_text())
+    async def _handle_compact_start(self) -> None:
+        compact = CompactMessage()
+        self.current_compact = compact
+        await self.mount_callback(compact)
 
-        return tool_call
-
-    async def _handle_tool_result(self, event: ToolResultEvent) -> None:
-        tool_call_id = event.tool_call_id
-        call_widget = self.tool_calls.get(tool_call_id) if tool_call_id else None
-        anchor = (
-            self._tool_call_anchors.get(tool_call_id) if tool_call_id else None
-        ) or call_widget
-
-        tool_result = ToolResultMessage(event, call_widget)
-        await self.mount_callback(tool_result, after=anchor)
-
-        if event.error and not event.skipped and not event.cancelled:
-            self._pending_error_results.append(tool_result)
-
-        if tool_call_id:
-            self._tool_call_anchors[tool_call_id] = tool_result
-            if tool_call_id in self.tool_calls:
-                del self.tool_calls[tool_call_id]
+    async def _handle_compact_end(self, entry: PublicCheckpointEntry) -> None:
+        if self.current_compact is None:
+            return
+        details = CompactionDetails.model_validate(entry.details)
+        self.current_compact.set_complete(
+            old_session_id=details.old_session_id, new_session_id=details.new_session_id
+        )
+        self.current_compact = None
 
     def _resolve_pending_errors(self, *, escalate: bool) -> None:
         if escalate:
@@ -256,56 +380,7 @@ class EventHandler:
         self._pending_error_results.clear()
 
     def escalate_unresolved_errors(self) -> None:
-        # Called at turn end: errors not followed by a tool call were terminal.
         self._resolve_pending_errors(escalate=True)
-
-    async def _handle_tool_stream(self, event: ToolStreamEvent) -> None:
-        tool_call = self.tool_calls.get(event.tool_call_id)
-        if tool_call:
-            tool_call.set_stream_message(event.message)
-
-    async def _handle_assistant_message(self, event: AssistantEvent) -> None:
-        if self.current_streaming_reasoning is not None:
-            self.current_streaming_reasoning.stop_spinning()
-            await self.current_streaming_reasoning.stop_stream()
-            self.current_streaming_reasoning = None
-
-        if self.current_streaming_message is None:
-            msg = AssistantMessage(event.content)
-            self.current_streaming_message = msg
-            await self.mount_callback(msg)
-        else:
-            await self.current_streaming_message.append_content(event.content)
-
-    async def _handle_reasoning_message(self, event: ReasoningEvent) -> None:
-        if self.current_streaming_message is not None:
-            await self.current_streaming_message.stop_stream()
-            if self.current_streaming_message.is_stripped_content_empty():
-                await self.current_streaming_message.remove()
-            self.current_streaming_message = None
-
-        if self.current_streaming_reasoning is None:
-            tools_collapsed = self.get_tools_collapsed()
-            msg = ReasoningMessage(event.content, collapsed=tools_collapsed)
-            self.current_streaming_reasoning = msg
-            await self.mount_callback(msg)
-        else:
-            await self.current_streaming_reasoning.append_content(event.content)
-
-    async def _handle_compact_start(self) -> None:
-        compact_msg = CompactMessage()
-        self.current_compact = compact_msg
-        await self.mount_callback(compact_msg)
-
-    async def _handle_compact_end(self, event: CompactEndEvent) -> None:
-        if self.current_compact:
-            self.current_compact.set_complete(
-                old_session_id=event.old_session_id, new_session_id=event.new_session_id
-            )
-            self.current_compact = None
-
-    async def _handle_unknown_event(self, event: BaseEvent) -> None:
-        await self.mount_callback(NoMarkupStatic(str(event), classes="unknown-event"))
 
     async def finalize_streaming(self) -> None:
         if self.current_streaming_reasoning is not None:
@@ -321,14 +396,13 @@ class EventHandler:
     ) -> None:
         for tool_call in self.tool_calls.values():
             if cancelled:
-                # A user interrupt is neutral, not a failure: hold a grey square.
                 tool_call.show_muted()
             else:
                 tool_call.stop_spinning(success=success)
         self.tool_calls.clear()
         self._tool_call_anchors.clear()
         self._hook_containers.clear()
-        # On cancel nothing is terminal -- leave prior errors muted too.
+        self._finalize_tool_group()
         self._resolve_pending_errors(escalate=not cancelled)
 
     def stop_current_compact(self) -> None:
@@ -338,13 +412,50 @@ class EventHandler:
 
     async def _handle_start_plan_review(self, file_path: Path) -> None:
         file_path.touch()
-        msg = PlanFileMessage(file_path=file_path)
-        self.plan_file_message = msg
-        await self.mount_callback(msg)
+        message = PlanFileMessage(file_path=file_path)
+        self.plan_file_message = message
+        await self.mount_callback(message)
 
     def _handle_stop_plan_review(self) -> None:
         if self.plan_file_message is None:
             return
-
         self.plan_file_message.stop_watching()
         self.plan_file_message = None
+
+
+def _entry_keeps_tool_group(entry: PublicHistoryEntry) -> bool:
+    return isinstance(entry, PublicEffectEntry | PublicReasoningEntry) or (
+        isinstance(entry, PublicNoticeEntry)
+        and isinstance(entry.detail, HookNoticeDetail)
+    )
+
+
+def _appended_text(patch: list[JsonPatchOperation], path: str) -> str:
+    return "".join(
+        operation.value
+        for operation in patch
+        if operation.op == "append"
+        and operation.path == path
+        and isinstance(operation.value, str)
+    )
+
+
+def _effect_is_terminal(entry: PublicEffectEntry) -> bool:
+    return isinstance(
+        entry.state,
+        CompletedEffectState
+        | FailedEffectState
+        | CancelledEffectState
+        | SkippedEffectState,
+    )
+
+
+def _effect_became_terminal(update: HistoryEntryUpdated) -> bool:
+    return (
+        isinstance(update.entry, PublicEffectEntry)
+        and _effect_is_terminal(update.entry)
+        and (
+            not isinstance(update.previous, PublicEffectEntry)
+            or not _effect_is_terminal(update.previous)
+        )
+    )

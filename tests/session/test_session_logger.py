@@ -276,12 +276,12 @@ class TestSessionLoggerTitleManagement:
 
         assert logger.needs_initial_auto_title() is False
 
-    def test_needs_initial_auto_title_false_when_disabled(
+    def test_needs_initial_auto_title_true_when_disabled(
         self, disabled_session_config: SessionLoggingConfig
     ) -> None:
         logger = SessionLogger(disabled_session_config, "test-session-123")
 
-        assert logger.needs_initial_auto_title() is False
+        assert logger.needs_initial_auto_title() is True
 
 
 class TestSessionLoggerSaveInteraction:

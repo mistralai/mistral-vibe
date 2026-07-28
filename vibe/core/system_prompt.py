@@ -10,23 +10,23 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from vibe.core.config import VibeConfigSchema
-from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.experiments import ExperimentName
-from vibe.core.logger import logger
+from vibe.core.config.harness_files import (
+    HarnessFilesManager,
+    get_harness_files_manager,
+)
 from vibe.core.paths import VIBE_HOME
-from vibe.core.prompts import MissingPromptFileError, UtilityPrompt, load_system_prompt
+from vibe.core.prompts import UtilityPrompt
 from vibe.core.utils import (
     WindowsShellKind,
     get_platform_display_name,
-    is_dangerous_directory,
     is_windows,
     resolve_windows_shell,
 )
+from vibe.utils.paths import is_dangerous_directory
 
 if TYPE_CHECKING:
     from vibe.core.agents import AgentManager
     from vibe.core.config import ProjectContextConfig
-    from vibe.core.experiments import ExperimentManager
     from vibe.core.skills.manager import SkillManager
     from vibe.core.tools.manager import ToolManager
 
@@ -152,12 +152,26 @@ class ProjectContextProvider:
         )
 
 
-def _get_os_system_prompt() -> str:
+def _get_os_system_prompt(
+    *, use_git_bash_treatment: bool = False, use_powershell_treatment: bool = False
+) -> str:
     platform_name = get_platform_display_name()
 
     if not is_windows():
         shell = os.environ.get("SHELL", "sh")
         return f"The operating system is {platform_name} with shell `{shell}`"
+
+    if use_git_bash_treatment:
+        return (
+            f"The operating system is {platform_name} with shell `Git Bash`"
+            "\n" + _get_windows_bash_system_prompt()
+        )
+
+    if use_powershell_treatment:
+        return (
+            f"The operating system is {platform_name} with shell `PowerShell`"
+            "\n" + _get_windows_powershell_system_prompt()
+        )
 
     shell = resolve_windows_shell()
     if shell.kind is WindowsShellKind.BASH and shell.executable is not None:
@@ -200,6 +214,19 @@ def _get_windows_cmd_system_prompt() -> str:
         "- `&&` and `||` are valid for command chaining in cmd.exe\n"
         "- Check command availability with: `where command`\n"
         "- Script shebang: Not applicable on Windows\n"
+        "### ALWAYS verify commands work on the detected platform before suggesting them"
+    )
+
+
+def _get_windows_powershell_system_prompt() -> str:
+    return (
+        "### COMMAND COMPATIBILITY RULES (MUST FOLLOW):\n"
+        "- The shell is PowerShell, NOT bash or cmd.exe\n"
+        "- Use PowerShell syntax for variables, quoting, pipes, redirects, and conditionals\n"
+        "- Use backslashes (\\\\) for Windows paths unless a command explicitly accepts another form\n"
+        "- Discard output with `*> $null` or `2>$null` as appropriate - NEVER `2>/dev/null` or `2>nul`\n"
+        "- Check command availability with: `Get-Command <command>`\n"
+        "- Prefer `Get-ChildItem`, `Get-Content`, and `Select-String` over Unix-only shell commands when a dedicated Vibe tool is not available\n"
         "### ALWAYS verify commands work on the detected platform before suggesting them"
     )
 
@@ -284,42 +311,6 @@ def _get_scratchpad_section(scratchpad_dir: Path | None) -> str | None:
     )
 
 
-def _resolve_system_prompt(
-    config: VibeConfigSchema, experiment_manager: ExperimentManager | None
-) -> str:
-    default_prompt_id = VibeConfigSchema.model_fields["system_prompt_id"].default
-    if config.system_prompt_id != default_prompt_id:
-        logger.info(
-            "System prompt loaded: id=%s (user config overrides experiments)",
-            config.system_prompt_id,
-        )
-        return config.system_prompt
-
-    prompt_id = (
-        experiment_manager.get_variant_or_none(ExperimentName.SYSTEM_PROMPT)
-        if experiment_manager is not None
-        else None
-    )
-
-    if prompt_id is None:
-        logger.info(
-            "System prompt loaded: id=%s (user config)", config.system_prompt_id
-        )
-        return config.system_prompt
-
-    try:
-        prompt = load_system_prompt(prompt_id)
-    except MissingPromptFileError:
-        logger.warning(
-            "System prompt loaded: id=%s (variant '%s' missing, fell back)",
-            config.system_prompt_id,
-            prompt_id,
-        )
-        return config.system_prompt
-    logger.info("System prompt loaded: id=%s (experiment variant)", prompt_id)
-    return prompt
-
-
 def _interpolate_prompt(prompt: str) -> str:
     return Template(prompt).safe_substitute(current_date=_format_current_date())
 
@@ -335,17 +326,34 @@ def _get_headless_section() -> str:
     )
 
 
+def _get_tool_aware_os_system_prompt(tool_manager: ToolManager | None) -> str:
+    if tool_manager is None:
+        return _get_os_system_prompt()
+
+    available_tools = tool_manager.available_tools
+    use_git_bash_treatment = "git_bash" in available_tools
+    return _get_os_system_prompt(
+        use_git_bash_treatment=use_git_bash_treatment,
+        use_powershell_treatment=(
+            "powershell" in available_tools and not use_git_bash_treatment
+        ),
+    )
+
+
 def get_universal_system_prompt(
-    tool_manager: ToolManager,
     config: VibeConfigSchema,
     skill_manager: SkillManager,
     agent_manager: AgentManager,
     *,
     scratchpad_dir: Path | None = None,
     headless: bool = False,
-    experiment_manager: ExperimentManager | None = None,
+    cwd: Path | None = None,
+    harness_files: HarnessFilesManager | None = None,
+    tool_manager: ToolManager | None = None,
 ) -> str:
-    sections = [_interpolate_prompt(_resolve_system_prompt(config, experiment_manager))]
+    cwd = (cwd or Path.cwd()).resolve()
+    harness_files = harness_files or get_harness_files_manager()
+    sections = [_interpolate_prompt(config.system_prompt)]
 
     if headless:
         sections.append(_get_headless_section())
@@ -357,7 +365,7 @@ def get_universal_system_prompt(
         sections.append(f"Your model name is: `{config.active_model}`")
 
     if config.include_prompt_detail:
-        sections.append(_get_os_system_prompt())
+        sections.append(_get_tool_aware_os_system_prompt(tool_manager))
 
         skills_section = _get_available_skills_section(skill_manager)
         if skills_section:
@@ -370,22 +378,25 @@ def get_universal_system_prompt(
         sections.extend(filter(None, [_get_scratchpad_section(scratchpad_dir)]))
 
     if config.include_project_context:
-        is_dangerous, reason = is_dangerous_directory()
+        is_dangerous, reason = is_dangerous_directory(cwd)
         if is_dangerous:
             template = UtilityPrompt.DANGEROUS_DIRECTORY.read()
             context = Template(template).safe_substitute(
-                reason=reason.lower(), abs_path=Path(".").resolve()
+                reason=reason.lower(), abs_path=cwd.resolve()
             )
         else:
             context = ProjectContextProvider(
-                config=config.project_context, root_path=Path.cwd()
+                config=config.project_context, root_path=cwd
             ).get_full_context()
 
         sections.append(context)
 
-        mgr = get_harness_files_manager()
-        cwd_resolved = Path.cwd().resolve()
-        extra_roots = [r for r in mgr.project_roots if r.resolve() != cwd_resolved]
+        cwd_resolved = cwd.resolve()
+        extra_roots = [
+            root
+            for root in harness_files.project_roots
+            if root.resolve() != cwd_resolved
+        ]
         if extra_roots:
             dirs_lines = "\n".join(f" - {d}" for d in extra_roots)
             sections.append(
@@ -394,8 +405,8 @@ def get_universal_system_prompt(
                 + dirs_lines
             )
 
-        user_doc = mgr.load_user_doc()
-        project_docs = mgr.load_project_docs()
+        user_doc = harness_files.load_user_doc()
+        project_docs = harness_files.load_project_docs()
 
         doc_sections: list[str] = []
         if user_doc.strip():

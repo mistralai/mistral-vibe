@@ -7,9 +7,9 @@ from pathlib import Path
 import re
 import threading
 
-from vibe.core.logger import logger
 from vibe.core.paths import LOG_FILE
-from vibe.core.utils.io import decode_safe
+from vibe.observability.logging import logger
+from vibe.utils.io import decode_safe
 
 
 @dataclass(frozen=True, slots=True)

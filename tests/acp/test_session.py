@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+import logging
+from pathlib import Path
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vibe.acp.session import AcpSessionLoop
+from vibe.acp.session import AcpSession
+from vibe.app_server.session import AppServerSession
 
 
-def _make_session() -> AcpSessionLoop:
-    return AcpSessionLoop(
-        id="test-session", agent_loop=MagicMock(), command_registry=MagicMock()
+def _make_session(*, turn_active: bool = False) -> AcpSession:
+    app_server = MagicMock(spec=AppServerSession)
+    app_server.turn_active = turn_active
+    app_server.interrupt = AsyncMock()
+    app_server.close = AsyncMock()
+    return AcpSession(
+        session_id="test-session",
+        app_server=app_server,
+        cwd=Path.cwd(),
+        commands=MagicMock(),
     )
 
 
@@ -58,57 +69,43 @@ class TestSpawn:
         gate.set()
         await asyncio.gather(t1, t2)
 
-
-class TestPromptTask:
     @pytest.mark.asyncio
-    async def test_set_prompt_task_tracks_task(self) -> None:
+    async def test_spawn_logs_task_failure(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         session = _make_session()
+        error = RuntimeError("boom")
 
-        async def work() -> None:
-            pass
+        async def fail() -> None:
+            raise error
 
-        task = session.set_prompt_task(work())
-        assert session.prompt_task is task
-        await task
-        assert session.prompt_task is None
+        with caplog.at_level(logging.ERROR, logger="vibe"):
+            task = session.spawn(fail())
+            assert task is not None
+            with pytest.raises(RuntimeError, match="boom"):
+                await task
+            await asyncio.sleep(0)
 
+        record = caplog.records[-1]
+        assert record.getMessage() == (
+            "ACP background task failed session_id=test-session error=boom"
+        )
+        assert record.exc_info is not None
+        assert record.exc_info[1] is error
+
+
+class TestCancelPrompt:
     @pytest.mark.asyncio
-    async def test_cancel_prompt_cancels_active_task(self) -> None:
-        session = _make_session()
-
-        async def hang() -> None:
-            await asyncio.Event().wait()
-
-        task = session.set_prompt_task(hang())
+    async def test_cancel_prompt_interrupts_active_app_server_turn(self) -> None:
+        session = _make_session(turn_active=True)
         await session.cancel_prompt()
-        assert task.cancelled()
-        assert session.prompt_task is None
+        cast(AsyncMock, session.app_server.interrupt).assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_cancel_prompt_is_noop_without_task(self) -> None:
+    async def test_cancel_prompt_is_noop_without_active_turn(self) -> None:
         session = _make_session()
         await session.cancel_prompt()
-
-    @pytest.mark.asyncio
-    async def test_cancel_prompt_does_not_cancel_background_tasks(self) -> None:
-        session = _make_session()
-        gate = asyncio.Event()
-
-        async def bg() -> None:
-            await gate.wait()
-
-        bg_task = session.spawn(bg())
-        assert bg_task is not None
-
-        async def hang() -> None:
-            await asyncio.Event().wait()
-
-        session.set_prompt_task(hang())
-        await session.cancel_prompt()
-
-        assert not bg_task.cancelled()
-        gate.set()
-        await bg_task
+        cast(AsyncMock, session.app_server.interrupt).assert_not_awaited()
 
 
 class TestClose:
@@ -120,21 +117,37 @@ class TestClose:
             await asyncio.Event().wait()
 
         bg = session.spawn(hang())
-        prompt = session.set_prompt_task(hang())
 
         assert bg is not None
 
         await session.close()
 
         assert bg.cancelled()
-        assert prompt.cancelled()
-        assert session.prompt_task is None
 
     @pytest.mark.asyncio
     async def test_close_is_idempotent(self) -> None:
         session = _make_session()
         await session.close()
         await session.close()
+
+    @pytest.mark.asyncio
+    async def test_close_can_retry_failed_app_server_cleanup(self) -> None:
+        session = _make_session()
+        close = cast(AsyncMock, session.app_server.close)
+        close.side_effect = [RuntimeError("cleanup failed"), None]
+
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await session.close()
+
+        async def noop() -> None:
+            pass
+
+        assert session.spawn(noop()) is None
+
+        await session.close()
+        await session.close()
+
+        assert close.await_count == 2
 
     @pytest.mark.asyncio
     async def test_close_waits_for_task_cleanup(self) -> None:

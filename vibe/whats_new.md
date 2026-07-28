@@ -1,3 +1,5 @@
-# What's new in v2.22.0
+# What's new in v2.23.0
 
-- **`/new` command**: Use `/new` as an alias for `/clear` to start a fresh conversation.
+- **`vibe mcp add`/`remove`**: Add and remove remote MCP servers from the shell without editing TOML by hand.
+- **Auto theme**: Vibe now follows your terminal/OS light/dark appearance automatically with theme "auto" (default).
+- **Skill creator**: New built-in `/skill-creator` guides you through authoring custom skills.

@@ -7,11 +7,12 @@ import keyring
 from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
 import pytest
 
-from vibe.core.config import ProviderConfig, resolve_api_key
+from vibe.core.config import ProviderConfig
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.types import Backend
 from vibe.setup.auth import api_key_persistence
 from vibe.setup.auth.api_key_persistence import persist_api_key, remove_api_key
+from vibe.utils.api_keys import resolve_api_key
 
 
 def _provider(*, api_key_env_var: str = "CUSTOM_API_KEY") -> ProviderConfig:

@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import BaseModel
 import pytest
 
 from tests.agent_loop.e2e.conftest import MistralAPI, build_e2e_agent_loop
@@ -12,8 +11,12 @@ from tests.backend.data.mistral import mistral_completion
 from tests.conftest import build_test_vibe_config
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.tools.builtins.bash import BashResult
-from vibe.core.tools.permissions import RequiredPermission
-from vibe.core.types import ApprovalResponse, BaseEvent, ToolResultEvent
+from vibe.core.types import (
+    ApprovalRequestEvent,
+    ApprovalResponse,
+    BaseEvent,
+    ToolResultEvent,
+)
 
 
 def _bash_call(command: str, timeout: int | None = None) -> dict[str, Any]:
@@ -44,19 +47,13 @@ async def _run_bash(
     agent = build_e2e_agent_loop(
         config=build_test_vibe_config(enabled_tools=["bash"]), agent_name=agent_name
     )
-    if approval is not None:
 
-        async def approval_callback(
-            _tool_name: str,
-            _args: BaseModel,
-            _tool_call_id: str,
-            _rp: list[RequiredPermission] | None = None,
-        ) -> tuple[ApprovalResponse, str | None]:
-            return (approval, None)
-
-        agent.set_approval_callback(approval_callback)
-
-    events: list[BaseEvent] = [event async for event in agent.act("go")]
+    events: list[BaseEvent] = []
+    async for event in agent.act("go"):
+        events.append(event)
+        if isinstance(event, ApprovalRequestEvent):
+            assert approval is not None
+            agent.resolve_approval_request(event.request_id, approval)
     return next(e for e in events if isinstance(e, ToolResultEvent))
 
 
@@ -116,7 +113,7 @@ async def test_bash_denylisted_command_is_skipped(mistral_api: MistralAPI) -> No
 async def test_bash_allowlisted_command_runs_without_approval(
     mistral_api: MistralAPI,
 ) -> None:
-    # No approval callback registered; an allowlisted command must run anyway.
+    # No interaction responder is available; an allowlisted command still runs.
     result = await _run_bash(
         mistral_api, "echo allowed", agent_name=BuiltinAgentName.DEFAULT
     )

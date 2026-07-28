@@ -15,16 +15,16 @@ from vibe.core.config import (
     DEFAULT_MISTRAL_SERVER_URL,
     OtelRedactionMode,
     OtelSpanExporterConfig,
-    resolve_api_key,
 )
-from vibe.core.utils import get_server_url_from_api_base
+from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.http import get_server_url_from_api_base
 
 if TYPE_CHECKING:
     from opentelemetry import trace
 
     from vibe.core.config import ProviderConfig, VibeConfigSchema
 
-from vibe.core.logger import logger
+from vibe.observability.logging import logger
 
 VIBE_TRACER_NAME = "mistral_vibe"
 VIBE_AGENT_NAME = "mistral-vibe"

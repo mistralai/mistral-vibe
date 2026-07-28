@@ -7,7 +7,7 @@ import pytest
 from tests.mock.utils import collect_result
 from vibe.core.tools.base import BaseToolState, ToolError
 from vibe.core.tools.builtins.grep import Grep, GrepArgs, GrepBackend, GrepToolConfig
-from vibe.core.utils import io as io_utils
+from vibe.utils import io as io_utils
 
 
 @pytest.fixture

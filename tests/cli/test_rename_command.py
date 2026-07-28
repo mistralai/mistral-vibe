@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import build_test_vibe_app, build_test_vibe_config
+from tests.conftest import (
+    build_test_agent_loop,
+    build_test_vibe_app,
+    build_test_vibe_config,
+)
 from vibe.cli.textual_ui.widgets.messages import ErrorMessage, UserCommandMessage
 from vibe.core.config import SessionLoggingConfig
 
@@ -19,7 +23,8 @@ async def test_rename_command_updates_live_unsaved_session_title(
     tmp_path: Path,
 ) -> None:
     config = build_test_vibe_config(session_logging=_enabled_session_config(tmp_path))
-    app = build_test_vibe_app(config=config)
+    agent_loop = build_test_agent_loop(config=config)
+    app = build_test_vibe_app(agent_loop=agent_loop)
 
     async with app.run_test() as pilot:
         handled = await app._handle_command("/rename Manual title")
@@ -32,11 +37,11 @@ async def test_rename_command_updates_live_unsaved_session_title(
 
     assert handled is True
 
-    metadata = app.agent_loop.session_logger.session_metadata
+    metadata = agent_loop.session_logger.session_metadata
     assert metadata is not None
     assert metadata.title == "Manual title"
     assert metadata.title_source == "manual"
-    assert not app.agent_loop.session_logger.metadata_filepath.exists()
+    assert not agent_loop.session_logger.metadata_filepath.exists()
 
 
 @pytest.mark.asyncio
@@ -44,8 +49,9 @@ async def test_rename_command_persists_existing_session_metadata(
     tmp_path: Path,
 ) -> None:
     config = build_test_vibe_config(session_logging=_enabled_session_config(tmp_path))
-    app = build_test_vibe_app(config=config)
-    logger = app.agent_loop.session_logger
+    agent_loop = build_test_agent_loop(config=config)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+    logger = agent_loop.session_logger
     assert logger.session_dir is not None
     assert logger.session_metadata is not None
 
@@ -82,8 +88,9 @@ async def test_resume_picker_shows_renamed_session_title(
     config = build_test_vibe_config(
         session_logging=_enabled_session_config(tmp_path), vibe_code_enabled=False
     )
-    app = build_test_vibe_app(config=config)
-    logger = app.agent_loop.session_logger
+    agent_loop = build_test_agent_loop(config=config)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+    logger = agent_loop.session_logger
     assert logger.session_dir is not None
     assert logger.session_metadata is not None
 

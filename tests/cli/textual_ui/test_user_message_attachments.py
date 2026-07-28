@@ -8,22 +8,41 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Link
 
+from vibe.app_server.models import (
+    ContentBlock,
+    FileImageSource,
+    ImageAttachment,
+    ImageContentBlock,
+    InlineImageSource,
+    PublicEntryGenerationStatus,
+    PublicMessageEntry,
+    TextContentBlock,
+)
 from vibe.cli.textual_ui.widgets.messages import UserMessage
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.windowing.history import build_history_widgets
-from vibe.core.types import (
-    FileImageSource,
-    ImageAttachment,
-    InlineImageSource,
-    LLMMessage,
-    Role,
-)
 
 
 def _att(path: Path, alias: str) -> ImageAttachment:
     path.write_bytes(b"\x89PNG")
     return ImageAttachment(
-        source=FileImageSource(path=path), alias=alias, mime_type="image/png"
+        source=FileImageSource(path=str(path)), alias=alias, mime_type="image/png"
+    )
+
+
+def _user_entry(text: str, attachment: ImageAttachment) -> PublicMessageEntry:
+    content: list[ContentBlock] = [ImageContentBlock(attachment=attachment)]
+    if text:
+        content.insert(0, TextContentBlock(text=text))
+    return PublicMessageEntry(
+        id="message-1",
+        session_id="session-1",
+        created_at=1,
+        updated_at=1,
+        generation_status=PublicEntryGenerationStatus.COMPLETED,
+        role="user",
+        content=content,
+        source="harness",
     )
 
 
@@ -104,7 +123,7 @@ async def test_attachment_link_renders_alias_brackets_literally(tmp_path: Path) 
 async def test_attachment_link_shortens_home_absolute_alias() -> None:
     path = Path.home() / "Pictures" / "shot.png"
     att = ImageAttachment(
-        source=FileImageSource(path=path), alias=str(path), mime_type="image/png"
+        source=FileImageSource(path=str(path)), alias=str(path), mime_type="image/png"
     )
     app = _UserMessageApp(UserMessage("look", images=[att]))
 
@@ -117,13 +136,13 @@ async def test_attachment_link_shortens_home_absolute_alias() -> None:
 
 def test_resumed_user_message_with_images_renders_footer(tmp_path: Path) -> None:
     att = _att(tmp_path / "shot.png", "shot.png")
-    msg = LLMMessage(role=Role.user, content="look at @shot.png", images=[att])
+    entry = _user_entry("look at @shot.png", att)
 
     widgets = build_history_widgets(
-        [msg],
-        tool_call_map={},
+        [entry],
         start_index=0,
         history_widget_indices=WeakKeyDictionary(),
+        tools_collapsed=False,
     )
 
     assert len(widgets) == 1
@@ -134,13 +153,13 @@ def test_resumed_user_message_with_images_renders_footer(tmp_path: Path) -> None
 
 def test_resumed_user_message_with_images_only_still_mounts(tmp_path: Path) -> None:
     att = _att(tmp_path / "shot.png", "shot.png")
-    msg = LLMMessage(role=Role.user, content="", images=[att])
+    entry = _user_entry("", att)
 
     widgets = build_history_widgets(
-        [msg],
-        tool_call_map={},
+        [entry],
         start_index=0,
         history_widget_indices=WeakKeyDictionary(),
+        tools_collapsed=False,
     )
 
     assert len(widgets) == 1

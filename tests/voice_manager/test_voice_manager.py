@@ -4,25 +4,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.stubs.app_config import build_test_app_config
 from tests.stubs.fake_audio_recorder import FakeAudioRecorder
 from tests.stubs.fake_transcribe_client import FakeTranscribeClient
+from vibe.cli.audio_recorder.audio_recorder_port import (
+    AudioBackendUnavailableError,
+    NoAudioInputDeviceError,
+)
+from vibe.cli.transcribe.transcribe_client_port import (
+    TranscribeDone,
+    TranscribeError,
+    TranscribeSessionCreated,
+    TranscribeTextDelta,
+)
 from vibe.cli.voice_manager.voice_manager import VoiceManager
 from vibe.cli.voice_manager.voice_manager_port import (
     RecordingStartError,
     TranscribeState,
     VoiceManagerListener,
-    VoiceToggleResult,
-)
-from vibe.core.audio_recorder.audio_recorder_port import (
-    AudioBackendUnavailableError,
-    NoAudioInputDeviceError,
-)
-from vibe.core.transcribe.transcribe_client_port import (
-    TranscribeDone,
-    TranscribeError,
-    TranscribeSessionCreated,
-    TranscribeTextDelta,
 )
 
 
@@ -50,7 +49,7 @@ def _make_manager(
 ) -> tuple[VoiceManager, FakeAudioRecorder, FakeTranscribeClient]:
     recorder = FakeAudioRecorder()
     client = transcribe_client or FakeTranscribeClient()
-    config = build_test_vibe_config(voice_mode_enabled=voice_mode_enabled)
+    config = build_test_app_config(voice_mode_enabled=voice_mode_enabled)
     manager = VoiceManager(
         config_getter=lambda: config,
         audio_recorder=recorder,
@@ -107,7 +106,7 @@ class TestStartRecording:
     @pytest.mark.asyncio
     async def test_start_raises_when_no_transcribe_client(self) -> None:
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
@@ -162,7 +161,7 @@ class TestStopRecording:
                 pass
 
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
@@ -194,7 +193,7 @@ class TestStopRecording:
                 pass
 
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
@@ -265,7 +264,7 @@ class TestCancelRecording:
                 pass
 
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
@@ -288,22 +287,12 @@ class TestCancelRecording:
         assert listener.state_changes == []
 
 
-class TestToggleVoiceMode:
-    def test_toggle_enables(self) -> None:
-        manager, _, _ = _make_manager(voice_mode_enabled=False)
-        result = manager.toggle_voice_mode()
-        assert result == VoiceToggleResult(enabled=True)
-
-    def test_toggle_disables(self) -> None:
-        manager, _, _ = _make_manager(voice_mode_enabled=True)
-        result = manager.toggle_voice_mode()
-        assert result == VoiceToggleResult(enabled=False)
-
+class TestApplyVoiceMode:
     @pytest.mark.asyncio
-    async def test_toggle_disable_cancels_active_recording(self) -> None:
+    async def test_apply_disable_cancels_active_recording(self) -> None:
         manager, _, _ = _make_manager(voice_mode_enabled=True)
         manager.start_recording()
-        manager.toggle_voice_mode()
+        manager.apply_enabled(False)
         assert manager.transcribe_state == TranscribeState.IDLE
 
 
@@ -320,7 +309,7 @@ class TestListeners:
         manager, _, _ = _make_manager(voice_mode_enabled=False)
         listener = StateListener()
         manager.add_listener(listener)
-        manager.toggle_voice_mode()
+        manager.apply_enabled(True)
         assert listener.voice_mode_changes == [True]
 
     @pytest.mark.asyncio
@@ -434,7 +423,7 @@ class TestTranscription:
                 pass
 
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
@@ -537,7 +526,7 @@ class TestTelemetryTracking:
                 pass
 
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         mock_telemetry = MagicMock()
         manager = VoiceManager(
             config_getter=lambda: config,
@@ -608,7 +597,7 @@ class TestTelemetryTracking:
                 pass
 
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         mock_telemetry = MagicMock()
         manager = VoiceManager(
             config_getter=lambda: config,

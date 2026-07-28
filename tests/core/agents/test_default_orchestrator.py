@@ -7,7 +7,7 @@ import pytest
 
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import build_default_orchestrator
+from vibe.core.config import MissingAPIKeyError, build_default_orchestrator
 from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.config.layers.discovered import DiscoveredConfigLayer
 from vibe.core.config.patch import AddOperationPatch
@@ -15,10 +15,23 @@ from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.manager import ToolManager
 from vibe.core.trusted_folders import trusted_folders_manager
 
-_LAYERS_DISABLED = pytest.mark.skip(
-    reason="DefaultConfigLayer/DiscoveredConfigLayer/AgentProfileLayer are commented "
-    "out in build_default_orchestrator pending integration"
+_DISCOVERED_AND_AGENT_PROFILE_LAYERS_DISABLED = pytest.mark.skip(
+    reason="DiscoveredConfigLayer and AgentProfileLayer are not yet part of "
+    "build_default_orchestrator"
 )
+
+
+@pytest.mark.asyncio
+async def test_build_default_orchestrator_can_skip_api_key_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MISTRAL_API_KEY")
+
+    orchestrator = await build_default_orchestrator(require_api_key=False)
+    assert orchestrator.config.get_active_provider().name == "mistral"
+
+    with pytest.raises(MissingAPIKeyError):
+        await build_default_orchestrator()
 
 
 async def _switch_profile_with_agent_layer(
@@ -237,7 +250,6 @@ temperature = 0.2
     ]
 
 
-@_LAYERS_DISABLED
 @pytest.mark.asyncio
 async def test_config_orchestrator_can_patch_default_model_thinking(
     config_dir: Path,
@@ -260,7 +272,7 @@ async def test_config_orchestrator_can_patch_default_model_thinking(
 
 
 @pytest.mark.skip(
-    reason="DefaultConfigLayer/DiscoveredConfigLayer/AgentProfileLayer are commented out in build_default_orchestrator pending integration"
+    reason="DiscoveredConfigLayer is not yet part of build_default_orchestrator"
 )
 @pytest.mark.asyncio
 async def test_build_default_orchestrator_discovered_layer_sits_below_toml(
@@ -285,7 +297,7 @@ async def test_build_default_orchestrator_discovered_layer_sits_below_toml(
     assert orchestrator.config.disabled_tools == ["discovered-tool", "user-tool"]
 
 
-@_LAYERS_DISABLED
+@_DISCOVERED_AND_AGENT_PROFILE_LAYERS_DISABLED
 @pytest.mark.asyncio
 async def test_tool_defaults_can_be_written_to_discovered_layer() -> None:
     orchestrator = await build_default_orchestrator()
@@ -305,7 +317,7 @@ async def test_tool_defaults_can_be_written_to_discovered_layer() -> None:
     assert orchestrator.config.tools["read_file"]["max_read_bytes"] == 51200
 
 
-@_LAYERS_DISABLED
+@_DISCOVERED_AND_AGENT_PROFILE_LAYERS_DISABLED
 @pytest.mark.asyncio
 async def test_agent_profile_layer_overrides_runtime_overrides() -> None:
     orchestrator = await build_default_orchestrator({
@@ -338,7 +350,7 @@ async def test_agent_profile_layer_overrides_runtime_overrides() -> None:
     assert orchestrator.config.disabled_tools == ["runtime-disabled", "agent-disabled"]
 
 
-@_LAYERS_DISABLED
+@_DISCOVERED_AND_AGENT_PROFILE_LAYERS_DISABLED
 @pytest.mark.asyncio
 async def test_agent_manager_switch_profile_updates_agent_profile_layer() -> None:
     orchestrator = await build_default_orchestrator()
@@ -356,7 +368,7 @@ async def test_agent_manager_switch_profile_updates_agent_profile_layer() -> Non
     assert tool_manager.get_tool_config("write_file").permission == ToolPermission.NEVER
 
 
-@_LAYERS_DISABLED
+@_DISCOVERED_AND_AGENT_PROFILE_LAYERS_DISABLED
 @pytest.mark.asyncio
 async def test_agent_manager_switch_profile_replaces_agent_profile_layer() -> None:
     orchestrator = await build_default_orchestrator()
@@ -375,7 +387,7 @@ async def test_agent_manager_switch_profile_replaces_agent_profile_layer() -> No
     assert "write_file" not in manager.config.tools
 
 
-@_LAYERS_DISABLED
+@_DISCOVERED_AND_AGENT_PROFILE_LAYERS_DISABLED
 @pytest.mark.asyncio
 async def test_agent_manager_switch_writes_discovered_agent_profile_layer(
     config_dir: Path, tmp_path: Path

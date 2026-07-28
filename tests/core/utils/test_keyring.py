@@ -7,8 +7,8 @@ import keyring
 from keyring.errors import KeyringError, PasswordDeleteError
 import pytest
 
-import vibe.core.utils.keyring as keyring_utils
-from vibe.core.utils.keyring import (
+import vibe.utils.keyring as keyring_utils
+from vibe.utils.keyring import (
     delete_api_key_from_keyring,
     get_api_key_from_keyring,
     set_api_key_in_keyring,

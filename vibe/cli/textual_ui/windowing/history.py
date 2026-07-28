@@ -5,99 +5,97 @@ from weakref import WeakKeyDictionary
 
 from textual.widget import Widget
 
+from vibe.app_server.models import (
+    PublicEffectEntry,
+    PublicEntryGenerationStatus,
+    PublicHistoryEntry,
+    PublicMessageEntry,
+    PublicReasoningEntry,
+)
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
     ReasoningMessage,
     UserMessage,
 )
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
-from vibe.core.types import LLMMessage, Role
 
 
-def non_system_history_messages(messages: Sequence[LLMMessage]) -> list[LLMMessage]:
-    return [msg for msg in messages if msg.role != Role.system]
-
-
-def build_tool_call_map(messages: Sequence[LLMMessage]) -> dict[str, str]:
-    tool_call_map: dict[str, str] = {}
-    for msg in messages:
-        if msg.role != Role.assistant or not msg.tool_calls:
-            continue
-        for tool_call in msg.tool_calls:
-            if tool_call.id:
-                tool_call_map[tool_call.id] = tool_call.function.name or "unknown"
-    return tool_call_map
+def history_entry_renders_widget(entry: PublicHistoryEntry) -> bool:
+    match entry:
+        case PublicMessageEntry(role="user"):
+            return True
+        case PublicMessageEntry(role="assistant"):
+            return bool(entry.text)
+        case PublicReasoningEntry() | PublicEffectEntry():
+            return True
+        case _:
+            return False
 
 
 def build_history_widgets(
-    batch: Sequence[LLMMessage],
-    tool_call_map: dict[str, str],
+    batch: Sequence[PublicHistoryEntry],
     *,
     start_index: int,
     history_widget_indices: WeakKeyDictionary[Widget, int],
+    tools_collapsed: bool,
 ) -> list[Widget]:
     widgets: list[Widget] = []
 
-    for history_index, msg in zip(
+    for history_index, entry in zip(
         range(start_index, start_index + len(batch)), batch, strict=True
     ):
-        if msg.injected:
-            continue
-        match msg.role:
-            case Role.user:
-                if msg.content or msg.images:
-                    # history_index is 0-based in non-system messages;
-                    # agent_loop.messages index = history_index + 1 (system msg at 0)
-                    widget = UserMessage(
-                        msg.content or "",
-                        message_index=history_index + 1,
-                        images=msg.images,
-                    )
-                    widgets.append(widget)
-                    history_widget_indices[widget] = history_index
-
-            case Role.assistant:
-                if msg.content:
-                    assistant_widget = AssistantMessage(msg.content)
-                    widgets.append(assistant_widget)
-                    history_widget_indices[assistant_widget] = history_index
-
-                if msg.tool_calls:
-                    for tool_call in msg.tool_calls:
-                        tool_name = tool_call.function.name or "unknown"
-                        if tool_call.id:
-                            tool_call_map[tool_call.id] = tool_name
-                        widget = ToolCallMessage(tool_name=tool_name)
-                        widgets.append(widget)
-                        history_widget_indices[widget] = history_index
-
-            case Role.tool:
-                tool_name = msg.name or tool_call_map.get(
-                    msg.tool_call_id or "", "tool"
-                )
-                widget = ToolResultMessage(tool_name=tool_name, content=msg.content)
-                widgets.append(widget)
-                history_widget_indices[widget] = history_index
+        entry_widgets = _entry_widgets(entry, history_index, tools_collapsed)
+        widgets.extend(entry_widgets)
+        for widget in entry_widgets:
+            history_widget_indices[widget] = history_index
 
     return widgets
 
 
+def _entry_widgets(
+    entry: PublicHistoryEntry, history_index: int, tools_collapsed: bool
+) -> list[Widget]:
+    match entry:
+        case PublicMessageEntry(role="user"):
+            return [
+                UserMessage(
+                    entry.text, history_entry_id=entry.id, images=entry.images or None
+                )
+            ]
+        case PublicMessageEntry(role="assistant"):
+            return [AssistantMessage(entry.text)] if entry.text else []
+        case PublicReasoningEntry():
+            return [
+                ReasoningMessage(
+                    entry.text,
+                    collapsed=tools_collapsed,
+                    completed=(
+                        entry.generation_status is PublicEntryGenerationStatus.COMPLETED
+                    ),
+                )
+            ]
+        case PublicEffectEntry():
+            call = ToolCallMessage(entry)
+            return [call, ToolResultMessage(entry, call)]
+        case _:
+            return []
+
+
 def split_history_tail(
-    history_messages: list[LLMMessage], tail_size: int
-) -> tuple[list[LLMMessage], list[LLMMessage], int]:
-    tail_messages = history_messages[-tail_size:]
-    backfill_messages = history_messages[:-tail_size]
-    tail_start_index = len(history_messages) - len(tail_messages)
-    return tail_messages, backfill_messages, tail_start_index
+    history: list[PublicHistoryEntry], tail_size: int
+) -> tuple[list[PublicHistoryEntry], list[PublicHistoryEntry], int]:
+    tail = history[-tail_size:]
+    backfill = history[:-tail_size]
+    return tail, backfill, len(history) - len(tail)
 
 
 def visible_history_indices(
     children: list[Widget], history_widget_indices: WeakKeyDictionary[Widget, int]
 ) -> list[int]:
     return [
-        idx
+        index
         for child in children
-        if (idx := history_widget_indices.get(child)) is not None
+        if (index := history_widget_indices.get(child)) is not None
     ]
 
 
@@ -110,3 +108,10 @@ def visible_history_widgets_count(children: list[Widget]) -> int:
         ToolResultMessage,
     )
     return sum(isinstance(child, history_widget_types) for child in children)
+
+
+def shift_history_widget_indices(
+    history_widget_indices: WeakKeyDictionary[Widget, int], offset: int
+) -> None:
+    for widget, index in list(history_widget_indices.items()):
+        history_widget_indices[widget] = index + offset

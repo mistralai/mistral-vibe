@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from textual.pilot import Pilot
 
 from tests.mock.utils import mock_llm_chunk
@@ -7,7 +8,13 @@ from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_
 from tests.snapshots.snap_compare import SnapCompare
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_voice_manager import FakeVoiceManager
+from vibe.cli.textual_ui import app as app_module
 from vibe.cli.textual_ui.widgets.chat_input.body import ChatInputBody
+
+
+@pytest.fixture(autouse=True)
+def _audio_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_module, "check_audio_available", lambda: None)
 
 
 class VoiceEnableApp(BaseSnapshotTestApp):

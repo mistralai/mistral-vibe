@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vibe.core.types import IMAGE_EXTENSIONS
+from vibe.utils.images import IMAGE_EXTENSIONS
 
 _QUOTES: frozenset[str] = frozenset({"'", '"'})
 _PATH_ROOTS: frozenset[str] = frozenset({"/", "~"})

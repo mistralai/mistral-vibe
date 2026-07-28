@@ -7,8 +7,8 @@ import types
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 from vibe.core.vibe_code_project.selection import ProjectRepository, VibeCodeProject
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 
 class VibeCodeProjectApiError(Exception):

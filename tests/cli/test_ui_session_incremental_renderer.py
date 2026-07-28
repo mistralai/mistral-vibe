@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import time
-from unittest.mock import Mock
 
 import pytest
 from textual.widgets import Button
 
-from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from tests.conftest import build_test_agent_loop
-from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
+from tests.stubs.app_server import create_test_app_server_session
+from tests.stubs.fake_account_gateway import FakeAccountGateway
+from vibe.app_server._account import WhoAmIResult
+from vibe.app_server.models import AccountPlanKind
 from vibe.cli.textual_ui.app import ChatScroll, VibeApp
 from vibe.cli.textual_ui.widgets.load_more import (
     HistoryLoadMoreMessage,
@@ -31,13 +33,23 @@ def vibe_config(make_config) -> VibeConfigSchema:
     )
 
 
-def _pro_plan_gateway() -> FakeWhoAmIGateway:
-    return FakeWhoAmIGateway(
-        response=WhoAmIResponse(
-            plan_type=WhoAmIPlanType.CHAT,
+def _pro_account_gateway() -> FakeAccountGateway:
+    return FakeAccountGateway(
+        result=WhoAmIResult(
+            plan_type=AccountPlanKind.CHAT,
             plan_name="INDIVIDUAL",
             prompt_switching_to_pro_plan=False,
         )
+    )
+
+
+def _app(agent_loop) -> VibeApp:
+    account_gateway = _pro_account_gateway()
+    return VibeApp(
+        app_server=lambda: create_test_app_server_session(
+            agent_loop, account_gateway=account_gateway
+        ),
+        history_file=Path(".vibehistory"),
     )
 
 
@@ -68,43 +80,33 @@ async def test_ui_mount_defers_history_resume(
     vibe_config: VibeConfigSchema, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     agent_loop = build_test_agent_loop(config=vibe_config, enable_streaming=False)
-    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    app = _app(agent_loop)
+    await app.prepare()
     history_started = asyncio.Event()
     history_release = asyncio.Event()
-    restore_from_session = Mock()
-    loop_start = Mock()
-    initialize_experiments = Mock()
+    event_listener_started = asyncio.Event()
+    event_listener_release = asyncio.Event()
 
     async def resume_history() -> None:
         history_started.set()
         await history_release.wait()
 
-    monkeypatch.setattr(app, "_resume_history_from_messages", resume_history)
-    monkeypatch.setattr(app._loop_runner, "restore_from_session", restore_from_session)
-    monkeypatch.setattr(app._loop_runner, "start", loop_start)
-    monkeypatch.setattr(
-        agent_loop, "start_initialize_experiments", initialize_experiments
-    )
+    async def listen_app_server_events() -> None:
+        event_listener_started.set()
+        await event_listener_release.wait()
 
+    monkeypatch.setattr(app, "_resume_history_from_messages", resume_history)
+    monkeypatch.setattr(app, "_listen_app_server_events", listen_app_server_events)
     async with asyncio.timeout(5):
         async with app.run_test() as pilot:
             await _wait_until(pilot.pause, history_started.is_set, timeout=2.0)
 
             app.query_one(ChatScroll)
-            restore_from_session.assert_not_called()
-            loop_start.assert_not_called()
-            initialize_experiments.assert_not_called()
+            assert not event_listener_started.is_set()
 
             history_release.set()
-            await _wait_until(
-                pilot.pause,
-                lambda: (
-                    restore_from_session.call_count == 1
-                    and loop_start.call_count == 1
-                    and initialize_experiments.call_count == 1
-                ),
-                timeout=2.0,
-            )
+            await _wait_until(pilot.pause, event_listener_started.is_set, timeout=2.0)
+            event_listener_release.set()
 
 
 @pytest.mark.asyncio
@@ -116,7 +118,7 @@ async def test_ui_session_incremental_loader_shows_tail_and_load_more(
         LLMMessage(role=Role.user, content=f"msg-{idx}") for idx in range(66)
     ])
 
-    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    app = _app(agent_loop)
 
     async with app.run_test() as pilot:
         await _wait_until(
@@ -143,7 +145,7 @@ async def test_ui_session_incremental_loader_load_more_shows_remaining_count(
         for idx in range(total_messages)
     ])
 
-    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    app = _app(agent_loop)
 
     async with app.run_test() as pilot:
         await _wait_until(
@@ -174,7 +176,7 @@ async def test_ui_session_incremental_loader_load_more_batches_until_done(
         LLMMessage(role=Role.user, content=f"msg-{idx}") for idx in range(31)
     ])
 
-    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    app = _app(agent_loop)
 
     async with app.run_test() as pilot:
         await _wait_until(
@@ -201,6 +203,37 @@ async def test_ui_session_incremental_loader_load_more_batches_until_done(
 
 
 @pytest.mark.asyncio
+async def test_ui_session_incremental_loader_pages_before_initial_snapshot(
+    vibe_config: VibeConfigSchema,
+) -> None:
+    total_messages = 205
+    agent_loop = build_test_agent_loop(config=vibe_config, enable_streaming=False)
+    agent_loop.messages.extend([
+        LLMMessage(role=Role.user, content=f"msg-{idx}")
+        for idx in range(total_messages)
+    ])
+    app = _app(agent_loop)
+    app._windowing.load_more_batch_size = total_messages
+
+    async with app.run_test() as pilot:
+        await _wait_for_load_more(app, pilot.pause)
+
+        app.post_message(HistoryLoadMoreRequested())
+        await _wait_until(
+            pilot.pause, lambda: len(app.query(UserMessage)) == 200, timeout=5.0
+        )
+        assert len(app.query(HistoryLoadMoreMessage)) == 1
+
+        app.post_message(HistoryLoadMoreRequested())
+        await _wait_until(
+            pilot.pause,
+            lambda: len(app.query(UserMessage)) == total_messages,
+            timeout=5.0,
+        )
+        assert len(app.query(HistoryLoadMoreMessage)) == 0
+
+
+@pytest.mark.asyncio
 async def test_ui_session_incremental_loader_keeps_top_alignment_when_not_scrollable(
     vibe_config: VibeConfigSchema,
 ) -> None:
@@ -210,7 +243,7 @@ async def test_ui_session_incremental_loader_keeps_top_alignment_when_not_scroll
         for idx in range(HISTORY_RESUME_TAIL_MESSAGES + 1)
     ])
 
-    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    app = _app(agent_loop)
 
     # Each UserMessage renders as ~3 rows (top margin + content + separator);
     # add chrome (input box, banner, status) so all messages fit without scrolling.
@@ -236,7 +269,7 @@ async def test_chat_scroll_does_not_reanchor_during_text_selection(
         LLMMessage(role=Role.user, content=f"msg-{idx}") for idx in range(40)
     ])
 
-    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    app = _app(agent_loop)
 
     async with app.run_test(size=(80, 20)) as pilot:
         await _wait_until(pilot.pause, lambda: app.query_one("#chat", ChatScroll))

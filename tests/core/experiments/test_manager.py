@@ -8,6 +8,7 @@ from vibe.core.experiments.active import DEFAULT_VARIANTS, ExperimentName
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager, hash_api_key
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
+from vibe.core.experiments.rollouts import managed_shell_tools_enabled
 
 
 class _StubClient(RemoteEvalClient):
@@ -49,6 +50,8 @@ def test_hash_api_key_differs_per_key() -> None:
 async def test_get_variant_returns_default_when_uninitialized() -> None:
     manager = ExperimentManager(client=_StubClient(None))
     assert manager.get_variant(ExperimentName.SYSTEM_PROMPT) == "cli"
+    assert manager.get_variant(ExperimentName.MANAGED_SHELL_TOOLS) == "legacy"
+    assert managed_shell_tools_enabled(manager) is False
 
 
 @pytest.mark.asyncio
@@ -58,11 +61,19 @@ async def test_get_variant_or_none_returns_none_when_unassigned() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_variant_or_none_returns_override() -> None:
-    manager = ExperimentManager(
-        client=_StubClient(None), overrides={ExperimentName.SYSTEM_PROMPT.value: "lean"}
-    )
-    assert manager.get_variant_or_none(ExperimentName.SYSTEM_PROMPT) == "lean"
+async def test_managed_shell_tools_remote_variant_enables_rollout() -> None:
+    response = _response({
+        ExperimentName.MANAGED_SHELL_TOOLS.value: {
+            "defaultValue": "legacy",
+            "rules": [{"force": "managed", "tracks": []}],
+        }
+    })
+    manager = ExperimentManager(client=_StubClient(response))
+
+    await manager.initialize(_attrs())
+
+    assert manager.get_variant(ExperimentName.MANAGED_SHELL_TOOLS) == "managed"
+    assert managed_shell_tools_enabled(manager) is True
 
 
 @pytest.mark.asyncio
@@ -79,6 +90,70 @@ async def test_get_variant_or_none_returns_resolved_value() -> None:
 
 
 @pytest.mark.asyncio
+async def test_assignments_returns_empty_without_confirmed_assignment() -> None:
+    response = _response({
+        ExperimentName.SYSTEM_PROMPT.value: {
+            "defaultValue": "cli",
+            "rules": [{"force": "explore", "tracks": []}],
+        }
+    })
+    manager = ExperimentManager(client=_StubClient(response))
+    await manager.initialize(_attrs())
+    assert manager.assignments() == {}
+
+
+@pytest.mark.asyncio
+async def test_config_variants_include_forced_rule_without_assignment() -> None:
+    response = _response({
+        ExperimentName.SYSTEM_PROMPT.value: {
+            "defaultValue": "cli",
+            "rules": [{"force": "explore", "tracks": []}],
+        }
+    })
+    manager = ExperimentManager(client=_StubClient(response))
+    await manager.initialize(_attrs())
+    assert manager.assignments() == {}
+    assert manager.config_variants() == {ExperimentName.SYSTEM_PROMPT.value: "explore"}
+
+
+@pytest.mark.asyncio
+async def test_config_variants_exclude_default_value_without_forced_rule() -> None:
+    response = _response({
+        ExperimentName.SYSTEM_PROMPT.value: {"defaultValue": "explore", "rules": []}
+    })
+    manager = ExperimentManager(client=_StubClient(response))
+    await manager.initialize(_attrs())
+    assert manager.config_variants() == {}
+
+
+@pytest.mark.asyncio
+async def test_assignments_returns_confirmed_assignment() -> None:
+    response = _response({
+        ExperimentName.SYSTEM_PROMPT.value: {
+            "defaultValue": "cli",
+            "rules": [
+                {
+                    "force": "explore",
+                    "tracks": [
+                        {
+                            "experiment": {"key": ExperimentName.SYSTEM_PROMPT.value},
+                            "result": {
+                                "key": "1",
+                                "variationId": 1,
+                                "inExperiment": True,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    })
+    manager = ExperimentManager(client=_StubClient(response))
+    await manager.initialize(_attrs())
+    assert manager.assignments() == {ExperimentName.SYSTEM_PROMPT.value: "explore"}
+
+
+@pytest.mark.asyncio
 async def test_get_variant_returns_resolved_value() -> None:
     response = _response({
         ExperimentName.SYSTEM_PROMPT.value: {
@@ -89,22 +164,6 @@ async def test_get_variant_returns_resolved_value() -> None:
     manager = ExperimentManager(client=_StubClient(response))
     await manager.initialize(_attrs())
     assert manager.get_variant(ExperimentName.SYSTEM_PROMPT) == "cli_v2"
-
-
-@pytest.mark.asyncio
-async def test_overrides_take_precedence_over_remote() -> None:
-    response = _response({
-        ExperimentName.SYSTEM_PROMPT.value: {
-            "defaultValue": "cli",
-            "rules": [{"force": "cli_v2", "tracks": []}],
-        }
-    })
-    manager = ExperimentManager(
-        client=_StubClient(response),
-        overrides={ExperimentName.SYSTEM_PROMPT.value: "forced"},
-    )
-    await manager.initialize(_attrs())
-    assert manager.get_variant(ExperimentName.SYSTEM_PROMPT) == "forced"
 
 
 @pytest.mark.asyncio
@@ -176,8 +235,8 @@ async def test_assignments_prefers_track_result_value() -> None:
 @pytest.mark.asyncio
 async def test_assignments_keys_on_feature_id_when_experiment_key_differs() -> None:
     # GrowthBook feature ID and experiment key can diverge. Telemetry must
-    # key on the feature ID (matches ExperimentName) so overrides, lookups
-    # and downstream analysis stay consistent.
+    # key on the feature ID (matches ExperimentName) so lookups and downstream
+    # analysis stay consistent.
     response = _response({
         ExperimentName.SYSTEM_PROMPT.value: {
             "defaultValue": "cli",

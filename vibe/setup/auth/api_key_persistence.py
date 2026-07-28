@@ -7,13 +7,13 @@ from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
 
 from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig
 from vibe.core.config.default_orchestrator import build_default_orchestrator
-from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import LaunchContext
 from vibe.core.types import Backend
 from vibe.core.utils.concurrency import run_sync
-from vibe.core.utils.keyring import delete_api_key_from_keyring, set_api_key_in_keyring
+from vibe.observability.logging import logger
+from vibe.utils.keyring import delete_api_key_from_keyring, set_api_key_in_keyring
 
 
 def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:

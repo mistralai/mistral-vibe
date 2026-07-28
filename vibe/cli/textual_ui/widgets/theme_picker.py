@@ -15,6 +15,7 @@ from textual.widgets.option_list import Option
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.config_values import AUTO_THEME
 
 PREVIEW_DEBOUNCE_SECONDS = 0.1
 
@@ -22,7 +23,7 @@ PREVIEW_DEBOUNCE_SECONDS = 0.1
 def sorted_theme_names() -> list[str]:
     light = sorted(name for name, t in BUILTIN_THEMES.items() if not t.dark)
     dark = sorted(name for name, t in BUILTIN_THEMES.items() if t.dark)
-    return light + dark
+    return [AUTO_THEME] + light + dark
 
 
 def _build_option_text(theme: str, is_current: bool) -> Text:

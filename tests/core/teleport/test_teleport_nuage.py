@@ -16,13 +16,14 @@ from vibe.core.teleport.nuage import (
     NuageRequest,
     NuageTextPart,
 )
-from vibe.core.utils.http import VibeAsyncHTTPClient
+from vibe.utils.http import VibeAsyncHTTPClient
 
 
 def _request() -> NuageRequest:
     return NuageRequest(
         project_id="project-id",
         idempotency_key="idem-1",
+        conversation_id="cli-conversation-id",
         message=NuageMessage(parts=[NuageTextPart(text="continue from here")]),
         context=NuageContext(
             repositories=[
@@ -62,6 +63,7 @@ async def test_start_posts_nuage_request() -> None:
         "projectId": "project-id",
         "source": "vibe_code_cli",
         "idempotencyKey": "idem-1",
+        "conversationId": "cli-conversation-id",
         "message": {
             "role": "user",
             "parts": [{"type": "text", "text": "continue from here"}],

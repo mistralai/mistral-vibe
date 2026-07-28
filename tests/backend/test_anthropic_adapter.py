@@ -74,7 +74,7 @@ class TestMapperPrepareMessages:
         assert content[0] == {"type": "thinking", "thinking": "hmm", "signature": "sig"}
         assert content[1]["type"] == "text"
 
-    def test_assistant_with_reasoning_content(self, mapper):
+    def test_unsigned_reasoning_content_dropped(self, mapper):
         messages = [
             LLMMessage(
                 role=Role.assistant, content="Answer", reasoning_content="thinking..."
@@ -82,7 +82,36 @@ class TestMapperPrepareMessages:
         ]
         _, converted = mapper.prepare_messages(messages)
         content = converted[0]["content"]
-        assert content[0] == {"type": "thinking", "thinking": "thinking..."}
+        assert all(b.get("type") != "thinking" for b in content)
+        assert content == [{"type": "text", "text": "Answer"}]
+
+    def test_unsigned_reasoning_with_tool_calls_keeps_tool_use(self, mapper):
+        messages = [
+            LLMMessage(
+                role=Role.assistant,
+                reasoning_content="unsigned thinking",
+                tool_calls=[
+                    ToolCall(
+                        id="tc_1",
+                        index=0,
+                        function=FunctionCall(name="search", arguments="{}"),
+                    )
+                ],
+            )
+        ]
+        _, converted = mapper.prepare_messages(messages)
+        content = converted[0]["content"]
+        assert all(b.get("type") != "thinking" for b in content)
+        assert [b["type"] for b in content] == ["tool_use"]
+
+    def test_has_thinking_content_ignores_unsigned(self, adapter):
+        messages = [
+            LLMMessage(
+                role=Role.assistant, content="Answer", reasoning_content="thinking..."
+            )
+        ]
+        _, converted = adapter._mapper.prepare_messages(messages)
+        assert adapter._has_thinking_content(converted) is False
 
     def test_assistant_with_tool_calls(self, mapper):
         messages = [

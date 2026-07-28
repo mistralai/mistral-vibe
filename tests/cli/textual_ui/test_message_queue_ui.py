@@ -12,6 +12,7 @@ from vibe.cli.textual_ui.widgets.messages import (
     QueueHeaderMessage,
     WarningMessage,
 )
+from vibe.cli.textual_ui.widgets.tools import ToolResultMessage
 
 
 @pytest.fixture
@@ -150,13 +151,21 @@ async def test_drain_runs_queued_bashes_in_fifo_order(vibe_app: VibeApp) -> None
         await _wait_until(
             pilot,
             lambda: (
-                len(list(vibe_app.query(BashOutputMessage))) == 3
-                and all(not m._pending for m in vibe_app.query(BashOutputMessage))
+                len([
+                    message
+                    for message in vibe_app.query(ToolResultMessage)
+                    if message.tool_name == "shell"
+                ])
+                == 3
             ),
             timeout=5.0,
         )
 
-        msgs = list(vibe_app.query(BashOutputMessage))
+        msgs = [
+            message
+            for message in vibe_app.query(ToolResultMessage)
+            if message.tool_name == "shell"
+        ]
         assert len(msgs) == 3
         assert vibe_app._input_queue.paused is False
         assert len(vibe_app._input_queue) == 0

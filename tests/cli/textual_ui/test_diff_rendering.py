@@ -3,13 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from textual.app import App, ComposeResult
 from textual.content import Content
+from textual.geometry import Offset
 from textual.highlight import HighlightTheme
-from textual.widget import Widget
+from textual.selection import Selection
 
 from vibe.cli.textual_ui.widgets.diff_rendering import (
     DiffOccurrence,
-    _build_diff_line,
+    DiffView,
+    _build_diff_body,
+    _build_diff_gutter,
+    _DiffLine,
     diff_border_colors,
     edit_diff_inputs,
     language_for_path,
@@ -20,8 +25,8 @@ from vibe.cli.textual_ui.widgets.diff_rendering import (
 def _build(
     code: str, prefix: str, lineno: int | None, language: str, *, ansi: bool
 ) -> Content:
-    return _build_diff_line(
-        code, prefix, lineno, language, ansi=ansi, theme=HighlightTheme
+    return _build_diff_gutter(prefix, lineno, ansi=ansi) + _build_diff_body(
+        code, prefix, language, ansi=ansi, theme=HighlightTheme
     )
 
 
@@ -34,15 +39,12 @@ def _render(old_string, new_string, language, start, *, ansi, dark=True):
 
 
 def _render_with_colors(*args, **kwargs):
-    widgets = _render(*args, **kwargs)
-    return widgets, diff_border_colors(widgets)
+    lines = _render(*args, **kwargs)
+    return lines, diff_border_colors(lines)
 
 
-def _plain(widget: Widget) -> str:
-    if plain := getattr(widget, "plain", None):
-        return plain
-    visual = widget.render()
-    return visual.plain if isinstance(visual, Content) else str(visual)
+def _plain(line: _DiffLine) -> str:
+    return line.content.plain
 
 
 def _styles_at(content: Content, index: int) -> list[str]:
@@ -116,37 +118,37 @@ class TestBuildDiffLine:
 
 class TestRenderEditDiff:
     def test_simple_replacement(self) -> None:
-        widgets = _render("x = 100", "x = 200", "py", 1, ansi=False)
-        classes = [w.classes for w in widgets]
-        assert any("diff-removed" in c for c in classes)
-        assert any("diff-added" in c for c in classes)
+        lines = _render("x = 100", "x = 200", "py", 1, ansi=False)
+        classes = [line.css_class for line in lines]
+        assert "diff-removed" in classes
+        assert "diff-added" in classes
 
     def test_no_hunk_header_rendered(self) -> None:
-        widgets = _render("a\nb\nc\nd\ne\nf", "a\nb\nX\nd\ne\nf", "py", 1, ansi=False)
-        for w in widgets:
-            assert not _plain(w).startswith("@@")
+        lines = _render("a\nb\nc\nd\ne\nf", "a\nb\nX\nd\ne\nf", "py", 1, ansi=False)
+        for line in lines:
+            assert not _plain(line).startswith("@@")
 
     def test_gap_separator_between_hunks(self) -> None:
         search = "A\nB\nC\nD\nE\nF\nG\nH"
         replace = "Z\nB\nC\nD\nE\nF\nG\nY"
-        widgets = _render(search, replace, "py", 1, ansi=False)
-        assert any("diff-gap" in w.classes for w in widgets)
+        lines = _render(search, replace, "py", 1, ansi=False)
+        assert any(line.css_class == "diff-gap" for line in lines)
 
     def test_no_leading_gap_for_single_hunk(self) -> None:
-        widgets = _render("x = 100", "x = 200", "py", 1, ansi=False)
-        assert all("diff-gap" not in w.classes for w in widgets)
+        lines = _render("x = 100", "x = 200", "py", 1, ansi=False)
+        assert all(line.css_class != "diff-gap" for line in lines)
 
     def test_pure_insertion(self) -> None:
-        widgets = _render("x = 1", "x = 1\ny = 2", "py", 1, ansi=False)
-        assert any("diff-added" in w.classes for w in widgets)
+        lines = _render("x = 1", "x = 1\ny = 2", "py", 1, ansi=False)
+        assert any(line.css_class == "diff-added" for line in lines)
 
     def test_pure_deletion(self) -> None:
-        widgets = _render("x = 1\ny = 2", "x = 1", "py", 1, ansi=False)
-        assert any("diff-removed" in w.classes for w in widgets)
+        lines = _render("x = 1\ny = 2", "x = 1", "py", 1, ansi=False)
+        assert any(line.css_class == "diff-removed" for line in lines)
 
     def test_line_numbers_use_start_line_offset(self) -> None:
-        widgets = _render("x = 100", "x = 200", "py", 42, ansi=False)
-        assert any("42" in _plain(w) for w in widgets)
+        lines = _render("x = 100", "x = 200", "py", 42, ansi=False)
+        assert any("42" in _plain(line) for line in lines)
 
     @pytest.mark.asyncio
     async def test_leading_newline_snippet_gutter_matches_file_lines(
@@ -160,10 +162,10 @@ class TestRenderEditDiff:
         occurrences = await edit_diff_inputs(
             str(f), "\nbab\nc", "Z\nbab\nC", replace_all=False
         )
-        widgets = render_edit_diff(occurrences, "py", ansi=False, dark=True)
+        lines = render_edit_diff(occurrences, "py", ansi=False, dark=True)
         file_lines = ["aa", "bab", "cc"]
-        for w in widgets:
-            plain = _plain(w)
+        for line in lines:
+            plain = _plain(line)
             if plain[5:6] in (" ", "-"):
                 lineno = int(plain[:4])
                 assert plain[7:] == file_lines[lineno - 1]
@@ -171,52 +173,52 @@ class TestRenderEditDiff:
     def test_multi_hunk_line_numbers(self) -> None:
         search = "A\nB\nC\nD\nE\nF\nG\nH"
         replace = "Z\nB\nC\nD\nE\nF\nG\nY"
-        widgets = _render(search, replace, "py", 10, ansi=False)
-        joined = "\n".join(_plain(w) for w in widgets)
+        lines = _render(search, replace, "py", 10, ansi=False)
+        joined = "\n".join(_plain(line) for line in lines)
         assert "10" in joined
         assert "17" in joined
 
     def test_no_line_numbers_without_start_line(self) -> None:
-        widgets = _render("x = 100", "x = 200", "py", None, ansi=False)
-        for w in widgets:
-            plain = _plain(w)
+        lines = _render("x = 100", "x = 200", "py", None, ansi=False)
+        for line in lines:
+            plain = _plain(line)
             if plain.startswith(("- ", "+ ")):
                 assert not plain[0].isdigit()
 
     def test_blank_lines_preserved(self) -> None:
         search = "a\n\nb\nc\nd"
         replace = "a\n\nb\nc\nZ"
-        widgets = _render(search, replace, "py", 1, ansi=False)
-        removed = [w for w in widgets if "diff-removed" in w.classes]
-        added = [w for w in widgets if "diff-added" in w.classes]
-        assert any(_plain(w).rstrip().endswith("d") for w in removed)
-        assert any(_plain(w).rstrip().endswith("Z") for w in added)
+        lines = _render(search, replace, "py", 1, ansi=False)
+        removed = [line for line in lines if line.css_class == "diff-removed"]
+        added = [line for line in lines if line.css_class == "diff-added"]
+        assert any(_plain(line).rstrip().endswith("d") for line in removed)
+        assert any(_plain(line).rstrip().endswith("Z") for line in added)
 
     def test_replace_all_renders_each_occurrence(self) -> None:
-        widgets = _render("foo", "bar", "py", [3, 10, 25], ansi=False)
-        removed = [w for w in widgets if "diff-removed" in w.classes]
-        added = [w for w in widgets if "diff-added" in w.classes]
+        lines = _render("foo", "bar", "py", [3, 10, 25], ansi=False)
+        removed = [line for line in lines if line.css_class == "diff-removed"]
+        added = [line for line in lines if line.css_class == "diff-added"]
         assert len(removed) == 3
         assert len(added) == 3
 
     def test_replace_all_uses_each_start_line(self) -> None:
-        widgets = _render("foo", "bar", "py", [3, 10, 25], ansi=False)
-        joined = "\n".join(_plain(w) for w in widgets)
+        lines = _render("foo", "bar", "py", [3, 10, 25], ansi=False)
+        joined = "\n".join(_plain(line) for line in lines)
         assert "3" in joined
         assert "10" in joined
         assert "25" in joined
 
     def test_replace_all_separates_occurrences_with_gap(self) -> None:
-        widgets = _render("foo", "bar", "py", [3, 10], ansi=False)
-        assert sum("diff-gap" in w.classes for w in widgets) == 1
+        lines = _render("foo", "bar", "py", [3, 10], ansi=False)
+        assert sum(line.css_class == "diff-gap" for line in lines) == 1
 
     def test_single_occurrence_has_no_gap(self) -> None:
-        widgets = _render("foo", "bar", "py", [3], ansi=False)
-        assert all("diff-gap" not in w.classes for w in widgets)
+        lines = _render("foo", "bar", "py", [3], ansi=False)
+        assert all(line.css_class != "diff-gap" for line in lines)
 
     def test_per_occurrence_full_lines(self) -> None:
         # Each occurrence carries its own whole-line content with its own line.
-        widgets = render_edit_diff(
+        lines = render_edit_diff(
             [
                 DiffOccurrence(2, "x = bar + 1", "x = qux + 1"),
                 DiffOccurrence(7, "y = bar - 2", "y = qux - 2"),
@@ -225,8 +227,8 @@ class TestRenderEditDiff:
             ansi=False,
             dark=True,
         )
-        removed = [_plain(w) for w in widgets if "diff-removed" in w.classes]
-        added = [_plain(w) for w in widgets if "diff-added" in w.classes]
+        removed = [_plain(line) for line in lines if line.css_class == "diff-removed"]
+        added = [_plain(line) for line in lines if line.css_class == "diff-added"]
         assert any("x = bar + 1" in r for r in removed)
         assert any("y = bar - 2" in r for r in removed)
         assert any("x = qux + 1" in a for a in added)
@@ -234,24 +236,131 @@ class TestRenderEditDiff:
 
 
 class TestBorderColors:
-    def test_keys_index_into_widgets(self) -> None:
-        widgets, colors = _render_with_colors("x = 100", "x = 200", "py", 1, ansi=False)
-        assert colors and all(0 <= k < len(widgets) for k in colors)
+    def test_keys_index_into_lines(self) -> None:
+        lines, colors = _render_with_colors("x = 100", "x = 200", "py", 1, ansi=False)
+        assert colors and all(0 <= k < len(lines) for k in colors)
 
     def test_added_lines_get_bright_success(self) -> None:
-        widgets, colors = _render_with_colors("x = 100", "x = 200", "py", 1, ansi=False)
-        added_keys = [i for i, w in enumerate(widgets) if "diff-added" in w.classes]
-        assert added_keys and all(colors[i] == "not dim $success" for i in added_keys)
+        lines, colors = _render_with_colors("x = 100", "x = 200", "py", 1, ansi=False)
+        added = [i for i, line in enumerate(lines) if line.css_class == "diff-added"]
+        assert added and all(colors[i] == "not dim $success" for i in added)
 
     def test_removed_lines_get_bright_error(self) -> None:
-        widgets, colors = _render_with_colors("x = 100", "x = 200", "py", 1, ansi=False)
-        removed_keys = [i for i, w in enumerate(widgets) if "diff-removed" in w.classes]
-        assert removed_keys and all(colors[i] == "not dim $error" for i in removed_keys)
+        lines, colors = _render_with_colors("x = 100", "x = 200", "py", 1, ansi=False)
+        removed = [
+            i for i, line in enumerate(lines) if line.css_class == "diff-removed"
+        ]
+        assert removed and all(colors[i] == "not dim $error" for i in removed)
 
     def test_context_and_gap_not_in_dict(self) -> None:
         search = "A\nB\nC\nD\nE\nF\nG\nH"
         replace = "Z\nB\nC\nD\nE\nF\nG\nY"
-        widgets, colors = _render_with_colors(search, replace, "py", 1, ansi=False)
-        for i, w in enumerate(widgets):
-            if "diff-context" in w.classes or "diff-gap" in w.classes:
+        lines, colors = _render_with_colors(search, replace, "py", 1, ansi=False)
+        for i, line in enumerate(lines):
+            if line.css_class in ("diff-context", "diff-gap"):
                 assert i not in colors
+
+    def test_border_row_colors_property_matches_helper(self) -> None:
+        lines = _render("x = 100", "x = 200", "py", 1, ansi=False)
+        view = DiffView(lines, ansi=False, dark=True)
+        assert view.border_row_colors == diff_border_colors(lines)
+
+
+class TestDiffViewSelection:
+    def test_get_selection_excludes_gutter(self) -> None:
+        lines = _render("x = 100", "x = 200", "py", 1, ansi=False)
+        view = DiffView(lines, ansi=False, dark=True)
+        for y, line in enumerate(lines):
+            if line.css_class == "diff-gap":
+                continue
+            start = Offset(view._gutter_width, y)
+            end = Offset(view._gutter_width + len(line.body_plain), y)
+            result = view.get_selection(Selection(start, end))
+            assert result is not None
+            text, ending = result
+            assert text == line.body_plain
+            assert ending == "\n"
+
+    def test_get_selection_before_gutter_clamps_to_body_start(self) -> None:
+        lines = _render("x = 100", "x = 200", "py", 1, ansi=False)
+        view = DiffView(lines, ansi=False, dark=True)
+        y, line = next(
+            (y, line)
+            for y, line in enumerate(lines)
+            if line.css_class == "diff-removed"
+        )
+        end = Offset(view._gutter_width + len(line.body_plain), y)
+        result = view.get_selection(Selection(Offset(0, y), end))
+        assert result is not None
+        assert result[0] == line.body_plain
+
+    @pytest.mark.asyncio
+    async def test_single_row_selection_does_not_highlight_other_rows(self) -> None:
+        lines = _render("a\nb\nc\nd\ne", "a\nB\nc\nD\ne", "py", 1, ansi=False)
+
+        class _App(App[None]):
+            def compose(self) -> ComposeResult:
+                yield DiffView(lines, ansi=False, dark=True)
+
+        app = _App()
+        async with app.run_test(size=(60, 20)) as pilot:
+            view = app.query_one(DiffView)
+            unselected = [view.render_line(y) for y in range(len(lines))]
+
+            body = view._gutter_width
+            app.screen.selections = {
+                view: Selection(Offset(body, 0), Offset(body + 1, 0))
+            }
+            await pilot.pause()
+
+            selected = [view.render_line(y) for y in range(len(lines))]
+
+        assert selected[0] != unselected[0]
+        for y in range(1, len(lines)):
+            assert selected[y] == unselected[y]
+
+    @pytest.mark.asyncio
+    async def test_render_line_offsets_target_their_own_row(self) -> None:
+        lines = _render("a\nb\nc\nd\ne", "a\nB\nc\nD\ne", "py", 1, ansi=False)
+
+        class _App(App[None]):
+            def compose(self) -> ComposeResult:
+                yield DiffView(lines, ansi=False, dark=True)
+
+        app = _App()
+        async with app.run_test(size=(60, 20)) as pilot:
+            view = app.query_one(DiffView)
+            await pilot.pause()
+            for y in range(len(lines)):
+                strip = view.render_line(y)
+                offsets_y = {
+                    segment.style.meta["offset"][1]
+                    for segment in strip
+                    if segment.style is not None
+                    and segment.style.meta.get("offset") is not None
+                }
+                assert offsets_y == {y}
+
+    @pytest.mark.asyncio
+    async def test_gutter_is_not_highlighted_by_selection(self) -> None:
+        lines = _render("x = 100", "x = 200", "py", 1, ansi=False)
+
+        class _App(App[None]):
+            def compose(self) -> ComposeResult:
+                yield DiffView(lines, ansi=False, dark=True)
+
+        app = _App()
+        async with app.run_test(size=(60, 20)) as pilot:
+            view = app.query_one(DiffView)
+            y = next(
+                y for y, line in enumerate(lines) if line.css_class == "diff-removed"
+            )
+            unselected = view.render_line(y)
+            app.screen.selections = {view: Selection(Offset(0, y), Offset(40, y))}
+            await pilot.pause()
+            selected = view.render_line(y)
+            gutter = view._gutter_width
+            width = view.size.width
+
+        assert selected.crop(0, gutter) == unselected.crop(0, gutter)
+        assert selected.crop(gutter, width) != unselected.crop(gutter, width)

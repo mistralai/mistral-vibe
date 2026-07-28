@@ -9,7 +9,7 @@ from textual.content import Content, ContentType
 from textual.style import Style
 from textual.widgets import Static
 
-from vibe.core.logger import logger
+from vibe.observability.logging import logger
 
 _SAFE_SCHEMES = {"http", "https"}
 

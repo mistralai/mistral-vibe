@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import errno
@@ -12,7 +12,6 @@ import json
 import os
 from pathlib import Path
 import shlex
-import subprocess
 import threading
 import time
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, get_args
@@ -34,10 +33,11 @@ from vibe.core.tools.base import (
     ToolPermission,
 )
 from vibe.core.tools.builtins.bash import BashToolConfig
-from vibe.core.tools.builtins.managed_bash import backend as managed_bash_backend
-from vibe.core.tools.builtins.managed_bash.backend import (
-    ManagedBashBackend,
-    ManagedBashBackendError,
+from vibe.core.tools.builtins.managed_shell import backend as managed_shell_backend
+from vibe.core.tools.builtins.managed_shell.backend import (
+    ManagedShellBackend,
+    ManagedShellBackendError,
+    ManagedTerminal,
 )
 from vibe.core.tools.permissions import (
     PermissionContext,
@@ -48,10 +48,12 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import is_path_within_workdir
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows
-from vibe.core.utils.io import decode_safe
+from vibe.utils.io import decode_safe
+from vibe.utils.tool_presentation import ToolEffectKind
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
+    from vibe.core.config.harness_files import HarnessFilesManager
 
 Status = Literal["running", "completed", "killed", "timed_out", "orphaned"]
 LogAction = Literal["read", "write", "append"]
@@ -61,6 +63,7 @@ DEFAULT_INLINE_BYTES = 30_000
 DEFAULT_MAX_TIMEOUT_SECONDS = 600.0
 DEFAULT_MAX_POLL_SECONDS = 300.0
 KILL_GRACE_SECONDS = 2.0
+FORCE_TERMINATION_TIMEOUT_SECONDS = 2.0
 READER_SELECT_SECONDS = 0.1
 
 CONTROL_SEQUENCES: dict[str, bytes] = {
@@ -153,11 +156,11 @@ if set(get_args(ControlKey)) != set(CONTROL_SEQUENCES):
     raise RuntimeError("ControlKey is out of sync with CONTROL_SEQUENCES")
 
 
-class ManagedBashError(Exception):
+class ManagedShellError(Exception):
     pass
 
 
-class SessionNotFoundError(ManagedBashError):
+class SessionNotFoundError(ManagedShellError):
     pass
 
 
@@ -253,6 +256,37 @@ def default_read_only_commands() -> list[str]:
     )
 
 
+def posix_read_only_commands() -> list[str]:
+    return list(_READ_ONLY_COMMANDS_POSIX)
+
+
+def posix_shell_default_allowlist() -> list[str]:
+    common = ["cd", "echo", "git diff", "git log", "git status", "tree", "whoami"]
+    return common + posix_read_only_commands()
+
+
+def posix_shell_default_denylist() -> list[str]:
+    common = ["gdb", "pdb", "passwd"]
+    return common + [
+        "nano",
+        "vim",
+        "vi",
+        "emacs",
+        "bash -i",
+        "sh -i",
+        "zsh -i",
+        "fish -i",
+        "dash -i",
+        "screen",
+        "tmux",
+    ]
+
+
+def posix_shell_default_denylist_standalone() -> list[str]:
+    common = ["python", "python3", "ipython"]
+    return common + ["bash", "sh", "nohup", "vi", "vim", "emacs", "nano", "su"]
+
+
 def _get_default_allowlist() -> list[str]:
     common = ["cd", "echo", "git diff", "git log", "git status", "tree", "whoami"]
     return common + default_read_only_commands()
@@ -288,28 +322,22 @@ def _get_default_denylist_standalone() -> list[str]:
     return common + ["bash", "sh", "nohup", "vi", "vim", "emacs", "nano", "su"]
 
 
-_PATH_COMMANDS = {
-    "cat",
-    "cd",
-    "chmod",
-    "chown",
-    "cp",
-    "head",
-    "ls",
-    "mkdir",
-    "mv",
-    "rm",
-    "stat",
-    "tail",
-    "touch",
-    "wc",
-}
+_MUTATING_PATH_COMMANDS = {"cd", "chmod", "chown", "cp", "mkdir", "mv", "rm", "touch"}
+_PATH_COMMANDS = _MUTATING_PATH_COMMANDS | set(_READ_ONLY_COMMANDS_POSIX)
 
 _FIND_EXECUTION_PREDICATES = {"-exec", "-execdir", "-ok", "-okdir"}
+_MSYS_DRIVE_PATH_PREFIX_LEN = 2
 
 
-def _split_command_tokens(command: str) -> list[str]:
+def _split_command_tokens(
+    command: str, *, preserve_backslashes: bool = False
+) -> list[str]:
     try:
+        if preserve_backslashes:
+            lexer = shlex.shlex(command, posix=True)
+            lexer.whitespace_split = True
+            lexer.escape = ""
+            return list(lexer)
         return shlex.split(command)
     except ValueError:
         return command.split()
@@ -320,41 +348,81 @@ def _looks_like_path(token: str) -> bool:
         token.startswith(os.sep)
         or token.startswith("~")
         or token.startswith(".")
-        or os.sep in token
+        or "/" in token
+        or "\\" in token
     )
 
 
+def _normalize_bash_path_token(token: str) -> str:
+    if not is_windows() or not token.startswith("/"):
+        return token
+    if len(token) < _MSYS_DRIVE_PATH_PREFIX_LEN:
+        return token
+
+    drive = token[1]
+    if not drive.isascii() or not drive.isalpha():
+        return token
+    if len(token) > _MSYS_DRIVE_PATH_PREFIX_LEN and token[
+        _MSYS_DRIVE_PATH_PREFIX_LEN
+    ] not in {"/", "\\"}:
+        return token
+
+    suffix = token[_MSYS_DRIVE_PATH_PREFIX_LEN:].replace("\\", "/")
+    return f"{drive.upper()}:{suffix or '/'}"
+
+
 def _collect_outside_dirs(
-    command_parts: list[str], command_cwd: Path | None = None
+    command_parts: list[str],
+    *,
+    command_cwd: Path,
+    cwd: Path,
+    project_roots: list[Path],
+    scratchpad_dir: Path | None,
+    path_commands: Collection[str] = _PATH_COMMANDS,
+    case_sensitive_commands: bool = True,
+    preserve_backslashes: bool = False,
 ) -> set[str]:
-    command_cwd = Path.cwd() if command_cwd is None else command_cwd
     dirs: set[str] = set()
-    if not is_path_within_workdir(str(command_cwd)) and not is_scratchpad_path(
-        str(command_cwd)
-    ):
+    if not is_path_within_workdir(
+        str(command_cwd), cwd=cwd, project_roots=project_roots
+    ) and not is_scratchpad_path(str(command_cwd), scratchpad_dir=scratchpad_dir):
         dirs.add(str(command_cwd))
 
     for part in command_parts:
-        tokens = _split_command_tokens(part)
+        tokens = _split_command_tokens(part, preserve_backslashes=preserve_backslashes)
         command = tokens[0] if tokens else None
-        if not command or command not in _PATH_COMMANDS:
+        if not command:
+            continue
+        command_name = command if case_sensitive_commands else command.lower()
+        if command_name not in path_commands:
             continue
         for token in tokens[1:]:
             if token.startswith("-"):
                 continue
-            if command == "chmod" and token.startswith("+"):
+            if command_name == "chmod" and token.startswith("+"):
                 continue
             if not _looks_like_path(token):
                 continue
 
-            resolved = Path(token).expanduser()
+            path_token = _normalize_bash_path_token(token)
+            if path_token != token:
+                if is_path_within_workdir(
+                    path_token, cwd=cwd, project_roots=project_roots
+                ):
+                    continue
+                if is_scratchpad_path(path_token, scratchpad_dir=scratchpad_dir):
+                    continue
+
+            resolved = Path(path_token).expanduser()
             if not resolved.is_absolute():
                 resolved = command_cwd / resolved
             resolved = resolved.resolve()
 
-            if is_path_within_workdir(str(resolved)):
+            if is_path_within_workdir(
+                str(resolved), cwd=cwd, project_roots=project_roots
+            ):
                 continue
-            if is_scratchpad_path(str(resolved)):
+            if is_scratchpad_path(str(resolved), scratchpad_dir=scratchpad_dir):
                 continue
 
             parent = str(resolved) if resolved.is_dir() else str(resolved.parent)
@@ -385,7 +453,7 @@ def _decode_base64_bytes(value: str) -> bytes:
     try:
         return base64.b64decode(value, validate=True)
     except binascii.Error as exc:
-        raise ManagedBashError(f"invalid bytes_base64 value: {exc}") from exc
+        raise ManagedShellError(f"invalid bytes_base64 value: {exc}") from exc
 
 
 @dataclass
@@ -394,11 +462,11 @@ class TerminalSession:
     command: str
     cwd: Path
     shell: str
-    process: subprocess.Popen[bytes]
-    master_fd: int
+    terminal: ManagedTerminal
     output_path: Path
     manifest_path: Path
     created_at: float
+    pty_backend: str | None = None
     status: Status = "running"
     exit_code: int | None = None
     updated_at: float = field(default_factory=time.time)
@@ -414,6 +482,7 @@ class SessionInfo(BaseModel):
     command: str
     cwd: str
     shell: str
+    pty_backend: str | None = None
     status: Status
     exit_code: int | None = None
     output_path: str
@@ -493,14 +562,25 @@ def _safe_stat_size(path: Path) -> int:
 
 
 class TerminalSessionManager:
-    def __init__(self, backend: ManagedBashBackend | None = None) -> None:
-        self._backend = backend or managed_bash_backend.create_managed_bash_backend()
-        self.base_dir = VIBE_HOME.path / "bash-tool"
+    def __init__(
+        self,
+        backend: ManagedShellBackend | None = None,
+        *,
+        shell_family: str = "posix",
+        session_prefix: str = "bash",
+    ) -> None:
+        self._backend = backend or managed_shell_backend.create_managed_shell_backend(
+            shell_family
+        )
+        self.shell_family = shell_family
+        self.session_prefix = session_prefix
+        self.base_dir = VIBE_HOME.path / "shell-tool"
         self.sessions_dir = self.base_dir / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._sessions: dict[str, TerminalSession] = {}
         self._orphaned: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
+        self._load_orphaned_manifests()
 
     def start(
         self,
@@ -512,9 +592,9 @@ class TerminalSessionManager:
         background: bool,
     ) -> TerminalSession:
         if not command.strip():
-            raise ManagedBashError("command must not be empty")
+            raise ManagedShellError("command must not be empty")
         if not cwd.is_dir():
-            raise ManagedBashError(f"cwd is not a directory: {cwd}")
+            raise ManagedShellError(f"cwd is not a directory: {cwd}")
 
         merged_env = self._build_env(env)
 
@@ -523,36 +603,25 @@ class TerminalSessionManager:
         manifest_path = self.sessions_dir / f"{session_id}.json"
         output_path.touch()
 
-        master_fd, slave_fd = self._backend.open_terminal()
-        try:
-            process = self._backend.spawn(
-                shell=shell, command=command, cwd=cwd, env=merged_env, slave_fd=slave_fd
-            )
-        except Exception:
-            self._backend.close_fd(master_fd)
-            self._backend.close_fd(slave_fd)
-            raise
-        finally:
-            try:
-                self._backend.close_fd(slave_fd)
-            except OSError:
-                pass
+        terminal = self._backend.start_terminal(
+            shell=shell, command=command, cwd=cwd, env=merged_env
+        )
 
         session = TerminalSession(
             session_id=session_id,
             command=command,
             cwd=cwd,
             shell=shell,
-            process=process,
-            master_fd=master_fd,
+            terminal=terminal,
             output_path=output_path,
             manifest_path=manifest_path,
             created_at=time.time(),
+            pty_backend=terminal.pty_backend,
         )
         reader = threading.Thread(
             target=self._reader_loop,
             args=(session,),
-            name=f"managed-bash-reader-{session_id}",
+            name=f"managed-shell-reader-{session_id}",
             daemon=True,
         )
         session.reader_thread = reader
@@ -584,17 +653,17 @@ class TerminalSessionManager:
 
     def write_bytes(self, session_id: str, data: bytes) -> int:
         if not data:
-            raise ManagedBashError("stdin payload must not be empty")
+            raise ManagedShellError("stdin payload must not be empty")
         session = self._live_session(session_id)
         with session.condition:
             if session.status != "running":
-                raise ManagedBashError(
+                raise ManagedShellError(
                     f"cannot write to session {session_id}; status is {session.status}"
                 )
             try:
-                return self._backend.write(session.master_fd, data)
-            except OSError as exc:
-                raise ManagedBashError(f"failed to write stdin: {exc}") from exc
+                return session.terminal.write(data)
+            except (EOFError, OSError) as exc:
+                raise ManagedShellError(f"failed to write stdin: {exc}") from exc
 
     def read_output(
         self, *, session_id: str, cursor: int, wait_seconds: float, max_bytes: int
@@ -664,7 +733,7 @@ class TerminalSessionManager:
 
     def kill(self, session_id: str, *, status: Status = "killed") -> SessionInfo:
         if status not in {"killed", "timed_out"}:
-            raise ManagedBashError(f"invalid terminal kill status: {status}")
+            raise ManagedShellError(f"invalid terminal kill status: {status}")
 
         session = self._live_session(session_id)
         with session.condition:
@@ -674,9 +743,12 @@ class TerminalSessionManager:
             session.updated_at = time.time()
             session.condition.notify_all()
 
-        self._terminate_process_group(session)
-        if session.reader_thread is not None:
-            session.reader_thread.join(timeout=KILL_GRACE_SECONDS)
+        try:
+            self._terminate_sessions([session])
+        except ManagedShellBackendError:
+            self._restore_running_status([session])
+            raise
+        self._join_reader_threads([session])
 
         with session.condition:
             self._refresh_session_locked(session)
@@ -685,18 +757,34 @@ class TerminalSessionManager:
 
     def reset(self, *, clear_logs: bool) -> list[SessionInfo]:
         with self._lock:
-            killed: list[SessionInfo] = []
-            for session in list(self._sessions.values()):
+            sessions = list(self._sessions.values())
+            running_sessions: list[TerminalSession] = []
+            for session in sessions:
                 with session.condition:
                     self._refresh_session_locked(session)
-                    running = session.status == "running"
-                if running:
-                    killed.append(self.kill(session.session_id))
+                    if session.status != "running":
+                        continue
+                    session.status = "killed"
+                    session.updated_at = time.time()
+                    session.condition.notify_all()
+                    running_sessions.append(session)
+
+            try:
+                self._terminate_sessions(running_sessions)
+            except ManagedShellBackendError:
+                self._restore_running_status(running_sessions)
+                raise
+            self._join_reader_threads(running_sessions)
+            killed: list[SessionInfo] = []
+            for session in running_sessions:
+                with session.condition:
+                    self._save_manifest(session)
+                    killed.append(self._session_info_locked(session))
 
             if clear_logs:
                 self._sessions.clear()
                 self._orphaned.clear()
-                for child in self.sessions_dir.glob("*"):
+                for child in self.sessions_dir.glob(f"{self.session_prefix}_*"):
                     if child.is_file():
                         child.unlink(missing_ok=True)
         return killed
@@ -707,11 +795,12 @@ class TerminalSessionManager:
         if session_id:
             return Path(self.info(session_id).output_path)
         if not relative_path:
-            raise ManagedBashError("provide either session_id or relative_path")
+            raise ManagedShellError("provide either session_id or relative_path")
         candidate = (self.base_dir / relative_path).resolve()
         base = self.base_dir.resolve()
         if not candidate.is_relative_to(base):
-            raise ManagedBashError("log path must stay under ~/.vibe/bash-tool")
+            raise ManagedShellError("log path must stay under ~/.vibe/shell-tool")
+        self._reject_other_family_session_log(candidate)
         return candidate
 
     def read_log_file(self, path: Path, *, offset: int, max_bytes: int) -> OutputChunk:
@@ -726,7 +815,8 @@ class TerminalSessionManager:
         resolved = path.resolve()
         base = self.base_dir.resolve()
         if not resolved.is_relative_to(base):
-            raise ManagedBashError("log path must stay under ~/.vibe/bash-tool")
+            raise ManagedShellError("log path must stay under ~/.vibe/shell-tool")
+        self._reject_other_family_session_log(resolved)
         self._reject_live_session_log_write(resolved)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         if action == "write":
@@ -735,7 +825,7 @@ class TerminalSessionManager:
             with resolved.open("a", encoding="utf-8") as handle:
                 handle.write(content)
         else:
-            raise ManagedBashError(f"unsupported write action: {action}")
+            raise ManagedShellError(f"unsupported write action: {action}")
         return len(content.encode("utf-8"))
 
     def _reject_live_session_log_write(self, path: Path) -> None:
@@ -746,11 +836,22 @@ class TerminalSessionManager:
                         continue
                     self._refresh_session_locked(session)
                     if session.status == "running":
-                        raise ManagedBashError(
+                        raise ManagedShellError(
                             "cannot write or append to a live session log; use "
-                            "BashStdin for process input or wait until the session exits"
+                            f"{self.session_prefix}_stdin for process input or wait "
+                            "until the session exits"
                         )
                     return
+
+    def _reject_other_family_session_log(self, path: Path) -> None:
+        sessions_dir = self.sessions_dir.resolve()
+        if not path.is_relative_to(sessions_dir):
+            return
+        if path.name.startswith(f"{self.session_prefix}_"):
+            return
+        raise ManagedShellError(
+            f"log path must reference a {self.session_prefix} session file"
+        )
 
     def _is_running_output_path(self, path: Path) -> bool:
         resolved = path.resolve()
@@ -766,12 +867,10 @@ class TerminalSessionManager:
     def _reader_loop(self, session: TerminalSession) -> None:
         try:
             while True:
-                readable = self._backend.wait_readable(
-                    session.master_fd, READER_SELECT_SECONDS
-                )
+                readable = session.terminal.wait_readable(READER_SELECT_SECONDS)
                 if readable:
                     try:
-                        chunk = self._backend.read(session.master_fd, 8192)
+                        chunk = session.terminal.read(8192)
                     except OSError as exc:
                         if exc.errno in {errno.EBADF, errno.EIO}:
                             break
@@ -780,7 +879,7 @@ class TerminalSessionManager:
                         break
                     self._append_output(session, chunk)
 
-                if session.process.poll() is not None and not readable:
+                if session.terminal.poll() is not None and not readable:
                     break
         except Exception as exc:
             with session.condition:
@@ -788,23 +887,22 @@ class TerminalSessionManager:
                 session.updated_at = time.time()
                 session.condition.notify_all()
         finally:
-            try:
-                session.process.wait(timeout=KILL_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                self._terminate_process_group(session, force=True)
-            except Exception:
-                pass
+            if session.terminal.poll() is None:
+                try:
+                    self._terminate_sessions([session], force=True)
+                except ManagedShellBackendError:
+                    pass
 
             with session.condition:
                 if session.status == "running":
                     session.status = "completed"
-                session.exit_code = session.process.returncode
+                session.exit_code = session.terminal.returncode
                 session.updated_at = time.time()
                 session.condition.notify_all()
                 self._save_manifest(session)
 
             try:
-                self._backend.close_fd(session.master_fd)
+                session.terminal.close()
             except OSError:
                 pass
 
@@ -815,17 +913,95 @@ class TerminalSessionManager:
             session.updated_at = time.time()
             session.condition.notify_all()
 
-    def _terminate_process_group(
-        self, session: TerminalSession, *, force: bool = False
+    def _terminate_sessions(
+        self, sessions: list[TerminalSession], *, force: bool = False
     ) -> None:
-        self._backend.terminate_process_group(
-            session.process, force=force, grace_seconds=KILL_GRACE_SECONDS
+        live = [session for session in sessions if session.terminal.poll() is None]
+        if not live:
+            return
+
+        force_targets = live if force else []
+        if not force:
+            graceful: list[TerminalSession] = []
+            for session in live:
+                try:
+                    self._backend.request_termination(session.terminal)
+                except Exception:
+                    force_targets.append(session)
+                else:
+                    graceful.append(session)
+            force_targets.extend(
+                self._wait_for_terminal_exit(graceful, KILL_GRACE_SECONDS)
+            )
+
+        force_errors: dict[str, Exception] = {}
+        for session in force_targets:
+            try:
+                self._backend.force_terminate_terminal(
+                    session.terminal, timeout_seconds=FORCE_TERMINATION_TIMEOUT_SECONDS
+                )
+            except Exception as exc:
+                force_errors[session.session_id] = exc
+
+        remaining = self._wait_for_terminal_exit(
+            force_targets, FORCE_TERMINATION_TIMEOUT_SECONDS
         )
+        if not remaining:
+            return
+
+        details = []
+        for session in remaining:
+            error = force_errors.get(session.session_id)
+            detail = f"{session.session_id}: {error}" if error else session.session_id
+            details.append(detail)
+        raise ManagedShellBackendError(
+            "failed to terminate managed shell process tree: " + ", ".join(details)
+        )
+
+    @staticmethod
+    def _restore_running_status(sessions: list[TerminalSession]) -> None:
+        for session in sessions:
+            if session.terminal.poll() is not None:
+                continue
+            with session.condition:
+                if session.status == "running":
+                    continue
+                session.status = "running"
+                session.updated_at = time.time()
+                session.condition.notify_all()
+
+    @staticmethod
+    def _wait_for_terminal_exit(
+        sessions: list[TerminalSession], timeout_seconds: float
+    ) -> list[TerminalSession]:
+        deadline = time.monotonic() + timeout_seconds
+        remaining = sessions
+        while remaining:
+            remaining = [
+                session for session in remaining if session.terminal.poll() is None
+            ]
+            now = time.monotonic()
+            if not remaining or now >= deadline:
+                return remaining
+            time.sleep(min(READER_SELECT_SECONDS, deadline - now))
+        return []
+
+    @staticmethod
+    def _join_reader_threads(sessions: list[TerminalSession]) -> None:
+        deadline = time.monotonic() + FORCE_TERMINATION_TIMEOUT_SECONDS
+        for session in sessions:
+            reader = session.reader_thread
+            if reader is None:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            reader.join(timeout=remaining)
 
     def _refresh_session_locked(self, session: TerminalSession) -> None:
         if session.status != "running":
             return
-        returncode = session.process.poll()
+        returncode = session.terminal.poll()
         if returncode is None:
             return
         # The process exited, but the reader thread may still be draining
@@ -843,19 +1019,25 @@ class TerminalSessionManager:
 
     def _build_env(self, overrides: dict[str, str] | None) -> dict[str, str]:
         env = dict(os.environ)
-        env.update({
-            "TERM": env.get("TERM", "xterm-256color"),
-            "COLUMNS": env.get("COLUMNS", "120"),
-            "LINES": env.get("LINES", "40"),
-            # Keep the PTY interactive (so stdin can drive REPLs/prompts) while
-            # neutralising pagers: with a real TTY, foreground commands like
-            # `git log` would otherwise spawn `less` and block until timeout
-            # waiting for input that never arrives.
-            "GIT_PAGER": "cat",
-            "PAGER": "cat",
-            "LESS": "-FX",
-            "DEBIAN_FRONTEND": "noninteractive",
-        })
+        match self.shell_family:
+            case "powershell" | "windows":
+                env.update({"GIT_PAGER": "more", "PAGER": "more"})
+            case "posix" | "git_bash":
+                env.update({
+                    "TERM": env.get("TERM", "xterm-256color"),
+                    "COLUMNS": env.get("COLUMNS", "120"),
+                    "LINES": env.get("LINES", "40"),
+                    # Keep the PTY interactive (so stdin can drive REPLs/prompts)
+                    # while neutralising pagers such as `less`.
+                    "GIT_PAGER": "cat",
+                    "PAGER": "cat",
+                    "LESS": "-FX",
+                    "DEBIAN_FRONTEND": "noninteractive",
+                })
+            case _:
+                raise ManagedShellError(
+                    f"unknown managed shell family: {self.shell_family}"
+                )
         if overrides:
             env.update(overrides)
         return env
@@ -865,14 +1047,18 @@ class TerminalSessionManager:
             return self._sessions[session_id]
         except KeyError as exc:
             if session_id in self._orphaned:
-                raise ManagedBashError(f"session is orphaned: {session_id}") from exc
-            raise SessionNotFoundError(f"unknown bash session: {session_id}") from exc
+                raise ManagedShellError(f"session is orphaned: {session_id}") from exc
+            raise SessionNotFoundError(
+                f"unknown {self.session_prefix} session: {session_id}"
+            ) from exc
 
     def _orphan_info(self, session_id: str) -> SessionInfo:
         try:
             return self._info_from_manifest(self._orphaned[session_id])
         except KeyError as exc:
-            raise SessionNotFoundError(f"unknown bash session: {session_id}") from exc
+            raise SessionNotFoundError(
+                f"unknown {self.session_prefix} session: {session_id}"
+            ) from exc
 
     def _session_info_locked(self, session: TerminalSession) -> SessionInfo:
         return SessionInfo(
@@ -880,6 +1066,7 @@ class TerminalSessionManager:
             command=session.command,
             cwd=str(session.cwd),
             shell=session.shell,
+            pty_backend=session.pty_backend,
             status=session.status,
             exit_code=session.exit_code,
             output_path=str(session.output_path),
@@ -911,6 +1098,8 @@ class TerminalSessionManager:
             session_id = metadata.get("session_id")
             if not isinstance(session_id, str):
                 continue
+            if not session_id.startswith(f"{self.session_prefix}_"):
+                continue
             if metadata.get("status") == "running":
                 metadata["status"] = "orphaned"
                 metadata["updated_at"] = _now_iso()
@@ -934,9 +1123,9 @@ class TerminalSessionManager:
         trim_final_incomplete_utf8: bool = False,
     ) -> OutputChunk:
         if cursor < 0:
-            raise ManagedBashError("cursor must be a non-negative byte offset")
+            raise ManagedShellError("cursor must be a non-negative byte offset")
         if max_bytes <= 0:
-            raise ManagedBashError("max_bytes must be a positive byte limit")
+            raise ManagedShellError("max_bytes must be a positive byte limit")
         if not path.exists():
             return OutputChunk(output="", next_cursor=cursor, truncated=False)
 
@@ -956,28 +1145,35 @@ class TerminalSessionManager:
 
     def _new_session_id(self) -> str:
         stamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
-        return f"bash_{stamp}_{uuid.uuid4().hex[:8]}"
+        return f"{self.session_prefix}_{stamp}_{uuid.uuid4().hex[:8]}"
 
 
-_MANAGER: TerminalSessionManager | None = None
-
-
-def _manager() -> TerminalSessionManager:
-    global _MANAGER
-    if _MANAGER is None:
-        _MANAGER = TerminalSessionManager()
-    return _MANAGER
-
-
-def _experimental_bash_enabled(config: VibeConfigSchema | None) -> bool:
-    return bool(
-        config
-        and getattr(config, "experimental_bash_tool", False)
-        and managed_bash_backend.managed_bash_supported()
+def _manager(
+    tool: BaseTool, *, shell_family: str = "posix", session_prefix: str = "bash"
+) -> TerminalSessionManager:
+    return tool.terminal_runtime.get(
+        shell_family=shell_family, session_prefix=session_prefix
     )
 
 
+def _experimental_bash_enabled(config: VibeConfigSchema | None) -> bool:
+    _ = config
+    return not is_windows() and managed_shell_backend.managed_shell_supported("posix")
+
+
 class ExperimentalBashToolConfig(BashToolConfig):
+    allowlist: list[str] = Field(
+        default_factory=_get_default_allowlist,
+        description="Command prefixes that are automatically allowed",
+    )
+    denylist: list[str] = Field(
+        default_factory=_get_default_denylist,
+        description="Command prefixes that are automatically denied",
+    )
+    denylist_standalone: list[str] = Field(
+        default_factory=_get_default_denylist_standalone,
+        description="Commands that are denied only when run without arguments",
+    )
     max_timeout_seconds: float = Field(
         default=DEFAULT_MAX_TIMEOUT_SECONDS,
         description="Maximum foreground wait time allowed for one tool call.",
@@ -1057,6 +1253,7 @@ class ExperimentalBashResult(BaseModel):
     session_id: str = ""
     status: Status = "completed"
     exit_code: int | None = None
+    shell: str = ""
     background: bool = False
     output: str = ""
     next_cursor: int = 0
@@ -1127,10 +1324,25 @@ class BashStdinResult(BaseModel):
 
 
 class BashSessionsArgs(BaseModel):
-    action: SessionAction = Field(default="list")
-    session_id: str | None = None
+    action: SessionAction = Field(
+        default="list",
+        description=(
+            "`list` lists this tool family's sessions. `inspect` requires "
+            "`session_id` and reads one session. `kill` requires `session_id` "
+            "and terminates exactly that one session. `reset` ignores "
+            "`session_id` and stops every session in this tool family."
+        ),
+    )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Required for `inspect` and `kill`; ignored for `list` and `reset`. "
+            "`kill` affects exactly this one session."
+        ),
+    )
     clear_logs: bool = Field(
-        default=False, description="When resetting, also delete stored logs."
+        default=False,
+        description="Only used with `reset`; when true, also delete stored logs.",
     )
     max_bytes: int | None = Field(
         default=None,
@@ -1178,6 +1390,10 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
 
         @property
         def config(self) -> ConfigT: ...
+
+        cwd: Path
+        harness_files: HarnessFilesManager
+        scratchpad_dir: Path | None
 
     @staticmethod
     def _has_find_execution_predicate(command: str) -> bool:
@@ -1337,6 +1553,53 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         required.extend(required_context_permissions)
         return required
 
+    def _resolve_posix_shell_permission(
+        self,
+        *,
+        command: str,
+        cwd: str | None,
+        required_context_permissions: list[RequiredPermission] | None = None,
+    ) -> PermissionContext | None:
+        command_parts = _extract_commands(command)
+        if not command_parts:
+            return None
+
+        guardrail_permission = self._resolve_guardrail_permission(command_parts)
+        if (
+            guardrail_permission
+            and guardrail_permission.permission == ToolPermission.NEVER
+        ):
+            return guardrail_permission
+
+        command_cwd = Path(cwd).expanduser().resolve() if cwd is not None else self.cwd
+        outside_dirs = _collect_outside_dirs(
+            command_parts,
+            command_cwd=command_cwd,
+            cwd=self.cwd,
+            project_roots=self.harness_files.project_roots,
+            scratchpad_dir=self.scratchpad_dir,
+        )
+        context_required = required_context_permissions or []
+        if (
+            self._is_unconditionally_allowed(
+                command_parts, outside_dirs, context_required
+            )
+            and not guardrail_permission
+        ):
+            return PermissionContext(permission=ToolPermission.ALWAYS)
+
+        required = self._build_required_permissions(
+            command_parts, outside_dirs, context_required
+        )
+        if guardrail_permission:
+            required.extend(guardrail_permission.required_permissions)
+        if not required:
+            return None
+
+        return PermissionContext(
+            permission=ToolPermission.ASK, required_permissions=required
+        )
+
 
 class _DescriptionOnlyPromptMixin:
     @classmethod
@@ -1355,8 +1618,13 @@ class ExperimentalBash(
     ],
     ToolUIData[ExperimentalBashArgs, ExperimentalBashResult],
 ):
+    effect_kind = ToolEffectKind.SHELL
     description: ClassVar[str] = "Run a shell command in a managed PTY session."
     selection_priority: ClassVar[int] = 10
+    shell_rollout: ClassVar[str | None] = "managed"
+    local_managed_shell_only: ClassVar[bool] = True
+    shell_family: ClassVar[str] = "posix"
+    session_prefix: ClassVar[str] = "bash"
 
     @classmethod
     def get_name(cls) -> str:
@@ -1368,7 +1636,13 @@ class ExperimentalBash(
 
     @classmethod
     def format_call_display(cls, args: ExperimentalBashArgs) -> ToolCallDisplay:
-        return ToolCallDisplay(summary=f"bash: {args.command}")
+        return ToolCallDisplay(
+            summary=f"bash: {args.command}",
+            verb="Running",
+            message=args.command,
+            settled_verb="Ran",
+            settled_message=args.command,
+        )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -1378,14 +1652,19 @@ class ExperimentalBash(
             )
 
         status = event.result.status
-        message = f"Ran {event.result.command}"
-        if status == "running":
-            message = f"Running {event.result.command}"
-        return ToolResultDisplay(success=event.error is None, message=message)
+        verb = "Running" if status == "running" else "Ran"
+        return ToolResultDisplay(
+            success=event.error is None, verb=verb, message=event.result.command
+        )
 
     @classmethod
     def get_status_text(cls) -> str:
         return "Running command"
+
+    def _session_manager(self) -> TerminalSessionManager:
+        return _manager(
+            self, shell_family=self.shell_family, session_prefix=self.session_prefix
+        )
 
     def _build_context_permissions(
         self, args: ExperimentalBashArgs
@@ -1419,42 +1698,10 @@ class ExperimentalBash(
                 reason="managed bash requires a POSIX-like platform",
             )
 
-        command_parts = _extract_commands(args.command)
-        if not command_parts:
-            return None
-
-        guardrail_permission = self._resolve_guardrail_permission(command_parts)
-        if (
-            guardrail_permission
-            and guardrail_permission.permission == ToolPermission.NEVER
-        ):
-            return guardrail_permission
-
-        command_cwd = (
-            Path(args.cwd).expanduser().resolve()
-            if args.cwd is not None
-            else Path.cwd()
-        )
-        outside_dirs = _collect_outside_dirs(command_parts, command_cwd)
-        context_required = self._build_context_permissions(args)
-        if (
-            self._is_unconditionally_allowed(
-                command_parts, outside_dirs, context_required
-            )
-            and not guardrail_permission
-        ):
-            return PermissionContext(permission=ToolPermission.ALWAYS)
-
-        required = self._build_required_permissions(
-            command_parts, outside_dirs, context_required
-        )
-        if guardrail_permission:
-            required.extend(guardrail_permission.required_permissions)
-        if not required:
-            return None
-
-        return PermissionContext(
-            permission=ToolPermission.ASK, required_permissions=required
+        return self._resolve_posix_shell_permission(
+            command=args.command,
+            cwd=args.cwd,
+            required_context_permissions=self._build_context_permissions(args),
         )
 
     async def run(
@@ -1468,10 +1715,11 @@ class ExperimentalBash(
         timeout = self._resolve_timeout(requested_timeout)
         max_bytes = self.config.max_output_bytes
         try:
-            cwd = Path(args.cwd).expanduser().resolve() if args.cwd else Path.cwd()
-            shell = _manager().resolve_shell(args.shell, self.config.shell)
+            cwd = Path(args.cwd).expanduser().resolve() if args.cwd else self.cwd
+            manager = self._session_manager()
+            shell = manager.resolve_shell(args.shell, self.config.shell)
             session = await asyncio.to_thread(
-                _manager().start,
+                manager.start,
                 command=args.command,
                 cwd=cwd,
                 env=args.env,
@@ -1483,7 +1731,7 @@ class ExperimentalBash(
                 return
 
             completed = await asyncio.to_thread(
-                _manager().wait_for_exit, session.session_id, timeout
+                manager.wait_for_exit, session.session_id, timeout
             )
             if completed:
                 yield self._result_from_session(
@@ -1499,9 +1747,9 @@ class ExperimentalBash(
                 return
 
             info = await asyncio.to_thread(
-                _manager().kill, session.session_id, status="timed_out"
+                manager.kill, session.session_id, status="timed_out"
             )
-            chunk = _manager().read_log_file(
+            chunk = manager.read_log_file(
                 Path(info.output_path), offset=0, max_bytes=max_bytes
             )
             raise ToolError(
@@ -1514,7 +1762,7 @@ class ExperimentalBash(
             )
         except ToolError:
             raise
-        except (ManagedBashError, ManagedBashBackendError) as exc:
+        except (ManagedShellError, ManagedShellBackendError) as exc:
             raise ToolError(str(exc)) from exc
         except Exception as exc:
             raise ToolError(f"Error running command {args.command!r}: {exc}") from exc
@@ -1531,7 +1779,7 @@ class ExperimentalBash(
         *,
         enforce_success: bool = False,
     ) -> ExperimentalBashResult:
-        info, chunk = _manager().read_output(
+        info, chunk = self._session_manager().read_output(
             session_id=session_id, cursor=0, wait_seconds=0, max_bytes=max_bytes
         )
         returncode = info.exit_code or 0
@@ -1555,6 +1803,7 @@ class ExperimentalBash(
             next_cursor=chunk.next_cursor,
             truncated=chunk.truncated,
             output_path=info.output_path,
+            shell=info.shell,
             stdout=normalized_output,
             stderr="",
             returncode=returncode,
@@ -1567,6 +1816,11 @@ class BashOutput(
     ToolUIData[BashOutputArgs, BashOutputResult],
 ):
     description: ClassVar[str] = "Poll output from a running or completed bash session."
+    shell_rollout: ClassVar[str | None] = "managed"
+    local_managed_shell_only: ClassVar[bool] = True
+    shell_family: ClassVar[str] = "posix"
+    session_prefix: ClassVar[str] = "bash"
+    session_label: ClassVar[str] = "bash"
 
     @classmethod
     def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
@@ -1574,35 +1828,52 @@ class BashOutput(
 
     @classmethod
     def format_call_display(cls, args: BashOutputArgs) -> ToolCallDisplay:
+        message = f"{cls.session_label} session {args.session_id}"
         if args.wait_seconds > 0:
             return ToolCallDisplay(
-                summary=f"Waiting for bash session {args.session_id}"
+                summary=f"Waiting for {message}",
+                verb="Waiting for",
+                message=message,
+                settled_verb="Polled",
+                settled_message=message,
             )
-        return ToolCallDisplay(summary=f"Polling bash session {args.session_id}")
+        return ToolCallDisplay(
+            summary=f"Polling {message}",
+            verb="Polling",
+            message=message,
+            settled_verb="Polled",
+            settled_message=message,
+        )
 
     @classmethod
     def format_result_display(cls, result: BashOutputResult) -> ToolResultDisplay:
         match result.status:
             case "running":
-                message = f"Session {result.session_id} is still running"
+                message = f"session {result.session_id} is still running"
             case "completed":
-                message = f"Session {result.session_id} completed"
+                message = f"session {result.session_id} completed"
             case "killed":
-                message = f"Session {result.session_id} was killed"
+                message = f"session {result.session_id} was killed"
             case "timed_out":
-                message = f"Session {result.session_id} timed out"
+                message = f"session {result.session_id} timed out"
             case "orphaned":
-                message = f"Session {result.session_id} is orphaned"
+                message = f"session {result.session_id} is orphaned"
         suffix = "truncated" if result.truncated else ""
         return ToolResultDisplay(
             success=result.status in {"running", "completed", "orphaned"},
+            verb="Polled",
             message=message,
             suffix=suffix,
         )
 
     @classmethod
     def get_status_text(cls) -> str:
-        return "Polling bash session"
+        return f"Polling {cls.session_label} session"
+
+    def _session_manager(self) -> TerminalSessionManager:
+        return _manager(
+            self, shell_family=self.shell_family, session_prefix=self.session_prefix
+        )
 
     async def run(
         self, args: BashOutputArgs, ctx: InvokeContext | None = None
@@ -1613,13 +1884,13 @@ class BashOutput(
         max_bytes = args.max_bytes or self.config.max_inline_bytes
         try:
             info, chunk = await asyncio.to_thread(
-                _manager().read_output,
+                self._session_manager().read_output,
                 session_id=args.session_id,
                 cursor=cursor,
                 wait_seconds=wait_seconds,
                 max_bytes=max_bytes,
             )
-        except (ManagedBashError, ManagedBashBackendError) as exc:
+        except (ManagedShellError, ManagedShellBackendError) as exc:
             raise ToolError(str(exc)) from exc
         yield BashOutputResult(
             session_id=info.session_id,
@@ -1638,6 +1909,11 @@ class BashStdin(
     ToolUIData[BashStdinArgs, BashStdinResult],
 ):
     description: ClassVar[str] = "Send input to an interactive bash session."
+    shell_rollout: ClassVar[str | None] = "managed"
+    local_managed_shell_only: ClassVar[bool] = True
+    shell_family: ClassVar[str] = "posix"
+    session_prefix: ClassVar[str] = "bash"
+    session_label: ClassVar[str] = "bash"
 
     @classmethod
     def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
@@ -1645,23 +1921,34 @@ class BashStdin(
 
     @classmethod
     def format_call_display(cls, args: BashStdinArgs) -> ToolCallDisplay:
+        message = f"input to {cls.session_label} session {args.session_id}"
         return ToolCallDisplay(
-            summary=f"Sending input to bash session {args.session_id}"
+            summary=f"Sending {message}",
+            verb="Sending",
+            message=message,
+            settled_verb="Sent",
+            settled_message=message,
         )
 
     @classmethod
     def format_result_display(cls, result: BashStdinResult) -> ToolResultDisplay:
         return ToolResultDisplay(
             success=result.status in {"running", "completed"},
+            verb="Sent",
             message=(
-                f"Sent {result.bytes_written} bytes to "
+                f"{result.bytes_written} bytes to "
                 f"{result.status} session {result.session_id}"
             ),
         )
 
     @classmethod
     def get_status_text(cls) -> str:
-        return "Sending bash input"
+        return f"Sending {cls.session_label} input"
+
+    def _session_manager(self) -> TerminalSessionManager:
+        return _manager(
+            self, shell_family=self.shell_family, session_prefix=self.session_prefix
+        )
 
     async def run(
         self, args: BashStdinArgs, ctx: InvokeContext | None = None
@@ -1669,11 +1956,12 @@ class BashStdin(
         _ = ctx
         try:
             payload = self._build_payload(args)
+            manager = self._session_manager()
             bytes_written = await asyncio.to_thread(
-                _manager().write_bytes, args.session_id, payload
+                manager.write_bytes, args.session_id, payload
             )
-            info = _manager().info(args.session_id)
-        except (ManagedBashError, ManagedBashBackendError) as exc:
+            info = manager.info(args.session_id)
+        except (ManagedShellError, ManagedShellBackendError) as exc:
             raise ToolError(str(exc)) from exc
         yield BashStdinResult(
             session_id=args.session_id, bytes_written=bytes_written, status=info.status
@@ -1689,7 +1977,7 @@ class BashStdin(
             sequence = CONTROL_SEQUENCES.get(normalized)
             if sequence is None:
                 supported = ", ".join(sorted(CONTROL_SEQUENCES))
-                raise ManagedBashError(
+                raise ManagedShellError(
                     f"unsupported control sequence {control_name!r}; supported: {supported}"
                 )
             chunks.append(sequence)
@@ -1705,6 +1993,11 @@ class BashSessions(
     ToolUIData[BashSessionsArgs, BashSessionsResult],
 ):
     description: ClassVar[str] = "List, inspect, kill, or reset managed bash sessions."
+    shell_rollout: ClassVar[str | None] = "managed"
+    local_managed_shell_only: ClassVar[bool] = True
+    shell_family: ClassVar[str] = "posix"
+    session_prefix: ClassVar[str] = "bash"
+    session_label: ClassVar[str] = "bash"
 
     @classmethod
     def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
@@ -1714,17 +2007,42 @@ class BashSessions(
     def format_call_display(cls, args: BashSessionsArgs) -> ToolCallDisplay:
         match args.action:
             case "list":
-                return ToolCallDisplay(summary="Listing bash sessions")
-            case "inspect":
                 return ToolCallDisplay(
-                    summary=f"Inspecting bash session {args.session_id or ''}".strip()
+                    summary=f"Listing {cls.session_label} sessions",
+                    verb="Listing",
+                    message=f"{cls.session_label} sessions",
+                    settled_verb="Listed",
+                    settled_message=f"{cls.session_label} sessions",
+                )
+            case "inspect":
+                message = f"{cls.session_label} session {args.session_id or ''}".strip()
+                return ToolCallDisplay(
+                    summary=f"Inspecting {message}",
+                    verb="Inspecting",
+                    message=message,
+                    settled_verb="Inspected",
+                    settled_message=message,
                 )
             case "kill":
+                message = (
+                    f"one {cls.session_label} session {args.session_id or ''}"
+                ).strip()
                 return ToolCallDisplay(
-                    summary=f"Killing bash session {args.session_id or ''}".strip()
+                    summary=f"Killing {message}",
+                    verb="Killing",
+                    message=message,
+                    settled_verb="Killed",
+                    settled_message=message,
                 )
             case "reset":
-                return ToolCallDisplay(summary="Resetting bash sessions")
+                message = f"all {cls.session_label} sessions"
+                return ToolCallDisplay(
+                    summary=f"Resetting {message}",
+                    verb="Resetting",
+                    message=message,
+                    settled_verb="Reset",
+                    settled_message=message,
+                )
 
     @classmethod
     def format_result_display(cls, result: BashSessionsResult) -> ToolResultDisplay:
@@ -1732,29 +2050,40 @@ class BashSessions(
             case "list":
                 count = len(result.sessions)
                 noun = "session" if count == 1 else "sessions"
-                message = f"Found {count} bash {noun}"
+                verb = "Listed"
+                message = f"{count} {cls.session_label} {noun}"
             case "inspect":
+                verb = "Inspected"
                 if result.session is None:
-                    message = "Bash session inspected"
+                    message = f"{cls.session_label} session"
                 else:
                     message = (
-                        f"Session {result.session.session_id} is "
+                        f"session {result.session.session_id} is "
                         f"{result.session.status}"
                     )
             case "kill":
+                verb = "Killed"
                 if result.session is None:
-                    message = result.message or "Bash session killed"
+                    message = result.message or f"one {cls.session_label} session"
                 else:
-                    message = f"Killed bash session {result.session.session_id}"
+                    message = (
+                        f"one {cls.session_label} session {result.session.session_id}"
+                    )
             case "reset":
                 count = len(result.sessions)
                 noun = "session" if count == 1 else "sessions"
-                message = f"Reset bash sessions; stopped {count} {noun}"
-        return ToolResultDisplay(success=True, message=message)
+                verb = "Reset"
+                message = f"all {cls.session_label} sessions; stopped {count} {noun}"
+        return ToolResultDisplay(success=True, verb=verb, message=message)
 
     @classmethod
     def get_status_text(cls) -> str:
-        return "Managing bash sessions"
+        return f"Managing {cls.session_label} sessions"
+
+    def _session_manager(self) -> TerminalSessionManager:
+        return _manager(
+            self, shell_family=self.shell_family, session_prefix=self.session_prefix
+        )
 
     async def run(
         self, args: BashSessionsArgs, ctx: InvokeContext | None = None
@@ -1762,15 +2091,16 @@ class BashSessions(
         _ = ctx
         max_bytes = args.max_bytes or self.config.max_inline_bytes
         try:
+            manager = self._session_manager()
             match args.action:
                 case "list":
-                    sessions = await asyncio.to_thread(_manager().list_sessions)
+                    sessions = await asyncio.to_thread(manager.list_sessions)
                     yield BashSessionsResult(action=args.action, sessions=sessions)
                 case "inspect":
                     if not args.session_id:
-                        raise ManagedBashError("session_id is required for inspect")
+                        raise ManagedShellError("session_id is required for inspect")
                     info, chunk = await asyncio.to_thread(
-                        _manager().inspect_session, args.session_id, max_bytes
+                        manager.inspect_session, args.session_id, max_bytes
                     )
                     yield BashSessionsResult(
                         action=args.action,
@@ -1781,8 +2111,8 @@ class BashSessions(
                     )
                 case "kill":
                     if not args.session_id:
-                        raise ManagedBashError("session_id is required for kill")
-                    info = await asyncio.to_thread(_manager().kill, args.session_id)
+                        raise ManagedShellError("session_id is required for kill")
+                    info = await asyncio.to_thread(manager.kill, args.session_id)
                     yield BashSessionsResult(
                         action=args.action,
                         session=info,
@@ -1790,14 +2120,14 @@ class BashSessions(
                     )
                 case "reset":
                     killed = await asyncio.to_thread(
-                        _manager().reset, clear_logs=args.clear_logs
+                        manager.reset, clear_logs=args.clear_logs
                     )
                     yield BashSessionsResult(
                         action=args.action,
                         sessions=killed,
                         message=f"reset {len(killed)} running session(s)",
                     )
-        except (ManagedBashError, ManagedBashBackendError) as exc:
+        except (ManagedShellError, ManagedShellBackendError) as exc:
             raise ToolError(str(exc)) from exc
 
 
@@ -1807,6 +2137,11 @@ class BashLogFile(
     ToolUIData[BashLogFileArgs, BashLogFileResult],
 ):
     description: ClassVar[str] = "Read or annotate managed bash output files."
+    shell_rollout: ClassVar[str | None] = "managed"
+    local_managed_shell_only: ClassVar[bool] = True
+    shell_family: ClassVar[str] = "posix"
+    session_prefix: ClassVar[str] = "bash"
+    session_label: ClassVar[str] = "bash"
 
     @classmethod
     def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
@@ -1814,35 +2149,68 @@ class BashLogFile(
 
     @classmethod
     def format_call_display(cls, args: BashLogFileArgs) -> ToolCallDisplay:
-        target = args.session_id or args.relative_path or "bash log"
+        target = args.session_id or args.relative_path or f"{cls.session_label} log"
+        message = f"{cls.session_label} log {target}"
         match args.action:
             case "read":
-                return ToolCallDisplay(summary=f"Reading bash log {target}")
+                return ToolCallDisplay(
+                    summary=f"Reading {message}",
+                    verb="Reading",
+                    message=message,
+                    settled_verb="Read",
+                    settled_message=message,
+                )
             case "write":
-                return ToolCallDisplay(summary=f"Writing bash log {target}")
+                return ToolCallDisplay(
+                    summary=f"Writing {message}",
+                    verb="Writing",
+                    message=message,
+                    settled_verb="Wrote",
+                    settled_message=message,
+                )
             case "append":
-                return ToolCallDisplay(summary=f"Appending bash log {target}")
+                return ToolCallDisplay(
+                    summary=f"Appending {message}",
+                    verb="Appending",
+                    message=message,
+                    settled_verb="Appended",
+                    settled_message=message,
+                )
 
     @classmethod
     def format_result_display(cls, result: BashLogFileResult) -> ToolResultDisplay:
         path = Path(result.path).name
         match result.action:
             case "read":
-                message = f"Read bash log {path}"
+                verb = "Read"
+                message = f"{cls.session_label} log {path}"
                 suffix = "truncated" if result.truncated else ""
             case "write":
-                message = f"Wrote {result.bytes_written or 0} bytes to bash log {path}"
-                suffix = ""
-            case "append":
+                verb = "Wrote"
                 message = (
-                    f"Appended {result.bytes_written or 0} bytes to bash log {path}"
+                    f"{result.bytes_written or 0} bytes to "
+                    f"{cls.session_label} log {path}"
                 )
                 suffix = ""
-        return ToolResultDisplay(success=True, message=message, suffix=suffix)
+            case "append":
+                verb = "Appended"
+                message = (
+                    f"{result.bytes_written or 0} bytes to "
+                    f"{cls.session_label} log {path}"
+                )
+                suffix = ""
+        return ToolResultDisplay(
+            success=True, verb=verb, message=message, suffix=suffix
+        )
 
     @classmethod
     def get_status_text(cls) -> str:
-        return "Working with bash log"
+        return f"Working with {cls.session_label} log"
+
+    def _session_manager(self) -> TerminalSessionManager:
+        return _manager(
+            self, shell_family=self.shell_family, session_prefix=self.session_prefix
+        )
 
     def resolve_permission(self, args: BashLogFileArgs) -> PermissionContext | None:
         if args.action == "read":
@@ -1855,15 +2223,13 @@ class BashLogFile(
         _ = ctx
         max_bytes = args.max_bytes or self.config.max_inline_bytes
         try:
-            path = _manager().resolve_log_path(
+            manager = self._session_manager()
+            path = manager.resolve_log_path(
                 session_id=args.session_id, relative_path=args.relative_path
             )
             if args.action == "read":
                 chunk = await asyncio.to_thread(
-                    _manager().read_log_file,
-                    path,
-                    offset=args.offset,
-                    max_bytes=max_bytes,
+                    manager.read_log_file, path, offset=args.offset, max_bytes=max_bytes
                 )
                 yield BashLogFileResult(
                     action=args.action,
@@ -1875,15 +2241,12 @@ class BashLogFile(
                 return
 
             if args.content is None:
-                raise ManagedBashError("content is required for write and append")
+                raise ManagedShellError("content is required for write and append")
             bytes_written = await asyncio.to_thread(
-                _manager().write_log_file,
-                path,
-                action=args.action,
-                content=args.content,
+                manager.write_log_file, path, action=args.action, content=args.content
             )
             yield BashLogFileResult(
                 action=args.action, path=str(path), bytes_written=bytes_written
             )
-        except (ManagedBashError, ManagedBashBackendError) as exc:
+        except (ManagedShellError, ManagedShellBackendError) as exc:
             raise ToolError(str(exc)) from exc

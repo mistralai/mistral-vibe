@@ -24,6 +24,16 @@ def test_deduplicates_same_file_mentioned_twice(tmp_path: Path) -> None:
     assert len(payload.all_resources) == 2
 
 
+def test_over_long_candidate_does_not_crash(tmp_path: Path) -> None:
+    long_candidate = "council-9aItl3/" + "a" * 5000
+    message = f"see @{long_candidate}"
+
+    payload = build_path_prompt_payload(message, base_dir=tmp_path)
+
+    assert payload.resources == []
+    assert payload.prompt_text == message
+
+
 class TestTildeExpansion:
     def test_tilde_path_expands_and_attaches(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -9,13 +9,13 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
-from vibe.core.logger import logger
 from vibe.core.tools.mcp.tools import (
     MCPToolResult,
     _parse_call_result as parse_call_result,
     build_stdio_params,
     enter_stdio_session,
 )
+from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from mcp import ClientSession

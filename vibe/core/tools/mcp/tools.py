@@ -23,7 +23,6 @@ from vibe.core.auth.mcp_oauth import (
     MCPOAuthTransientRefreshError,
     unwrap_oauth_refresh_error,
 )
-from vibe.core.logger import logger
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -35,8 +34,9 @@ from vibe.core.tools.mcp_sampling import MCPSamplingHandler
 from vibe.core.tools.remote import MCPTool, MCPToolResult, RemoteTool, _OpenArgs
 from vibe.core.tools.ui import ToolResultDisplay
 from vibe.core.types import ToolStreamEvent
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
-from vibe.core.utils.io import decode_safe
+from vibe.observability.logging import logger
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.utils.io import decode_safe
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -303,8 +303,9 @@ def create_mcp_http_proxy_tool_class(
                     message=event.error or event.skip_reason or "No result",
                 )
 
-            message = f"MCP tool {event.result.tool} completed"
-            return ToolResultDisplay(success=event.result.ok, message=message)
+            return ToolResultDisplay(
+                success=event.result.ok, verb="Ran", message=event.result.tool
+            )
 
         @classmethod
         def get_status_text(cls) -> str:
@@ -482,8 +483,9 @@ def create_mcp_stdio_proxy_tool_class(
                     message=event.error or event.skip_reason or "No result",
                 )
 
-            message = f"MCP tool {event.result.tool} completed"
-            return ToolResultDisplay(success=event.result.ok, message=message)
+            return ToolResultDisplay(
+                success=event.result.ok, verb="Ran", message=event.result.tool
+            )
 
         @classmethod
         def get_status_text(cls) -> str:

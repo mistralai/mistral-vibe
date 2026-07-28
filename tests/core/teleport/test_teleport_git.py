@@ -241,6 +241,33 @@ class TestGitRepositoryGetInfo:
             info = await repo.get_info()
             assert info.branch is None
 
+    @pytest.mark.asyncio
+    async def test_raises_when_path_missing(self, tmp_path: Path) -> None:
+        # Folder moved/deleted after selection: gitpython raises NoSuchPathError,
+        # which must surface as an ineligible root, not a generic failure.
+        repo = GitRepository(tmp_path / "gone")
+        with pytest.raises(
+            ServiceTeleportNotSupportedError, match="Teleport requires a git repository"
+        ):
+            await repo.get_metadata()
+
+    @pytest.mark.asyncio
+    async def test_get_metadata_skips_diff(self, repo: GitRepository) -> None:
+        mock = make_mock_repo(
+            urls=["git@github.com:owner/repo.git"],
+            commit="abc123def456",
+            branch="main",
+            diff="diff content",
+        )
+        with patch.object(repo, "_repo_or_raise", return_value=mock):
+            info = await repo.get_metadata()
+        # Metadata lookup returns the same fields as get_info but never computes
+        # the (potentially huge) working-tree diff.
+        assert info.diff == ""
+        assert info.repo == "repo"
+        assert info.branch == "main"
+        mock.git.diff.assert_not_called()
+
 
 class TestGitRepositoryGetDiff:
     @pytest.mark.asyncio

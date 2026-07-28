@@ -14,8 +14,8 @@ try:
 except OSError:
     pytest.skip("PortAudio library not available", allow_module_level=True)
 
-from vibe.core.audio_recorder.audio_recorder import AudioRecorder
-from vibe.core.audio_recorder.audio_recorder_port import (
+from vibe.cli.audio_recorder.audio_recorder import AudioRecorder
+from vibe.cli.audio_recorder.audio_recorder_port import (
     AlreadyRecordingError,
     AudioBackendUnavailableError,
     AudioRecording,
@@ -23,6 +23,18 @@ from vibe.core.audio_recorder.audio_recorder_port import (
     NoAudioInputDeviceError,
     RecordingMode,
 )
+
+
+@pytest.fixture(autouse=True)
+def available_input_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "vibe.cli.audio_recorder.audio_recorder.sd.query_devices",
+        lambda *, kind: {"default_samplerate": 48_000.0},
+    )
+    monkeypatch.setattr(
+        "vibe.cli.audio_recorder.audio_recorder.sd.check_input_settings",
+        lambda **kwargs: None,
+    )
 
 
 def _make_pcm_frames(value: int, n_samples: int = 1024) -> bytes:
@@ -46,14 +58,14 @@ class TestAudioRecorderInitialState:
 
 
 class TestBufferMode:
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_start_sets_recording_state(self, mock_stream_cls: MagicMock) -> None:
         recorder = AudioRecorder()
         recorder.start(RecordingMode.BUFFER)
         assert recorder.is_recording is True
         mock_stream_cls.return_value.start.assert_called_once()
 
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_start_when_already_recording_raises(
         self, mock_stream_cls: MagicMock
     ) -> None:
@@ -63,7 +75,7 @@ class TestBufferMode:
         with pytest.raises(AlreadyRecordingError):
             recorder.start(RecordingMode.BUFFER)
 
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_stop_returns_valid_wav(self, mock_stream_cls: MagicMock) -> None:
         recorder = AudioRecorder()
         recorder.start(RecordingMode.BUFFER)
@@ -84,7 +96,7 @@ class TestBufferMode:
             assert wf.getframerate() == 48_000
             assert wf.getnframes() == 1024
 
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_stop_returns_positive_duration(self, mock_stream_cls: MagicMock) -> None:
         recorder = AudioRecorder()
         recorder.start(RecordingMode.BUFFER)
@@ -101,7 +113,7 @@ class TestBufferMode:
         assert result.duration == 0.0
 
     @pytest.mark.asyncio
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     async def test_buffer_mode_audio_stream_yields_nothing(
         self, mock_stream_cls: MagicMock
     ) -> None:
@@ -117,7 +129,7 @@ class TestBufferMode:
 
         assert collected == []
 
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_can_record_multiple_times(self, mock_stream_cls: MagicMock) -> None:
         recorder = AudioRecorder()
 
@@ -139,7 +151,7 @@ class TestBufferMode:
 
 class TestStreamMode:
     @pytest.mark.asyncio
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     async def test_audio_stream_yields_chunks(self, mock_stream_cls: MagicMock) -> None:
         recorder = AudioRecorder()
         recorder.start(RecordingMode.STREAM)
@@ -176,7 +188,7 @@ class TestStreamMode:
         assert collected == []
 
     @pytest.mark.asyncio
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     async def test_stream_audio_does_not_leak_into_buffer_recording(
         self, mock_stream_cls: MagicMock
     ) -> None:
@@ -203,7 +215,7 @@ class TestStreamMode:
             assert wf.getnframes() == 0
 
     @pytest.mark.asyncio
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     async def test_stop_from_event_loop_does_not_block(
         self, mock_stream_cls: MagicMock
     ) -> None:
@@ -235,7 +247,7 @@ class TestStreamMode:
         assert len(collected) == 1
 
     @pytest.mark.asyncio
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     async def test_stop_returns_empty_data_in_stream_mode(
         self, mock_stream_cls: MagicMock
     ) -> None:
@@ -256,7 +268,7 @@ class TestStreamMode:
         assert result.duration > 0.0
 
     @pytest.mark.asyncio
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     async def test_stop_without_drain_returns_promptly(
         self, mock_stream_cls: MagicMock
     ) -> None:
@@ -277,7 +289,7 @@ class TestStreamMode:
 
 
 class TestCancel:
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_cancel_discards_audio(self, mock_stream_cls: MagicMock) -> None:
         recorder = AudioRecorder()
         recorder.start(RecordingMode.BUFFER)
@@ -297,7 +309,7 @@ class TestCancel:
 
 
 class TestMaxDuration:
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_auto_stops_after_max_duration(self, mock_stream_cls: MagicMock) -> None:
         recorder = AudioRecorder()
         recorder.start(RecordingMode.BUFFER, max_duration=0.1)
@@ -309,7 +321,7 @@ class TestMaxDuration:
 
         assert recorder.is_recording is False
 
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_on_expire_receives_audio(self, mock_stream_cls: MagicMock) -> None:
         """on_expire callback receives the WAV data when the timer fires."""
         received: list[AudioRecording] = []
@@ -326,7 +338,7 @@ class TestMaxDuration:
         assert len(received) == 1
         assert received[0].data[:4] == b"RIFF"
 
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_manual_stop_prevents_on_expire(self, mock_stream_cls: MagicMock) -> None:
         expired: list[AudioRecording] = []
         recorder = AudioRecorder()
@@ -345,7 +357,7 @@ class TestMaxDuration:
 
 
 class TestPeak:
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_peak_updates_from_callback(self, mock_stream_cls: MagicMock) -> None:
         recorder = AudioRecorder()
         recorder.start(RecordingMode.BUFFER)
@@ -355,7 +367,7 @@ class TestPeak:
 
         assert recorder.peak == pytest.approx(16_384 / 32_768, abs=0.01)
 
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_peak_clamps_to_one(self, mock_stream_cls: MagicMock) -> None:
         recorder = AudioRecorder()
         recorder.start(RecordingMode.BUFFER)
@@ -365,7 +377,7 @@ class TestPeak:
 
         assert recorder.peak <= 1.0
 
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_silent_audio_has_zero_peak(self, mock_stream_cls: MagicMock) -> None:
         recorder = AudioRecorder()
         recorder.start(RecordingMode.BUFFER)
@@ -380,9 +392,9 @@ class TestGuardAudioInput:
     def test_guard_returns_sample_rate_when_compatible(self) -> None:
         with (
             patch(
-                "vibe.core.audio_recorder.audio_recorder.sd.query_devices"
+                "vibe.cli.audio_recorder.audio_recorder.sd.query_devices"
             ) as mock_query,
-            patch("vibe.core.audio_recorder.audio_recorder.sd.check_input_settings"),
+            patch("vibe.cli.audio_recorder.audio_recorder.sd.check_input_settings"),
         ):
             mock_query.return_value = {"default_samplerate": 48000.0}
             result = AudioRecorder._guard_audio_input(48000, 1)
@@ -390,7 +402,7 @@ class TestGuardAudioInput:
 
     def test_guard_raises_when_no_input_device(self) -> None:
         with patch(
-            "vibe.core.audio_recorder.audio_recorder.sd.query_devices",
+            "vibe.cli.audio_recorder.audio_recorder.sd.query_devices",
             side_effect=sd.PortAudioError(-1),
         ):
             with pytest.raises(NoAudioInputDeviceError):
@@ -399,10 +411,10 @@ class TestGuardAudioInput:
     def test_guard_raises_with_fallback_when_rate_incompatible(self) -> None:
         with (
             patch(
-                "vibe.core.audio_recorder.audio_recorder.sd.query_devices"
+                "vibe.cli.audio_recorder.audio_recorder.sd.query_devices"
             ) as mock_query,
             patch(
-                "vibe.core.audio_recorder.audio_recorder.sd.check_input_settings",
+                "vibe.cli.audio_recorder.audio_recorder.sd.check_input_settings",
                 side_effect=sd.PortAudioError(-1),
             ),
         ):
@@ -412,15 +424,15 @@ class TestGuardAudioInput:
             assert exc_info.value.fallback_sample_rate == 16000
 
     def test_start_raises_when_no_sounddevice(self) -> None:
-        with patch("vibe.core.audio_recorder.audio_recorder.sd", None):
+        with patch("vibe.cli.audio_recorder.audio_recorder.sd", None):
             recorder = AudioRecorder()
             with pytest.raises(AudioBackendUnavailableError):
                 recorder.start(RecordingMode.BUFFER)
 
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_start_raises_when_no_device(self, mock_stream_cls: MagicMock) -> None:
         with patch(
-            "vibe.core.audio_recorder.audio_recorder.sd.query_devices",
+            "vibe.cli.audio_recorder.audio_recorder.sd.query_devices",
             side_effect=sd.PortAudioError(-1),
         ):
             recorder = AudioRecorder()
@@ -429,16 +441,16 @@ class TestGuardAudioInput:
             assert recorder.is_recording is False
             mock_stream_cls.assert_not_called()
 
-    @patch("vibe.core.audio_recorder.audio_recorder.sd.RawInputStream")
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_start_retries_with_fallback_sample_rate(
         self, mock_stream_cls: MagicMock
     ) -> None:
         with (
             patch(
-                "vibe.core.audio_recorder.audio_recorder.sd.query_devices"
+                "vibe.cli.audio_recorder.audio_recorder.sd.query_devices"
             ) as mock_query,
             patch(
-                "vibe.core.audio_recorder.audio_recorder.sd.check_input_settings"
+                "vibe.cli.audio_recorder.audio_recorder.sd.check_input_settings"
             ) as mock_check,
         ):
             mock_query.return_value = {"default_samplerate": 16000.0}

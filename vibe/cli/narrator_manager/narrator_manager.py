@@ -3,49 +3,51 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from vibe.app_server.config import ConfigView
+from vibe.cli.audio_player.audio_player_port import AudioFormat, AudioPlayerPort
 from vibe.cli.narrator_manager.narrator_manager_port import (
     NarratorManagerListener,
     NarratorState,
 )
 from vibe.cli.narrator_manager.telemetry import ReadAloudTrackingState
+from vibe.cli.tts.factory import make_tts_client
+from vibe.cli.tts.tts_client_port import TTSClientPort
 from vibe.cli.turn_summary import (
     NoopTurnSummary,
+    TurnSummaryGenerator,
     TurnSummaryResult,
     TurnSummaryTracker,
-    create_narrator_backend,
 )
-from vibe.core.audio_player.audio_player_port import AudioFormat
-from vibe.core.logger import logger
-from vibe.core.tts.factory import make_tts_client
+from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
 
+    from vibe.cli.telemetry import ClientTelemetry
     from vibe.cli.turn_summary import TurnSummaryPort
-    from vibe.core.audio_player.audio_player_port import AudioPlayerPort
-    from vibe.core.config import VibeConfigSchema
-    from vibe.core.telemetry.send import TelemetryClient
-    from vibe.core.tts.tts_client_port import TTSClientPort
-    from vibe.core.types import BaseEvent
 
 
 class NarratorManager:
     def __init__(
         self,
-        config_getter: Callable[[], VibeConfigSchema],
+        config_getter: Callable[[], ConfigView],
         audio_player: AudioPlayerPort,
-        telemetry_client: TelemetryClient | None = None,
+        summary_generator: TurnSummaryGenerator,
+        telemetry_client: ClientTelemetry | None = None,
     ) -> None:
         self._config_getter = config_getter
         self._audio_player = audio_player
+        self._summary_generator = summary_generator
         self._telemetry_client = telemetry_client
         config = config_getter()
         self._turn_summary: TurnSummaryPort = self._make_turn_summary(
-            config, telemetry_client
+            config, summary_generator
         )
         self._turn_summary.on_summary = self._on_turn_summary
-        self._tts_client: TTSClientPort | None = self._make_tts_client(config)
+        self._tts_client: TTSClientPort | None = self._make_tts_client(
+            config, telemetry_client
+        )
         self._state = NarratorState.IDLE
         self._speak_task: asyncio.Task[None] | None = None
         self._cancel_summary: Callable[[], bool] | None = None
@@ -90,8 +92,11 @@ class NarratorManager:
     def on_turn_start(self, user_message: str) -> None:
         self._turn_summary.start_turn(user_message)
 
-    def on_turn_event(self, event: BaseEvent) -> None:
-        self._turn_summary.track(event)
+    def on_user_message(self, message_id: str) -> None:
+        self._turn_summary.track_user_message(message_id)
+
+    def on_assistant_text(self, content: str) -> None:
+        self._turn_summary.track_assistant_text(content)
 
     def on_turn_error(self, message: str) -> None:
         self._turn_summary.set_error(message)
@@ -126,38 +131,36 @@ class NarratorManager:
     def sync(self) -> None:
         self.cancel()
         config = self._config_getter()
-        self.turn_summary = self._make_turn_summary(config, self._telemetry_client)
-        self.tts_client = self._make_tts_client(config)
+        self.turn_summary = self._make_turn_summary(config, self._summary_generator)
+        self.tts_client = self._make_tts_client(config, self._telemetry_client)
 
     @staticmethod
     def _make_turn_summary(
-        config: VibeConfigSchema, telemetry_client: TelemetryClient | None = None
+        config: ConfigView, summary_generator: TurnSummaryGenerator
     ) -> NoopTurnSummary | TurnSummaryTracker:
         if not config.narrator_enabled:
             return NoopTurnSummary()
-        result = create_narrator_backend(config)
-        if result is None:
-            return NoopTurnSummary()
-        backend, model = result
-        return TurnSummaryTracker(
-            backend=backend,
-            model=model,
-            session_metadata_getter=(
-                None
-                if telemetry_client is None
-                else telemetry_client.build_client_event_metadata
-            ),
-        )
+        return TurnSummaryTracker(generator=summary_generator)
 
     @staticmethod
-    def _make_tts_client(config: VibeConfigSchema) -> TTSClientPort | None:
+    def _make_tts_client(
+        config: ConfigView, telemetry_client: ClientTelemetry | None
+    ) -> TTSClientPort | None:
         if not config.narrator_enabled:
             return None
         try:
-            model = config.get_active_tts_model()
-            provider = config.get_tts_provider_for_model(model)
-            return make_tts_client(provider, model)
-        except (ValueError, KeyError) as exc:
+            model = config.speech.model
+            provider = config.speech.provider
+            return make_tts_client(
+                provider,
+                model,
+                metadata_getter=(
+                    None
+                    if telemetry_client is None
+                    else telemetry_client.build_request_metadata
+                ),
+            )
+        except KeyError as exc:
             logger.error("Failed to initialize TTS client", exc_info=exc)
             return None
 

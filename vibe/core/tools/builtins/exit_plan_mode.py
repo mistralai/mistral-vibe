@@ -17,10 +17,9 @@ from vibe.core.tools.base import (
 from vibe.core.tools.builtins.ask_user_question import (
     AskUserQuestionArgs,
     AskUserQuestionResult,
-    Choice,
-    Question,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.questions import QuestionChoice, UserQuestion
 
 LABEL_CLEAR_AUTO = "Yes, clear context and auto approve edits"
 LABEL_AUTO = "Yes, and auto approve edits"
@@ -47,7 +46,13 @@ class ExitPlanMode(
 ):
     @classmethod
     def format_call_display(cls, args: ExitPlanModeArgs) -> ToolCallDisplay:
-        return ToolCallDisplay(summary="Ready to exit plan mode")
+        return ToolCallDisplay(
+            summary="Ready to exit plan mode",
+            verb="Requesting",
+            message="exit from plan mode",
+            settled_verb="Requested",
+            settled_message="exit from plan mode",
+        )
 
     @classmethod
     def format_result_display(cls, result: ExitPlanModeResult) -> ToolResultDisplay:
@@ -66,23 +71,23 @@ class ExitPlanMode(
         if ctx.agent_manager.active_profile.name != BuiltinAgentName.PLAN:
             raise ToolError("ExitPlanMode can only be used in plan mode.")
 
-        if ctx.user_input_callback is None:
+        if ctx.interaction_requests is None:
             raise ToolError("ExitPlanMode requires an interactive UI.")
 
         options = [
-            Choice(
+            QuestionChoice(
                 label=LABEL_CLEAR_AUTO,
                 description="Clear the planning context, then switch to accept-edits mode",
             ),
-            Choice(
+            QuestionChoice(
                 label=LABEL_AUTO,
                 description="Switch to accept-edits mode with auto-approve permissions",
             ),
-            Choice(
+            QuestionChoice(
                 label=LABEL_MANUAL,
                 description="Switch to default agent mode (manual approval for edits)",
             ),
-            Choice(
+            QuestionChoice(
                 label=LABEL_NO, description="Stay in plan mode and continue planning"
             ),
         ]
@@ -91,7 +96,7 @@ class ExitPlanMode(
         confirmation = AskUserQuestionArgs(
             footer_note=f"Plan: {plan_path} (Ctrl+G to edit)",
             questions=[
-                Question(
+                UserQuestion(
                     question="Plan is complete. Switch to accept-edits mode and start implementing?",
                     header="Plan ready",
                     options=options,
@@ -99,7 +104,9 @@ class ExitPlanMode(
             ],
         )
 
-        result = await ctx.user_input_callback(confirmation)
+        result = await ctx.interaction_requests.request_user_input(
+            confirmation, ctx.tool_call_id
+        )
         result = cast(AskUserQuestionResult, result)
 
         if result.cancelled or not result.answers:

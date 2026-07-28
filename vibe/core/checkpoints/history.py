@@ -17,7 +17,7 @@ from vibe.core.checkpoints.models import (
     RegionId,
     TurnRegion,
 )
-from vibe.core.utils.io import decode_safe, encode_safe
+from vibe.utils.io import decode_safe, encode_safe
 
 # -- Text / line helpers ------------------------------------------------------
 

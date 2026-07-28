@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from dataclasses import dataclass
+from enum import StrEnum, auto
+from typing import Any, ClassVar, Literal
 
 from rich.text import Text
 from textual import events
@@ -11,22 +13,12 @@ from textual.message import Message
 from textual.widgets import Input, OptionList
 from textual.widgets.option_list import Option
 
+from vibe.app_server.models import VibeCodePickerContext, VibeCodeProject
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
-from vibe.core.vibe_code_project import (
-    ProjectMatchKind,
-    ProjectPickerContext,
-    ProjectPickerCreateItem,
-    ProjectPickerItem,
-    ProjectPickerLoadMoreItem,
-    ProjectPickerProjectItem,
-    ProjectPickerUnlinkItem,
-    VibeCodeProject,
-    build_project_picker_items,
-    repo_url_label,
-)
+from vibe.utils.repository import normalize_repo_url, repo_url_label
 
 _MIN_NAME_COLUMN_WIDTH = 28
 _MAX_NAME_COLUMN_WIDTH = 48
@@ -34,7 +26,189 @@ _REPO_COUNT_COLUMN_WIDTH = 8
 _COLUMN_GAP = 3
 
 
-def _build_repo_text(context: ProjectPickerContext) -> Text:
+class ProjectMatchKind(StrEnum):
+    CURRENT_LINK = auto()
+    EXACT_REPO = auto()
+    MULTI_REPO = auto()
+
+    @property
+    def label(self) -> str:
+        match self:
+            case ProjectMatchKind.CURRENT_LINK:
+                return "currently linked"
+            case ProjectMatchKind.EXACT_REPO:
+                return "exact repo match"
+            case ProjectMatchKind.MULTI_REPO:
+                return "multi-repo match"
+
+    @property
+    def rank(self) -> int:
+        match self:
+            case ProjectMatchKind.CURRENT_LINK:
+                return 0
+            case ProjectMatchKind.EXACT_REPO:
+                return 1
+            case ProjectMatchKind.MULTI_REPO:
+                return 2
+
+
+@dataclass(frozen=True)
+class ProjectPickerProjectItem:
+    project: VibeCodeProject
+    match_kind: ProjectMatchKind
+    label: str
+    recommended: bool = False
+    kind: Literal["project"] = "project"
+
+    @property
+    def option_id(self) -> str:
+        return f"project:{self.project.project_id}"
+
+
+@dataclass(frozen=True)
+class ProjectPickerCreateItem:
+    project_name: str
+    recommended: bool = False
+    kind: Literal["create"] = "create"
+
+    @property
+    def option_id(self) -> str:
+        return "action:create"
+
+    @property
+    def label(self) -> str:
+        return "recommended" if self.recommended else "repo-linked project"
+
+
+@dataclass(frozen=True)
+class ProjectPickerLoadMoreItem:
+    kind: Literal["load_more"] = "load_more"
+    label: str = ""
+    recommended: bool = False
+
+    @property
+    def option_id(self) -> str:
+        return "action:load_more"
+
+
+@dataclass(frozen=True)
+class ProjectPickerUnlinkItem:
+    kind: Literal["unlink"] = "unlink"
+    label: str = ""
+    recommended: bool = False
+
+    @property
+    def option_id(self) -> str:
+        return "action:unlink"
+
+
+type ProjectPickerItem = (
+    ProjectPickerProjectItem
+    | ProjectPickerCreateItem
+    | ProjectPickerLoadMoreItem
+    | ProjectPickerUnlinkItem
+)
+
+
+def build_project_picker_items(
+    *,
+    context: VibeCodePickerContext,
+    projects: list[VibeCodeProject],
+    query: str = "",
+    has_more: bool = False,
+    include_unlink: bool = False,
+) -> list[ProjectPickerItem]:
+    normalized_query = query.strip().casefold()
+    visible_projects = [
+        project
+        for project in projects
+        if not project.is_read_only
+        and _is_project_linked(project, context.repo_url)
+        and _project_matches_query(project, normalized_query)
+    ]
+    project_items = [
+        _project_item(context=context, project=project) for project in visible_projects
+    ]
+    primary_items = sorted(project_items, key=_project_sort_key)
+    create_name = query.strip() or _suggested_project_name(context)
+    items: list[ProjectPickerItem] = [
+        *[
+            _with_recommendation(item, recommended=index == 0)
+            for index, item in enumerate(primary_items)
+        ],
+        *([ProjectPickerLoadMoreItem()] if has_more else []),
+        ProjectPickerCreateItem(
+            project_name=create_name, recommended=not primary_items and not has_more
+        ),
+    ]
+    if include_unlink:
+        items.append(ProjectPickerUnlinkItem())
+    return items
+
+
+def _is_project_linked(project: VibeCodeProject, repo_url: str) -> bool:
+    normalized = normalize_repo_url(repo_url)
+    return any(
+        normalize_repo_url(repository.repo_url) == normalized
+        for repository in project.repositories
+    )
+
+
+def _suggested_project_name(context: VibeCodePickerContext) -> str:
+    if name := context.repo_name.strip():
+        return name
+    repo_path = normalize_repo_url(context.repo_url).rsplit("/", maxsplit=1)[-1]
+    return repo_path or "vibe-project"
+
+
+def _project_matches_query(project: VibeCodeProject, normalized_query: str) -> bool:
+    if not normalized_query:
+        return True
+    return any(
+        normalized_query in value.casefold()
+        for value in [
+            project.name,
+            *[repository.repo_url for repository in project.repositories],
+        ]
+    )
+
+
+def _project_item(
+    *, context: VibeCodePickerContext, project: VibeCodeProject
+) -> ProjectPickerProjectItem:
+    saved_link = context.saved_link
+    if (
+        saved_link is not None
+        and saved_link.project_id == project.project_id
+        and normalize_repo_url(saved_link.repo_url)
+        == normalize_repo_url(context.repo_url)
+    ):
+        match_kind = ProjectMatchKind.CURRENT_LINK
+    elif len(project.repositories) == 1:
+        match_kind = ProjectMatchKind.EXACT_REPO
+    else:
+        match_kind = ProjectMatchKind.MULTI_REPO
+    return ProjectPickerProjectItem(
+        project=project, match_kind=match_kind, label=match_kind.label
+    )
+
+
+def _project_sort_key(item: ProjectPickerProjectItem) -> tuple[int, str]:
+    return item.match_kind.rank, item.project.name.casefold()
+
+
+def _with_recommendation(
+    item: ProjectPickerProjectItem, *, recommended: bool
+) -> ProjectPickerProjectItem:
+    return ProjectPickerProjectItem(
+        project=item.project,
+        match_kind=item.match_kind,
+        label=item.label,
+        recommended=recommended,
+    )
+
+
+def _build_repo_text(context: VibeCodePickerContext) -> Text:
     text = Text(no_wrap=True)
     text.append("Repository: ", style="dim")
     text.append(repo_url_label(context.repo_url))
@@ -204,7 +378,7 @@ class VibeCodeProjectPickerApp(Container):
     def __init__(
         self,
         *,
-        context: ProjectPickerContext,
+        context: VibeCodePickerContext,
         projects: list[VibeCodeProject],
         has_more: bool = False,
         include_unlink: bool = False,

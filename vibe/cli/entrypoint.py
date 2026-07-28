@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
 import os
 from pathlib import Path
 import sys
@@ -22,6 +21,8 @@ def parse_arguments() -> argparse.Namespace:
         description="Run the Mistral Vibe interactive CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
+            "Commands:\n"
+            "  mcp            Manage MCP server configuration (vibe mcp --help).\n\n"
             "Environment variables:\n"
             "  VIBE_HOME       Override the Vibe home directory (default: ~/.vibe)\n"
             "  LOG_LEVEL       Logging level: DEBUG, INFO, WARNING (default), ERROR, CRITICAL.\n"
@@ -170,41 +171,6 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def check_and_resolve_trusted_folder(cwd: Path) -> None:
-    from rich import print as rprint
-
-    from vibe.core.trusted_folders import (
-        apply_workspace_trust_decision,
-        maybe_build_workspace_trust_prompt,
-    )
-    from vibe.setup.trusted_folders.trust_folder_dialog import (
-        TrustDialogQuitException,
-        ask_trust_folder,
-    )
-
-    prompt = maybe_build_workspace_trust_prompt(cwd)
-    if prompt is None:
-        return
-
-    try:
-        decision = ask_trust_folder(
-            prompt.cwd,
-            prompt.repo_root,
-            prompt.detected_files,
-            repo_detected_files=prompt.repo_detected_files,
-            offer_repo_trust=prompt.offer_repo_trust,
-            repo_explicitly_untrusted=prompt.repo_explicitly_untrusted,
-        )
-    except (KeyboardInterrupt, EOFError, TrustDialogQuitException):
-        sys.exit(0)
-    except Exception as e:
-        rprint(f"[yellow]Error showing trust dialog: {e}[/]")
-        return
-
-    if decision is not None:
-        apply_workspace_trust_decision(prompt, decision)
-
-
 def _prompt_remove_worktree(
     worktree: PreparedWorktree, cleanup_state: WorktreeCleanupState
 ) -> bool:
@@ -289,13 +255,22 @@ def main() -> None:
 
     silence_proactor_transport_teardown_warnings()
 
+    if sys.argv[1:2] == ["mcp"]:
+        from vibe.cli.mcp_command import run_mcp_cli
+
+        run_mcp_cli(sys.argv[2:])
+        return
+
     args = parse_arguments()
     worktree_session: PreparedWorktree | None = None
 
     from rich import print as rprint
 
     from vibe.core.config.harness_files import init_harness_files_manager
-    from vibe.core.trusted_folders import trusted_folders_manager
+    from vibe.core.paths import LOG_FILE
+    from vibe.observability.logging import init_file_logging
+
+    init_file_logging(LOG_FILE.path)
 
     if args.workdir:
         workdir = args.workdir.expanduser().resolve()
@@ -322,7 +297,7 @@ def main() -> None:
         os.chdir(target)
 
     try:
-        cwd = Path.cwd()
+        Path.cwd()
     except FileNotFoundError:
         rprint(
             "[red]Error: Current working directory no longer exists.[/]\n"
@@ -331,9 +306,6 @@ def main() -> None:
             "or use --workdir to specify a working directory.[/]"
         )
         sys.exit(1)
-
-    if args.trust or args.worktree:
-        trusted_folders_manager.trust_for_session(cwd)
 
     additional_dirs: list[Path] = []
     for d in args.add_dir:
@@ -345,31 +317,21 @@ def main() -> None:
             )
             sys.exit(1)
         additional_dirs.append(resolved)
-        trusted_folders_manager.trust_for_session(resolved)
 
-    init_harness_files_manager("user", "project", additional_dirs=additional_dirs)
+    args.add_dir = [str(path) for path in additional_dirs]
+    init_harness_files_manager("user", "project")
 
-    resolve_trusted_folder: Callable[[], None] | None = None
-    if args.prompt is None and not args.check_upgrade:
-
-        def _resolve_trusted_folder() -> None:
-            check_and_resolve_trusted_folder(cwd)
-
-        resolve_trusted_folder = _resolve_trusted_folder
-
-    _run_cli_with_worktree_cleanup(args, worktree_session, resolve_trusted_folder)
+    _run_cli_with_worktree_cleanup(args, worktree_session)
 
 
 def _run_cli_with_worktree_cleanup(
-    args: argparse.Namespace,
-    worktree_session: PreparedWorktree | None,
-    resolve_trusted_folder: Callable[[], None] | None,
+    args: argparse.Namespace, worktree_session: PreparedWorktree | None
 ) -> None:
     from vibe.cli.cli import run_cli
 
     session_started = False
     try:
-        run_cli(args, resolve_trusted_folder=resolve_trusted_folder)
+        run_cli(args)
         session_started = True
     except SystemExit as e:
         session_started = e.code in {0, None}

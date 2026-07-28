@@ -24,19 +24,12 @@ Vibe application codes:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from acp import RequestError
 
-from vibe.core.config import MissingAPIKeyError
-from vibe.core.types import (
-    ContextTooLongError as CoreContextTooLongError,
-    RateLimitError as CoreRateLimitError,
-    RefusalError as CoreRefusalError,
-)
-
-if TYPE_CHECKING:
-    from vibe.core.agent_loop import CompactionFailedError as CoreCompactionFailedError
+from vibe.app_server.models import PublicError
+from vibe.app_server.protocol import ProtocolError, ProtocolErrorCode
 
 # JSON-RPC 2.0 standard codes
 UNAUTHENTICATED = -32000
@@ -69,8 +62,8 @@ class UnauthenticatedError(VibeRequestError):
         super().__init__(message=detail)
 
     @classmethod
-    def from_missing_api_key(cls, exc: MissingAPIKeyError) -> UnauthenticatedError:
-        return cls(f"Missing API key for {exc.provider_name} provider.")
+    def for_provider(cls, provider_name: str) -> UnauthenticatedError:
+        return cls(f"Missing API key for {provider_name} provider.")
 
 
 class NotImplementedMethodError(VibeRequestError):
@@ -117,10 +110,6 @@ class RateLimitError(VibeRequestError):
             data={"provider": provider, "model": model},
         )
 
-    @classmethod
-    def from_core(cls, exc: CoreRateLimitError) -> RateLimitError:
-        return cls(exc.provider, exc.model)
-
 
 class ContextTooLongError(VibeRequestError):
     code = CONTEXT_TOO_LONG
@@ -131,10 +120,6 @@ class ContextTooLongError(VibeRequestError):
             "Use /rewind to undo recent actions, then /compact to summarize.",
             data={"provider": provider, "model": model},
         )
-
-    @classmethod
-    def from_core(cls, exc: CoreContextTooLongError) -> ContextTooLongError:
-        return cls(exc.provider, exc.model)
 
 
 class RefusalError(VibeRequestError):
@@ -162,20 +147,12 @@ class RefusalError(VibeRequestError):
             },
         )
 
-    @classmethod
-    def from_core(cls, exc: CoreRefusalError) -> RefusalError:
-        return cls(exc.provider, exc.model, exc.category, exc.explanation)
-
 
 class CompactionError(VibeRequestError):
     code = COMPACTION_FAILED
 
     def __init__(self, reason: str, detail: str) -> None:
         super().__init__(message=detail, data={"reason": reason})
-
-    @classmethod
-    def from_core(cls, exc: CoreCompactionFailedError) -> CompactionError:
-        return cls(exc.reason, str(exc))
 
 
 class ConfigurationError(VibeRequestError):
@@ -214,3 +191,47 @@ class InternalError(VibeRequestError):
 
     def __init__(self, detail: str) -> None:
         super().__init__(message=detail or "Internal error")
+
+
+def from_public_error(error: PublicError) -> VibeRequestError:
+    details = error.details if isinstance(error.details, dict) else {}
+    provider = details.get("provider")
+    model = details.get("model")
+    reason = details.get("reason")
+    match error.code:
+        case "rate_limit" if isinstance(provider, str) and isinstance(model, str):
+            mapped: VibeRequestError = RateLimitError(provider, model)
+        case "context_too_long" if isinstance(provider, str) and isinstance(model, str):
+            mapped = ContextTooLongError(provider, model)
+        case "response_too_long":
+            mapped = ConversationLimitError(error.message)
+        case "refusal" if isinstance(provider, str) and isinstance(model, str):
+            category = details.get("category")
+            explanation = details.get("explanation")
+            mapped = RefusalError(
+                provider,
+                model,
+                category if isinstance(category, str) else None,
+                explanation if isinstance(explanation, str) else None,
+            )
+        case "invalid_image_attachment":
+            mapped = InvalidImageAttachmentError(
+                error.message, reason="invalid_image_attachment"
+            )
+        case "images_not_supported" if isinstance(model, str):
+            mapped = ImagesNotSupportedError(model)
+        case "compaction_failed" if isinstance(reason, str):
+            mapped = CompactionError(reason, error.message)
+        case _:
+            mapped = InternalError(error.message)
+    return mapped
+
+
+def from_app_server_error(error: ProtocolError) -> VibeRequestError:
+    details = error.data if isinstance(error.data, dict) else {}
+    reason = details.get("reason")
+    match error.code:
+        case ProtocolErrorCode.COMPACTION_FAILED if isinstance(reason, str):
+            return CompactionError(reason, error.message)
+        case _:
+            return InternalError(error.message)

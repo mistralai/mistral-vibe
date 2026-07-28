@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.22.0"
+version = "2.23.0"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -41,7 +41,7 @@ dependencies = [
     "cryptography==48.0.1",
     "eval-type-backport==0.3.1",
     "gitdb==4.0.12",
-    "gitpython==3.1.51",
+    "gitpython==3.1.53",
     "giturlparse==0.15.0",
     "google-auth==2.49.2",
     "googleapis-common-protos==1.74.0",
@@ -81,7 +81,7 @@ dependencies = [
     "platformdirs==4.9.6",
     "protobuf==6.33.6",
     "ptyprocess==0.7.0",
-    "pyasn1==0.6.3",
+    "pyasn1==0.6.4",
     "pyasn1-modules==0.4.2",
     "pycparser==3.0 ; implementation_name != 'PyPy'",
     "pydantic==2.13.4",
@@ -95,6 +95,7 @@ dependencies = [
     "python-multipart==0.0.32",
     "pywin32==311 ; sys_platform == 'win32'",
     "pywin32-ctypes==0.2.3 ; sys_platform == 'win32'",
+    "pywinpty==3.0.5 ; sys_platform == 'win32'",
     "pyyaml==6.0.3",
     "referencing==0.37.0",
     "requests==2.34.2",
@@ -184,7 +185,7 @@ build = [
     "pyinstaller==6.20.0",
     "pyinstaller-hooks-contrib==2026.4",
     "pywin32-ctypes==0.2.3 ; sys_platform == 'win32'",
-    "setuptools==82.0.1",
+    "setuptools==83.0.0",
 ]
 
 [tool.pyright]

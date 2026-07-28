@@ -4,6 +4,7 @@ import importlib
 from pathlib import Path
 import platform
 import subprocess
+import tempfile
 from unittest.mock import patch
 
 import pytest
@@ -214,10 +215,13 @@ def test_read_clipboard_image_returns_none_on_unsupported_platform(monkeypatch) 
     assert read_clipboard_image() is None
 
 
-def test_write_clipboard_image_uses_filename_without_whitespace(tmp_path) -> None:
-    path = write_clipboard_image(_FAKE_PNG, session_dir=tmp_path)
+def test_write_clipboard_image_uses_filename_without_whitespace(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    path = write_clipboard_image(_FAKE_PNG)
 
-    assert path.parent == tmp_path / "attachments"
+    assert path.parent == tmp_path / "vibe-pasted-images"
     assert not any(char.isspace() for char in path.name)
 
 
@@ -310,26 +314,28 @@ async def test_handle_clipboard_image_paste_warns_when_token_insert_fails(
     path = tmp_path / "clipboard.png"
     notifications: list[tuple[str, str | None]] = []
 
-    def fake_write_clipboard_image(data: bytes, *, session_dir: Path | None) -> Path:
+    def fake_write_clipboard_image(data: bytes) -> Path:
         path.write_bytes(data)
         return path
-
-    def fake_query_one(*_args, **_kwargs):
-        raise RuntimeError("not mounted")
 
     monkeypatch.setattr(paste_image, "is_clipboard_image_paste_supported", lambda: True)
     monkeypatch.setattr(paste_image, "read_clipboard_image", lambda: _FAKE_PNG)
     monkeypatch.setattr(
         paste_image, "write_clipboard_image", fake_write_clipboard_image
     )
-    monkeypatch.setattr(app, "query_one", fake_query_one)
-    monkeypatch.setattr(
-        app,
-        "notify",
-        lambda msg, **kwargs: notifications.append((msg, kwargs.get("severity"))),
-    )
-
-    await handle_clipboard_image_paste(app, notify_when_empty=False)
+    async with app.run_test():
+        with (
+            patch.object(app, "query_one", side_effect=RuntimeError("not mounted")),
+            patch.object(
+                app,
+                "notify",
+                side_effect=lambda msg, **kwargs: notifications.append((
+                    msg,
+                    kwargs.get("severity"),
+                )),
+            ),
+        ):
+            await handle_clipboard_image_paste(app, notify_when_empty=False)
 
     assert not path.exists()
     assert notifications == [("Failed to paste image into prompt.", "warning")]

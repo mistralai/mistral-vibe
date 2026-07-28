@@ -72,7 +72,7 @@ class TestAgentLoopAutoTitleEvent:
         assert title_events == []
 
     @pytest.mark.asyncio
-    async def test_no_event_when_session_logging_disabled(self, tmp_path: Path) -> None:
+    async def test_event_when_session_logging_disabled(self, tmp_path: Path) -> None:
         config = build_test_vibe_config()
         backend = FakeBackend(mock_llm_chunk(content="ok"))
         loop = build_test_agent_loop(config=config, backend=backend)
@@ -80,4 +80,4 @@ class TestAgentLoopAutoTitleEvent:
         events = await _collect(loop, "rendered", auto_title="Pretty title")
 
         title_events = [e for e in events if isinstance(e, SessionTitleUpdatedEvent)]
-        assert title_events == []
+        assert [event.title for event in title_events] == ["Pretty title"]

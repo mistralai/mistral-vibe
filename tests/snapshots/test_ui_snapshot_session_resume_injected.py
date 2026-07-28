@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from textual.pilot import Pilot
 
-from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp
+from tests.conftest import build_test_agent_loop
+from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
 from tests.snapshots.snap_compare import SnapCompare
 from vibe.core.types import LLMMessage, Role
 
@@ -15,8 +16,8 @@ class SnapshotTestAppWithInjectedMessages(BaseSnapshotTestApp):
     """
 
     def __init__(self) -> None:
-        super().__init__()
-        self.agent_loop.messages.extend([
+        agent_loop = build_test_agent_loop(config=default_config())
+        agent_loop.messages.extend([
             LLMMessage(role=Role.user, content="Hello, can you help me?"),
             LLMMessage(role=Role.assistant, content="Sure! What do you need?"),
             # Middleware-injected plan mode reminder — should be hidden
@@ -30,6 +31,7 @@ class SnapshotTestAppWithInjectedMessages(BaseSnapshotTestApp):
                 role=Role.assistant, content="Here is the content of your config file."
             ),
         ])
+        super().__init__(agent_loop=agent_loop)
 
 
 def test_snapshot_session_resume_hides_injected_messages(

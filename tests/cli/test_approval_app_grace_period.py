@@ -1,32 +1,35 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from unittest.mock import patch
 
-from pydantic import BaseModel
 import pytest
 from textual import events
 
+from tests.stubs.app_config import build_test_app_config
+from vibe.app_server.models import (
+    EffectCallDisplay,
+    ShellEffectDetail,
+    ShellEffectInput,
+)
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
-from vibe.core.config import VibeConfigSchema
 
 _TEST_GRACE_PERIOD_S = 0.5
 
 
-class FakeArgs(BaseModel):
-    command: str = "echo hello"
-
-
 @pytest.fixture
-def approval_app(
-    monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., VibeConfigSchema]
-):
+def approval_app(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         "vibe.cli.textual_ui.widgets.approval_app._INPUT_GRACE_PERIOD_S",
         _TEST_GRACE_PERIOD_S,
     )
-    config = make_config()
-    app = ApprovalApp(tool_name="bash", tool_args=FakeArgs(), config=config)
+    app = ApprovalApp(
+        effect=ShellEffectDetail(
+            tool_name="bash",
+            input=ShellEffectInput(command="echo hello"),
+            display=EffectCallDisplay(summary="bash", status_text="Running"),
+        ),
+        config=build_test_app_config(),
+    )
     app._mount_time = 100.0
     return app
 

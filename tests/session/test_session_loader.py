@@ -10,7 +10,7 @@ import pytest
 from vibe.core.config import SessionLoggingConfig
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.types import LLMMessage, Role, SessionMetadata, ToolCall
-from vibe.core.utils.io import read_safe
+from vibe.utils.io import read_safe
 
 
 @pytest.fixture

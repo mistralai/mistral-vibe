@@ -6,7 +6,7 @@ from contextlib import suppress
 import socket
 import time
 from types import TracebackType
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import urllib.parse
 
 import httpx
@@ -24,6 +24,7 @@ from vibe.core.auth.mcp_oauth import (
     Fingerprint,
     KeyringTokenStorage,
     LoopbackCallbackHandler,
+    MCPOAuthCredentialCleanupFailed,
     MCPOAuthError,
     MCPOAuthHeadlessError,
     MCPOAuthInvalidGrant,
@@ -32,6 +33,7 @@ from vibe.core.auth.mcp_oauth import (
     MCPOAuthTransientRefreshError,
     RefreshAwareOAuthClientProvider,
     build_oauth_provider,
+    delete_oauth_credentials,
     perform_oauth_login,
     unwrap_oauth_refresh_error,
 )
@@ -207,6 +209,24 @@ class TestKeyringTokenStorage:
             with pytest.raises(MCPOAuthHeadlessError) as exc_info:
                 KeyringTokenStorage(alias="notion")
         assert exc_info.value.server_alias == "notion"
+
+    @pytest.mark.asyncio
+    async def test_delete_oauth_credentials_wraps_keyring_failure(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        delete = AsyncMock(side_effect=keyring.errors.KeyringError("keyring locked"))
+
+        with patch("vibe.core.auth.mcp_oauth._kr_delete", delete):
+            with pytest.raises(MCPOAuthCredentialCleanupFailed, match="keyring locked"):
+                await delete_oauth_credentials("linear")
+
+    @pytest.mark.asyncio
+    async def test_delete_oauth_credentials_is_noop_when_headless(
+        self, headless_keyring: None
+    ) -> None:
+        # No keyring backend means nothing was ever stored, so removing an OAuth
+        # server (e.g. added with `--no-login` on CI) must not fail.
+        await delete_oauth_credentials("linear")
 
 
 class TestFingerprint:
@@ -701,6 +721,52 @@ class TestPerformOAuthLogin:
         ):
             with pytest.raises(MCPOAuthLoginFailed, match="cancelled"):
                 await perform_oauth_login(srv, on_url=on_url)
+
+    @pytest.mark.parametrize("retry_after_invalid_grant", [False, True])
+    @pytest.mark.asyncio
+    async def test_network_error_becomes_login_failed(
+        self, retry_after_invalid_grant: bool, memory_keyring: _MemoryKeyring
+    ) -> None:
+        srv = _oauth_server(name="demo")
+        errors: list[Exception] = []
+        if retry_after_invalid_grant:
+            errors.append(
+                MCPOAuthInvalidGrant(server_alias="demo", reason="expired token")
+            )
+        errors.append(
+            httpx.ConnectError(
+                "connection refused", request=httpx.Request("GET", srv.url)
+            )
+        )
+
+        class NetworkFailingClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            async def __aenter__(self) -> NetworkFailingClient:
+                return self
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: TracebackType | None,
+            ) -> None:
+                pass
+
+            async def get(self, _url: str) -> None:
+                raise errors.pop(0)
+
+        async def on_url(_url: str) -> None:
+            pass
+
+        with patch(
+            "vibe.core.auth.mcp_oauth.VibeAsyncHTTPClient", new=NetworkFailingClient
+        ):
+            with pytest.raises(MCPOAuthLoginFailed, match="connection refused"):
+                await perform_oauth_login(srv, on_url=on_url)
+
+        assert errors == []
 
     @pytest.mark.asyncio
     async def test_full_flow_persists_tokens_and_fingerprint(

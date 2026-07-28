@@ -2,7 +2,10 @@
 
 ## Decision
 
-The agent loop communicates through typed events and streaming async generators. The loop owns orchestration; consumers react to events.
+The agent loop communicates through typed events and streaming async generators.
+It owns model and tool execution. The app server owns the external session,
+turn, callback, and delivery lifecycle and projects the core stream into public
+client events.
 
 Events are the contract for assistant output, reasoning, user messages, tool calls, tool streams, tool results, approvals, compaction, plan review, title updates, hooks, teleport, and related lifecycle changes.
 
@@ -17,6 +20,10 @@ Streaming keeps the CLI responsive and lets ACP/programmatic consumers observe t
 - Use `asyncio.create_task` and queues for explicit concurrent flows; avoid hiding orchestration in broad `gather` calls.
 - Keep long-running work cancellable and make cancellation visible through existing event/result paths.
 - Do not make consumers inspect private agent-loop state to understand what happened.
+- Route core events to delivery surfaces through `vibe.app_server`; a delivery
+  surface must not consume `AgentLoop.act()` directly.
+- Keep public session event IDs monotonic. Duplicate notifications are ignored;
+  a gap is recovered by replacing the client projection from `session/read`.
 
 ## Flag To User When
 

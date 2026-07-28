@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from vibe import __version__
-from vibe.core.skills.models import SkillInfo
+from vibe.core.skills.models import SkillInfo, SkillSource
 
 _PROMPT_TEMPLATE = """# Vibe CLI Self-Awareness
 
@@ -26,7 +26,7 @@ agents, prompts, logs, and session data live here.
 
 ```
 ~/.vibe/
-  config.toml          # Main configuration file (TOML format)
+  config.toml          # Optional user configuration, created on first saved setting
   hooks.toml           # User-level hook definitions
   .env                 # API keys and credentials (dotenv format)
   vibehistory          # Command history
@@ -109,8 +109,10 @@ it ran in.
 
 ## Configuration (config.toml)
 
-The configuration file uses TOML format. Settings can also be overridden via
-environment variables with the `VIBE_` prefix (e.g., `VIBE_ACTIVE_MODEL=local`).
+The configuration file uses TOML format. When it does not exist, Vibe uses its
+built-in defaults and creates a sparse file on the first persisted setting.
+Settings can also be overridden via environment variables with the `VIBE_`
+prefix (e.g., `VIBE_ACTIVE_MODEL=local`).
 
 Custom prompt IDs are resolved from project-local `.vibe/prompts/` first, then
 from `~/.vibe/prompts/`, and finally from the built-in bundled prompts.
@@ -122,6 +124,7 @@ from `~/.vibe/prompts/`, and finally from the built-in bundled prompts.
 active_model = "mistral-medium-3.5"  # Model alias to use (see [[models]])
 
 # UI preferences
+theme = "auto"  # Follow terminal background, then OS light/dark preference
 disable_welcome_banner_animation = false
 autocopy_to_clipboard = true
 file_watcher_for_autocomplete = false
@@ -209,22 +212,46 @@ enabled_tools = ["bash", "read_file", "grep"]
 # Disable specific tools after enabled_tools filtering
 disabled_tools = ["web_fetch"]
 
-# Opt into the managed PTY bash experiment
-experimental_bash_tool = true
-
 # Per-tool configuration
 [tools.bash]
 allowlist = ["git", "npm", "python"]
+
+[tools.git_bash]
+permission = "ask"
+shell = "C:\\Program Files\\Git\\bin\\bash.exe"
+
+[tools.powershell]
+permission = "ask"
+shell = "powershell.exe"
 ```
 
-The built-in `bash` tool runs one-off shell commands by default. Set
-`experimental_bash_tool = true` to replace it with the experimental managed PTY
-implementation under the same `bash` tool name, which also enables the companion
-tools `bash_output`, `bash_stdin`, `bash_sessions`, and `bash_log_file` and
-persists session logs under `~/.vibe/bash-tool/`. Both implementations read
-permissions and allow/deny lists from `[tools.bash]`. Output polling uses byte
-offset cursors (`cursor` / `next_cursor`), `max_bytes` caps per-call inline
-output, and `max_inline_bytes` configures the default cap.
+The rollout assignment is server-managed and is not a `config.toml` option.
+
+The built-in shell surface is controlled by the `vibe_cli_managed_shell_tools`
+experiment. The default variant keeps the legacy one-shot `bash` tool, including
+its existing Windows behavior. The managed variant exposes OS-native shell tools:
+POSIX systems, including WSL where Vibe runs as Linux, get managed `bash`,
+`bash_output`, `bash_stdin`, `bash_sessions`, and `bash_log_file`; native Windows
+gets `git_bash`, `git_bash_output`, `git_bash_stdin`, `git_bash_sessions`, and
+`git_bash_log_file` when Git Bash is available. If Git Bash is unavailable,
+native Windows falls back to `powershell`, `powershell_output`,
+`powershell_stdin`, `powershell_sessions`, and `powershell_log_file`.
+
+Managed shell sessions return a `session_id`, inline output, a cursor for polling
+more output, and a log path under `~/.vibe/shell-tool/sessions/`. Long-running
+commands can be left alive with `background = true`, and interactive commands can
+be driven with the matching stdin tool.
+
+POSIX `bash` reads permissions, allowlists, and denylists from `[tools.bash]`.
+Native Windows `git_bash` reads them from `[tools.git_bash]`; native Windows
+`powershell` reads them from `[tools.powershell]`. Neither Windows tool reads
+`[tools.bash]`. Git Bash is preferred when Vibe can resolve a usable `bash.exe`
+from PATH, Git for Windows, or standard Git install locations. If Git Bash is
+unavailable, the PowerShell resolution order is `pwsh.exe`, then
+`powershell.exe`. `cmd.exe` is not used by the managed Windows shell tools.
+Output polling uses byte offset cursors
+(`cursor` / `next_cursor`), `max_bytes` caps per-call inline output, and
+`max_inline_bytes` configures the default cap.
 
 **Special case — `find` command:** Even if `find` is in the bash allowlist,
 Vibe detects `-exec`, `-execdir`, `-ok`, and `-okdir` predicates and will
@@ -283,7 +310,28 @@ default_agent = "plan"
 
 ### MCP Servers
 
-Hosted OAuth MCP servers can be added from inside Vibe:
+Remote MCP servers can be added non-interactively from the shell:
+
+```bash
+vibe mcp add mistralai \\
+  --url https://api.mistral.ai/mcp \\
+  --transport streamable-http \\
+  --api-key-env MISTRAL_API_KEY
+
+vibe mcp add linear \\
+  --url https://mcp.linear.app/mcp
+
+vibe mcp remove mistralai
+```
+
+Static auth is selected when `--api-key-env` or `--header` is provided.
+Otherwise the server uses OAuth and starts browser login by default. Pass
+`--no-login` to only persist the OAuth configuration. Run
+`vibe mcp add --help` for all supported authentication and timeout options.
+Use `vibe mcp remove <name>` to remove a server from the user configuration;
+stored OAuth credentials are deleted when available.
+
+Hosted OAuth MCP servers can also be added from inside Vibe:
 
 ```text
 /mcp add https://mcp.linear.app/mcp
@@ -294,8 +342,7 @@ Hosted OAuth MCP servers can be added from inside Vibe:
 scopes and starts login by default. It uses `transport = "streamable-http"`
 unless you pass `--transport http`. Pass `--no-login` to add the server without
 starting OAuth login. The shortcut supports `streamable-http` and `http`
-transports. For API-key/static auth, edit `config.toml` using the static auth
-example below.
+transports.
 
 ```toml
 [[mcp_servers]]
@@ -308,7 +355,12 @@ args = ["-y", "@my/mcp-server"]
 name = "remote-server"
 transport = "http"
 url = "https://mcp.example.com"
+
+[mcp_servers.auth]
+type = "static"
 api_key_env = "MCP_API_KEY"
+api_key_header = "Authorization"
+api_key_format = "Bearer {token}"
 
 [[mcp_servers]]
 name = "linear"
@@ -611,7 +663,7 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/config` - Edit config settings
 - `/model` - Select active model
 - `/thinking` - Select thinking level
-- `/theme` - Select Textual UI theme (persisted in config)
+- `/theme` - Select Textual UI theme; `auto` follows terminal/OS appearance (persisted in config)
 - `/reload` - Reload configuration, agent instructions, and skills from disk
 - `/clear`, `/new` - Clear conversation history
 - `/log` - Show path to current interaction log file
@@ -623,8 +675,10 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
   name to list its tools or open its auth panel when authentication is required
 - `/mcp add <url>` - Add a hosted OAuth MCP server. Supports `--name <alias>`,
   repeatable `--scope <scope>`, `--transport <http|streamable-http>`, and
-  `--no-login`. Starts OAuth login by default. OAuth-only; use `config.toml`
-  for API-key/static auth.
+  `--no-login`. Starts OAuth login by default. OAuth-only; use
+  `vibe mcp add <name> --url <url> --api-key-env <var>` for API-key/static auth.
+- `vibe mcp remove <name>` - Remove an MCP server from the user configuration
+  and delete its stored OAuth credentials when available.
 - `/mcp status` - Display MCP auth state (`ok`, `needs_auth`, `static`, `stdio`)
 - `/mcp login <alias>` - Start OAuth login for an MCP server
 - `/mcp logout <alias>` - Log out from an MCP server and delete stored OAuth
@@ -811,12 +865,12 @@ Do not use tools (read, write_file, bash cat/echo, etc.) to access these files.
 
 To help the user modify their Vibe configuration:
 
-1. **Read current config**: Read the file at `~/.vibe/config.toml` (or the path
-   from `VIBE_HOME` env var if set)
-2. **Create a backup**: Before any edit, copy the file to `config.toml.bak` in the
-   same directory (e.g. `cp ~/.vibe/config.toml ~/.vibe/config.toml.bak`). This
-   applies to any config file you are about to modify (`config.toml`,
-   `trusted_folders.toml`, agent TOML files, etc.)
+1. **Read current config when present**: Read `~/.vibe/config.toml` (or the path
+   from `VIBE_HOME` if set). A missing file means Vibe is using built-in defaults.
+2. **Create a backup when present**: Before editing an existing file, copy it to
+   `config.toml.bak` in the same directory. This applies to any existing config
+   file you are about to modify (`config.toml`, `trusted_folders.toml`, agent
+   TOML files, etc.)
 3. **Edit the TOML file**: Make changes using the edit tool
 4. **Reload**: The user can run `/reload` to apply changes without restarting
 
@@ -842,4 +896,5 @@ LOAD when the user:
 SCOPE: config under `~/.vibe/` and project-local `.vibe/`; `VIBE_*` and `LOG_*` env vars; models and providers; agents and subagents; skills; tools and their permission model; every slash command and CLI flag; hooks; MCP servers; connectors; trusted folders; `@`-file mentions; logs; themes; voice.""",
     user_invocable=False,
     prompt=_PROMPT_TEMPLATE.replace("__VIBE_VERSION__", __version__),
+    source=SkillSource.BUILTIN,
 )

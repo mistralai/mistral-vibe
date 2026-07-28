@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vibe.core.config import VibeConfigSchema
-from vibe.core.session.session_id import shorten_session_id
 from vibe.core.session.session_loader import SessionLoader
+from vibe.utils.session_id import shorten_session_id
 
 
 def short_session_id(session_id: str) -> str:

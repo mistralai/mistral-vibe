@@ -5,6 +5,12 @@ from textual.pilot import Pilot
 
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp
 from tests.snapshots.snap_compare import SnapCompare
+from vibe.app_server.models import (
+    EffectCallDisplay,
+    EffectDetail,
+    FileWriteEffectDetail,
+    FileWriteEffectInput,
+)
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.core.tools.builtins.write_file import WriteFileArgs
 
@@ -12,16 +18,24 @@ WF_CONTENT_LONG = "\n".join(f"line_{i:03d} = {i * 7}" for i in range(1, 101))
 WF_CONTENT_SHORT = "line_001 = 7"
 
 
+def _write_effect(args: WriteFileArgs) -> EffectDetail:
+    return FileWriteEffectDetail(
+        tool_name="write_file",
+        input=FileWriteEffectInput.model_validate(args, from_attributes=True),
+        display=EffectCallDisplay(summary="write_file", status_text="Writing file"),
+    )
+
+
 class WriteApprovalLongContentApp(BaseSnapshotTestApp):
     async def on_ready(self) -> None:
         args = WriteFileArgs(file_path="src/example.py", content=WF_CONTENT_LONG)
-        await self._switch_to_approval_app("write_file", args)
+        await self._switch_to_approval_app(_write_effect(args))
 
 
 class WriteApprovalShortContentApp(BaseSnapshotTestApp):
     async def on_ready(self) -> None:
         args = WriteFileArgs(file_path="src/example.py", content=WF_CONTENT_SHORT)
-        await self._switch_to_approval_app("write_file", args)
+        await self._switch_to_approval_app(_write_effect(args))
 
 
 def test_snapshot_write_approval_long_content_bottom_lines_hidden(

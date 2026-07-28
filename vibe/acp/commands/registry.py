@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
-
-type OnCommandsChanged = Callable[[], Awaitable[None]]
+from enum import StrEnum, auto
 
 
 @dataclass(frozen=True)
@@ -14,13 +13,26 @@ class AcpCommandContext:
 type CommandAvailability = Callable[[AcpCommandContext], bool]
 
 
+class AcpCommandKind(StrEnum):
+    HELP = auto()
+    COMPACT = auto()
+    RELOAD = auto()
+    LOG = auto()
+    MCP = auto()
+    TELEPORT = auto()
+    PROXY_SETUP = auto()
+    LEANSTALL = auto()
+    UNLEANSTALL = auto()
+    DATA_RETENTION = auto()
+
+
 @dataclass(frozen=True)
 class AcpCommand:
     """Command advertised to ACP clients via available_commands_update."""
 
     name: str
     description: str
-    handler: str
+    kind: AcpCommandKind
     input_hint: str | None = None
     is_available: CommandAvailability | None = None
 
@@ -31,7 +43,6 @@ class AcpCommandRegistry:
 
     vibe_code_enabled: bool = False
     _commands: dict[str, AcpCommand] = field(default_factory=dict)
-    _on_changed: OnCommandsChanged | None = None
     _context: AcpCommandContext = field(init=False, default_factory=AcpCommandContext)
 
     def __post_init__(self) -> None:
@@ -50,9 +61,6 @@ class AcpCommandRegistry:
             return True
         return command.is_available(self._context)
 
-    def set_on_changed(self, callback: OnCommandsChanged) -> None:
-        self._on_changed = callback
-
     @property
     def commands(self) -> dict[str, AcpCommand]:
         return self._commands
@@ -60,65 +68,61 @@ class AcpCommandRegistry:
     def get(self, name: str) -> AcpCommand | None:
         return self._commands.get(name)
 
-    async def notify_changed(self) -> None:
-        if self._on_changed is not None:
-            await self._on_changed()
-
 
 def _build_commands() -> dict[str, AcpCommand]:
     return {
         "help": AcpCommand(
             name="help",
             description="Show available commands and keyboard shortcuts",
-            handler="_handle_help",
+            kind=AcpCommandKind.HELP,
         ),
         "compact": AcpCommand(
             name="compact",
             description="Compact conversation history by summarizing. Optionally pass instructions to guide the summary",
-            handler="_handle_compact",
+            kind=AcpCommandKind.COMPACT,
             input_hint="Optional instructions to guide the compaction summary",
         ),
         "reload": AcpCommand(
             name="reload",
             description="Reload configuration, agent instructions, and skills from disk",
-            handler="_handle_reload",
+            kind=AcpCommandKind.RELOAD,
         ),
         "log": AcpCommand(
             name="log",
             description="Show path to current session log directory",
-            handler="_handle_log",
+            kind=AcpCommandKind.LOG,
         ),
         "mcp": AcpCommand(
             name="mcp",
             description="Show MCP OAuth status, login guidance, or log out an OAuth MCP server",
-            handler="_handle_mcp",
+            kind=AcpCommandKind.MCP,
             input_hint="status | login <alias> | logout <alias>",
         ),
         "teleport": AcpCommand(
             name="teleport",
             description="Teleport session to Vibe Code Web",
-            handler="_handle_teleport",
+            kind=AcpCommandKind.TELEPORT,
             is_available=lambda ctx: ctx.vibe_code_enabled,
         ),
         "proxy-setup": AcpCommand(
             name="proxy-setup",
             description="Configure proxy and SSL certificate settings",
-            handler="_handle_proxy_setup",
+            kind=AcpCommandKind.PROXY_SETUP,
             input_hint="KEY value to set, KEY to unset, or empty for help",
         ),
         "leanstall": AcpCommand(
             name="leanstall",
             description="Install the Lean 4 agent (leanstral)",
-            handler="_handle_leanstall",
+            kind=AcpCommandKind.LEANSTALL,
         ),
         "unleanstall": AcpCommand(
             name="unleanstall",
             description="Uninstall the Lean 4 agent",
-            handler="_handle_unleanstall",
+            kind=AcpCommandKind.UNLEANSTALL,
         ),
         "data-retention": AcpCommand(
             name="data-retention",
             description="Show data retention information",
-            handler="_handle_data_retention",
+            kind=AcpCommandKind.DATA_RETENTION,
         ),
     }
