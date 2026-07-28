@@ -62,12 +62,14 @@ class BrowserSignInService:
         gateway: BrowserSignInGateway,
         *,
         open_browser: BrowserOpener | None = None,
+        raise_on_browser_open_failure: bool = True,
         sleep: SleepFn = asyncio.sleep,
         now: NowFn | None = None,
         poll_interval: float = 3.0,
     ) -> None:
         self._gateway = gateway
         self._open_browser = open_browser or webbrowser.open
+        self._raise_on_browser_open_failure = raise_on_browser_open_failure
         self._sleep = sleep
         self._now = now or (lambda: datetime.now(UTC))
         self._poll_interval = poll_interval
@@ -99,7 +101,14 @@ class BrowserSignInService:
         if event_callback is not None:
             event_callback(event)
         self._emit_status(event_callback, BrowserSignInStatus.OPENING_BROWSER)
-        self._open_browser_or_raise(attempt.sign_in_url)
+        try:
+            self._open_browser_or_raise(attempt.sign_in_url)
+        except BrowserSignInError as err:
+            if (
+                self._raise_on_browser_open_failure
+                or err.code is not BrowserSignInErrorCode.OPEN_BROWSER_FAILED
+            ):
+                raise
         return await self._complete_attempt(attempt, event_callback=event_callback)
 
     async def _complete_attempt(

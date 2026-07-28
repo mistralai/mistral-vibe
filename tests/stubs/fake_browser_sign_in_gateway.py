@@ -14,6 +14,9 @@ from vibe.setup.auth import (
 )
 from vibe.setup.auth.browser_sign_in import BrowserSignInService
 
+BrowserSignInPollScript = tuple[BrowserSignInPollResult | BrowserSignInError, ...]
+PollWaiter = Callable[[int], Awaitable[None]]
+
 
 @dataclass
 class ExchangeRequestPayload:
@@ -22,24 +25,28 @@ class ExchangeRequestPayload:
     code_verifier: str
 
 
-class StubBrowserSignInGateway(BrowserSignInGateway):
+class FakeBrowserSignInGateway(BrowserSignInGateway):
     def __init__(
         self,
         *,
         process: BrowserSignInProcess | None = None,
         processes: list[BrowserSignInProcess] | None = None,
+        start_error: BrowserSignInError | None = None,
         poll_results: list[BrowserSignInPollResult | BrowserSignInError] | None = None,
         exchange_result: str = "sk-browser-key",
         exchange_error: BrowserSignInError | None = None,
+        wait_before_poll_result: PollWaiter | None = None,
     ) -> None:
         if process is not None and processes is not None:
-            msg = "StubBrowserSignInGateway accepts either process or processes."
+            msg = "FakeBrowserSignInGateway accepts either process or processes."
             raise AssertionError(msg)
 
         self._processes = list(processes or ([] if process is None else [process]))
+        self._start_error = start_error
         self._poll_results = list(poll_results or [])
         self.exchange_result = exchange_result
         self.exchange_error = exchange_error
+        self._wait_before_poll_result = wait_before_poll_result
         self.code_challenges: list[str] = []
         self.polled_urls: list[str] = []
         self.exchange_requests: list[ExchangeRequestPayload] = []
@@ -49,8 +56,10 @@ class StubBrowserSignInGateway(BrowserSignInGateway):
 
     async def create_process(self, code_challenge: str) -> BrowserSignInProcess:
         self.code_challenges.append(code_challenge)
+        if self._start_error is not None:
+            raise self._start_error
         if not self._processes:
-            msg = "StubBrowserSignInGateway requires at least one scripted process."
+            msg = "FakeBrowserSignInGateway requires at least one scripted process."
             raise AssertionError(msg)
 
         self.process_number += 1
@@ -59,8 +68,10 @@ class StubBrowserSignInGateway(BrowserSignInGateway):
     async def poll(self, poll_url: str) -> BrowserSignInPollResult:
         self.polled_urls.append(poll_url)
         self.poll_calls += 1
+        if self._wait_before_poll_result is not None:
+            await self._wait_before_poll_result(self.poll_calls)
         if not self._poll_results:
-            msg = "StubBrowserSignInGateway requires scripted poll results."
+            msg = "FakeBrowserSignInGateway requires scripted poll results."
             raise AssertionError(msg)
         result = self._poll_results.pop(0)
         if isinstance(result, BrowserSignInError):
@@ -112,8 +123,32 @@ def build_poll_failed_error() -> BrowserSignInError:
     )
 
 
-def build_poll_results_from_outcomes(
-    outcomes: list[str],
+def build_completed_poll_script(
+    process_id: str = "process-1",
+) -> BrowserSignInPollScript:
+    return (
+        BrowserSignInPollResult(status="pending"),
+        BrowserSignInPollResult(
+            status="completed", exchange_token=f"exchange-{process_id}"
+        ),
+    )
+
+
+def build_expired_poll_script() -> BrowserSignInPollScript:
+    return (BrowserSignInPollResult(status="expired"),)
+
+
+def build_poll_failed_script() -> BrowserSignInPollScript:
+    return (
+        BrowserSignInPollResult(status="pending"),
+        build_poll_failed_error(),
+        build_poll_failed_error(),
+        build_poll_failed_error(),
+    )
+
+
+def build_processes_and_poll_results(
+    poll_scripts: list[BrowserSignInPollScript],
 ) -> tuple[
     list[BrowserSignInProcess], list[BrowserSignInPollResult | BrowserSignInError]
 ]:
@@ -121,30 +156,10 @@ def build_poll_results_from_outcomes(
     poll_results: list[BrowserSignInPollResult | BrowserSignInError] = []
     now = datetime(2026, 3, 16, tzinfo=UTC)
 
-    for process_index, outcome in enumerate(outcomes, start=1):
+    for process_index, poll_script in enumerate(poll_scripts, start=1):
         process_id = f"process-{process_index}"
         processes.append(build_sign_in_process(now, process_id=process_id))
-
-        match outcome:
-            case "completed":
-                poll_results.extend([
-                    BrowserSignInPollResult(status="pending"),
-                    BrowserSignInPollResult(
-                        status="completed", exchange_token=f"exchange-{process_id}"
-                    ),
-                ])
-            case "expired":
-                poll_results.append(BrowserSignInPollResult(status="expired"))
-            case "poll_failed":
-                poll_results.extend([
-                    BrowserSignInPollResult(status="pending"),
-                    build_poll_failed_error(),
-                    build_poll_failed_error(),
-                    build_poll_failed_error(),
-                ])
-            case _:
-                msg = f"Unsupported browser sign-in outcome: {outcome}"
-                raise AssertionError(msg)
+        poll_results.extend(poll_script)
 
     return processes, poll_results
 
@@ -154,20 +169,25 @@ async def noop_sleep(_: float) -> None:
 
 
 def build_browser_sign_in_service_factory(
-    outcomes: list[str],
+    poll_scripts: list[BrowserSignInPollScript],
     *,
     exchange_result: str = "sk-browser-onboarding-test-key",
     open_browser: Callable[[str], bool] | None = None,
+    raise_on_browser_open_failure: bool = True,
     sleep: Callable[[float], Awaitable[None]] = noop_sleep,
     now: Callable[[], datetime] | None = None,
+    wait_before_poll_result: PollWaiter | None = None,
 ) -> tuple[
-    StubBrowserSignInGateway,
+    FakeBrowserSignInGateway,
     Callable[[], BrowserSignInService],
     list[BrowserSignInService],
 ]:
-    processes, poll_results = build_poll_results_from_outcomes(outcomes)
-    gateway = StubBrowserSignInGateway(
-        processes=processes, poll_results=poll_results, exchange_result=exchange_result
+    processes, poll_results = build_processes_and_poll_results(poll_scripts)
+    gateway = FakeBrowserSignInGateway(
+        processes=processes,
+        poll_results=poll_results,
+        exchange_result=exchange_result,
+        wait_before_poll_result=wait_before_poll_result,
     )
     created_services: list[BrowserSignInService] = []
 
@@ -175,6 +195,7 @@ def build_browser_sign_in_service_factory(
         service = BrowserSignInService(
             gateway,
             open_browser=open_browser or (lambda _: True),
+            raise_on_browser_open_failure=raise_on_browser_open_failure,
             sleep=sleep,
             now=now
             or (

@@ -121,7 +121,8 @@ class OnboardingApp(App[str | None]):
         return lambda: BrowserSignInService(
             HttpBrowserSignInGateway(
                 browser_base_url=browser_base_url, api_base_url=api_base_url
-            )
+            ),
+            raise_on_browser_open_failure=False,
         )
 
     def _resolve_browser_sign_in_factory(
