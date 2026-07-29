@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from enum import StrEnum, auto
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shlex
 from string import Formatter
@@ -33,6 +33,7 @@ from vibe.core.config._defaults import (
 )
 from vibe.core.paths import SESSION_LOG_DIR
 from vibe.core.types import Backend
+from vibe.utils.platform import is_windows
 
 logger = logging.getLogger(__name__)
 
@@ -377,11 +378,16 @@ class MCPStdio(_MCPBase):
     )
 
     def argv(self) -> list[str]:
-        base = (
-            shlex.split(self.command)
-            if isinstance(self.command, str)
-            else list(self.command or [])
-        )
+        command = self.command
+        if isinstance(command, str):
+            is_native_windows_path = (
+                is_windows()
+                and "\\" in command
+                and PureWindowsPath(command).is_absolute()
+            )
+            base = [command] if is_native_windows_path else shlex.split(command)
+        else:
+            base = list(command)
         return [*base, *self.args] if self.args else base
 
 
