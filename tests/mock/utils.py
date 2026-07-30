@@ -24,6 +24,7 @@ def mock_llm_chunk(
     tool_call_id: str | None = None,
     prompt_tokens: int = 10,
     completion_tokens: int = 5,
+    cached_tokens: int = 0,
 ) -> LLMChunk:
     message = LLMMessage(
         role=role,
@@ -36,7 +37,9 @@ def mock_llm_chunk(
     return LLMChunk(
         message=message,
         usage=LLMUsage(
-            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
         ),
     )
 

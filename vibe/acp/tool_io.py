@@ -78,6 +78,7 @@ class AcpClientToolHandler(ClientToolHandler):
                 update=ToolCallProgress(
                     session_update="tool_call_update",
                     tool_call_id=params.tool_call_id,
+                    kind="execute",
                     status="in_progress",
                     content=[tool_terminal_ref(response.terminal_id)],
                 ),

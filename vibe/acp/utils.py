@@ -35,9 +35,11 @@ _KIND_REJECT_ONCE: PermissionOptionKind = "reject_once"
 def build_permission_options(
     required_permissions: list[RequiredPermission],
 ) -> list[PermissionOption]:
+    # The webview parses these snake_case keys (invocation_pattern,
+    # session_pattern); RequiredPermission has a camel alias generator, so
+    # dumping by_alias would emit camelCase and blank the displayed patterns.
     permissions_meta = [
-        permission.model_dump(mode="json", by_alias=True)
-        for permission in required_permissions
+        permission.model_dump(mode="json") for permission in required_permissions
     ]
     session_meta = (
         {"required_permissions": permissions_meta} if permissions_meta else None

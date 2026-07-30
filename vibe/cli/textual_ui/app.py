@@ -129,7 +129,6 @@ from vibe.cli.textual_ui.widgets.chat_input.paste_image import (
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.textual_ui.widgets.collapsible import CollapsibleSection
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
-from vibe.cli.textual_ui.widgets.config_app import ConfigApp
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenState
 from vibe.cli.textual_ui.widgets.debug_console import DebugConsole
 from vibe.cli.textual_ui.widgets.feedback_bar import FeedbackBar
@@ -279,12 +278,11 @@ class BottomApp(StrEnum):
     """Bottom panel app types.
 
     Convention: Each value must match the widget class name with "App" suffix removed.
-    E.g., ApprovalApp -> Approval, ConfigApp -> Config, QuestionApp -> Question.
+    E.g., ApprovalApp -> Approval, QuestionApp -> Question.
     This allows dynamic lookup via: BottomApp[type(widget).__name__.removesuffix("App")]
     """
 
     Approval = auto()
-    Config = auto()
     ConnectorAuth = auto()
     Input = auto()
     MCP = auto()
@@ -804,10 +802,15 @@ class VibeApp(App):  # noqa: PLR0904
         return self._cached_loading_area
 
     async def on_mount(self) -> None:
-        self._apply_theme(self.config.theme)
+        await self._apply_theme(self.config.theme)
+        self.app_server.resources.config.subscribe(self._on_config_changed)
         self._terminal_notifier.restore()
         self._feedback_bar = self.query_one(FeedbackBar)
         self.run_worker(self._complete_mount(), exclusive=False)
+
+    def _on_config_changed(self, config: ConfigView) -> None:
+        if resolve_theme_name(config.theme) != self.theme:
+            self.run_worker(self._apply_theme(config.theme))
 
     async def _complete_mount(self) -> None:
         self.event_handler = EventHandler(
@@ -1189,28 +1192,6 @@ class VibeApp(App):  # noqa: PLR0904
     async def _persist_config_changes(self, changes: dict[str, str | bool]) -> None:
         await self.app_server.resources.config.update(changes)
 
-    async def on_config_app_open_model_picker(
-        self, _message: ConfigApp.OpenModelPicker
-    ) -> None:
-        config_app = self.query_one(ConfigApp)
-        changes = config_app._convert_changes_for_save()
-        if changes:
-            await self._persist_config_changes(changes)
-            await self._reload_config()
-        await self._switch_to_input_app()
-        await self._switch_to_model_picker_app()
-
-    async def on_config_app_open_thinking_picker(
-        self, _message: ConfigApp.OpenThinkingPicker
-    ) -> None:
-        config_app = self.query_one(ConfigApp)
-        changes = config_app._convert_changes_for_save()
-        if changes:
-            await self._persist_config_changes(changes)
-            await self._reload_config()
-        await self._switch_to_input_app()
-        await self._switch_to_thinking_picker_app()
-
     async def _ensure_loading_widget(
         self, status: str = DEFAULT_LOADING_STATUS, *, show_hint: bool = True
     ) -> None:
@@ -1226,28 +1207,9 @@ class VibeApp(App):  # noqa: PLR0904
         self._loading_widget = loading
         await loading_area.mount(loading)
 
-    async def on_config_app_config_closed(
-        self, message: ConfigApp.ConfigClosed
-    ) -> None:
-        await self._handle_config_settings_closed(message.changes)
-        await self._switch_to_input_app()
-
     async def on_voice_app_config_closed(self, message: VoiceApp.ConfigClosed) -> None:
         await self._handle_voice_settings_closed(message.changes)
         await self._switch_to_input_app()
-
-    async def _handle_config_settings_closed(
-        self, changes: dict[str, str | bool]
-    ) -> None:
-        if changes:
-            await self._persist_config_changes(changes)
-            await self._reload_config()
-            if "show_thinking_nodes" in changes:
-                self._apply_thinking_visibility()
-        else:
-            await self._mount_and_scroll(
-                UserCommandMessage("Configuration closed (no changes saved).")
-            )
 
     def _apply_thinking_visibility(self) -> None:
         show = self.config.show_thinking_nodes
@@ -1475,8 +1437,7 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_theme_picker_app_theme_previewed(
         self, message: ThemePickerApp.ThemePreviewed
     ) -> None:
-        self._apply_theme(message.theme)
-        await self._restyle_diff_widgets()
+        await self._apply_theme(message.theme)
 
     async def on_theme_picker_app_theme_selected(
         self, message: ThemePickerApp.ThemeSelected
@@ -1485,15 +1446,13 @@ class VibeApp(App):  # noqa: PLR0904
             await self.app_server.resources.config.update({"theme": message.theme})
             await self.app_server.resources.config.reload(reload_runtime=False)
         finally:
-            self._apply_theme(self.config.theme)
-            await self._restyle_diff_widgets()
+            await self._apply_theme(self.config.theme)
         await self._switch_to_input_app()
 
     async def on_theme_picker_app_cancelled(
         self, message: ThemePickerApp.Cancelled
     ) -> None:
-        self._apply_theme(message.original_theme)
-        await self._restyle_diff_widgets()
+        await self._apply_theme(message.original_theme)
         await self._switch_to_input_app()
 
     async def _restyle_diff_widgets(self) -> None:
@@ -2564,10 +2523,14 @@ class VibeApp(App):  # noqa: PLR0904
         await self._mount_and_scroll(UserCommandMessage(status_text))
 
     async def _show_config(self, **kwargs: Any) -> None:
-        """Switch to the configuration app in the bottom panel."""
-        if self._current_bottom_app == BottomApp.Config:
-            return
-        await self._switch_to_config_app()
+        """Open the full-screen, searchable settings browser."""
+        from vibe.cli.textual_ui.screens.config import ConfigScreen
+
+        def _on_close(dirty: bool | None) -> None:
+            if dirty:
+                self.run_worker(self._reload_config())
+
+        self.push_screen(ConfigScreen(self.app_server.resources.config), _on_close)
 
     async def _show_model(self, **kwargs: Any) -> None:
         """Switch to the model picker in the bottom panel."""
@@ -3030,13 +2993,6 @@ class VibeApp(App):  # noqa: PLR0904
             )
         )
 
-    async def _switch_to_config_app(self) -> None:
-        if self._current_bottom_app == BottomApp.Config:
-            return
-
-        await self._mount_and_scroll(UserCommandMessage("Configuration opened..."))
-        await self._switch_from_input(ConfigApp(self.config))
-
     async def _switch_to_voice_app(self) -> None:
         if self._current_bottom_app == BottomApp.Voice:
             return
@@ -3075,8 +3031,9 @@ class VibeApp(App):  # noqa: PLR0904
             )
         )
 
-    def _apply_theme(self, theme: str) -> None:
+    async def _apply_theme(self, theme: str) -> None:
         self.theme = resolve_theme(resolve_theme_name(theme))
+        await self._restyle_diff_widgets()
 
     async def _switch_to_proxy_setup_app(self) -> None:
         if self._current_bottom_app == BottomApp.ProxySetup:
@@ -3126,7 +3083,6 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _focus_current_bottom_app(self) -> None:
         focus_widget_by_app: dict[BottomApp, type[Widget]] = {
-            BottomApp.Config: ConfigApp,
             BottomApp.ModelPicker: ModelPickerApp,
             BottomApp.ThemePicker: ThemePickerApp,
             BottomApp.ThinkingPicker: ThinkingPickerApp,
@@ -3149,14 +3105,6 @@ class VibeApp(App):  # noqa: PLR0904
             self.query_one(focus_widget_by_app[self._current_bottom_app]).focus()
         except Exception:
             pass
-
-    def _handle_config_app_escape(self) -> None:
-        try:
-            config_app = self.query_one(ConfigApp)
-            config_app.action_close()
-        except Exception:
-            pass
-        self._last_escape_time = None
 
     def _handle_voice_app_escape(self) -> None:
         try:
@@ -3469,7 +3417,6 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _try_interrupt_bottom_app_escape(self) -> bool:
         handlers = {
-            BottomApp.Config: self._handle_config_app_escape,
             BottomApp.Voice: self._handle_voice_app_escape,
             BottomApp.MCP: lambda: self._handle_bottom_app_close_escape(
                 _get_mcp_app_class()
@@ -3563,6 +3510,17 @@ class VibeApp(App):  # noqa: PLR0904
             self.call_after_refresh(self._chat_widget.anchor)
         self._focus_current_bottom_app()
         return interrupted
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Disable the priority escape->interrupt binding on config modals so escape falls through to their own escape->close."""
+        screen_id = self.screen.id
+        if (
+            action == "interrupt"
+            and screen_id is not None
+            and screen_id.startswith("config-")
+        ):
+            return False
+        return True
 
     def action_interrupt(self) -> None:
         self._try_interrupt()

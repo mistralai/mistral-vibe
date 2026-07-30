@@ -25,7 +25,7 @@ _PAID_CHAT_PLANS = {"INDIVIDUAL", "EDU", "TEAM"}
 
 
 class WhoAmIResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="ignore", strict=True)
 
     plan_type: AccountPlanKind
     plan_name: str

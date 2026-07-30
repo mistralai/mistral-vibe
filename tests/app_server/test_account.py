@@ -351,17 +351,18 @@ async def test_http_account_gateway_maps_server_error_to_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_http_account_gateway_rejects_extra_response_fields(respx_mock) -> None:
+async def test_http_account_gateway_ignores_extra_response_fields(respx_mock) -> None:
     respx_mock.get("https://console.test/api/vibe/whoami").mock(
         return_value=httpx.Response(
             200, json={"plan_type": "CHAT", "plan_name": "FREE", "legacy": True}
         )
     )
 
-    with pytest.raises(AccountGatewayUnavailable):
-        await HttpAccountGateway().read(
-            base_url="https://console.test", api_key="server-secret"
-        )
+    result = await HttpAccountGateway().read(
+        base_url="https://console.test", api_key="server-secret"
+    )
+
+    assert result == WhoAmIResult(plan_type=AccountPlanKind.CHAT, plan_name="FREE")
 
 
 @pytest.mark.asyncio

@@ -83,7 +83,8 @@ SERVER_METHODS: tuple[str, ...] = (
     "agents/list",
     "agents/uninstall",
     "callback/respond",
-    "config/batchWrite",
+    "config/fields/read",
+    "config/patch",
     "config/proxy/read",
     "config/proxy/write",
     "config/read",
@@ -109,6 +110,13 @@ SERVER_METHODS: tuple[str, ...] = (
     "mcp/refresh",
     "mcp/toggle",
     "narration/summarize",
+    "projectLinks/create",
+    "projectLinks/link",
+    "projectLinks/list",
+    "projectLinks/picker/load",
+    "projectLinks/picker/loadMore",
+    "projectLinks/resolveRoot",
+    "projectLinks/unlink",
     "review/approve",
     "review/baseline",
     "review/hunks",
@@ -329,6 +337,7 @@ class SessionRewindParams(ProtocolModel):
     session_id: str
     entry_id: str
     restore_files: bool = False
+    inplace: bool = False
 
 
 class SessionRewindResponse(ProtocolModel):
@@ -401,17 +410,6 @@ class ConfigSchemaReadParams(ProtocolModel):
 class ConfigSchemaReadResponse(ProtocolModel):
     config_schema_version: str
     config_schema: dict[str, JsonValue] = Field(alias="schema")
-
-
-class ConfigEdit(ProtocolModel):
-    path: str
-    value: JsonValue
-
-
-class ConfigWriteParams(ProtocolModel):
-    session_id: str
-    edits: list[ConfigEdit]
-    reload_runtime: bool = False
 
 
 class ConfigReloadParams(ProtocolModel):
@@ -510,6 +508,64 @@ class ServerErrorParams(ProtocolModel):
 
 class ConfigMutationResponse(RuntimeMutationResponse):
     stripped_history_images: int = 0
+
+
+class ConfigFieldKind(StrEnum):
+    BOOL = auto()
+    ENUM = auto()
+    INT = auto()
+    FLOAT = auto()
+    STR = auto()
+    LIST = auto()
+    COMPLEX = auto()
+
+
+class ConfigLayerValueWire(ProtocolModel):
+    layer: str
+    value: JsonValue = None
+
+
+class ConfigFieldWire(ProtocolModel):
+    name: str
+    kind: ConfigFieldKind
+    description: str
+    value: JsonValue = None
+    path: str
+    popular: bool = False
+    enum_choices: list[str] = Field(default_factory=list)
+    layer_values: list[ConfigLayerValueWire] = Field(default_factory=list)
+
+    @property
+    def origin(self) -> str:
+        return self.layer_values[0].layer if self.layer_values else "default"
+
+
+class ConfigFieldsReadParams(ProtocolModel):
+    session_id: str
+
+
+class ConfigFieldsReadResponse(ProtocolModel):
+    fields: list[ConfigFieldWire]
+    targets: list[str]
+
+
+class ConfigPatchOpWire(ProtocolModel):
+    op: Literal["set", "remove"]
+    path: str
+    value: JsonValue = None
+    target_layer: str | None = None
+
+
+class ConfigPatchParams(ProtocolModel):
+    session_id: str
+    ops: list[ConfigPatchOpWire]
+    reason: str = "config screen edit"
+    reload_runtime: bool = False
+
+
+class ConfigPatchResponse(ConfigMutationResponse):
+    rejected: bool = False
+    failures: list[str] = Field(default_factory=list)
 
 
 class AgentInstallParams(ProtocolModel):
@@ -796,6 +852,109 @@ class WorkspaceTrustDecisionParams(ProtocolModel):
     decision: WorkspaceTrustDecision
     cwd: str | None = None
     session_id: str | None = None
+
+
+class ProjectLinksListParams(ProtocolModel):
+    pass
+
+
+class ProjectLinksLinkedProject(ProtocolModel):
+    project_id: str
+    repo_local_paths: list[str]
+
+
+class ProjectLinksListResponse(ProtocolModel):
+    projects: list[ProjectLinksLinkedProject]
+
+
+type ProjectLinksResolveRootRejectReason = Literal[
+    "not_git", "unsupported_remote", "nested_unresolvable", "no_commits"
+]
+
+
+class ProjectLinksResolvedRoot(ProtocolModel):
+    repo_local_path: str
+    repo_name: str
+    current_branch: str | None
+    default_branch: str | None
+
+
+class ProjectLinksResolveRootParams(ProtocolModel):
+    root_path: str = Field(min_length=1)
+
+
+class ProjectLinksResolveRootResponse(ProtocolModel):
+    eligible: bool
+    reject_reason: ProjectLinksResolveRootRejectReason | None = None
+    root: ProjectLinksResolvedRoot | None = None
+
+
+class ProjectLinksPickerCandidate(ProtocolModel):
+    project_id: str
+    name: str
+    match_kind: Literal["exact_repo", "multi_repo"]
+    recommended: bool
+
+
+class ProjectLinksPickerCandidates(ProtocolModel):
+    items: list[ProjectLinksPickerCandidate]
+    next_cursor: str | None
+
+
+class ProjectLinksPickerLoadParams(ProtocolModel):
+    root_path: str = Field(min_length=1)
+
+
+class ProjectLinksSavedLink(ProtocolModel):
+    project_id: str
+    project_name: str
+
+
+class ProjectLinksPickerLoadResponse(ProtocolModel):
+    root: ProjectLinksResolvedRoot
+    saved_link: ProjectLinksSavedLink | None = None
+    stale_link_cleared: bool
+    candidates: ProjectLinksPickerCandidates
+
+
+class ProjectLinksPickerLoadMoreParams(ProtocolModel):
+    root_path: str = Field(min_length=1)
+    cursor: str = Field(min_length=1)
+
+
+class ProjectLinksPickerLoadMoreResponse(ProtocolModel):
+    candidates: ProjectLinksPickerCandidates
+    focus_project_id: str | None
+
+
+class ProjectLinksCreateParams(ProtocolModel):
+    root_path: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    default_branch: str = Field(min_length=1)
+
+
+class ProjectLinksLinkParams(ProtocolModel):
+    root_path: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    project_name: str = Field(min_length=1)
+
+
+class ProjectLink(ProtocolModel):
+    project_id: str
+    project_name: str
+    repo_local_path: str
+
+
+class ProjectLinkMutationResponse(ProtocolModel):
+    link: ProjectLink
+
+
+class ProjectLinksUnlinkParams(ProtocolModel):
+    root_path: str = Field(min_length=1)
+
+
+class ProjectLinksUnlinkResponse(ProtocolModel):
+    unlinked: Literal[True]
 
 
 class LoopsListParams(ProtocolModel):

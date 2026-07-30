@@ -82,6 +82,24 @@ async def test_config_mutation_refreshes_all_derived_client_resources() -> None:
 
 
 @pytest.mark.asyncio
+async def test_config_change_notifies_subscribers_until_unsubscribed() -> None:
+    agent_loop = build_test_agent_loop()
+    session = await create_test_app_server_session(agent_loop)
+    themes: list[str] = []
+    unsubscribe = session.resources.config.subscribe(
+        lambda config: themes.append(config.theme)
+    )
+    try:
+        await session.resources.config.update({"theme": "monokai"})
+        unsubscribe()
+        await session.resources.config.update({"theme": "gruvbox"})
+    finally:
+        await session.close()
+
+    assert themes == ["monokai"]
+
+
+@pytest.mark.asyncio
 async def test_workspace_trust_is_server_owned(
     tmp_working_directory: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

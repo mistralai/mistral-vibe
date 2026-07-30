@@ -620,6 +620,8 @@ class AppServer:
             raise method_not_found(method)
         if method in {"config/schema", "workspace/trust/status"}:
             return await self._host_handler.dispatch(method, raw_params)
+        if method.startswith("projectLinks/"):
+            return await self._host_handler.dispatch(method, raw_params)
         if method == "session/delete":
             return await self._delete_session(raw_params)
         if method == "workspace/trust/decision":

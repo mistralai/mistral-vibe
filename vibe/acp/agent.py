@@ -1054,7 +1054,9 @@ class VibeAcpAgent(AcpAgent):
             return {"paths": paths}
         try:
             response = await session.app_server.resources.sessions.rewind(
-                entry_id, restore_files=bool(params.get("restoreFiles", True))
+                entry_id,
+                restore_files=bool(params.get("restoreFiles", True)),
+                inplace=True,
             )
         except AppServerResponseError as exc:
             raise InvalidRequestError(exc.error.message) from exc

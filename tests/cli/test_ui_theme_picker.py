@@ -102,7 +102,7 @@ async def test_theme_picker_restores_canonical_theme_when_write_fails() -> None:
     app = build_test_vibe_app(config=config)
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        app._apply_theme("dracula")
+        await app._apply_theme("dracula")
 
         with (
             patch.object(
@@ -118,6 +118,21 @@ async def test_theme_picker_restores_canonical_theme_when_write_fails() -> None:
 
         assert app.config.theme == "ansi-dark"
         assert app.theme == "ansi-dark"
+
+
+@pytest.mark.asyncio
+async def test_config_theme_change_applies_via_pubsub() -> None:
+    config = build_test_vibe_config(theme="ansi-dark")
+    app = build_test_vibe_app(config=config)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        assert app.theme == "ansi-dark"
+
+        await app.app_server.resources.config.update({"theme": "dracula"})
+        await pilot.pause(0.2)
+
+        assert app.config.theme == "dracula"
+        assert app.theme == "dracula"
 
 
 @pytest.mark.asyncio

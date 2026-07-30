@@ -40,6 +40,8 @@ def build_test_app_config(
                 supports_images=False,
             )
         ],
+        transcribe_models=["test-transcribe"],
+        tts_models=["test-tts"],
         transcription=TranscriptionConfigView(
             model=TranscribeModelConfigView(
                 name="test-transcribe",

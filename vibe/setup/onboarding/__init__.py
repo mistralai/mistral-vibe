@@ -11,16 +11,27 @@ from textual.app import App
 from vibe.cli.clipboard import try_copy_text_to_clipboard
 from vibe.cli.theme import resolve_auto_theme, resolve_theme, resolve_theme_name
 from vibe.core.config import VibeConfigSchema
+from vibe.core.config._defaults import (
+    DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
+    DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
+)
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.telemetry.types import LaunchContext
 from vibe.setup.auth import BrowserSignInService, HttpBrowserSignInGateway
-from vibe.setup.onboarding.context import OnboardingContext
+from vibe.setup.auth.api_key_persistence import (
+    persist_api_key,
+    persist_provider_to_config,
+    resolve_api_key_provider,
+)
+from vibe.setup.onboarding.context import OnboardingContext, resolve_browser_auth_urls
 from vibe.setup.onboarding.screens import (
     ApiKeyScreen,
     AuthMethodScreen,
     BrowserSignInScreen,
+    CustomDomainScreen,
+    SignInTargetScreen,
     ThemeSelectionScreen,
     WelcomeScreen,
 )
@@ -86,6 +97,8 @@ class OnboardingApp(App[str | None]):
         )
         if self._browser_sign_in_service_factory is not None:
             self.install_screen(AuthMethodScreen(self._provider), "auth_method")
+            self.install_screen(SignInTargetScreen(), "sign_in_target")
+            self.install_screen(CustomDomainScreen(), "custom_domain")
             self.install_screen(
                 BrowserSignInScreen(
                     self._provider,
@@ -109,20 +122,54 @@ class OnboardingApp(App[str | None]):
             return self._initial_theme
         return self._theme_selection_screen.selected_theme
 
+    @property
+    def configured_custom_domain(self) -> str | None:
+        base_url = self._config.provider.browser_auth_base_url
+        if not base_url or base_url == DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL:
+            return None
+        return base_url
+
+    def apply_custom_domain(self, domain: str) -> None:
+        browser_base_url, browser_api_base_url = resolve_browser_auth_urls(domain)
+        self._provider = self._provider.model_copy(
+            update={
+                "browser_auth_base_url": browser_base_url,
+                "browser_auth_api_base_url": browser_api_base_url,
+            }
+        )
+
+    def apply_mistral_default_domain(self) -> None:
+        self._provider = self._provider.model_copy(
+            update={
+                "browser_auth_base_url": DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
+                "browser_auth_api_base_url": DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
+            }
+        )
+
+    def persist_credentials(self, api_key: str) -> str:
+        resolved = resolve_api_key_provider(self._provider)
+        result = persist_api_key(resolved, api_key, launch_context=self._launch_context)
+        if result == "completed" and self._provider != self._config.provider:
+            if not persist_provider_to_config(self._provider):
+                return "provider_config_error:failed to persist provider config"
+        return result
+
     def _build_browser_sign_in_service_factory(
         self,
     ) -> Callable[[], BrowserSignInService]:
-        browser_base_url = self._provider.browser_auth_base_url
-        api_base_url = self._provider.browser_auth_api_base_url
-        if not browser_base_url or not api_base_url:
-            msg = "Browser sign-in requires both browser auth URLs."
-            raise AssertionError(msg)
-
-        return lambda: BrowserSignInService(
-            HttpBrowserSignInGateway(
-                browser_base_url=browser_base_url, api_base_url=api_base_url
+        def factory() -> BrowserSignInService:
+            browser_base_url = self._provider.browser_auth_base_url
+            api_base_url = self._provider.browser_auth_api_base_url
+            if not browser_base_url or not api_base_url:
+                msg = "Browser sign-in requires both browser auth URLs."
+                raise AssertionError(msg)
+            return BrowserSignInService(
+                HttpBrowserSignInGateway(
+                    browser_base_url=browser_base_url, api_base_url=api_base_url
+                )
             )
-        )
+
+        return factory
 
     def _resolve_browser_sign_in_factory(
         self, browser_sign_in_service_factory: Callable[[], BrowserSignInService] | None
@@ -163,6 +210,16 @@ def run_onboarding(
                 f"\n[yellow]Warning: Could not save API key to .env file: {err}[/]"
                 "\n[dim]The API key is set for this session only. "
                 f"You may need to set it manually in {GLOBAL_ENV_FILE.path}[/]\n"
+            )
+        case str() as s if s.startswith("provider_config_error:"):
+            err = s.removeprefix("provider_config_error:")
+            rprint(
+                f"\n[yellow]Warning: Could not save provider config: {err}[/]"
+                "\n[dim]The API key was saved, but the custom domain provider "
+                "configuration was not persisted to config.toml. "
+                "You may need to update your provider's "
+                "`browser_auth_base_url` / `browser_auth_api_base_url` "
+                "settings manually.[/]\n"
             )
         case "completed":
             rprint(

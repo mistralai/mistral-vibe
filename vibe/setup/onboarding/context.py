@@ -4,8 +4,9 @@ from dataclasses import dataclass
 import os
 import tomllib
 from typing import Any
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, HttpUrl, TypeAdapter, ValidationError
 
 from vibe.core.config import (
     DEFAULT_ACTIVE_MODEL_CONFIG,
@@ -22,6 +23,51 @@ from vibe.core.config.models import normalize_model_configs
 from vibe.observability.logging import logger
 
 _ONBOARDING_LIST_ADAPTER = TypeAdapter(list[Any])
+
+
+def _normalize_origin(value: str) -> str:
+    origin = value.strip()
+    if "://" not in origin:
+        origin = f"https://{origin}"
+    return origin.rstrip("/")
+
+
+_HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
+
+
+def is_valid_custom_domain(value: str) -> bool:
+    # http:// is accepted on purpose so users can target local auth gateways
+    # (e.g. http://localhost:8080); _normalize_origin only upgrades scheme-less
+    # inputs to https://, an explicit scheme is always respected.
+    origin = value.strip()
+    if "://" not in origin and ":/" in origin:
+        return False
+    try:
+        _HTTP_URL_ADAPTER.validate_python(_normalize_origin(origin))
+    except ValidationError:
+        return False
+    return True
+
+
+def resolve_browser_auth_urls(domain: str) -> tuple[str, str]:
+    base = _normalize_origin(domain)
+    api = f"{base}/api"
+    return base, api
+
+
+def is_likely_mistral_private_cloud_domain(domain: str) -> bool:
+    """Heuristic: a Mistral-hosted subdomain that is not the default auth host.
+
+    Private-cloud Studio redirects users to a custom `*.mistral.ai` URL, but
+    Vibe CLI browser sign-in for Mistral-hosted accounts uses `console.mistral.ai`.
+    Surfacing this lets the wizard warn users who paste their Studio URL.
+    """
+    host = urlparse(_normalize_origin(domain)).hostname or ""
+    return (
+        host != "console.mistral.ai"
+        and host.startswith("console.")
+        and host.endswith(".mistral.ai")
+    )
 
 
 def _default_provider_payloads() -> list[dict[str, Any]]:

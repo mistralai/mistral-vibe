@@ -57,6 +57,25 @@ if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
 
 
+def _cached_tokens(usage: object | None) -> int:
+    # Mistral reports cache hits under usage.prompt_tokens_details.cached_tokens.
+    # The SDK keeps this nested block as an untyped extra, so both its shape
+    # (dict vs object) and its value type are unvalidated; coerce defensively
+    # and fall back to 0 on anything odd.
+    if usage is None:
+        return 0
+    details = getattr(usage, "prompt_tokens_details", None)
+    value = (
+        details.get("cached_tokens")
+        if isinstance(details, dict)
+        else getattr(details, "cached_tokens", None)
+    )
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class ParsedContent(NamedTuple):
     content: Content
     reasoning_content: Content | None
@@ -349,6 +368,7 @@ class MistralBackend:
                 usage=LLMUsage(
                     prompt_tokens=response.usage.prompt_tokens or 0,
                     completion_tokens=response.usage.completion_tokens or 0,
+                    cached_tokens=_cached_tokens(response.usage),
                 ),
             )
 
@@ -439,6 +459,7 @@ class MistralBackend:
                         completion_tokens=chunk.data.usage.completion_tokens or 0
                         if chunk.data.usage
                         else 0,
+                        cached_tokens=_cached_tokens(chunk.data.usage),
                     ),
                     correlation_id=correlation_id,
                 )

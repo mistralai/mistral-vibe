@@ -103,11 +103,14 @@ class GrepMatch(BaseModel):
     line: int | None = None
 
     @classmethod
-    def from_output_line(cls, raw: str) -> GrepMatch | None:
+    def from_output_line(cls, raw: str, base: Path) -> GrepMatch | None:
         """Parse a single grep/rg output line in `file:line:content` format.
 
         Handles Windows drive-letter paths like ``C:\\repo\\file.py:10:match``
-        by skipping a single-letter first segment.
+        by skipping a single-letter first segment. Relative paths (rg/grep emit
+        them relative to the search cwd) are anchored on `base`, not the process
+        cwd, so the resolved path is correct regardless of where the agent was
+        launched from.
         """
         parts = raw.split(":", 3)
         MIN_MATCH_PARTS = 2
@@ -132,7 +135,7 @@ class GrepMatch(BaseModel):
             line_num = int(line_str) if line_str else None
         except (ValueError, TypeError):
             line_num = None
-        return cls(path=str(Path(file_path).resolve()), line=line_num)
+        return cls(path=str((base / file_path).resolve()), line=line_num)
 
 
 class GrepResult(BaseModel):
@@ -142,12 +145,22 @@ class GrepResult(BaseModel):
     was_truncated: bool = Field(
         description="True if output was cut short by max_matches or max_output_bytes."
     )
+    cwd: str = Field(
+        default_factory=lambda: str(Path.cwd()),
+        exclude=True,
+        description=(
+            "Search working directory that relative match paths resolve against. "
+            "Excluded from serialization: it feeds parsed_matches only, and the "
+            "absolute host path must not reach the model-facing result text."
+        ),
+    )
 
     @property
     def parsed_matches(self) -> list[GrepMatch]:
+        base = Path(self.cwd)
         results: list[GrepMatch] = []
         for line in self.matches.splitlines():
-            if match := GrepMatch.from_output_line(line):
+            if match := GrepMatch.from_output_line(line, base):
                 results.append(match)
         return results
 
@@ -355,6 +368,7 @@ class Grep(
             match_count=len(truncated_lines),
             pattern=pattern,
             was_truncated=was_truncated,
+            cwd=str(self.cwd),
         )
 
     @classmethod

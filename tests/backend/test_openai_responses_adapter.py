@@ -420,6 +420,27 @@ class TestParseNonStreamingResponse:
         assert chunk.message.role == Role.assistant
         assert chunk.usage.prompt_tokens == 10
         assert chunk.usage.completion_tokens == 5
+        assert chunk.usage.cached_tokens == 0
+
+    def test_cached_tokens_parsed_from_input_details(self, adapter, provider):
+        data = {
+            "id": "resp_cached",
+            "object": "response",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "Hi"}],
+                    "role": "assistant",
+                }
+            ],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 5,
+                "input_tokens_details": {"cached_tokens": 64},
+            },
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.usage.cached_tokens == 64
 
     def test_function_call_response(self, adapter, provider):
         data = {

@@ -208,6 +208,7 @@ Examples:
                     f"releases/download/v{new_version}",
                 ),
                 (f"-{current_version}.zip", f"-{new_version}.zip"),
+                (f"-{current_version}.tar.gz", f"-{new_version}.tar.gz"),
             ],
         )
         # Update vibe/core/__init__.py

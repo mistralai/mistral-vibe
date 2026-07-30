@@ -8,6 +8,7 @@ import select
 import subprocess
 import sys
 import threading
+import time
 import types
 from typing import Any
 
@@ -379,8 +380,18 @@ def test_detect_terminal_dark_posix_preserves_pending_input(
     )
     pending_input = b"pasted command\n"
     os.write(master_fd, pending_input)
-    assert select.select([master_fd], [], [], 1)[0]
-    assert os.read(master_fd, 64) == b"pasted command\r\n"
+    # The line discipline echoes the write back out the master asynchronously
+    # (with ONLCR turning \n into \r\n); drain it in a loop rather than a single
+    # read, which under load returns only the bytes flushed so far.
+    expected_echo = b"pasted command\r\n"
+    echo = b""
+    deadline = time.monotonic() + 1.0
+    while len(echo) < len(expected_echo):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([master_fd], [], [], remaining)[0]:
+            break
+        echo += os.read(master_fd, 64)
+    assert echo == expected_echo
 
     try:
         assert detect_terminal_dark() is None

@@ -17,6 +17,7 @@ class ResumeSessionInfo:
     cwd: str
     title: str | None
     end_time: str | None
+    parent_session_id: str | None = None
 
     @property
     def option_id(self) -> str:
@@ -30,6 +31,7 @@ def list_local_resume_sessions(
         ResumeSessionInfo(
             session_id=session["session_id"],
             cwd=session["cwd"],
+            parent_session_id=session["parent_session_id"],
             title=session.get("title"),
             end_time=session.get("end_time"),
         )

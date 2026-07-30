@@ -50,7 +50,9 @@ class AppServerResources:
         await self.runtime.refresh()
 
     async def consume_notification(self, notification: Notification) -> bool:
+        previous_config = self.config.current
         if await self.runtime.consume_notification(notification):
+            self.config.publish_change(previous_config)
             return True
         if await self.mcp.consume_notification(notification):
             return True

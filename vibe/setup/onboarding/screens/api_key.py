@@ -15,10 +15,7 @@ from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import DEFAULT_VIBE_BASE_URL, ProviderConfig
 from vibe.core.telemetry.types import LaunchContext
-from vibe.setup.auth.api_key_persistence import (
-    persist_api_key,
-    resolve_api_key_provider,
-)
+from vibe.setup.auth.api_key_persistence import resolve_api_key_provider
 from vibe.setup.onboarding.base import OnboardingScreen
 
 MISTRAL_PROVIDER_NAME = "mistral"
@@ -126,9 +123,7 @@ class ApiKeyScreen(OnboardingScreen):
             self._save_and_finish(event.value)
 
     def _save_and_finish(self, api_key: str) -> None:
-        self.app.exit(
-            persist_api_key(self.provider, api_key, launch_context=self._launch_context)
-        )
+        self.app.exit(self.onboarding_app.persist_credentials(api_key))
 
     def on_mouse_up(self, event: MouseUp) -> None:
         copy_selection_to_clipboard(self.app)

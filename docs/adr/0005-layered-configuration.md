@@ -54,9 +54,10 @@ values. Clients must not infer writable paths from its shape.
 The current resource methods are defined by `vibe.app_server.protocol`:
 
 - `config/read` returns effective and base redacted views;
-- `config/batchWrite` validates and persists JSON-pointer edits;
 - `config/reload` re-reads configured sources and optionally rebuilds runtime
   state;
+- `config/patch` validates and persists JSON-pointer edits, applying `set` and
+  `remove` ops that each optionally target a named layer;
 - `config/thinking/write` updates the active model's thinking level;
 - `config/proxy/read` and `config/proxy/write` manage the supported global
   proxy and certificate `.env` entries; and
@@ -64,12 +65,12 @@ The current resource methods are defined by `vibe.app_server.protocol`:
 
 The proxy resource is deliberately separate from the TOML orchestrator.
 `config/schema` is configuration-form metadata; it is not a list of valid
-`config/batchWrite` paths and is not the public app-server protocol schema.
+`config/patch` paths and is not the public app-server protocol schema.
 
-For `config/batchWrite`, the server:
+For `config/patch`, the server:
 
 1. requires the session to be idle;
-2. converts all edits into one schema-aware patch;
+2. converts all ops into one schema-aware patch;
 3. validates the prospective merged config;
 4. writes the selected layer once;
 5. replaces the effective config with a newly validated snapshot;
@@ -77,13 +78,13 @@ For `config/batchWrite`, the server:
 7. returns a canonical `RuntimeSnapshot` and emits `runtime/updated`.
 
 One TOML-layer write uses a temporary file, `fsync`, and atomic replacement.
-The general orchestrator is not transactional across several target layers,
-but the current public batch has no target-layer field and routes its edits to
-one selected layer.
+The general orchestrator is not transactional across several target layers;
+each op may name a target layer, and ops without one route to the selected
+writable layer.
 
 The current public API does not expose an explicit user/project write scope,
 resource revision, complete provenance, or per-field runtime-impact metadata.
-It still accepts generic `{path, value}` edits and a client-supplied
+It accepts generic `{op, path, value, target_layer}` ops and a client-supplied
 `reloadRuntime` choice. Do not emulate missing config primitives with shadow
 state in `vibe.app_server`; add them to the configuration substrate before
 projecting them through the public resource.

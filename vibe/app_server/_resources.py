@@ -7,6 +7,11 @@ from typing import Any, cast
 from pydantic import JsonValue
 
 from vibe.app_server._account import AccountController, AccountGateway
+from vibe.app_server._config_introspect import (
+    POPULAR_SETTINGS,
+    build_field_wires,
+    collect_layer_values,
+)
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._execution import SessionExecution
 from vibe.app_server._model import ProtocolModel, validate_wire
@@ -31,7 +36,12 @@ from vibe.app_server.protocol import (
     AgentInstallParams,
     AgentsListParams,
     AgentsListResponse,
+    ConfigFieldsReadParams,
+    ConfigFieldsReadResponse,
     ConfigMutationResponse,
+    ConfigPatchOpWire,
+    ConfigPatchParams,
+    ConfigPatchResponse,
     ConfigProxyReadParams,
     ConfigProxyReadResponse,
     ConfigProxyWriteParams,
@@ -39,7 +49,6 @@ from vibe.app_server.protocol import (
     ConfigReadResponse,
     ConfigReloadParams,
     ConfigThinkingWriteParams,
-    ConfigWriteParams,
     ConnectorAuthReadParams,
     ConnectorAuthReadResponse,
     ConnectorRefreshParams,
@@ -87,9 +96,15 @@ from vibe.app_server.protocol import (
     ToolsListResponse,
 )
 from vibe.core.agent_loop import AgentLoop
+from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.mcp_servers import MCPServerAddError, persist_oauth_mcp_server
 from vibe.core.config.orchestrator import ConfigPatchValidationError
-from vibe.core.config.patch import AddOperationPatch, PatchOp, escape_json_pointer_token
+from vibe.core.config.patch import (
+    AddOperationPatch,
+    PatchOp,
+    RemoveOperationPatch,
+    escape_json_pointer_token,
+)
 from vibe.core.config.types import ConcurrencyConflictError
 from vibe.core.feedback import (
     record_feedback_asked,
@@ -238,11 +253,19 @@ class ResourceRequestHandler:
                     validate_wire(ConfigReadParams, raw_params)
                 )
                 runtime_updated = False
-            case "config/batchWrite":
-                response = await self._config_write(
-                    validate_wire(ConfigWriteParams, raw_params)
+            case "config/fields/read":
+                response = await self._config_fields_read(
+                    validate_wire(ConfigFieldsReadParams, raw_params)
                 )
-                runtime_updated = True
+                runtime_updated = False
+            case "config/patch":
+                patch_response = await self._config_patch(
+                    validate_wire(ConfigPatchParams, raw_params)
+                )
+                response = patch_response
+                runtime_updated = not patch_response.rejected and not (
+                    patch_response.failures
+                )
             case "config/reload":
                 response = await self._config_reload(
                     validate_wire(ConfigReloadParams, raw_params)
@@ -483,37 +506,45 @@ class ResourceRequestHandler:
         self._require_session(params.session_id)
         return self._config_response()
 
-    async def _config_write(self, params: ConfigWriteParams) -> ConfigMutationResponse:
+    async def _config_patch(self, params: ConfigPatchParams) -> ConfigPatchResponse:
         self._execution.require_idle()
         self._require_session(params.session_id)
+        operations: list[PatchOp] = []
+        for op in params.ops:
+            if op.op == "set":
+                operations.append(
+                    AddOperationPatch(
+                        path=op.path, value=op.value, target_layer_name=op.target_layer
+                    )
+                )
+            else:
+                operations.append(
+                    RemoveOperationPatch(
+                        path=op.path, target_layer_name=op.target_layer
+                    )
+                )
         try:
-            operations: list[PatchOp] = [
-                AddOperationPatch(path=edit.path, value=edit.value)
-                for edit in params.edits
-            ]
             failures = await self._agent_loop.config_orchestrator.apply_patch(
-                operations, reason="app-server config/batchWrite"
+                operations, reason=params.reason
             )
-        except (ConfigPatchValidationError, ValueError) as exc:
-            raise RequestFailure(
-                ProtocolErrorCode.INVALID_PARAMS, f"Invalid configuration edit: {exc}"
-            ) from exc
+        except (ConfigPatchValidationError, ValueError):
+            return ConfigPatchResponse(runtime=self.runtime_snapshot(), rejected=True)
         if failures:
-            failure = failures[0]
-            code = (
-                ProtocolErrorCode.CONFLICT
-                if isinstance(failure, ConcurrencyConflictError)
-                else ProtocolErrorCode.INTERNAL_ERROR
+            return ConfigPatchResponse(
+                runtime=self.runtime_snapshot(),
+                failures=[str(failure) for failure in failures],
             )
-            raise RequestFailure(
-                code, f"Failed to update configuration: {failure}"
-            ) from failure
         if params.reload_runtime:
             self._clear_mcp_discovery_errors()
             await self._agent_loop.reload_with_initial_messages(reload_hooks=True)
         else:
             self._agent_loop.agent_manager.invalidate_config()
-        return self._config_mutation_response()
+        return ConfigPatchResponse(
+            runtime=self.runtime_snapshot(),
+            stripped_history_images=(
+                self._agent_loop.count_history_images_unsupported_by_active_model()
+            ),
+        )
 
     async def _config_reload(
         self, params: ConfigReloadParams
@@ -533,11 +564,18 @@ class ResourceRequestHandler:
     ) -> ConfigMutationResponse:
         self._execution.require_idle()
         self._require_session(params.session_id)
-        active_model = self._agent_loop.config.get_active_model()
-        await self._persist_config_field(
-            f"/models/{escape_json_pointer_token(active_model.alias)}/thinking",
-            params.level,
+        model = self._agent_loop.config.get_active_model()
+        value = model.model_dump(mode="json")
+        value["thinking"] = params.level
+        failures = await self._agent_loop.config_orchestrator.set_field(
+            f"/models/{escape_json_pointer_token(model.alias)}", value
         )
+        if failures:
+            failure = failures[0]
+            raise RequestFailure(
+                ProtocolErrorCode.INTERNAL_ERROR,
+                f"Failed to update configuration: {failure}",
+            ) from failure
         self._agent_loop.agent_manager.invalidate_config()
         return self._config_mutation_response()
 
@@ -569,6 +607,32 @@ class ResourceRequestHandler:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
         return EmptyResponse()
 
+    async def _config_fields_read(
+        self, params: ConfigFieldsReadParams
+    ) -> ConfigFieldsReadResponse:
+        self._require_session(params.session_id)
+        orchestrator = self._agent_loop.config_orchestrator
+        config = orchestrator.config
+        layer_values = await collect_layer_values(orchestrator.layers)
+        # Per-tool config editing is not exposed in the settings screen yet.
+        fields = [
+            wire
+            for wire in build_field_wires(
+                config, layer_values, popular=POPULAR_SETTINGS
+            )
+            if wire.name != "tools"
+        ]
+        return ConfigFieldsReadResponse(fields=fields, targets=self._config_targets())
+
+    def _config_targets(self) -> list[str]:
+        orchestrator = self._agent_loop.config_orchestrator
+        names = {layer.name for layer in orchestrator.layers}
+        writable = orchestrator.writable_layer_name
+        targets = [writable]
+        if OverridesLayer.NAME in names and OverridesLayer.NAME not in targets:
+            targets.append(OverridesLayer.NAME)
+        return targets
+
     def _agents_list(self, params: AgentsListParams) -> AgentsListResponse:
         self._require_session(params.session_id)
         active, agents = project_agents(self._agent_loop)
@@ -577,17 +641,29 @@ class ResourceRequestHandler:
     async def _agent_install(
         self, params: AgentInstallParams, *, install: bool
     ) -> AgentsListResponse:
-        self._execution.require_idle()
-        self._require_session(params.session_id)
         installed = list(self._agent_loop.base_config.installed_agents)
         if install and params.agent_name not in installed:
             installed.append(params.agent_name)
         if not install:
             installed = [name for name in installed if name != params.agent_name]
-        await self._persist_config_field(
-            "/installed_agents", cast(JsonValue, installed)
+        response = await self._config_patch(
+            ConfigPatchParams(
+                session_id=params.session_id,
+                ops=[
+                    ConfigPatchOpWire(
+                        op="set",
+                        path="/installed_agents",
+                        value=cast(JsonValue, installed),
+                    )
+                ],
+                reason="app-server agents install",
+            )
         )
-        self._agent_loop.agent_manager.invalidate_config()
+        if response.rejected or response.failures:
+            raise RequestFailure(
+                ProtocolErrorCode.INTERNAL_ERROR,
+                "; ".join(response.failures) or "Configuration edit rejected",
+            )
         active, agents = project_agents(self._agent_loop)
         return AgentsListResponse(active=active, agents=agents)
 
@@ -766,16 +842,6 @@ class ResourceRequestHandler:
                 self._agent_loop.count_history_images_unsupported_by_active_model()
             ),
         )
-
-    async def _persist_config_field(self, path: str, value: JsonValue) -> None:
-        failures = await self._agent_loop.config_orchestrator.set_field(path, value)
-        if not failures:
-            return
-        failure = failures[0]
-        raise RequestFailure(
-            ProtocolErrorCode.INTERNAL_ERROR,
-            f"Failed to update configuration: {failure}",
-        ) from failure
 
     def _require_session(self, session_id: str) -> None:
         if session_id != self._agent_loop.session_id:

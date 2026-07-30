@@ -1,13 +1,8 @@
----
-name: skill-creator
-description: Load this skill before creating, updating, or deleting a Vibe skill, or whenever you plan to add or modify SKILL.md files under a skills directory. It explains Vibe's SKILL.md frontmatter, discovery order, support files, and the permission flow.
-metadata:
-  display-name: Skill Creator
-  short-description: Author and edit Vibe skills
-  default-prompt: Use $skill-creator to create or update a Vibe skill.
----
+from __future__ import annotations
 
-# Skill Creator
+from vibe.core.skills.models import SkillInfo, SkillSource
+
+_PROMPT = """# Skill Creator
 
 Use this when the user asks you to create, update, or delete a Vibe skill.
 
@@ -114,4 +109,17 @@ Writing under a skills directory goes through the normal `write_file` / `edit`
 permission prompts — there is no separate proposal step. After changes, tell the
 user they can run `/reload` to pick up the new or edited skill without
 restarting. Keep the final summary brief; do not paste full file contents unless
-the user asks.
+the user asks."""
+
+SKILL = SkillInfo(
+    name="skill-creator",
+    description=(
+        "Load this skill before creating, updating, or deleting a Vibe skill, "
+        "or whenever you plan to add or modify SKILL.md files under a skills directory. "
+        "It explains Vibe's SKILL.md frontmatter, discovery order, support files, "
+        "and the permission flow."
+    ),
+    user_invocable=True,
+    prompt=_PROMPT,
+    source=SkillSource.BUILTIN,
+)

@@ -6,12 +6,14 @@ from jsonpatch import apply_patch as json_apply_patch
 from jsonpointer import JsonPointer
 
 from vibe.core.config import RawConfig, VibeConfigSchema
+from vibe.core.config.event_bus import EventBus
+from vibe.core.config.layer import ConfigLayer
 from vibe.core.config.layers.default import DefaultConfigLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.layers.user import UserConfigLayer
-from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.orchestrator import ConfigOrchestrator, _changed_keys_between
 from vibe.core.config.patch import PatchOp, ensure_parent_paths
-from vibe.core.config.types import ConflictStrategy
+from vibe.core.config.types import ConfigChangeEvent, ConflictStrategy
 
 
 class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
@@ -26,13 +28,32 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
 
     def __init__(self, config: C) -> None:
         self._config = config
+        self._bus = EventBus()
 
     def copy(self) -> FakeConfigOrchestrator[C]:
         return FakeConfigOrchestrator(self._config.model_copy(deep=True))
 
+    def _publish(self, before: dict[str, Any], reason: str) -> None:
+        after = self._config.model_dump(mode="json")
+        if changed := _changed_keys_between(before, after):
+            self._bus.publish(
+                ConfigChangeEvent(
+                    changed_keys=changed, before=before, after=after, reason=reason
+                )
+            )
+
     @property
     def config(self) -> C:
         return self._config
+
+    @property
+    def layers(self) -> tuple[ConfigLayer[RawConfig], ...]:
+        # The verbatim fake has no layer stack; every value reads as a default.
+        return ()
+
+    @property
+    def writable_layer_name(self) -> str:
+        return UserConfigLayer().name
 
     async def load_persistence_layer(self) -> RawConfig:
         return await UserConfigLayer().load()
@@ -51,9 +72,11 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         if target_layer != OverridesLayer.NAME:
             orchestrator = await self._persistence_orchestrator()
             await orchestrator.set_field(path, value, reason)
+        before = self._config.model_dump(mode="json")
         data = self._config.model_dump()
         _set_pointer_in_place(data, path, value)
         self._config = type(self._config).model_validate(data)
+        self._publish(before, reason)
         return []
 
     async def apply_patch(
@@ -63,6 +86,7 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         *,
         on_conflict: ConflictStrategy = ConflictStrategy.CANCEL,
     ) -> list[BaseException]:
+        before = self._config.model_dump(mode="json")
         persistent_operations = [
             operation
             for operation in operations
@@ -80,6 +104,7 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
             data, [op.to_json_patch() for op in operations], in_place=False
         )
         self._config = type(self._config).model_validate(data)
+        self._publish(before, reason)
         return []
 
     async def reload(self) -> None:

@@ -257,6 +257,7 @@ class TestMapperParseResponse:
         chunk = mapper.parse_response(data)
         assert chunk.usage.prompt_tokens == 18
         assert chunk.usage.completion_tokens == 7
+        assert chunk.usage.cached_tokens == 3
 
 
 class TestAdapterPrepareRequest:
@@ -549,6 +550,23 @@ class TestAdapterParseResponse:
         data = {"type": "message_start", "message": {"usage": {"input_tokens": 100}}}
         chunk = adapter.parse_response(data, provider)
         assert chunk.usage.prompt_tokens == 100
+        assert chunk.usage.cached_tokens == 0
+
+    def test_streaming_message_start_reports_cache_tokens(self, adapter, provider):
+        data = {
+            "type": "message_start",
+            "message": {
+                "usage": {
+                    "input_tokens": 100,
+                    "cache_read_input_tokens": 60,
+                    "cache_creation_input_tokens": 25,
+                }
+            },
+        }
+        chunk = adapter.parse_response(data, provider)
+        # prompt_tokens folds in cache read + creation; cached_tokens is the read.
+        assert chunk.usage.prompt_tokens == 185
+        assert chunk.usage.cached_tokens == 60
 
     def test_streaming_unknown_returns_empty(self, adapter, provider):
         data = {"type": "ping"}

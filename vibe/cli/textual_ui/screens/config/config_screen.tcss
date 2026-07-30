@@ -1,0 +1,60 @@
+#config-screen {
+    align: center middle;
+}
+
+#config-screen-content {
+    width: 96%;
+    max-width: 92;
+    height: 96%;
+    background: $surface;
+    border: round $primary;
+    border-title-color: $primary;
+    border-title-style: bold;
+    padding: 1 2;
+}
+
+.config-screen-search {
+    height: auto;
+    margin: 1 0 2 0;
+    color: $primary;
+}
+
+#config-screen-options-wrap {
+    width: 100%;
+    height: 1fr;
+    align-horizontal: center;
+}
+
+#config-screen-options {
+    /* Row-block width 74 (cursor 2 + name 38 + gap 2 + value 32) plus a stable
+       2-col scrollbar gutter, so the section rules never wrap when scrolling. */
+    width: 76;
+    height: 100%;
+    border: none;
+    padding: 0;
+    scrollbar-gutter: stable;
+}
+
+#config-screen-options:focus {
+    border: none;
+}
+
+#config-screen-options > .option-list--option-highlighted {
+    background: $boost;
+    color: $foreground;
+}
+
+#config-screen-options:focus > .option-list--option-highlighted {
+    background: $boost;
+    color: $foreground;
+}
+
+.config-screen-help {
+    height: auto;
+    margin-top: 1;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
+}

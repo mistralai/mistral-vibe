@@ -739,7 +739,7 @@ class CoreRequestHandler:
                 restore_errors,
                 restored_paths,
             ) = await self._agent_loop.rewind_manager.rewind_to_message(
-                index, restore_files=params.restore_files
+                index, restore_files=params.restore_files, inplace=params.inplace
             )
             await self._turns.reset()
             handoff = self._root_session.replace_idle_with_history(

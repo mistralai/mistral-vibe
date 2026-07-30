@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.23.2] - 2026-07-30
+
+ ### Added
+
+- Skill-creator built-in skill: a guided flow to author, update, and delete your own skills
+- Browser sign-in can target a custom login domain for self-hosted or private-gateway deployments
+- Session stats now track provider cache-hit (cached) tokens
+
+### Changed
+
+- Redesigned `/config` as a searchable, full-screen settings browser with typed edit modals and per-layer origin display
+- App-server protocol extended and packaged as a standalone `vibe-app-server` binary for desktop integration
+
+### Fixed
+
+- Cached-token counts now reported in session stats instead of always zero
+- Zed ACP packaging preserves symlinks by shipping `.tar.gz` archives
+- `grep` result chips open the correct file and no longer leak absolute host paths into context (ACP)
+- ACP `/rewind` truncates in place instead of forking
+- Extra fields in the whoami response no longer rejected
+- ACP session history sorted by recency
+- Blank permission prompt and duplicated user message in the ACP/VS Code webview
+- WhoAmI result again tolerates extra fields
+
+
 ## [2.23.1] - 2026-07-28
 
 ### Fixed

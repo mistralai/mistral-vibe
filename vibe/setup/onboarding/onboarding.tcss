@@ -161,11 +161,13 @@ ThemeSelectionScreen #enter-hint {
     text-style: bold;
 }
 
-#auth-method-title {
+#auth-method-title,
+#sign-in-target-title {
     color: $mistral_orange_title;
 }
 
-#auth-method-subtitle {
+#auth-method-subtitle,
+#sign-in-target-subtitle {
     width: 100%;
     margin-left: 2;
     margin-bottom: 2;
@@ -173,9 +175,18 @@ ThemeSelectionScreen #enter-hint {
     text-style: bold;
 }
 
-#auth-method-options {
+#auth-method-options,
+#sign-in-target-options {
     width: 100%;
     height: auto;
+}
+
+#sign-in-target-warning {
+    width: 100%;
+    height: auto;
+    margin-left: 2;
+    margin-top: 1;
+    color: $error;
 }
 
 .onboarding-option-row {
@@ -412,7 +423,8 @@ ThemeSelectionScreen #enter-hint {
 
 #feedback {
     width: 100%;
-    height: 1;
+    height: auto;
+    text-wrap: wrap;
     color: $text-muted;
     padding-left: 2;
 
@@ -427,6 +439,10 @@ ThemeSelectionScreen #enter-hint {
 
 #feedback.success {
     color: $text-muted;
+}
+
+#feedback.warning {
+    color: $warning;
 }
 
 #config-docs-label {
@@ -450,4 +466,59 @@ ThemeSelectionScreen #enter-hint {
         color: $primary;
         text-style: bold underline;
     }
+}
+
+/* =============================================================================
+   Custom Domain Screen
+   ============================================================================= */
+
+#custom-domain-outer {
+    width: 100%;
+    height: auto;
+}
+
+#custom-domain-panel {
+    width: 76;
+    max-width: 100%;
+}
+
+#custom-domain-title {
+    color: $mistral_orange_title;
+}
+
+#custom-domain-subtitle {
+    width: 100%;
+    margin-left: 2;
+    margin-bottom: 1;
+    color: $text;
+    text-style: bold;
+}
+
+#domain-box {
+    border-title-align: left;
+    border-title-color: $text;
+    border-title-style: bold;
+    margin-left: 2;
+    margin-bottom: 1;
+    width: 100%;
+    height: 3;
+}
+
+#domain-box.valid {
+    border: solid $success;
+}
+
+#domain-box.invalid {
+    border: solid $error;
+}
+
+#domain-box.warning {
+    border: solid $warning;
+}
+
+#domain {
+    border: none;
+    width: 100%;
+    height: 1;
+    padding: 0 1;
 }

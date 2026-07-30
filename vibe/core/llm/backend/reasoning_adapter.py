@@ -191,9 +191,11 @@ class ReasoningAdapter(APIAdapter):
             message = LLMMessage(role=Role.assistant, content="")
 
         usage_data = data.get("usage") or {}
+        prompt_details = usage_data.get("prompt_tokens_details") or {}
         usage = LLMUsage(
             prompt_tokens=usage_data.get("prompt_tokens", 0),
             completion_tokens=usage_data.get("completion_tokens", 0),
+            cached_tokens=prompt_details.get("cached_tokens", 0),
         )
 
         return LLMChunk(message=message, usage=usage)

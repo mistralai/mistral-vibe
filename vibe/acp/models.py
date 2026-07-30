@@ -16,8 +16,8 @@ class ConfigSchemaResponse(BaseModel):
 #
 # Request params for the projectLinks/* ACP ext methods. Every method is
 # stateless and takes the absolute `rootPath` held by desktop-main; the
-# response shaping (safe labels only) lives in the app-server
-# ProjectLinksController. Only safe labels are ever returned to the renderer.
+# app-server ProjectLinksController intentionally returns `repoLocalPath`;
+# renderers that need compact labels should derive them from the basename.
 
 
 class ProjectLinksListRequest(BaseModel):

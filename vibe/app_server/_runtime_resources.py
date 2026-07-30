@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from vibe.app_server._model import validate_wire
 from vibe.app_server.client_state import ClientSessionState
@@ -25,8 +25,13 @@ from vibe.app_server.protocol import (
     AgentsListParams,
     AgentsListResponse,
     AgentSwitchParams,
-    ConfigEdit,
+    AppServerResponseError,
+    ConfigFieldsReadParams,
+    ConfigFieldsReadResponse,
     ConfigMutationResponse,
+    ConfigPatchOpWire,
+    ConfigPatchParams,
+    ConfigPatchResponse,
     ConfigProxyReadParams,
     ConfigProxyReadResponse,
     ConfigProxyWriteParams,
@@ -36,14 +41,16 @@ from vibe.app_server.protocol import (
     ConfigSchemaReadParams,
     ConfigSchemaReadResponse,
     ConfigThinkingWriteParams,
-    ConfigWriteParams,
     DiagnosticsLogsReadParams,
     DiagnosticsLogsReadResponse,
     EmptyResponse,
     Notification,
+    ProtocolError,
+    ProtocolErrorCode,
     RuntimeMutationResponse,
     RuntimeReadParams,
     RuntimeReadResponse,
+    RuntimeSnapshot,
     RuntimeUpdatedParams,
     SessionReadyWaitParams,
     SessionReadyWaitResponse,
@@ -56,6 +63,7 @@ class ConfigResource:
     ) -> None:
         self._connection = connection
         self._state = state
+        self._subscribers: list[Callable[[ConfigView], None]] = []
 
     @property
     def current(self) -> ConfigView:
@@ -65,6 +73,26 @@ class ConfigResource:
     def base(self) -> ConfigView:
         return self._state.base_config
 
+    def subscribe(self, callback: Callable[[ConfigView], None]) -> Callable[[], None]:
+        self._subscribers.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return unsubscribe
+
+    def publish_change(self, previous: ConfigView) -> None:
+        if previous == self.current:
+            return
+        for callback in list(self._subscribers):
+            callback(self.current)
+
+    def _apply_runtime(self, snapshot: RuntimeSnapshot) -> None:
+        previous = self.current
+        self._state.apply_runtime(snapshot)
+        self.publish_change(previous)
+
     async def read(self) -> None:
         client = await self._connection.connect()
         response = validate_wire(
@@ -73,7 +101,9 @@ class ConfigResource:
                 "config/read", ConfigReadParams(session_id=self._state.session_id)
             ),
         )
+        previous = self.current
         self._state.apply_config(response)
+        self.publish_change(previous)
 
     async def read_schema(self) -> ConfigSchemaReadResponse:
         client = await self._connection.connect()
@@ -82,25 +112,72 @@ class ConfigResource:
             await client.request("config/schema", ConfigSchemaReadParams()),
         )
 
+    async def read_fields(self) -> ConfigFieldsReadResponse:
+        client = await self._connection.connect()
+        return validate_wire(
+            ConfigFieldsReadResponse,
+            await client.request(
+                "config/fields/read",
+                ConfigFieldsReadParams(session_id=self._state.session_id),
+            ),
+        )
+
+    async def patch(
+        self, ops: list[ConfigPatchOpWire], *, reason: str
+    ) -> ConfigPatchResponse:
+        client = await self._connection.connect()
+        response = validate_wire(
+            ConfigPatchResponse,
+            await client.request(
+                "config/patch",
+                ConfigPatchParams(
+                    session_id=self._state.session_id, ops=ops, reason=reason
+                ),
+            ),
+        )
+        if not response.rejected and not response.failures:
+            self._apply_runtime(response.runtime)
+        return response
+
     async def update(
         self, changes: Mapping[str, object], *, reload_runtime: bool = False
     ) -> None:
+        ops = [
+            ConfigPatchOpWire.model_validate({
+                "op": "set",
+                "path": f"/{key}",
+                "value": value,
+            })
+            for key, value in changes.items()
+        ]
         client = await self._connection.connect()
         response = validate_wire(
-            ConfigMutationResponse,
+            ConfigPatchResponse,
             await client.request(
-                "config/batchWrite",
-                ConfigWriteParams(
+                "config/patch",
+                ConfigPatchParams(
                     session_id=self._state.session_id,
-                    edits=[
-                        ConfigEdit.model_validate({"path": f"/{key}", "value": value})
-                        for key, value in changes.items()
-                    ],
+                    ops=ops,
+                    reason="app-server config update",
                     reload_runtime=reload_runtime,
                 ),
             ),
         )
-        self._state.apply_runtime(response.runtime)
+        if response.rejected:
+            raise AppServerResponseError(
+                ProtocolError(
+                    code=ProtocolErrorCode.INVALID_PARAMS,
+                    message="Invalid configuration edit",
+                )
+            )
+        if response.failures:
+            raise AppServerResponseError(
+                ProtocolError(
+                    code=ProtocolErrorCode.INTERNAL_ERROR,
+                    message="; ".join(response.failures),
+                )
+            )
+        self._apply_runtime(response.runtime)
 
     async def set_thinking(self, level: ThinkingLevel) -> None:
         client = await self._connection.connect()
@@ -113,7 +190,7 @@ class ConfigResource:
                 ),
             ),
         )
-        self._state.apply_runtime(response.runtime)
+        self._apply_runtime(response.runtime)
 
     async def reload(self, *, reload_runtime: bool = True) -> int:
         client = await self._connection.connect()
@@ -126,7 +203,7 @@ class ConfigResource:
                 ),
             ),
         )
-        self._state.apply_runtime(response.runtime)
+        self._apply_runtime(response.runtime)
         return response.stripped_history_images
 
     async def read_proxy(self) -> ProxySettingsView:

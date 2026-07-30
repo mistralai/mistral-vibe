@@ -1,9 +1,9 @@
-"""Session-less projectLinks (DSK-626) controller.
+"""Session-less projectLinks controller.
 
-Owns the local-repo <-> Vibe Code Web project link lifecycle so the ACP runtime
-(`vibe/acp/agent.py`) never imports `vibe.core` — it delegates here. Every
-method is stateless and keyed on the absolute `root_path` held by desktop-main;
-returned dicts carry SAFE LABELS ONLY (never absolute paths or repo URLs).
+Owns the local-repo <-> Vibe Code Web project link lifecycle for delivery
+surfaces. Every method is stateless and keyed on the absolute `root_path` held
+by the caller. Responses intentionally carry `repoLocalPath` because this is a
+local app-server boundary; renderers can derive compact labels from the basename.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 
 class ProjectLinksError(Exception):
-    """Base for projectLinks failures the ACP layer maps to ACP errors."""
+    """Base for projectLinks failures mapped by delivery surfaces."""
 
 
 class ProjectLinksAuthError(ProjectLinksError):
@@ -52,11 +52,6 @@ class ProjectLinksInvalidRequest(ProjectLinksError):
 
 class ProjectLinksInternalError(ProjectLinksError):
     """An unexpected failure already reported to Sentry."""
-
-
-def _repo_root_label(repo_root: Path) -> str:
-    # Safe label: the checkout/worktree directory name, never the absolute path.
-    return repo_root.name or "repo"
 
 
 def _resolve_root_reject_reason(
@@ -81,7 +76,7 @@ def _candidate_match_kind(
 
 def _root_dict(repo_root: Path, git_info: GitRepoInfo) -> dict[str, Any]:
     return {
-        "label": _repo_root_label(repo_root),
+        "repoLocalPath": str(repo_root),
         "repoName": git_info.repo,
         "currentBranch": git_info.branch,
         "defaultBranch": git_info.default_branch,
@@ -124,11 +119,8 @@ class ProjectLinksController:
     """Stateless projectLinks operations, resolved per absolute `root_path`."""
 
     async def list_links(self) -> dict[str, Any]:
-        # No Vibe Code API key configured: local-link metadata is hidden per the
-        # design invariant, so return no groups rather than exposing labels.
-        if not (await self._load_config()).vibe_code_api_key:
-            return {"projects": []}
-
+        # Local-link metadata is local state, so listing it does not depend on a
+        # configured Vibe Code API key.
         store = VibeProjectsStore()
         links = await asyncio.to_thread(store.list_remote_projects)
         groups: dict[str, list[VibeCodeProjectLink]] = {}
@@ -284,7 +276,7 @@ class ProjectLinksController:
         except ProjectLinksInvalidRequest:
             # Checkout moved/deleted: git resolution fails. Links are keyed on
             # the git-resolved root, which may be an ancestor of the path the
-            # user chose (resolveRoot returns only labels, so desktop-main can
+            # user chose (desktop-main can
             # pass a nested dir). Clear the stored link whose root contains the
             # chosen path so a stranded link can still be removed.
             return await asyncio.to_thread(self._unlink_stale_root, root_path)
@@ -330,7 +322,7 @@ class ProjectLinksController:
         )
 
     async def _git_info(self, repo_root: Path) -> GitRepoInfo:
-        # Imported lazily so importing the ACP agent doesn't pull in gitpython.
+        # Imported lazily so lightweight delivery-surface imports do not pull in gitpython.
         from vibe.core.teleport.git import GitRepository
 
         async with GitRepository(workdir=repo_root) as git:
@@ -351,12 +343,12 @@ class ProjectLinksController:
         self,
         service: VibeCodeProjectPickerService,
         git_info: GitRepoInfo,
-        acp_method: str,
+        boundary_method: str,
     ) -> VibeCodeProjectPickerInitialData:
         try:
             return await service.load_initial(git_info)
         except VibeCodeProjectApiError as exc:
-            raise self._api_error(exc, acp_method) from exc
+            raise self._api_error(exc, boundary_method) from exc
 
     def _build_group(
         self, project_id: str, project_links: list[VibeCodeProjectLink]
@@ -374,33 +366,35 @@ class ProjectLinksController:
             "link": {
                 "projectId": link.project_id,
                 "projectName": link.project_name,
-                "label": _repo_root_label(repo_root),
+                "repoLocalPath": str(repo_root),
             }
         }
 
     @staticmethod
-    def _api_error(exc: VibeCodeProjectApiError, acp_method: str) -> ProjectLinksError:
+    def _api_error(
+        exc: VibeCodeProjectApiError, boundary_method: str
+    ) -> ProjectLinksError:
         lowered = str(exc).casefold()
         # Authentication failures (missing key or an HTTP 401/403 from VCW) are
         # the user's to fix, not internal errors — surface them as auth errors so
         # Desktop shows an auth message and we don't page on them via Sentry.
         if "api key" in lowered or "status 401" in lowered or "status 403" in lowered:
             return ProjectLinksAuthError(
-                f"Vibe Code authentication failed ({acp_method})"
+                f"Vibe Code authentication failed ({boundary_method})"
             )
         # Non-auth VCW errors are built from raw response text; forwarding the raw
-        # exception to Sentry (or its message to the ACP layer) would leak
+        # exception to Sentry (or its message to clients) would leak
         # unredacted remote payloads into telemetry. Capture a sanitized error
         # carrying only the boundary/method/type, and return a generic message.
         sanitized = ProjectLinksInternalError(
-            f"Vibe Code API request failed ({acp_method})"
+            f"Vibe Code API request failed ({boundary_method})"
         )
         capture_sentry_exception(
             sanitized,
             fatal=False,
             tags={
-                "vibe_boundary": "acp_request_handler",
-                "acp_method": acp_method,
+                "vibe_boundary": "project_links",
+                "project_links_method": boundary_method,
                 "error_type": type(exc).__name__,
             },
         )

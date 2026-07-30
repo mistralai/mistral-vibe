@@ -348,7 +348,7 @@ class SessionResource:
         return response.paths
 
     async def rewind(
-        self, entry_id: str, *, restore_files: bool
+        self, entry_id: str, *, restore_files: bool, inplace: bool = False
     ) -> SessionRewindResponse:
         client = await self._connection.connect()
         response = validate_wire(
@@ -359,6 +359,7 @@ class SessionResource:
                     session_id=self._state.session_id,
                     entry_id=entry_id,
                     restore_files=restore_files,
+                    inplace=inplace,
                 ),
             ),
         )

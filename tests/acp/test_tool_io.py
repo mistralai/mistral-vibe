@@ -118,5 +118,6 @@ async def test_acp_client_tool_handler_adapts_host_capabilities() -> None:
     update = client.updates[0]
     assert update.tool_call_id == "call-1"
     assert update.status == "in_progress"
+    assert update.kind == "execute"
     assert update.content is not None
     assert update.content[0].type == "terminal"

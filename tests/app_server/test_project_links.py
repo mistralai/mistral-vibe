@@ -6,6 +6,8 @@ from typing import Any
 
 import pytest
 
+from vibe.app_server._dispatch import RequestFailure
+from vibe.app_server._host import HostRequestHandler
 import vibe.app_server._project_links as project_links
 from vibe.app_server._project_links import (
     ProjectLinksAuthError,
@@ -13,6 +15,8 @@ from vibe.app_server._project_links import (
     ProjectLinksInternalError,
     ProjectLinksInvalidRequest,
 )
+from vibe.app_server.protocol import SERVER_METHODS, ProtocolErrorCode
+from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.teleport.errors import (
     ServiceTeleportError,
     ServiceTeleportNotSupportedError,
@@ -146,23 +150,28 @@ def _wire_service(
 
 class TestList:
     @pytest.mark.asyncio
-    async def test_hides_metadata_without_api_key(
+    async def test_lists_metadata_without_api_key(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def _config() -> SimpleNamespace:
-            return SimpleNamespace(vibe_code_api_key="")
-
-        monkeypatch.setattr(controller, "_load_config", _config)
-        assert await controller.list_links() == {"projects": []}
+        link = VibeCodeProjectLink(
+            repo_root=REPO_ROOT,
+            repo_url=REPO_URL,
+            project_id="proj-1",
+            project_name="Widgets",
+        )
+        monkeypatch.setattr(
+            project_links,
+            "VibeProjectsStore",
+            lambda: SimpleNamespace(list_remote_projects=lambda: [link]),
+        )
+        assert await controller.list_links() == {
+            "projects": [{"projectId": "proj-1", "repoLocalPaths": [str(REPO_ROOT)]}]
+        }
 
     @pytest.mark.asyncio
     async def test_groups_stored_links_by_project(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def _config() -> SimpleNamespace:
-            return SimpleNamespace(vibe_code_api_key="k")
-
-        monkeypatch.setattr(controller, "_load_config", _config)
         link = VibeCodeProjectLink(
             repo_root=REPO_ROOT,
             repo_url=REPO_URL,
@@ -186,10 +195,6 @@ class TestList:
     ) -> None:
         # Multiple links on one project surface all their local checkout paths;
         # the loopback folds each onto the project's repositories.
-        async def _config() -> SimpleNamespace:
-            return SimpleNamespace(vibe_code_api_key="k")
-
-        monkeypatch.setattr(controller, "_load_config", _config)
         link_a = VibeCodeProjectLink(
             repo_root=Path("/a/widgets"),
             repo_url=REPO_URL,
@@ -226,7 +231,7 @@ class TestResolveRoot:
         result = await controller.resolve_root(str(REPO_ROOT))
         assert result["eligible"] is True
         assert result["root"]["repoName"] == "widgets"
-        assert "/tmp/" not in result["root"]["label"]
+        assert result["root"]["repoLocalPath"] == str(REPO_ROOT)
 
     @pytest.mark.parametrize(
         ("message", "reason"),
@@ -440,7 +445,7 @@ class TestMutations:
         assert result["link"] == {
             "projectId": "proj-1",
             "projectName": "Widgets",
-            "label": "widgets",
+            "repoLocalPath": str(REPO_ROOT),
         }
 
     @pytest.mark.asyncio
@@ -532,3 +537,129 @@ class TestMutations:
         result = await controller.unlink(str((tmp_path / "gone").resolve()))
         assert result == {"unlinked": True}
         assert deleted == []
+
+
+class _FakeProjectLinksController:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def list_links(self) -> dict[str, Any]:
+        self.calls.append(("list_links", ()))
+        return {"projects": [{"projectId": "p1", "repoLocalPaths": ["/repo"]}]}
+
+    async def resolve_root(self, root_path: str) -> dict[str, Any]:
+        self.calls.append(("resolve_root", (root_path,)))
+        if self.error is not None:
+            raise self.error
+        return {
+            "eligible": True,
+            "rejectReason": None,
+            "root": {
+                "repoLocalPath": "/repo",
+                "repoName": "widgets",
+                "currentBranch": "main",
+                "defaultBranch": "main",
+            },
+        }
+
+    async def picker_load(self, root_path: str) -> dict[str, Any]:
+        self.calls.append(("picker_load", (root_path,)))
+        return {
+            "root": {
+                "repoLocalPath": "/repo",
+                "repoName": "widgets",
+                "currentBranch": "main",
+                "defaultBranch": "main",
+            },
+            "savedLink": None,
+            "staleLinkCleared": False,
+            "candidates": {"items": [], "nextCursor": None},
+        }
+
+    async def picker_load_more(self, root_path: str, cursor: str) -> dict[str, Any]:
+        self.calls.append(("picker_load_more", (root_path, cursor)))
+        return {"candidates": {"items": [], "nextCursor": None}, "focusProjectId": None}
+
+    async def create(
+        self, root_path: str, name: str, default_branch: str
+    ) -> dict[str, Any]:
+        self.calls.append(("create", (root_path, name, default_branch)))
+        return {
+            "link": {"projectId": "p1", "projectName": name, "repoLocalPath": root_path}
+        }
+
+    async def link(
+        self, root_path: str, project_id: str, project_name: str
+    ) -> dict[str, Any]:
+        self.calls.append(("link", (root_path, project_id, project_name)))
+        return {
+            "link": {
+                "projectId": project_id,
+                "projectName": project_name,
+                "repoLocalPath": root_path,
+            }
+        }
+
+    async def unlink(self, root_path: str) -> dict[str, Any]:
+        self.calls.append(("unlink", (root_path,)))
+        return {"unlinked": True}
+
+
+class TestProjectLinksJsonRpc:
+    def test_methods_are_advertised(self) -> None:
+        assert {
+            "projectLinks/create",
+            "projectLinks/link",
+            "projectLinks/list",
+            "projectLinks/picker/load",
+            "projectLinks/picker/loadMore",
+            "projectLinks/resolveRoot",
+            "projectLinks/unlink",
+        }.issubset(SERVER_METHODS)
+
+    @pytest.mark.asyncio
+    async def test_dispatches_without_attached_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        controller = _FakeProjectLinksController()
+        handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+        monkeypatch.setattr(handler, "_project_links", controller)
+
+        result = await handler.dispatch(
+            "projectLinks/resolveRoot", {"rootPath": "/repo"}
+        )
+
+        assert controller.calls == [("resolve_root", ("/repo",))]
+        assert result.response.model_dump(mode="json", by_alias=True) == {
+            "eligible": True,
+            "rejectReason": None,
+            "root": {
+                "repoLocalPath": "/repo",
+                "repoName": "widgets",
+                "currentBranch": "main",
+                "defaultBranch": "main",
+            },
+        }
+
+    @pytest.mark.parametrize(
+        ("error", "code"),
+        [
+            (ProjectLinksAuthError("no key"), ProtocolErrorCode.UNAUTHORIZED),
+            (ProjectLinksInvalidRequest("bad root"), ProtocolErrorCode.INVALID_PARAMS),
+            (ProjectLinksInternalError("boom"), ProtocolErrorCode.INTERNAL_ERROR),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_maps_controller_errors(
+        self, monkeypatch: pytest.MonkeyPatch, error: Exception, code: ProtocolErrorCode
+    ) -> None:
+        handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+        monkeypatch.setattr(
+            handler, "_project_links", _FakeProjectLinksController(error)
+        )
+
+        with pytest.raises(RequestFailure) as excinfo:
+            await handler.dispatch("projectLinks/resolveRoot", {"rootPath": "/repo"})
+
+        assert excinfo.value.code is code

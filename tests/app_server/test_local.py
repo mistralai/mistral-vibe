@@ -353,7 +353,10 @@ async def test_passive_host_requests_do_not_open_runtime(
 
     try:
         await client.request("config/schema", ConfigSchemaReadParams())
-        await client.request("session/list", SessionListParams(cwd=str(Path.cwd())))
+        listed = await client.request(
+            "session/list", SessionListParams(cwd=str(Path.cwd()))
+        )
+        assert listed["sessions"]
         await client.request(
             "session/read", SessionReadParams(session_id=saved.session_id)
         )

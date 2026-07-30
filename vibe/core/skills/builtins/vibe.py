@@ -418,8 +418,8 @@ session_prefix = "session"
 ### Browser Sign-In
 
 Browser sign-in lets users authenticate through the browser during onboarding.
-Mistral providers use default browser sign-in URLs. Custom or renamed providers
-must configure both URLs:
+Mistral providers use default browser sign-in URLs (`console.mistral.ai` /
+`api.mistral.ai`). Custom or renamed providers must configure both URLs:
 
 ```toml
 [[providers]]
@@ -433,6 +433,20 @@ Le Chat web deployment, where the Vibe API key is managed:
 ```toml
 vibe_base_url = "https://chat.mistral.ai"
 ```
+
+Interactive setup can target a Mistral-compatible deployment instead of the
+default `console.mistral.ai` / `api.mistral.ai`. The final credential is always a
+Mistral API key. On the auth-method screen pick **Launch browser**, then
+**Other** on the sign-in-target screen, and enter a login domain to complete
+browser sign-in. This sets `browser_auth_base_url` (the entered domain) and
+derives `browser_auth_api_base_url` (`DOMAIN/api`). The overridden `mistral`
+provider is persisted to user config so subsequent runs reuse it.
+
+The wizard reads any custom `browser_auth_base_url` already in `config.toml`:
+choosing **Other** pre-fills that configured domain so it can be confirmed or
+edited. Choosing **Mistral AI** while a custom domain is configured warns first
+and requires pressing **Enter** again to confirm the reset to the default
+domain, which is then persisted.
 
 ### Hooks
 
@@ -660,7 +674,7 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 ## Built-in Slash Commands
 
 - `/help` - Show help message
-- `/config` - Edit config settings
+- `/config` - Full-screen settings browser. Fields show their value and origin layer (default / TOML / env / override). Type to filter, arrows to move, Enter to edit; booleans toggle, closed-set fields (theme, models) pick from a list, scalars edit inline, complex fields open a JSON editor. The edit modal shows an inspector of the layers setting the field; edits persist to the TOML layer by default, `Tab` targets the ephemeral session override (until restart), and `Ctrl+R` clears the field one writable layer at a time toward the default. The `tools` field opens a grouped tool list with a per-tool config editor (permission, allow/deny lists, `Ctrl+E` for raw JSON). Enabling/disabling whole MCP servers or connectors stays in `/mcp`.
 - `/model` - Select active model
 - `/thinking` - Select thinking level
 - `/theme` - Select Textual UI theme; `auto` follows terminal/OS appearance (persisted in config)

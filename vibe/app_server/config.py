@@ -66,6 +66,8 @@ class ConfigView(ProtocolModel):
     enable_notifications: bool
     vibe_code_enabled: bool
     models: list[ModelConfigView]
+    transcribe_models: list[str]
+    tts_models: list[str]
     transcription: TranscriptionConfigView
     speech: SpeechConfigView
     validation_warnings: list[str]

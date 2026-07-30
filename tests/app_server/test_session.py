@@ -62,8 +62,8 @@ from vibe.app_server.protocol import (
     CallbackCallResponse,
     ClientCapabilities,
     ClientInfo,
-    ConfigEdit,
-    ConfigWriteParams,
+    ConfigPatchOpWire,
+    ConfigPatchParams,
     Notification,
     ProtocolErrorCode,
     RuntimeUpdatedParams,
@@ -1222,12 +1222,16 @@ async def test_runtime_mutation_result_publishes_the_coherent_snapshot(
         await client.notify("initialized")
         await client.request("session/start", SessionStartParams())
         await client.request(
-            "config/batchWrite",
-            ConfigWriteParams(
+            "config/patch",
+            ConfigPatchParams(
                 session_id=agent_loop.session_id,
-                edits=[
-                    ConfigEdit(path="/disable_welcome_banner_animation", value=True),
-                    ConfigEdit(path="/autocopy_to_clipboard", value=False),
+                ops=[
+                    ConfigPatchOpWire(
+                        op="set", path="/disable_welcome_banner_animation", value=True
+                    ),
+                    ConfigPatchOpWire(
+                        op="set", path="/autocopy_to_clipboard", value=False
+                    ),
                 ],
             ),
         )
@@ -1840,11 +1844,13 @@ async def test_rewind_uses_public_history_entry_id() -> None:
     try:
         assert await session.resources.sessions.rewind_preview("user-1") == ["x.py"]
         assert await session.resources.sessions.rewind_has_file_changes("user-1")
-        result = await session.resources.sessions.rewind("user-1", restore_files=True)
+        result = await session.resources.sessions.rewind(
+            "user-1", restore_files=True, inplace=True
+        )
     finally:
         await session.close()
 
-    rewind.assert_awaited_once_with(user_index, restore_files=True)
+    rewind.assert_awaited_once_with(user_index, restore_files=True, inplace=True)
     assert result.message == "rewind me"
     assert result.restore_errors == ["restore warning"]
     assert result.restored_paths == ["x.py"]

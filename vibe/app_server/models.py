@@ -504,6 +504,7 @@ class SessionLogSummary(ProtocolModel):
 class SavedSessionSummary(ProtocolModel):
     session_id: str
     cwd: str
+    parent_session_id: str | None = None
     title: str | None = None
     end_time: str | None = None
     preview: str = ""

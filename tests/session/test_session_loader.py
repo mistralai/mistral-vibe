@@ -892,6 +892,25 @@ class TestSessionLoaderListSessions:
         assert "aaaaaaaa-1111" in session_ids
         assert "bbbbbbbb-2222" in session_ids
 
+    def test_list_sessions_sorted_by_end_time_desc(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session_with_cwd(
+            session_dir, "middle-1", "/home/user/p", end_time="2024-01-02T00:00:00Z"
+        )
+        create_test_session_with_cwd(
+            session_dir, "newest-1", "/home/user/p", end_time="2024-01-03T00:00:00Z"
+        )
+        create_test_session_with_cwd(
+            session_dir, "oldest-1", "/home/user/p", end_time="2024-01-01T00:00:00Z"
+        )
+
+        result = SessionLoader.list_sessions(session_config)
+
+        assert [s["session_id"] for s in result] == ["newest-1", "middle-1", "oldest-1"]
+
     def test_list_sessions_filters_by_cwd(
         self, session_config: SessionLoggingConfig, create_test_session_with_cwd
     ) -> None:

@@ -111,11 +111,13 @@ class TestAgentStatsHelpers:
             steps=5,
             session_prompt_tokens=1000,
             session_completion_tokens=500,
+            session_cached_tokens=400,
             tool_calls_succeeded=3,
             tool_calls_failed=1,
             context_tokens=800,
             last_turn_prompt_tokens=100,
             last_turn_completion_tokens=50,
+            last_turn_cached_tokens=80,
             last_turn_duration=1.5,
             tokens_per_second=33.3,
             input_price_per_million=0.4,
@@ -127,6 +129,7 @@ class TestAgentStatsHelpers:
         assert stats.steps == 5
         assert stats.session_prompt_tokens == 1000
         assert stats.session_completion_tokens == 500
+        assert stats.session_cached_tokens == 400
         assert stats.tool_calls_succeeded == 3
         assert stats.tool_calls_failed == 1
         assert stats.input_price_per_million == 0.4
@@ -135,6 +138,7 @@ class TestAgentStatsHelpers:
         assert stats.context_tokens == 0
         assert stats.last_turn_prompt_tokens == 0
         assert stats.last_turn_completion_tokens == 0
+        assert stats.last_turn_cached_tokens == 0
         assert stats.last_turn_duration == 0.0
         assert stats.tokens_per_second == 0.0
 
@@ -151,6 +155,32 @@ class TestAgentStatsHelpers:
         stats.update_pricing(2.0, 4.0)
         # Cost = 1M * $2/M + 0.5M * $4/M = $2 + $2 = $4
         assert stats.session_cost == 4.0
+
+
+class TestCachedTokenStats:
+    @pytest.mark.asyncio
+    async def test_cached_tokens_accumulate_across_turns(self) -> None:
+        backend = FakeBackend([
+            [mock_llm_chunk(content="R1", prompt_tokens=100, cached_tokens=40)],
+            [mock_llm_chunk(content="R2", prompt_tokens=120, cached_tokens=90)],
+        ])
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
+
+        async for _ in agent.act("First"):
+            pass
+        assert agent.stats.last_turn_cached_tokens == 40
+        assert agent.stats.session_cached_tokens == 40
+
+        async for _ in agent.act("Second"):
+            pass
+        assert agent.stats.last_turn_cached_tokens == 90
+        assert agent.stats.session_cached_tokens == 130
+
+    def test_cached_tokens_serialized_in_stats_dump(self) -> None:
+        stats = AgentStats(session_cached_tokens=42, last_turn_cached_tokens=7)
+        dumped = stats.model_dump()
+        assert dumped["session_cached_tokens"] == 42
+        assert dumped["last_turn_cached_tokens"] == 7
 
 
 class TestReloadPreservesStats:

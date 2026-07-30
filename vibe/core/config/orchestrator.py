@@ -7,7 +7,7 @@ import copy
 from typing import Any
 
 from jsonpatch import JsonPatchException, apply_patch
-from jsonpointer import JsonPointerException
+from jsonpointer import JsonPointer, JsonPointerException
 from pydantic import ValidationError
 
 from vibe.core.config.builder import ConfigBuilder
@@ -18,6 +18,7 @@ from vibe.core.config.patch import (
     ConfigPatch,
     PatchOp,
     ensure_parent_paths,
+    resolve_upsert_op,
 )
 from vibe.core.config.schema import ConfigSchema
 from vibe.core.config.types import (
@@ -98,6 +99,16 @@ class ConfigOrchestrator[S: ConfigSchema]:
     def config(self) -> S:
         return self._config
 
+    @property
+    def layers(self) -> tuple[ConfigLayer[RawConfig], ...]:
+        """Active layers, lowest to highest priority. Read-only view."""
+        return tuple(self._builder.layers)
+
+    @property
+    def writable_layer_name(self) -> str:
+        """Name of the layer that implicit writes are routed to."""
+        return self._resolve_default_layer_name()
+
     def get_layer(self, name: str) -> ConfigLayer[RawConfig]:
         for layer in self._builder.layers:
             if layer.name == name:
@@ -123,6 +134,31 @@ class ConfigOrchestrator[S: ConfigSchema]:
             [AddOperationPatch(path=path, value=value, target_layer_name=target_layer)],
             reason=reason,
         )
+
+    async def upsert_field(
+        self,
+        path: str,
+        *,
+        key_field: str,
+        value: dict[str, Any],
+        reason: str = "No reason",
+        target_layer: str | None = None,
+    ) -> list[BaseException]:
+        """Insert or replace one entry in a persisted config list section.
+
+        *path* is a JSON Pointer to the list field (e.g. ``/providers``);
+        *key_field* identifies an entry within that list (e.g. ``name``).
+        When an entry with the same key already exists it is replaced in
+        place, otherwise the value is appended (or the section is created
+        when empty).
+        """
+        layer_name = target_layer or self._resolve_default_layer_name()
+        raw: dict[str, Any] = (await (self.get_layer(layer_name)).load()).model_dump()
+        existing = JsonPointer(path).resolve(raw, default=[])
+        operation = resolve_upsert_op(
+            existing, path, key_field, value, target_layer_name=layer_name
+        )
+        return await self.apply_patch([operation], reason=reason)
 
     async def apply_patch(
         self,

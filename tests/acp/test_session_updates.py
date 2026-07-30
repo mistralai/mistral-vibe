@@ -17,6 +17,7 @@ from acp.schema import (
 )
 
 from vibe.acp.session_updates import replay_history_entry, session_updates_for_event
+from vibe.acp.user_display_content import USER_DISPLAY_CONTENT_META_KEY
 from vibe.app_server.events import (
     HistoryEntryAdded,
     HistoryEntryUpdated,
@@ -55,6 +56,7 @@ from vibe.app_server.models import (
     TextContentBlock,
     TodoEffectDetail,
     TodoEffectInput,
+    UserDisplayContent,
     WebFetchEffectDetail,
     WebFetchEffectInput,
     WebFetchEffectOutput,
@@ -127,6 +129,37 @@ def test_replays_public_messages_and_reasoning_with_stable_entry_ids() -> None:
     assert assistant_update.message_id == "message-agent"
     assert isinstance(reasoning_update, AgentThoughtChunk)
     assert reasoning_update.message_id == "reasoning-1"
+
+
+def test_user_message_stamps_display_snapshot_on_each_chunk() -> None:
+    display = UserDisplayContent(
+        version="1.0.0",
+        host="vibe-vscode",
+        content=[
+            {"type": "text", "text": "What is this file?"},
+            {"type": "workspace_mention", "kind": "file", "name": "utils.ts"},
+        ],
+    )
+    user = PublicMessageEntry(
+        **_entry_fields("message-user", PublicEntryGenerationStatus.COMPLETED),
+        role="user",
+        content=[
+            TextContentBlock(text="What is this file?"),
+            TextContentBlock(text="utils.ts contents"),
+        ],
+        user_display_content=display,
+    )
+
+    updates = replay_history_entry(user)
+
+    # One chunk per content block; each carries the whole-message snapshot, which
+    # the webview treats as a replace so the bubble is not duplicated.
+    assert len(updates) == 2
+    expected_meta = display.model_dump(mode="json", by_alias=True)
+    for chunk in updates:
+        assert isinstance(chunk, UserMessageChunk)
+        assert chunk.field_meta is not None
+        assert chunk.field_meta[USER_DISPLAY_CONTENT_META_KEY] == expected_meta
 
 
 def test_live_message_and_reasoning_updates_emit_only_appended_text() -> None:

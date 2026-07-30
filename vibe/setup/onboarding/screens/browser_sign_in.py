@@ -31,10 +31,6 @@ from vibe.setup.auth import (
     BrowserSignInStatus,
     BrowserSignInStatusChanged,
 )
-from vibe.setup.auth.api_key_persistence import (
-    persist_api_key,
-    resolve_api_key_provider,
-)
 from vibe.setup.onboarding.base import OnboardingScreen
 from vibe.setup.onboarding.gradient_text import GRADIENT_COLORS, append_gradient_text
 
@@ -307,11 +303,7 @@ class BrowserSignInScreen(OnboardingScreen):
         if api_key is None:
             msg = "Browser sign-in finished without returning an API key."
             raise AssertionError(msg)
-        result = persist_api_key(
-            resolve_api_key_provider(self.provider),
-            api_key,
-            launch_context=self._launch_context,
-        )
+        result = self.onboarding_app.persist_credentials(api_key)
         self._cancel_sign_in_url_help_timer()
         if result != "completed":
             self._active_attempt_number = None

@@ -20,6 +20,7 @@ MESSAGES_FILENAME = "messages.jsonl"
 class SessionInfo(TypedDict):
     session_id: str
     cwd: str
+    parent_session_id: str | None
     title: str | None
     end_time: str | None
 
@@ -222,10 +223,15 @@ class SessionLoader:
             sessions.append({
                 "session_id": session_id,
                 "cwd": session_cwd,
+                "parent_session_id": metadata.get("parent_session_id"),
                 "title": metadata.get("title"),
                 "end_time": end_time,
             })
 
+        # glob() yields arbitrary filesystem order; callers expect most-recent
+        # first. end_time is normalized UTC ISO, so a lexicographic sort is
+        # chronological; sessions without one sort last.
+        sessions.sort(key=lambda item: item["end_time"] or "", reverse=True)
         return sessions
 
     @staticmethod

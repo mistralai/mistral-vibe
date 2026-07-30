@@ -145,6 +145,26 @@ class TestParseThinkingBlocks:
         assert chunk.message.content == "Hello!"
         assert chunk.message.reasoning_content is None
 
+    def test_cached_tokens_parsed_from_prompt_details(self, adapter, provider):
+        data = {
+            "choices": [{"message": {"role": "assistant", "content": "Hi"}}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 80},
+            },
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.usage.cached_tokens == 80
+
+    def test_cached_tokens_default_zero_without_details(self, adapter, provider):
+        data = {
+            "choices": [{"message": {"role": "assistant", "content": "Hi"}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 5},
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.usage.cached_tokens == 0
+
     def test_thinking_and_text_blocks(self, adapter, provider):
         data = {
             "choices": [
