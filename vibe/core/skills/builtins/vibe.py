@@ -147,7 +147,7 @@ include_commit_signature = true   # Add "Co-Authored-By" to commits
 
 # System prompt composition
 include_model_info = true         # Include model name in system prompt
-include_project_context = true    # Include project context (git info, cwd) in system prompt
+include_project_context = true    # Include project context (git info, cwd, file overview) in system prompt
 include_prompt_detail = true      # Include OS info, tool prompts, skills, and agents in system prompt
 
 # Voice features

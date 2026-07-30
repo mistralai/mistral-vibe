@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 import html
@@ -31,6 +32,17 @@ if TYPE_CHECKING:
     from vibe.core.tools.manager import ToolManager
 
 _git_status_cache: dict[Path, str] = {}
+_MAX_FILE_OVERVIEW_ENTRIES = 200
+
+
+def _normalize_overview_entries(entries: Sequence[str]) -> list[str]:
+    clean_entries = []
+    for entry in entries:
+        clean = entry.strip()
+        if not clean:
+            continue
+        clean_entries.append(clean)
+    return sorted(dict.fromkeys(clean_entries))
 
 
 class ProjectContextProvider:
@@ -39,6 +51,63 @@ class ProjectContextProvider:
     ) -> None:
         self.root_path = Path(root_path).resolve()
         self.config = config
+
+    def get_file_overview(self) -> str:
+        entries = self._list_project_files()
+        if not entries:
+            return "No project file overview available."
+
+        limit = _MAX_FILE_OVERVIEW_ENTRIES
+        visible = entries[:limit]
+        lines = ["Project file overview (snapshot at conversation start):"]
+        lines.extend(f"- {entry}" for entry in visible)
+        if len(entries) > limit:
+            lines.append(f"... {len(entries) - limit} more files omitted")
+        return "\n".join(lines)
+
+    def _list_project_files(self) -> list[str]:
+        if from_git := self._list_git_files():
+            return from_git
+        return self._list_directory_files()
+
+    def _list_git_files(self) -> list[str]:
+        try:
+            result = self._run_git(["ls-files"], min(self.config.timeout_seconds, 10.0))
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return []
+        return _normalize_overview_entries(result.stdout.splitlines())
+
+    def _list_directory_files(self) -> list[str]:
+        max_entries = _MAX_FILE_OVERVIEW_ENTRIES + 1
+        entries: list[str] = []
+        ignored_dirs = {
+            ".git",
+            ".hg",
+            ".svn",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".tox",
+            ".venv",
+            "__pycache__",
+            "node_modules",
+        }
+        try:
+            for current_root, dirs, files in os.walk(self.root_path):
+                dirs[:] = [
+                    d for d in dirs if d not in ignored_dirs and not d.startswith(".")
+                ]
+                dirs.sort()
+                for file_name in sorted(files):
+                    if file_name.startswith("."):
+                        continue
+                    path = Path(current_root, file_name)
+                    entries.append(path.relative_to(self.root_path).as_posix())
+                    if len(entries) >= max_entries:
+                        return entries
+        except OSError:
+            return []
+        return entries
 
     def get_git_status(self) -> str:
         if self.root_path in _git_status_cache:
@@ -147,8 +216,12 @@ class ProjectContextProvider:
         git_status = self.get_git_status()
 
         template = UtilityPrompt.PROJECT_CONTEXT.read()
+        file_overview = self.get_file_overview()
+
         return Template(template).safe_substitute(
-            abs_path=str(self.root_path), git_status=git_status
+            abs_path=str(self.root_path),
+            git_status=git_status,
+            file_overview=file_overview,
         )
 
 
