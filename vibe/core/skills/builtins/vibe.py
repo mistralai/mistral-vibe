@@ -183,6 +183,7 @@ alias = "mistral-medium-3.5"
 temperature = 1.0
 input_price = 1.5
 output_price = 7.5
+cached_input_price = 0.15         # per million cached input tokens; omit to bill at input_price
 thinking = "high"                 # "off", "low", "medium", "high", "max"
 auto_compact_threshold = 200000
 supports_images = true            # vision-capable; allows @-mentioned images
@@ -193,6 +194,7 @@ provider = "mistral"
 alias = "devstral-small"
 input_price = 0.1
 output_price = 0.3
+cached_input_price = 0.01
 
 [[models]]
 name = "devstral"
@@ -683,6 +685,10 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/log` - Show path to current interaction log file
 - `/debug` - Toggle debug console
 - `/compact` - Compact conversation history by summarizing
+- `/retry [additional instructions]` - Continue a model response interrupted by
+  a backend error without repeating text already shown. Optional instructions
+  are passed to the model for the continuation. Relevant error messages also
+  hint at this command.
 - `/status` - Display agent statistics
 - `/voice` - Configure voice settings
 - `/mcp` - Display MCP servers and connector status; pass a server or connector

@@ -6,9 +6,18 @@ import os
 from pathlib import Path, PureWindowsPath
 
 from git import InvalidGitRepositoryError, Repo
-from git.exc import GitCommandError
+from git.exc import GitCommandError, NoSuchPathError
 
 from vibe.core.paths import WORKTREES_DIR
+
+_INVALID_WORKTREE_NAME_CHARS = frozenset('<>:"/\\|?*')
+_GIT_USAGE_ERROR_STATUS = 129
+_WORKTREE_REV_PARSE_PARTS = 2
+_RESERVED_WORKTREE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
 
 
 class WorktreeError(Exception): ...
@@ -24,6 +33,15 @@ class PreparedWorktree:
     base_commit: str
     created: bool
     branch_created: bool
+
+
+@dataclass(frozen=True)
+class LinkedWorktree:
+    name: str
+    branch: str
+    root: Path
+    path: Path
+    repo_root: Path
 
 
 @dataclass(frozen=True)
@@ -49,35 +67,44 @@ class WorktreeCleanupState:
             reasons.append("untracked files")
         if self.new_commit_count:
             noun = "commit" if self.new_commit_count == 1 else "commits"
-            reasons.append(
-                f"{self.new_commit_count} {noun} added to the branch during this session"
-            )
+            reasons.append(f"{self.new_commit_count} {noun} added during this session")
         return tuple(reasons)
 
 
-def prepare_worktree(name: str, base: Path) -> Path:
-    return prepare_worktree_session(name, base).path
+def prepare_worktree(name: str, base: Path, *, branch: str | None = None) -> Path:
+    return prepare_worktree_session(name, base, branch=branch).path
 
 
-def prepare_worktree_session(name: str, base: Path) -> PreparedWorktree:
+def prepare_worktree_session(
+    name: str, base: Path, *, branch: str | None = None
+) -> PreparedWorktree:
     _validate_worktree_name(name)
     repo = _open_repo(base)
+    branch = name if branch is None else branch
+    _validate_branch(repo, branch)
 
     common_git_dir = _common_git_dir(repo)
-    repo_root = common_git_dir.parent
-    relative_base = base.resolve().relative_to(Path(repo.working_dir).resolve())
+    repo_root = _primary_worktree_root(repo, common_git_dir)
+    relative_base = _relative_base(repo, base)
     target = _worktree_root(repo_root, common_git_dir) / name
 
     if target.is_dir():
-        _validate_existing_worktree(target, name, common_git_dir)
+        _validate_existing_worktree(target, branch, common_git_dir)
         return _build_prepared(
-            name, target, relative_base, repo_root, created=False, branch_created=False
+            name,
+            branch,
+            target,
+            relative_base,
+            repo_root,
+            created=False,
+            branch_created=False,
         )
 
-    branch_created = name not in (h.name for h in repo.heads)
-    _create_worktree(repo, target, name, branch_created=branch_created)
+    branch_created = not _branch_exists(repo, branch)
+    _create_worktree(repo, target, branch, branch_created=branch_created)
     return _build_prepared(
         name,
+        branch,
         target,
         relative_base,
         repo_root,
@@ -86,28 +113,61 @@ def prepare_worktree_session(name: str, base: Path) -> PreparedWorktree:
     )
 
 
+def list_linked_worktrees(base: Path) -> tuple[LinkedWorktree, ...]:
+    repo = _open_repo(base)
+    common_git_dir = _common_git_dir(repo)
+    records = _worktree_records(repo)
+    repo_root = _primary_worktree_root(repo, common_git_dir)
+    relative_base = _relative_base(repo, base)
+    linked: list[LinkedWorktree] = []
+
+    for record in records[1:]:
+        if record.branch is None or record.prunable:
+            continue
+        try:
+            _validate_existing_worktree(record.root, record.branch, common_git_dir)
+            root = record.root.resolve()
+            path = _target_cwd(root, relative_base)
+        except WorktreeError:
+            continue
+        linked.append(
+            LinkedWorktree(
+                name=root.name,
+                branch=record.branch,
+                root=root,
+                path=path,
+                repo_root=repo_root,
+            )
+        )
+
+    return tuple(sorted(linked, key=lambda worktree: str(worktree.path)))
+
+
 def _open_repo(base: Path) -> Repo:
     try:
         return Repo(base, search_parent_directories=True)
-    except InvalidGitRepositoryError as e:
+    except (InvalidGitRepositoryError, NoSuchPathError) as e:
         raise WorktreeError("--worktree requires a git repository.") from e
 
 
 def _create_worktree(
-    repo: Repo, target: Path, name: str, *, branch_created: bool
+    repo: Repo, target: Path, branch: str, *, branch_created: bool
 ) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         if branch_created:
-            repo.git.worktree("add", "-b", name, str(target))
+            repo.git.worktree("add", "-b", branch, str(target))
         else:
-            repo.git.worktree("add", str(target), name)
+            repo.git.worktree("add", str(target), branch)
     except GitCommandError as e:
-        raise WorktreeError(f"Failed to create worktree {name!r}: {e}") from e
+        raise WorktreeError(
+            f"Failed to create worktree {target.name!r} for branch {branch!r}: {e}"
+        ) from e
 
 
 def _build_prepared(
     name: str,
+    branch: str,
     target: Path,
     relative_base: Path,
     repo_root: Path,
@@ -120,7 +180,7 @@ def _build_prepared(
     # branch already carried, which the invoking checkout's HEAD would miss).
     return PreparedWorktree(
         name=name,
-        branch=name,
+        branch=branch,
         root=target,
         path=_target_cwd(target, relative_base),
         repo_root=repo_root,
@@ -131,15 +191,18 @@ def _build_prepared(
 
 
 def inspect_worktree_for_cleanup(worktree: PreparedWorktree) -> WorktreeCleanupState:
+    """Inspect worktree state relative to the session-start HEAD.
+
+    Commit counts intentionally use the worktree's current HEAD instead of the
+    named branch so detached-HEAD commits still block cleanup.
+    """
     try:
         repo = Repo(worktree.root)
         status_lines = repo.git.status(
             "--porcelain", "--untracked-files=all"
         ).splitlines()
         new_commit_count = int(
-            repo.git.rev_list(
-                "--count", f"{worktree.base_commit}..{worktree.branch}"
-            ).strip()
+            repo.git.rev_list("--count", f"{worktree.base_commit}..HEAD").strip()
         )
     except (InvalidGitRepositoryError, GitCommandError, ValueError) as e:
         raise WorktreeError(f"Failed to inspect worktree {worktree.name!r}: {e}") from e
@@ -163,17 +226,47 @@ def remove_worktree(worktree: PreparedWorktree, *, delete_branch: bool = True) -
 
 
 def _validate_worktree_name(name: str) -> None:
-    if (
-        not name
-        or name in {".", ".."}
-        or Path(name).parts != (name,)
-        or PureWindowsPath(name).parts != (name,)
-    ):
-        raise WorktreeError("--worktree NAME must be a single path segment.")
+    if not _is_portable_worktree_name(name):
+        raise WorktreeError(
+            "--worktree NAME must be a single path segment with a portable filename."
+        )
+
+
+def _is_portable_worktree_name(name: str) -> bool:
+    if not name or name in {".", ".."}:
+        return False
+    if name[-1] in {" ", "."} or not name.isprintable():
+        return False
+    if any(char in _INVALID_WORKTREE_NAME_CHARS for char in name):
+        return False
+    if name.split(".", 1)[0].upper() in _RESERVED_WORKTREE_NAMES:
+        return False
+    return Path(name).parts == (name,) and PureWindowsPath(name).parts == (name,)
+
+
+def _validate_branch(repo: Repo, branch: str) -> None:
+    try:
+        repo.git.check_ref_format("--branch", branch)
+    except (GitCommandError, ValueError) as e:
+        raise WorktreeError(f"Invalid worktree branch {branch!r}.") from e
+
+
+def _branch_exists(repo: Repo, branch: str) -> bool:
+    try:
+        repo.git.show_ref("--verify", "--quiet", f"refs/heads/{branch}")
+    except GitCommandError as e:
+        if e.status == 1:
+            return False
+        raise WorktreeError(f"Failed to inspect worktree branch {branch!r}: {e}") from e
+    return True
 
 
 def _common_git_dir(repo: Repo) -> Path:
-    common_git_dir = Path(repo.git.rev_parse("--git-common-dir"))
+    return _resolve_git_dir(repo, repo.git.rev_parse("--git-common-dir"))
+
+
+def _resolve_git_dir(repo: Repo, value: str) -> Path:
+    common_git_dir = Path(value)
     if common_git_dir.is_absolute():
         return common_git_dir.resolve()
     return (Path(repo.working_dir) / common_git_dir).resolve()
@@ -182,12 +275,33 @@ def _common_git_dir(repo: Repo) -> Path:
 def _worktree_root(repo_root: Path, common_git_dir: Path) -> Path:
     repo_hash = hashlib.sha256(str(common_git_dir).encode()).hexdigest()[:12]
     repo_dir = f"{repo_root.name}-{repo_hash}"
-    return WORKTREES_DIR.path / repo_dir
+    managed_root = WORKTREES_DIR.path.resolve()
+    target_root = (managed_root / repo_dir).resolve()
+    if not target_root.is_relative_to(managed_root):
+        raise WorktreeError(
+            f"Managed worktree root {target_root} resolves outside {managed_root}."
+        )
+    return target_root
+
+
+def _relative_base(repo: Repo, base: Path) -> Path:
+    working_root = Path(repo.working_dir).resolve()
+    try:
+        return base.resolve().relative_to(working_root)
+    except ValueError as e:
+        raise WorktreeError(
+            f"Path {base.resolve()} is outside Git worktree {working_root}."
+        ) from e
 
 
 def _validate_existing_worktree(
     target: Path, expected_branch: str, expected_common_git_dir: Path
 ) -> None:
+    if _has_linked_path_component(target):
+        raise WorktreeError(
+            f"Path {target} contains a symbolic link or junction, "
+            "not a stable git worktree path."
+        )
     if not (target / ".git").is_file():
         raise WorktreeError(f"Path {target} already exists but is not a git worktree.")
 
@@ -198,25 +312,142 @@ def _validate_existing_worktree(
             f"Path {target} already exists but is not a git worktree."
         ) from e
 
-    existing_common_git_dir = _common_git_dir(existing_repo)
+    try:
+        rev_parse_parts = existing_repo.git.rev_parse(
+            "--git-common-dir", "--abbrev-ref", "HEAD"
+        ).splitlines()
+    except GitCommandError as e:
+        raise WorktreeError(f"Failed to inspect worktree {target}: {e}") from e
+    if len(rev_parse_parts) != _WORKTREE_REV_PARSE_PARTS:
+        raise WorktreeError(
+            f"Failed to inspect worktree {target}: expected git rev-parse to return "
+            f"{_WORKTREE_REV_PARSE_PARTS} lines, got {len(rev_parse_parts)}."
+        )
+    common_dir_value, branch = rev_parse_parts
+
+    existing_common_git_dir = _resolve_git_dir(existing_repo, common_dir_value)
     if existing_common_git_dir != expected_common_git_dir:
         raise WorktreeError(f"Path {target} belongs to a different git repository.")
 
-    branch = existing_repo.git.branch("--show-current").strip()
-    if branch != expected_branch:
-        actual = branch or "detached HEAD"
+    if branch == "HEAD" or branch != expected_branch:
+        actual = "detached HEAD" if branch == "HEAD" else branch
         raise WorktreeError(
             f"Path {target} is checked out on {actual!r}, expected {expected_branch!r}."
         )
 
 
+def _has_linked_path_component(path: Path) -> bool:
+    current = Path(path.anchor) if path.anchor else Path()
+    parts = path.parts[1:] if path.anchor else path.parts
+    for index, part in enumerate(parts):
+        current /= part
+        # Root-level aliases such as macOS /tmp -> /private/tmp are controlled by
+        # the operating system, not by the worktree directory hierarchy.
+        if path.anchor and index == 0:
+            continue
+        is_junction = getattr(current, "is_junction", None)
+        if current.is_symlink() or (is_junction is not None and is_junction()):
+            return True
+    return False
+
+
 def _target_cwd(target: Path, relative_base: Path) -> Path:
-    target_cwd = target / relative_base
-    if not target_cwd.is_dir():
+    root = target.resolve()
+    target_cwd = root / relative_base
+    try:
+        resolved_cwd = target_cwd.resolve(strict=True)
+    except (OSError, RuntimeError) as e:
         raise WorktreeError(
             f"Worktree path {target_cwd} does not exist after checkout."
-        )
-    return target_cwd
+        ) from e
+    if not resolved_cwd.is_dir():
+        raise WorktreeError(f"Worktree path {target_cwd} is not a directory.")
+    try:
+        resolved_cwd.relative_to(root)
+    except ValueError as e:
+        raise WorktreeError(
+            f"Worktree path {target_cwd} resolves outside worktree {root}."
+        ) from e
+    current = resolved_cwd
+    while current != root:
+        git_marker = current / ".git"
+        if git_marker.exists() or git_marker.is_symlink():
+            raise WorktreeError(
+                f"Worktree path {resolved_cwd} belongs to a different git repository."
+            )
+        current = current.parent
+    return resolved_cwd
+
+
+@dataclass(frozen=True)
+class _WorktreeRecord:
+    root: Path
+    branch: str | None
+    prunable: bool
+
+
+def _worktree_records(repo: Repo) -> tuple[_WorktreeRecord, ...]:
+    try:
+        output = _worktree_list_porcelain(repo, null_terminated=True)
+        return _parse_worktree_records(output, separator="\0")
+    except GitCommandError as e:
+        if e.status != _GIT_USAGE_ERROR_STATUS:
+            raise WorktreeError(f"Failed to list git worktrees: {e}") from e
+    try:
+        output = _worktree_list_porcelain(repo, null_terminated=False)
+    except GitCommandError as e:
+        raise WorktreeError(f"Failed to list git worktrees: {e}") from e
+    return _parse_worktree_records(output, separator="\n")
+
+
+def _worktree_list_porcelain(repo: Repo, *, null_terminated: bool) -> str:
+    args = ["list", "--porcelain"]
+    if null_terminated:
+        args.append("-z")
+    return repo.git.worktree(*args)
+
+
+def _parse_worktree_records(
+    output: str, *, separator: str
+) -> tuple[_WorktreeRecord, ...]:
+    records: list[_WorktreeRecord] = []
+    current: _WorktreeRecord | None = None
+
+    for token in output.split(separator):
+        if not token:
+            if current is not None:
+                records.append(current)
+            current = None
+            continue
+
+        field, _, value = token.partition(" ")
+        if field == "worktree":
+            if current is not None:
+                records.append(current)
+            current = _WorktreeRecord(Path(value), None, False)
+        elif field == "branch" and current is not None:
+            current = _WorktreeRecord(
+                current.root, value.removeprefix("refs/heads/"), current.prunable
+            )
+        elif field == "prunable" and current is not None:
+            current = _WorktreeRecord(current.root, current.branch, True)
+
+    if current is not None:
+        records.append(current)
+    return tuple(records)
+
+
+def _primary_worktree_root(repo: Repo, common_git_dir: Path) -> Path:
+    # Repositories using --separate-git-dir report that directory as the first
+    # worktree, so the primary checkout's working directory is authoritative.
+    if Path(repo.git_dir).resolve() == common_git_dir:
+        return Path(repo.working_dir).resolve()
+    if common_git_dir.name == ".git":
+        return common_git_dir.parent
+    raise WorktreeError(
+        "Cannot determine the primary checkout from a linked worktree "
+        "using a separate Git directory."
+    )
 
 
 def _leave_worktree_if_current_directory(worktree: PreparedWorktree) -> None:

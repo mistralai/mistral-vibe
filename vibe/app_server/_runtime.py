@@ -299,7 +299,15 @@ class AgentRuntimeFactory:
             ]
             replacement.messages.reset([*system_messages, *loaded_messages])
             if isinstance(raw_stats := metadata.get("stats"), dict):
-                replacement.stats = AgentStats.model_validate(raw_stats)
+                stats = AgentStats.model_validate(raw_stats)
+                if stats.cached_input_price_per_million is None:
+                    try:
+                        stats.cached_input_price_per_million = (
+                            replacement.config.get_active_model().cached_input_price
+                        )
+                    except ValueError:
+                        pass
+                replacement.stats = stats
         except BaseException:
             await close_agent_loop(replacement)
             raise

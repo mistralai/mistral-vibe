@@ -5,7 +5,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import keyring
 from keyring.errors import KeyringError
@@ -134,7 +134,7 @@ def _build_browser_onboarding_app(
     browser_sign_in_service_factory: Callable[[], BrowserSignInService] | None = None,
     browser_sign_in_success_delay: float = 0,
     browser_sign_in_url_help_delay: float = 0,
-    copy_sign_in_url: Callable[[str], bool] | None = None,
+    copy_sign_in_url: Callable[[str], None] | None = None,
 ) -> OnboardingApp:
     return OnboardingApp(
         config=_build_onboarding_config(
@@ -551,9 +551,8 @@ async def test_ui_does_not_show_browser_opened_before_attempt_starts() -> None:
     keep_authenticate_running = asyncio.Event()
     copied_urls: list[str] = []
 
-    def copy_sign_in_url(url: str) -> bool:
+    def copy_sign_in_url(url: str) -> None:
         copied_urls.append(url)
-        return True
 
     class DelayedBrowserSignInService:
         async def authenticate(
@@ -678,9 +677,8 @@ async def test_ui_copies_browser_sign_in_url() -> None:
     async def wait_forever(_: float) -> None:
         await blocker.wait()
 
-    def copy_sign_in_url(url: str) -> bool:
+    def copy_sign_in_url(url: str) -> None:
         copied_urls.append(url)
-        return True
 
     _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
         outcomes=["completed"], sleep=wait_forever
@@ -696,7 +694,10 @@ async def test_ui_copies_browser_sign_in_url() -> None:
             lambda: "copy this URL" in _browser_sign_in_url_text(app.screen), pilot
         )
         await pilot.press("c")
-        assert "process-1" not in _browser_sign_in_url_text(app.screen)
+        url_text = _browser_sign_in_url_text(app.screen)
+        assert "If copying to the clipboard was not successful" in url_text
+        assert _expected_browser_sign_in_url() in url_text
+        assert "hold Shift (Option in iTerm2, Fn in Terminal.app)" in url_text
 
     assert copied_urls == [_expected_browser_sign_in_url()]
 
@@ -709,9 +710,8 @@ async def test_ui_copies_browser_sign_in_url_when_help_text_is_clicked() -> None
     async def wait_forever(_: float) -> None:
         await blocker.wait()
 
-    def copy_sign_in_url(url: str) -> bool:
+    def copy_sign_in_url(url: str) -> None:
         copied_urls.append(url)
-        return True
 
     _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
         outcomes=["completed"], sleep=wait_forever
@@ -729,12 +729,13 @@ async def test_ui_copies_browser_sign_in_url_when_help_text_is_clicked() -> None
         url_widget = app.screen.query_one("#browser-sign-in-url", Static)
         link_x = url_widget.styles.padding.left + len(SIGN_IN_URL_HELP_PREFIX) + 1
         await pilot.click(url_widget, offset=(link_x, 0))
+        assert _expected_browser_sign_in_url() in _browser_sign_in_url_text(app.screen)
 
     assert copied_urls == [_expected_browser_sign_in_url()]
 
 
 @pytest.mark.asyncio
-async def test_ui_reveals_browser_sign_in_url_when_copy_fails() -> None:
+async def test_ui_copy_url_has_no_success_or_failure_notification() -> None:
     blocker = asyncio.Event()
 
     async def wait_forever(_: float) -> None:
@@ -745,7 +746,7 @@ async def test_ui_reveals_browser_sign_in_url_when_copy_fails() -> None:
     )
     app = _build_browser_onboarding_app(
         browser_sign_in_service_factory=browser_sign_in_service_factory,
-        copy_sign_in_url=lambda _: False,
+        copy_sign_in_url=lambda _: None,
     )
 
     async with app.run_test() as pilot:
@@ -755,13 +756,15 @@ async def test_ui_reveals_browser_sign_in_url_when_copy_fails() -> None:
         )
         assert "process-1" not in _browser_sign_in_url_text(app.screen)
 
-        await pilot.press("c")
-
-        await _wait_for(
-            lambda: "process-1" in _browser_sign_in_url_text(app.screen), pilot
-        )
-        url_text = _browser_sign_in_url_text(app.screen)
-        assert "Copy failed. Open this URL manually:" in url_text
+        with patch.object(app, "notify") as notify:
+            await pilot.press("c")
+            await _wait_for(
+                lambda: "process-1" in _browser_sign_in_url_text(app.screen), pilot
+            )
+            url_text = _browser_sign_in_url_text(app.screen)
+            assert "If copying to the clipboard was not successful" in url_text
+            assert "hold Shift (Option in iTerm2, Fn in Terminal.app)" in url_text
+        notify.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -799,9 +802,8 @@ async def test_ui_keeps_last_sign_in_url_copy_prompt_after_open_browser_failure(
 async def test_ui_copies_last_browser_sign_in_url_after_open_browser_failure() -> None:
     copied_urls: list[str] = []
 
-    def copy_sign_in_url(url: str) -> bool:
+    def copy_sign_in_url(url: str) -> None:
         copied_urls.append(url)
-        return True
 
     _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
         outcomes=["completed"], open_browser=lambda _: False
@@ -830,9 +832,8 @@ async def test_ui_retry_hides_old_sign_in_url_and_uses_fresh_attempt_url() -> No
     async def wait_forever(_: float) -> None:
         await blocker.wait()
 
-    def copy_sign_in_url(url: str) -> bool:
+    def copy_sign_in_url(url: str) -> None:
         copied_urls.append(url)
-        return True
 
     _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
         outcomes=["expired", "completed"], sleep=wait_forever
@@ -1472,7 +1473,8 @@ def test_persist_api_key_sends_onboarding_telemetry_with_launch_context(
 ) -> None:
     recorded_metadata: dict[str, str] = {}
 
-    def capture(self: TelemetryClient) -> None:
+    def capture(self: TelemetryClient, *, custom_domain: bool = False) -> None:
+        del custom_domain
         recorded_metadata.update(self.build_client_event_metadata())
 
     monkeypatch.setattr(TelemetryClient, "send_onboarding_api_key_added", capture)

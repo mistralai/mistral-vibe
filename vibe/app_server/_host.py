@@ -16,7 +16,7 @@ from vibe.app_server._project_links import (
     ProjectLinksInternalError,
     ProjectLinksInvalidRequest,
 )
-from vibe.app_server._projection import project_message_history
+from vibe.app_server._projection import project_config_view, project_message_history
 from vibe.app_server._state import build_stored_public_state, history_page
 from vibe.app_server._workspace import (
     WorkspaceTrustError,
@@ -24,6 +24,8 @@ from vibe.app_server._workspace import (
     read_workspace_trust,
 )
 from vibe.app_server.protocol import (
+    ConfigReadParams,
+    ConfigReadResponse,
     ConfigSchemaReadParams,
     ConfigSchemaReadResponse,
     EmptyResponse,
@@ -31,6 +33,8 @@ from vibe.app_server.protocol import (
     HistoryListResponse,
     ProjectLinkMutationResponse,
     ProjectLinksCreateParams,
+    ProjectLinksInspectRootParams,
+    ProjectLinksInspectRootResponse,
     ProjectLinksLinkParams,
     ProjectLinksListParams,
     ProjectLinksListResponse,
@@ -40,6 +44,7 @@ from vibe.app_server.protocol import (
     ProjectLinksPickerLoadResponse,
     ProjectLinksResolveRootParams,
     ProjectLinksResolveRootResponse,
+    ProjectLinksSaveParams,
     ProjectLinksUnlinkParams,
     ProjectLinksUnlinkResponse,
     ProtocolErrorCode,
@@ -64,14 +69,17 @@ from vibe.core.session.session_loader import SessionLoader
 from vibe.core.types import LLMMessage, SessionMetadata
 
 _HOST_METHODS = frozenset({
+    "config/read",
     "config/schema",
     "history/list",
     "projectLinks/create",
+    "projectLinks/inspectRoot",
     "projectLinks/link",
     "projectLinks/list",
     "projectLinks/picker/load",
     "projectLinks/picker/loadMore",
     "projectLinks/resolveRoot",
+    "projectLinks/save",
     "projectLinks/unlink",
     "session/delete",
     "session/list",
@@ -112,6 +120,10 @@ class HostRequestHandler:
             case "config/schema":
                 validate_wire(ConfigSchemaReadParams, raw_params)
                 response: ProtocolModel = config_schema_response()
+            case "config/read":
+                response = await self._read_config(
+                    validate_wire(ConfigReadParams, raw_params)
+                )
             case "session/list":
                 params = validate_wire(SessionListParams, raw_params)
                 config = await self._load_config(params.cwd)
@@ -178,6 +190,14 @@ class HostRequestHandler:
                 raise method_not_found(method)
         return response
 
+    async def _read_config(self, params: ConfigReadParams) -> ConfigReadResponse:
+        if params.session_id is not None:
+            raise RequestFailure(
+                ProtocolErrorCode.NOT_FOUND, f"Session not found: {params.session_id}"
+            )
+        view = project_config_view(await self._load_config(params.cwd))
+        return ConfigReadResponse(config=view, base_config=view)
+
     async def _dispatch_project_links(
         self, method: str, raw_params: dict[str, Any]
     ) -> ProtocolModel:
@@ -191,6 +211,11 @@ class HostRequestHandler:
                 params = validate_wire(ProjectLinksResolveRootParams, raw_params)
                 response = ProjectLinksResolveRootResponse.model_validate(
                     await self._project_links.resolve_root(params.root_path)
+                )
+            case "projectLinks/inspectRoot":
+                params = validate_wire(ProjectLinksInspectRootParams, raw_params)
+                response = ProjectLinksInspectRootResponse.model_validate(
+                    await self._project_links.inspect_root(params.root_path)
                 )
             case "projectLinks/picker/load":
                 params = validate_wire(ProjectLinksPickerLoadParams, raw_params)
@@ -216,6 +241,16 @@ class HostRequestHandler:
                 response = ProjectLinkMutationResponse.model_validate(
                     await self._project_links.link(
                         params.root_path, params.project_id, params.project_name
+                    )
+                )
+            case "projectLinks/save":
+                params = validate_wire(ProjectLinksSaveParams, raw_params)
+                response = ProjectLinkMutationResponse.model_validate(
+                    await self._project_links.save(
+                        params.root_path,
+                        params.project_id,
+                        params.project_name,
+                        params.expected_repo_url,
                     )
                 )
             case "projectLinks/unlink":

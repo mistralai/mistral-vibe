@@ -272,9 +272,11 @@ class _FakeTelemetry:
         self.config_getter = config_getter
         self.launch_context = launch_context
         self.sent = False
+        self.custom_domain: bool | None = None
 
-    def send_onboarding_api_key_added(self) -> None:
+    def send_onboarding_api_key_added(self, *, custom_domain: bool = False) -> None:
         self.sent = True
+        self.custom_domain = custom_domain
 
 
 def _capture_telemetry(monkeypatch: pytest.MonkeyPatch) -> list[_FakeTelemetry]:

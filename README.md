@@ -328,6 +328,10 @@ Vibe provides several built-in slash commands. Use slash commands by typing them
 > /help
 ```
 
+If a model response is interrupted by a backend error, use `/retry` to continue
+from the partial response. Add optional guidance after the command, for example
+`/retry keep the conclusion concise`.
+
 ### Custom Slash Commands via Skills
 
 You can define your own slash commands through the skills system. Skills are reusable components that extend Vibe's functionality.

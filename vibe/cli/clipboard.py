@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable
+from dataclasses import dataclass
 import os
-import shutil
-import subprocess
+from typing import NamedTuple
 
 import pyperclip
 from textual.app import App
+from textual.widget import Widget
 from textual.widgets import Input, TextArea
 
-from vibe.utils.io import decode_safe
+NATIVE_COPY_HINT = (
+    "if paste fails, hold Shift (Option in iTerm2, Fn in Terminal.app) "
+    "while selecting for native copy"
+)
+
+
+@dataclass(frozen=True)
+class ClipboardCopyResult:
+    text: str
+    verified: bool
 
 
 def _copy_osc52(text: str) -> None:
@@ -24,119 +33,65 @@ def _copy_osc52(text: str) -> None:
         tty.flush()
 
 
-def _copy_pyperclip(text: str) -> None:
+def _normalize_newlines(text: str) -> str:
+    return text.replace("\r\n", "\n")
+
+
+def _copy_native(text: str) -> bool:
     pyperclip.copy(text)
+    try:
+        return _normalize_newlines(pyperclip.paste()) == _normalize_newlines(text)
+    except Exception:
+        return False
 
 
-def _has_cmd(cmd: str) -> bool:
-    return shutil.which(cmd) is not None
+def _is_ssh_session() -> bool:
+    return bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"))
 
 
-def _copy_pbcopy(text: str) -> None:
-    subprocess.run(
-        ["pbcopy"], input=text.encode("utf-8"), check=True, stderr=subprocess.DEVNULL
-    )
+def copy_to_clipboard(text: str) -> bool:
+    if not text:
+        return False
 
-
-def _copy_xclip(text: str) -> None:
-    subprocess.run(
-        ["xclip", "-selection", "clipboard"],
-        input=text.encode("utf-8"),
-        check=True,
-        stderr=subprocess.DEVNULL,
-    )
-
-
-def _copy_wl_copy(text: str) -> None:
-    subprocess.run(
-        ["wl-copy"], input=text.encode("utf-8"), check=True, stderr=subprocess.DEVNULL
-    )
-
-
-_CMD_STRATEGIES: list[tuple[str, Callable[[str], None]]] = [
-    ("pbcopy", _copy_pbcopy),
-    ("xclip", _copy_xclip),
-    ("wl-copy", _copy_wl_copy),
-]
-
-_COPY_METHODS: list[Callable[[str], None]] = [
-    _copy_osc52,
-    _copy_pyperclip,
-    *[fn for cmd, fn in _CMD_STRATEGIES if _has_cmd(cmd)],
-]
-
-
-def _paste_pyperclip() -> str:
-    return pyperclip.paste()
-
-
-def _paste_pbpaste() -> str:
-    return decode_safe(
-        subprocess.run(["pbpaste"], capture_output=True, check=True).stdout,
-        from_subprocess=True,
-    ).text
-
-
-def _paste_xclip() -> str:
-    return decode_safe(
-        subprocess.run(
-            ["xclip", "-selection", "clipboard", "-o"], capture_output=True, check=True
-        ).stdout,
-        from_subprocess=True,
-    ).text
-
-
-def _paste_wl_paste() -> str:
-    return decode_safe(
-        subprocess.run(["wl-paste"], capture_output=True, check=True).stdout,
-        from_subprocess=True,
-    ).text
-
-
-_PASTE_CMD_STRATEGIES: list[tuple[str, Callable[[], str]]] = [
-    ("pbpaste", _paste_pbpaste),
-    ("xclip", _paste_xclip),
-    ("wl-paste", _paste_wl_paste),
-]
-
-_READ_CLIPBOARD_METHODS: list[Callable[[], str]] = [
-    _paste_pyperclip,
-    *[fn for cmd, fn in _PASTE_CMD_STRATEGIES if _has_cmd(cmd)],
-]
-
-
-def _read_clipboard() -> str | None:
-    for reader in _READ_CLIPBOARD_METHODS:
+    verified = False
+    if not _is_ssh_session():
         try:
-            return reader()
+            verified = _copy_native(text)
         except Exception:
-            pass
-    return None
+            verified = False
+
+    try:
+        _copy_osc52(text)
+    except Exception:
+        pass
+
+    return verified
 
 
-def _copy_to_clipboard(text: str) -> None:
-    all_strategies_failed = True
-    for to_clipboard in _COPY_METHODS:
-        try:
-            to_clipboard(text)
-        except Exception:
-            pass
-        else:
-            all_strategies_failed = False
-            if _read_clipboard() == text:
-                return
-
-    if all_strategies_failed:
-        raise RuntimeError("All clipboard strategies failed")
+class _SelectedText(NamedTuple):
+    column: int  # widget's rendered left column, used to restore indentation
+    text: str  # selected text inside the widget
+    ending: str  # the widget's own line ending ("\n", " ", "" ...)
 
 
-def _get_selected_texts(app: App) -> list[str]:
-    selected_texts = []
+def _widget_column(widget: Widget) -> int:
+    """Return the widget's rendered left column"""
+    try:
+        return widget.region.x
+    except Exception:
+        return 0
+
+
+def _get_selected_texts(app: App) -> list[_SelectedText]:
+    """Collect the selected text of every widget."""
+    selected_texts: list[_SelectedText] = []
 
     for widget in app.query("*"):
         if isinstance(widget, (TextArea, Input)):
             if (selected_text := widget.selected_text).strip():
-                selected_texts.append(selected_text)
+                selected_texts.append(
+                    _SelectedText(_widget_column(widget), selected_text, "\n")
+                )
             continue
 
         try:
@@ -150,11 +105,33 @@ def _get_selected_texts(app: App) -> list[str]:
         if not result:
             continue
 
-        selected_text, _ = result
+        selected_text, ending = result
         if selected_text.strip():
-            selected_texts.append(selected_text)
+            selected_texts.append(
+                _SelectedText(
+                    _widget_column(widget),
+                    selected_text,
+                    ending if isinstance(ending, str) else "\n",
+                )
+            )
 
     return selected_texts
+
+
+def _join_selected_texts(selected_texts: list[_SelectedText]) -> str:
+    """Join selections, honoring each widget's line ending and restoring per-line indentation."""
+    base_column = min(item.column for item in selected_texts)
+
+    parts: list[str] = []
+    at_line_start = True
+    for item in selected_texts:
+        if at_line_start:
+            parts.append(" " * max(0, item.column - base_column))
+        parts.append(item.text)
+        parts.append(item.ending)
+        at_line_start = item.ending.endswith("\n")
+
+    return "".join(parts).rstrip("\n")
 
 
 def copy_text_to_clipboard(
@@ -163,41 +140,37 @@ def copy_text_to_clipboard(
     *,
     show_toast: bool = True,
     success_message: str = "Copied to clipboard",
-) -> str | None:
+) -> ClipboardCopyResult | None:
     if not text:
         return None
 
-    if try_copy_text_to_clipboard(text):
-        if show_toast:
+    verified = copy_to_clipboard(text)
+
+    if show_toast:
+        if verified:
             app.notify(success_message, severity="information", timeout=2, markup=False)
-        return text
-
-    app.notify(
-        "Failed to copy - clipboard not available", severity="warning", timeout=3
-    )
-    return None
-
-
-def try_copy_text_to_clipboard(text: str) -> bool:
-    if not text:
-        return False
-
-    try:
-        _copy_to_clipboard(text)
-    except Exception:
-        return False
-
-    return True
+        else:
+            app.notify(
+                f"{success_message} · {NATIVE_COPY_HINT}",
+                severity="information",
+                timeout=6,
+                markup=False,
+            )
+    return ClipboardCopyResult(text=text, verified=verified)
 
 
-def copy_selection_to_clipboard(app: App, show_toast: bool = True) -> str | None:
+def copy_selection_to_clipboard(
+    app: App, show_toast: bool = True
+) -> ClipboardCopyResult | None:
     selected_texts = _get_selected_texts(app)
     if not selected_texts:
         return None
 
+    joined = _join_selected_texts(selected_texts)
+
     return copy_text_to_clipboard(
         app,
-        "\n".join(selected_texts),
+        joined,
         show_toast=show_toast,
         success_message="Selection copied to clipboard",
     )

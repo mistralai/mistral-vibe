@@ -59,6 +59,7 @@ from vibe.questions import (
     UserQuestionResult as UserQuestionResult,
 )
 from vibe.user_content import UserDisplayContent as UserDisplayContent, UserResource
+from vibe.utils.pricing import session_token_cost
 from vibe.utils.tool_presentation import (
     EffectCallDisplay as EffectCallDisplay,
     EffectResultDisplay as EffectResultDisplay,
@@ -238,6 +239,18 @@ class PublicTurnStopReason(StrEnum):
     LIMIT = auto()
 
 
+class TurnErrorCode(StrEnum):
+    RATE_LIMIT = auto()
+    CONTEXT_TOO_LONG = auto()
+    RESPONSE_TOO_LONG = auto()
+    REFUSAL = auto()
+    INVALID_IMAGE_ATTACHMENT = auto()
+    IMAGES_NOT_SUPPORTED = auto()
+    COMPACTION_FAILED = auto()
+    BACKEND_ERROR = auto()
+    INTERNAL_ERROR = auto()
+
+
 class PublicError(ProtocolModel):
     message: str
     code: str | None = None
@@ -254,8 +267,10 @@ class AgentStatsSnapshot(ProtocolModel):
     steps: int = 0
     session_prompt_tokens: int = 0
     session_completion_tokens: int = 0
+    session_cached_tokens: int = 0
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
+    cached_input_price_per_million: float | None = None
     tool_calls_agreed: int = 0
     tool_calls_rejected: int = 0
     tool_calls_failed: int = 0
@@ -263,6 +278,7 @@ class AgentStatsSnapshot(ProtocolModel):
     context_tokens: int = 0
     last_turn_prompt_tokens: int = 0
     last_turn_completion_tokens: int = 0
+    last_turn_cached_tokens: int = 0
     last_turn_duration: float = 0.0
     tokens_per_second: float = 0.0
 
@@ -276,9 +292,13 @@ class AgentStatsSnapshot(ProtocolModel):
 
     @property
     def session_cost(self) -> float:
-        return (
-            self.session_prompt_tokens / 1_000_000 * self.input_price_per_million
-            + self.session_completion_tokens / 1_000_000 * self.output_price_per_million
+        return session_token_cost(
+            prompt_tokens=self.session_prompt_tokens,
+            completion_tokens=self.session_completion_tokens,
+            cached_tokens=self.session_cached_tokens,
+            input_price_per_million=self.input_price_per_million,
+            output_price_per_million=self.output_price_per_million,
+            cached_input_price_per_million=self.cached_input_price_per_million,
         )
 
     @property

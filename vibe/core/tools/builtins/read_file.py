@@ -21,7 +21,7 @@ from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
-from vibe.core.utils import VIBE_WARNING_TAG
+from vibe.utils import VIBE_WARNING_TAG
 from vibe.utils.io import read_lines_safe_async
 from vibe.utils.tool_presentation import ToolEffectKind
 

@@ -74,6 +74,7 @@ from vibe.app_server.models import (
     TeleportPushRequired,
     TeleportStartingWorkflow,
     TeleportSummarizingContext,
+    TurnErrorCode,
     UserInputCallbackDetail,
     UserInputCallbackOutput,
     UserQuestion,
@@ -83,8 +84,13 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import AppServerResponseError, ShellRunResponse
 from vibe.app_server.session import AppServerTurnError
-from vibe.cli.clipboard import copy_selection_to_clipboard, copy_text_to_clipboard
-from vibe.cli.commands import CommandContext, CommandRegistry
+from vibe.cli.clipboard import (
+    NATIVE_COPY_HINT,
+    ClipboardCopyResult,
+    copy_selection_to_clipboard,
+    copy_text_to_clipboard,
+)
+from vibe.cli.commands import CommandContext, CommandRegistry, build_retry_prompt
 from vibe.cli.lazy_audio_managers import (
     check_audio_available,
     create_default_narrator_manager,
@@ -164,6 +170,7 @@ from vibe.cli.textual_ui.widgets.path_display import PathDisplay
 from vibe.cli.textual_ui.widgets.proxy_setup_app import ProxySetupApp
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.cli.textual_ui.widgets.rewind_app import RewindApp
+from vibe.cli.textual_ui.widgets.rewind_fork_message import RewindForkMessage
 from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
 from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
 from vibe.cli.textual_ui.widgets.theme_picker import ThemePickerApp, sorted_theme_names
@@ -225,11 +232,18 @@ _VSCODE_FAMILY_TERMINALS = {Terminal.VSCODE, Terminal.VSCODE_INSIDERS, Terminal.
 
 # Expected turn outcomes with bespoke user messages; not worth reporting to Sentry.
 _BENIGN_TURN_ERROR_CODES = {
-    "rate_limit",
-    "context_too_long",
-    "response_too_long",
-    "refusal",
+    TurnErrorCode.RATE_LIMIT,
+    TurnErrorCode.CONTEXT_TOO_LONG,
+    TurnErrorCode.RESPONSE_TOO_LONG,
+    TurnErrorCode.REFUSAL,
 }
+
+_RETRYABLE_TURN_ERROR_CODES = {
+    TurnErrorCode.BACKEND_ERROR,
+    TurnErrorCode.RATE_LIMIT,
+    TurnErrorCode.RESPONSE_TOO_LONG,
+}
+
 
 if TYPE_CHECKING:
     from vibe.cli.textual_ui.widgets.connector_auth_app import ConnectorAuthApp
@@ -1567,12 +1581,13 @@ class VibeApp(App):  # noqa: PLR0904
                 if command_text.startswith("/")
                 else cmd_name
             )
-            await self._mount_and_scroll(SlashCommandMessage(display))
+            command_message = SlashCommandMessage(display)
+            await self._mount_and_scroll(command_message)
             handler = getattr(self, command.handler)
             if asyncio.iscoroutinefunction(handler):
-                await handler(cmd_args=cmd_args)
+                await handler(cmd_args=cmd_args, command_message=command_message)
             else:
-                handler(cmd_args=cmd_args)
+                handler(cmd_args=cmd_args, command_message=command_message)
             return True
         return False
 
@@ -1686,6 +1701,8 @@ class VibeApp(App):  # noqa: PLR0904
     def _reset_ui_state(self) -> None:
         self._windowing.reset()
         self._history_widget_indices = WeakKeyDictionary()
+        if self.event_handler is not None:
+            self.event_handler.cancel_retry_presentation()
 
     async def _deferred_resume_and_start(self) -> None:
         await self._resume_history_from_messages()
@@ -1918,9 +1935,7 @@ class VibeApp(App):  # noqa: PLR0904
             await self._handle_turn_error()
             message = self._resolve_turn_error_message(error)
             self._narrator_manager.on_turn_error(message)
-            await self._mount_and_scroll(
-                ErrorMessage(message, collapsed=self._tools_collapsed)
-            )
+            await self._mount_turn_error(error, message)
         elif event.turn.status is PublicTurnStatus.INTERRUPTED:
             await self._handle_turn_error(cancelled=True)
             self._narrator_manager.on_turn_cancel()
@@ -1949,25 +1964,39 @@ class VibeApp(App):  # noqa: PLR0904
         *,
         prepared_prompt: PreparedPrompt | None = None,
         client_message_id: str | None = None,
+        injected: bool = False,
     ) -> None:
         await self._remove_loading_widget()
 
         try:
             await self._ensure_runtime_ready()
             await self._ensure_loading_widget()
-            message_id = client_message_id or str(uuid4())
-            prepared = prepared_prompt or await self._prepare_prompt_or_abort(prompt)
-            if prepared is None:
-                return
+            if injected:
+                prompt_text = prompt
+                auto_title = None
+                images = None
+                mentions = None
+            else:
+                prepared = prepared_prompt or await self._prepare_prompt_or_abort(
+                    prompt
+                )
+                if prepared is None:
+                    return
+                prompt_text = prepared.prompt_text
+                auto_title = prepared.auto_title
+                images = prepared.images or None
+                mentions = prepared.mentions
+            message_id = None if injected else client_message_id or str(uuid4())
             self._narrator_manager.cancel()
-            self._narrator_manager.on_turn_start(prepared.prompt_text)
+            self._narrator_manager.on_turn_start("" if injected else prompt_text)
             async with aclosing(
                 self.app_server.act(
-                    prepared.prompt_text,
+                    prompt_text,
                     client_message_id=message_id,
-                    auto_title=prepared.auto_title,
-                    images=prepared.images or None,
-                    mention_stats=prepared.mentions,
+                    auto_title=auto_title,
+                    images=images,
+                    mention_stats=mentions,
+                    injected=injected,
                 )
             ) as events:
                 await self._handle_turn_events(events)
@@ -1995,11 +2024,38 @@ class VibeApp(App):  # noqa: PLR0904
             message = self._resolve_turn_error_message(e)
             self._narrator_manager.on_turn_error(message)
 
-            await self._mount_and_scroll(
-                ErrorMessage(message, collapsed=self._tools_collapsed)
-            )
+            await self._mount_turn_error(e, message)
         finally:
             await self._finalize_turn_ui()
+
+    async def _mount_turn_error(self, error: Exception, message: str) -> None:
+        widget = ErrorMessage(message, collapsed=self._tools_collapsed)
+        await self._mount_and_scroll(widget)
+        if (
+            self.event_handler is not None
+            and isinstance(error, AppServerTurnError)
+            and error.error.code in _RETRYABLE_TURN_ERROR_CODES
+        ):
+            self.event_handler.offer_retry(widget)
+
+    async def _retry(
+        self,
+        cmd_args: str = "",
+        command_message: SlashCommandMessage | None = None,
+        **_kwargs: Any,
+    ) -> None:
+        if self._agent_job_active():
+            return
+        if (
+            self.event_handler is None
+            or command_message is None
+            or not self.event_handler.begin_retry(command_message)
+        ):
+            return
+        self._agent_task = asyncio.create_task(
+            self._handle_turn(build_retry_prompt(cmd_args), injected=True)
+        )
+        self._queue.notify_busy_changed()
 
     async def _finalize_turn_ui(self) -> None:
         self._narrator_manager.on_turn_end()
@@ -2019,14 +2075,26 @@ class VibeApp(App):  # noqa: PLR0904
     def _resolve_turn_error_message(self, e: Exception) -> str:
         if not isinstance(e, AppServerTurnError):
             return str(e)
-        match e.error.code:
-            case "rate_limit":
-                return self._rate_limit_message()
-            case "context_too_long":
+        code = e.error.code
+        match code:
+            case TurnErrorCode.RATE_LIMIT:
+                base = self._rate_limit_message()
+            case TurnErrorCode.CONTEXT_TOO_LONG:
                 return self._context_too_long_message()
-            case "refusal":
+            case TurnErrorCode.REFUSAL:
                 return self._refusal_message(e.error)
-        return str(e)
+            case _:
+                base = str(e)
+        if code in _RETRYABLE_TURN_ERROR_CODES:
+            return f"{base}{self._retry_hint()}"
+        return base
+
+    @staticmethod
+    def _retry_hint() -> str:
+        return (
+            "\n\nRun /retry [additional instructions] to continue the interrupted "
+            "response."
+        )
 
     def _rate_limit_message(self) -> str:
         account = self.app_server.resources.account.current
@@ -2334,12 +2402,12 @@ class VibeApp(App):  # noqa: PLR0904
             )
             return
 
-        copied_text = copy_text_to_clipboard(
+        copy_result = copy_text_to_clipboard(
             self, content, success_message="Last agent message copied to clipboard"
         )
-        if copied_text is not None:
+        if copy_result is not None:
             self.app_server.resources.telemetry.record(
-                "vibe.user_copied_text", {"text_length": len(copied_text)}
+                "vibe.user_copied_text", {"text_length": len(copy_result.text)}
             )
 
     async def _refresh_mcp_browser(self) -> str:
@@ -2511,13 +2579,23 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _show_status(self, **kwargs: Any) -> None:
         stats = self.app_server.resources.runtime.stats
+        session_cached = (
+            f" _(including {stats.session_cached_tokens:,} cached)_"
+            if stats.session_cached_tokens > 0
+            else ""
+        )
+        last_turn_cached = (
+            f" _(including {stats.last_turn_cached_tokens:,} cached)_"
+            if stats.last_turn_cached_tokens > 0
+            else ""
+        )
         status_text = f"""## Agent Statistics
 
 - **Steps**: {stats.steps:,}
-- **Session Prompt Tokens**: {stats.session_prompt_tokens:,}
+- **Session Prompt Tokens**: {stats.session_prompt_tokens:,}{session_cached}
 - **Session Completion Tokens**: {stats.session_completion_tokens:,}
 - **Session Total LLM Tokens**: {stats.session_total_llm_tokens:,}
-- **Last Turn Tokens**: {stats.last_turn_total_tokens:,}
+- **Last Turn Tokens**: {stats.last_turn_total_tokens:,}{last_turn_cached}
 - **Cost**: ${stats.session_cost:.4f}
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
@@ -2693,6 +2771,11 @@ class VibeApp(App):  # noqa: PLR0904
         if self._chat_input_container:
             self._chat_input_container.set_custom_border(None)
         self._refresh_profile_widgets()
+        runtime = self.app_server.resources.runtime
+        self.query_one(ContextProgress).tokens = TokenState(
+            max_tokens=runtime.context_window,
+            current_tokens=runtime.stats.context_tokens,
+        )
 
         self._reset_ui_state()
         await self._load_more.hide()
@@ -2928,6 +3011,7 @@ class VibeApp(App):  # noqa: PLR0904
         bottom_container = self.query_one("#bottom-app-container")
         chat = self._chat_widget
         should_scroll = scroll and chat.is_at_bottom
+        stale_bottom_apps = self._mounted_non_input_bottom_apps()
 
         with self.batch_update():
             if self._chat_input_container:
@@ -2935,6 +3019,9 @@ class VibeApp(App):  # noqa: PLR0904
                 self._chat_input_container.disabled = True
 
             self._feedback_bar.hide()
+
+            for stale in stale_bottom_apps:
+                await stale.remove()
 
             self._current_bottom_app = BottomApp[
                 type(widget).__name__.removesuffix("App")
@@ -2944,6 +3031,17 @@ class VibeApp(App):  # noqa: PLR0904
         self.call_after_refresh(widget.focus)
         if should_scroll:
             self.call_after_refresh(chat.anchor)
+
+    def _mounted_non_input_bottom_apps(self) -> list[Widget]:
+        mounted: list[Widget] = []
+        for app in BottomApp:
+            if app == BottomApp.Input:
+                continue
+            try:
+                mounted.append(self.query_one(f"#{app.value}-app"))
+            except Exception:
+                pass
+        return mounted
 
     async def _replace_bottom_app(self, widget: Widget, scroll: bool = False) -> None:
         bottom_container = self.query_one("#bottom-app-container")
@@ -3334,15 +3432,21 @@ class VibeApp(App):  # noqa: PLR0904
         self._clear_rewind_state()
         await self._switch_to_input_app()
 
-    async def on_rewind_app_rewind_with_restore(
-        self, message: RewindApp.RewindWithRestore
-    ) -> None:
-        await self._execute_rewind(restore_files=True)
+    def _handle_rewind_app_escape(self) -> None:
+        try:
+            rewind_app = self.query_one(RewindApp)
+        except Exception:
+            rewind_app = None
+        if rewind_app is not None and rewind_app.go_back():
+            return
+        self.action_rewind_prev()
 
-    async def on_rewind_app_rewind_without_restore(
-        self, message: RewindApp.RewindWithoutRestore
+    async def on_rewind_app_rewind_confirmed(
+        self, message: RewindApp.RewindConfirmed
     ) -> None:
-        await self._execute_rewind(restore_files=False)
+        await self._execute_rewind(
+            restore_files=message.restore_files, inplace=message.inplace
+        )
 
     def on_rewind_app_edit_prev(self, message: RewindApp.EditPrev) -> None:
         self.action_rewind_prev()
@@ -3353,8 +3457,7 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_rewind_app_quit(self, message: RewindApp.Quit) -> None:
         await self._exit_rewind_mode()
 
-    async def _execute_rewind(self, *, restore_files: bool) -> None:
-        """Rewind model context while preserving the public timeline."""
+    async def _execute_rewind(self, *, restore_files: bool, inplace: bool) -> None:
         if not self._rewind_mode or self._rewind_highlighted_widget is None:
             return
 
@@ -3363,9 +3466,10 @@ class VibeApp(App):  # noqa: PLR0904
         if entry_id is None:
             return
 
+        old_session_id = self.app_server.session_id
         try:
             result = await self.app_server.resources.sessions.rewind(
-                entry_id, restore_files=restore_files
+                entry_id, restore_files=restore_files, inplace=inplace
             )
             await self.app_server.resources.refresh()
         except AppServerResponseError as exc:
@@ -3382,6 +3486,13 @@ class VibeApp(App):  # noqa: PLR0904
         await self._switch_to_input_app()
         await self._reset_message_widgets()
         await self._resume_history_from_messages()
+        if not inplace:
+            await self._mount_and_scroll(
+                RewindForkMessage(
+                    old_session_id=old_session_id,
+                    new_session_id=self.app_server.session_id,
+                )
+            )
         if self._chat_input_container:
             self._chat_input_container.value = message_content
 
@@ -3445,7 +3556,7 @@ class VibeApp(App):  # noqa: PLR0904
         if handler := handlers.get(self._current_bottom_app):
             handler()
         elif self._current_bottom_app == BottomApp.Rewind:
-            self.action_rewind_prev()
+            self._handle_rewind_app_escape()
             self._last_escape_time = None
         elif (
             self._current_bottom_app == BottomApp.Input
@@ -3938,27 +4049,39 @@ class VibeApp(App):  # noqa: PLR0904
         except Exception as exc:
             logger.debug("Update check failed", exc_info=exc)
 
+    def _clipboard_notice_message(self, copy_result: ClipboardCopyResult) -> str:
+        if copy_result.verified:
+            return "Copied to clipboard"
+        return f"Copied · {NATIVE_COPY_HINT}"
+
+    def _show_clipboard_notice(self, message: str) -> None:
+        self._clipboard_notice.update(message)
+        self._clipboard_notice.display = True
+        if self._clipboard_hide_timer is not None:
+            self._clipboard_hide_timer.stop()
+        self._clipboard_hide_timer = self.set_timer(
+            4.0, lambda: setattr(self._clipboard_notice, "display", False)
+        )
+
     def action_copy_selection(self) -> None:
-        copied_text = copy_selection_to_clipboard(self, show_toast=False)
-        if copied_text is not None:
-            self.app_server.resources.telemetry.record(
-                "vibe.user_copied_text", {"text_length": len(copied_text)}
-            )
+        copy_result = copy_selection_to_clipboard(self, show_toast=False)
+        if copy_result is None:
+            return
+        self._show_clipboard_notice(self._clipboard_notice_message(copy_result))
+        self.app_server.resources.telemetry.record(
+            "vibe.user_copied_text", {"text_length": len(copy_result.text)}
+        )
 
     def on_mouse_up(self, event: MouseUp) -> None:
-        if self.config.autocopy_to_clipboard:
-            copied_text = copy_selection_to_clipboard(self, show_toast=False)
-            if copied_text is not None:
-                self._clipboard_notice.update("Selection copied to clipboard")
-                self._clipboard_notice.display = True
-                if self._clipboard_hide_timer is not None:
-                    self._clipboard_hide_timer.stop()
-                self._clipboard_hide_timer = self.set_timer(
-                    2.0, lambda: setattr(self._clipboard_notice, "display", False)
-                )
-                self.app_server.resources.telemetry.record(
-                    "vibe.user_copied_text", {"text_length": len(copied_text)}
-                )
+        if not self.config.autocopy_to_clipboard:
+            return
+        copy_result = copy_selection_to_clipboard(self, show_toast=False)
+        if copy_result is None:
+            return
+        self._show_clipboard_notice(self._clipboard_notice_message(copy_result))
+        self.app_server.resources.telemetry.record(
+            "vibe.user_copied_text", {"text_length": len(copy_result.text)}
+        )
 
     def on_app_blur(self, event: AppBlur) -> None:
         self._terminal_notifier.on_blur()

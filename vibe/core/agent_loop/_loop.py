@@ -62,8 +62,6 @@ from vibe.core.llm.format import (
 )
 from vibe.core.llm.types import BackendLike
 from vibe.core.middleware import (
-    CHAT_AGENT_EXIT,
-    CHAT_AGENT_REMINDER,
     PLAN_AGENT_EXIT,
     AutoCompactMiddleware,
     ContextWarningMiddleware,
@@ -177,12 +175,13 @@ from vibe.core.types import (
 from vibe.core.utils import (
     TOOL_ERROR_TAG,
     VIBE_STOP_EVENT_TAG,
-    VIBE_WARNING_TAG,
     CancellationReason,
+    RetryObserver,
     get_user_cancellation_message,
     is_user_cancellation_event,
 )
 from vibe.user_content import UserDisplayContent, UserResource
+from vibe.utils import VIBE_WARNING_TAG
 from vibe.utils.api_keys import resolve_api_key
 from vibe.utils.cache_store import CacheStore, InMemoryCacheStore
 from vibe.utils.http import get_server_url_from_api_base, get_user_agent
@@ -277,6 +276,24 @@ class _PreparedReload:
     system_prompt: str
     config_source: _SwappableConfigSource
     hook_config_result: HookConfigResult | None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTurnOptions:
+    retry_sink: RetryObserver | None = None
+    injected: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveTurn:
+    """Collaborators lent to the loop for one turn; its presence means one is running."""
+
+    subagent_runner: SubagentRunnerPort | None = None
+    tool_io: ToolIOPort | None = None
+    retry_sink: RetryObserver | None = None
+
+
+_NO_TURN = _ActiveTurn()
 
 
 class AgentLoopError(Exception):
@@ -506,15 +523,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.stats = AgentStats()
         self._tool_event_queue: asyncio.Queue[BaseEvent | None] | None = None
         self._request_broker = InteractionRequestBroker()
-        self._turn_active = False
-        self._active_subagent_runner: SubagentRunnerPort | None = None
-        self._active_tool_io: ToolIOPort | None = None
+        self._active_turn: _ActiveTurn | None = None
         self.launch_context = launch_context
         config = self.config
         try:
             active_model = config.get_active_model()
             self.stats.input_price_per_million = active_model.input_price
             self.stats.output_price_per_million = active_model.output_price
+            self.stats.cached_input_price_per_million = active_model.cached_input_price
         except ValueError:
             pass
 
@@ -987,6 +1003,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         """Rebuild and replace the system prompt with current tool/skill state."""
         self.messages.update_system_prompt(self._build_system_prompt())
 
+    @property
+    def _turn(self) -> _ActiveTurn:
+        return self._active_turn or _NO_TURN
+
+    async def notice_retry(self, reason: str) -> None:
+        if (sink := self._turn.retry_sink) is not None:
+            await sink(reason)
+
     def backend_factory(self, config: VibeConfigSchema | None = None) -> BackendLike:
         return self._injected_backend or self._select_backend(config)
 
@@ -995,6 +1019,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         provider = config.get_active_provider()
         return create_backend(
             provider=provider,
+            on_retry=self.notice_retry,
             timeout=config.api_timeout,
             retry_max_elapsed_time=config.api_retry_max_elapsed_time,
             enable_otel=(
@@ -1085,6 +1110,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         resources: list[UserResource] | None = None,
         subagent_runner: SubagentRunnerPort | None = None,
         tool_io: ToolIOPort | None = None,
+        turn_options: AgentTurnOptions | None = None,
     ) -> AsyncGenerator[BaseEvent, None]:
         try:
             active_model = self.config.get_active_model()
@@ -1094,11 +1120,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             model_name = None
         if images and active_model is not None and not active_model.supports_images:
             raise ImagesNotSupportedError(active_model.alias)
-        if self._turn_active:
+        if self._active_turn is not None:
             raise AgentLoopStateError("A turn is already active")
-        self._turn_active = True
-        self._active_subagent_runner = subagent_runner
-        self._active_tool_io = tool_io
+        options = turn_options or AgentTurnOptions()
+        self._active_turn = _ActiveTurn(
+            subagent_runner=subagent_runner,
+            tool_io=tool_io,
+            retry_sink=options.retry_sink,
+        )
         try:
             self._clean_message_history()
             self.checkpoint_recorder.create_checkpoint()
@@ -1112,14 +1141,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                         user_display_content=user_display_content,
                         input_text=input_text,
                         resources=resources,
+                        injected=options.injected,
                     ):
                         yield event
             finally:
                 self.checkpoint_recorder.seal_turn()
         finally:
-            self._turn_active = False
-            self._active_subagent_runner = None
-            self._active_tool_io = None
+            self._active_turn = None
 
     @property
     def teleport_service(self) -> TeleportService:
@@ -1340,14 +1368,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 PLAN_AGENT_EXIT,
             )
         )
-        self.middleware_pipeline.add(
-            ReadOnlyAgentMiddleware(
-                lambda: self.agent_profile,
-                BuiltinAgentName.CHAT,
-                CHAT_AGENT_REMINDER,
-                CHAT_AGENT_EXIT,
-            )
-        )
 
     async def _handle_middleware_result(
         self, result: MiddlewareResult
@@ -1466,7 +1486,26 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         user_display_content: UserDisplayContent | None = None,
         input_text: str | None = None,
         resources: list[UserResource] | None = None,
+        injected: bool = False,
     ) -> AsyncGenerator[BaseEvent]:
+        if injected:
+            self.messages.append(
+                LLMMessage(
+                    role=Role.user,
+                    content=user_msg,
+                    injected=True,
+                    images=images or None,
+                    user_display_content=user_display_content,
+                    input_text=input_text,
+                    resources=resources or None,
+                )
+            )
+            last_user = self._last_user_message()
+            self._current_user_message_id = (
+                last_user.message_id if last_user is not None else None
+            )
+            return
+
         user_message = LLMMessage(
             role=Role.user,
             content=user_msg,
@@ -1515,6 +1554,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         user_display_content: UserDisplayContent | None = None,
         input_text: str | None = None,
         resources: list[UserResource] | None = None,
+        injected: bool = False,
     ) -> AsyncGenerator[BaseEvent]:
         async for event in self._open_user_turn(
             user_msg,
@@ -1524,6 +1564,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             user_display_content=user_display_content,
             input_text=input_text,
             resources=resources,
+            injected=injected,
         ):
             yield event
 
@@ -2109,7 +2150,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 session_dir=self.session_logger.session_dir,
                 launch_context=self.launch_context,
                 interaction_requests=self._request_broker,
-                subagent_runner=self._active_subagent_runner,
+                subagent_runner=self._turn.subagent_runner,
                 sampling_callback=self._sampling_handler,
                 plan_file_path=self._plan_session.plan_file_path,
                 switch_agent_callback=self.switch_agent,
@@ -2121,7 +2162,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 hook_config_result=self._hook_config_result,
                 session_id=self.session_id,
                 mcp_pool=self._mcp_pool,
-                tool_io=self._active_tool_io,
+                tool_io=self._turn.tool_io,
             ),
             **tool_call.args_dict,
         ):
@@ -2438,10 +2479,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             ),
         )
 
+        chunk_agg: LLMChunk | None = None
         try:
             start_time = time.perf_counter()
             usage = LLMUsage()
-            chunk_agg: LLMChunk | None = None
             async for chunk in self.backend.complete_streaming(
                 model=active_model,
                 messages=self._messages_for_backend(self.messages, active_model),
@@ -2482,6 +2523,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         except Exception as e:
             if isinstance(e, RefusalError):
                 raise
+            if isinstance(e, BackendError):
+                self._record_interrupted_assistant(chunk_agg)
             if _should_raise_rate_limit_error(e):
                 raise RateLimitError(provider.name, active_model.name) from e
             if _is_context_too_long_error(e):
@@ -2494,6 +2537,17 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             raise RuntimeError(
                 f"API error from {provider.name} (model: {active_model.name}): {e}"
             ) from e
+
+    def _record_interrupted_assistant(self, chunk: LLMChunk | None) -> None:
+        if chunk is None or not chunk.message.content:
+            return
+        self.messages.append(
+            LLMMessage(
+                role=Role.assistant,
+                content=chunk.message.content,
+                message_id=chunk.message.message_id,
+            )
+        )
 
     def _update_stats(self, usage: LLMUsage, time_seconds: float) -> None:
         self.stats.last_turn_duration = time_seconds
@@ -2590,7 +2644,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         try:
             active_model = self.config.get_active_model()
             self.stats.update_pricing(
-                active_model.input_price, active_model.output_price
+                active_model.input_price,
+                active_model.output_price,
+                active_model.cached_input_price,
             )
         except ValueError:
             pass
@@ -2796,7 +2852,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         try:
             active_model = self.config.get_active_model()
             self.stats.update_pricing(
-                active_model.input_price, active_model.output_price
+                active_model.input_price,
+                active_model.output_price,
+                active_model.cached_input_price,
             )
         except ValueError:
             pass

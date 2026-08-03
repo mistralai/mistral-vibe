@@ -82,6 +82,7 @@ class TestACPAuthStatus:
             "authenticated": False,
             "authState": AuthStateKind.SIGNED_OUT.value,
             "signOutAvailable": False,
+            "customDomain": None,
         }
 
     @pytest.mark.asyncio
@@ -98,6 +99,7 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.VIBE_HOME_ENV_FILE.value,
             "signOutAvailable": True,
+            "customDomain": None,
         }
 
     @pytest.mark.asyncio
@@ -120,6 +122,7 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.VIBE_HOME_ENV_FILE.value,
             "signOutAvailable": True,
+            "customDomain": None,
         }
 
     @pytest.mark.asyncio
@@ -135,6 +138,7 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.PROCESS_ENV.value,
             "signOutAvailable": False,
+            "customDomain": None,
         }
 
     @pytest.mark.asyncio
@@ -151,6 +155,7 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.PROCESS_ENV.value,
             "signOutAvailable": False,
+            "customDomain": None,
         }
 
     @pytest.mark.asyncio
@@ -169,6 +174,7 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.OS_KEYRING.value,
             "signOutAvailable": True,
+            "customDomain": None,
         }
 
     @pytest.mark.asyncio
@@ -186,6 +192,7 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.AUTH_NOT_REQUIRED.value,
             "signOutAvailable": False,
+            "customDomain": None,
         }
 
     @pytest.mark.asyncio
@@ -202,6 +209,7 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.UNSUPPORTED_PROVIDER.value,
             "signOutAvailable": False,
+            "customDomain": None,
         }
 
 
@@ -227,6 +235,7 @@ class TestACPAuthSignOut:
             "authenticated": False,
             "authState": AuthStateKind.SIGNED_OUT.value,
             "signOutAvailable": False,
+            "customDomain": None,
         }
 
     @pytest.mark.asyncio

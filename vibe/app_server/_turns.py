@@ -37,7 +37,6 @@ from vibe.app_server.models import (
     PublicTurnStatus,
     PublicTurnStopReason,
     ScheduledLoopFiredNoticeDetail,
-    UserDisplayContent,
     UserInputCallbackDetail,
     UserInputCallbackOutput,
     UserQuestionRequest,
@@ -53,13 +52,14 @@ from vibe.app_server.protocol import (
     TurnCompletedParams,
     TurnInterruptParams,
     TurnInterruptResponse,
+    TurnRetryingParams,
     TurnStartedParams,
     TurnStartParams,
     TurnStartResponse,
     TurnSteerParams,
     TurnSteerResponse,
 )
-from vibe.core.agent_loop import AgentLoop
+from vibe.core.agent_loop import AgentLoop, AgentTurnOptions
 from vibe.core.subagents import SubagentRunnerPort
 from vibe.core.tools.io_port import ToolIOPort
 from vibe.core.types import (
@@ -203,13 +203,10 @@ class TurnController:
                     turn,
                     decoded.prompt,
                     session_execution=session_execution,
-                    client_message_id=params.client_user_message_id,
-                    auto_title=params.auto_title,
+                    params=params,
                     images=decoded.images,
                     input_text=(decoded.input_text if decoded.resources else None),
                     resources=decoded.resources,
-                    user_display_content=params.user_display_content,
-                    mention_stats=params.mention_stats,
                 )
             )
 
@@ -389,13 +386,10 @@ class TurnController:
         prompt: str,
         *,
         session_execution: ActiveSessionExecution,
-        client_message_id: str | None,
-        auto_title: str | None,
+        params: TurnStartParams,
         images: list[ImageAttachment],
         input_text: str | None,
         resources: list[UserResource],
-        user_display_content: UserDisplayContent | None,
-        mention_stats: MentionStats | None,
     ) -> None:
         await self._notify(
             "turn/started",
@@ -405,22 +399,26 @@ class TurnController:
         )
         await self._emit_status("running")
         await self._emit_stats()
+        last_context_tokens = self._agent_loop.stats.context_tokens
         status = PublicTurnStatus.COMPLETED
         error: PublicError | None = None
         stop_reason: PublicTurnStopReason | None = None
         try:
-            self._record_mentions(mention_stats, client_message_id)
+            self._record_mentions(params.mention_stats, params.client_user_message_id)
             async with aclosing(
                 self._agent_loop.act(
                     prompt,
-                    client_message_id=client_message_id,
-                    auto_title=auto_title,
+                    client_message_id=params.client_user_message_id,
+                    auto_title=params.auto_title,
                     images=images or None,
                     input_text=input_text,
                     resources=resources or None,
-                    user_display_content=user_display_content,
+                    user_display_content=params.user_display_content,
                     subagent_runner=self._subagent_runner,
                     tool_io=self._tool_io,
+                    turn_options=AgentTurnOptions(
+                        retry_sink=self._emit_retrying, injected=params.injected
+                    ),
                 )
             ) as events:
                 async for event in events:
@@ -435,6 +433,10 @@ class TurnController:
                     ):
                         stop_reason = PublicTurnStopReason.LIMIT
                     await self._project_events([event])
+                    context_tokens = self._agent_loop.stats.context_tokens
+                    if context_tokens != last_context_tokens:
+                        last_context_tokens = context_tokens
+                        await self._emit_stats()
                     if isinstance(event, UserMessageEvent) and (
                         loop_id := self._scheduled_loop_id
                     ):
@@ -692,6 +694,12 @@ class TurnController:
 
     async def _emit_projected(self, update: ProjectedUpdate) -> None:
         await self._notify(update.method, update.params)
+
+    async def _emit_retrying(self, reason: str) -> None:
+        await self._notify(
+            "turn/retrying",
+            TurnRetryingParams(session_id=self._agent_loop.session_id, reason=reason),
+        )
 
     async def _emit_stats(self) -> None:
         try:

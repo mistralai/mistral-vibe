@@ -111,11 +111,13 @@ SERVER_METHODS: tuple[str, ...] = (
     "mcp/toggle",
     "narration/summarize",
     "projectLinks/create",
+    "projectLinks/inspectRoot",
     "projectLinks/link",
     "projectLinks/list",
     "projectLinks/picker/load",
     "projectLinks/picker/loadMore",
     "projectLinks/resolveRoot",
+    "projectLinks/save",
     "projectLinks/unlink",
     "review/approve",
     "review/baseline",
@@ -394,7 +396,8 @@ class ReviewMutationParams(ProtocolModel):
 
 
 class ConfigReadParams(ProtocolModel):
-    session_id: str
+    session_id: str | None = None
+    cwd: str | None = None
 
 
 class ConfigReadResponse(ProtocolModel):
@@ -496,6 +499,11 @@ class RuntimeMutationResponse(ProtocolModel):
 class RuntimeUpdatedParams(ProtocolModel):
     session_id: str
     runtime: RuntimeSnapshot
+
+
+class TurnRetryingParams(ProtocolModel):
+    session_id: str
+    reason: str
 
 
 class ServerWarningParams(ProtocolModel):
@@ -889,6 +897,28 @@ class ProjectLinksResolveRootResponse(ProtocolModel):
     root: ProjectLinksResolvedRoot | None = None
 
 
+class ProjectLinksInspectRootParams(ProtocolModel):
+    root_path: str = Field(min_length=1)
+
+
+class ProjectLinksInspectedRoot(ProjectLinksResolvedRoot):
+    repo_url: str
+
+
+class ProjectLinksSavedLink(ProtocolModel):
+    project_id: str
+    project_name: str
+
+
+class ProjectLinksInspectRootResponse(ProtocolModel):
+    eligible: bool
+    reject_reason: ProjectLinksResolveRootRejectReason | None = None
+    root: ProjectLinksInspectedRoot | None = None
+    saved_link: ProjectLinksSavedLink | None = None
+    stale_link_cleared: bool
+    stale_link_clear_failed: bool = False
+
+
 class ProjectLinksPickerCandidate(ProtocolModel):
     project_id: str
     name: str
@@ -903,11 +933,6 @@ class ProjectLinksPickerCandidates(ProtocolModel):
 
 class ProjectLinksPickerLoadParams(ProtocolModel):
     root_path: str = Field(min_length=1)
-
-
-class ProjectLinksSavedLink(ProtocolModel):
-    project_id: str
-    project_name: str
 
 
 class ProjectLinksPickerLoadResponse(ProtocolModel):
@@ -937,6 +962,13 @@ class ProjectLinksLinkParams(ProtocolModel):
     root_path: str = Field(min_length=1)
     project_id: str = Field(min_length=1)
     project_name: str = Field(min_length=1)
+
+
+class ProjectLinksSaveParams(ProtocolModel):
+    root_path: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    project_name: str = Field(min_length=1)
+    expected_repo_url: str = Field(min_length=1)
 
 
 class ProjectLink(ProtocolModel):
@@ -1028,6 +1060,7 @@ class FeedbackRecordParams(ProtocolModel):
 class TurnStartParams(ProtocolModel):
     session_id: str
     input: list[ContentBlock]
+    injected: bool = False
     client_user_message_id: str | None = None
     auto_title: str | None = None
     user_display_content: UserDisplayContent | None = None
@@ -1190,6 +1223,16 @@ class ProtocolErrorCode(StrEnum):
     FORBIDDEN = auto()
     METHOD_NOT_FOUND = auto()
     INTERNAL_ERROR = auto()
+
+
+class InvalidParamsIssue(ProtocolModel):
+    path: list[str | int]
+    message: str
+
+
+class InvalidParamsData(ProtocolModel):
+    error_count: int
+    issues: list[InvalidParamsIssue]
 
 
 class ProtocolError(ProtocolModel):

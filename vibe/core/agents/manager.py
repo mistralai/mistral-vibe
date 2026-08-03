@@ -97,10 +97,6 @@ class AgentManager:
     def preview_config(self, name: str) -> VibeConfigSchema:
         return self.get_agent(name).apply_to_config(self._config)
 
-    def register_agent(self, profile: AgentProfile) -> None:
-        self._discovered[profile.name] = profile
-        self._cached_config = None
-
     def invalidate_config(self) -> None:
         self._cached_config = None
 

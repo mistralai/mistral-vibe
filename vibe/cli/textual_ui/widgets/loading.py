@@ -17,7 +17,10 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 DEFAULT_LOADING_STATUS = "Generating"
+THINKING_LOADING_STATUS = "Thinking"
+RETRYING_LOADING_STATUS = "Retrying"
 _DEBOUNCE_HINT_TEXT = "[dim italic]typing detected, waiting…[/]"
+_REPLACEABLE_STATUSES = frozenset({DEFAULT_LOADING_STATUS, THINKING_LOADING_STATUS})
 
 
 def _format_elapsed(seconds: int) -> str:
@@ -78,8 +81,8 @@ class LoadingWidget(SpinnerMixin, Static):
     def __init__(self, status: str | None = None, *, show_hint: bool = True) -> None:
         super().__init__(classes="loading-widget")
         self.init_spinner()
-        self.status = status or self._get_default_status()
         self._base_status = status or DEFAULT_LOADING_STATUS
+        self.status = self._with_easter_egg(self._base_status)
         self.current_color_index = 0
         self._color_direction = 1
         self.transition_progress = 0
@@ -112,10 +115,10 @@ class LoadingWidget(SpinnerMixin, Static):
             return random.choice(available_eggs)
         return None
 
-    def _get_default_status(self) -> str:
-        return self._get_easter_egg() or DEFAULT_LOADING_STATUS
-
-    def _apply_easter_egg(self, status: str) -> str:
+    def _with_easter_egg(self, status: str) -> str:
+        """Only generic labels are replaceable; other statuses carry information."""
+        if status not in _REPLACEABLE_STATUSES:
+            return status
         return self._get_easter_egg() or status
 
     def show_debounce_hint(self) -> None:
@@ -143,7 +146,7 @@ class LoadingWidget(SpinnerMixin, Static):
         if status == self._base_status:
             return
         self._base_status = status
-        self.status = self._apply_easter_egg(status)
+        self.status = self._with_easter_egg(status)
         if self._status_widget:
             self._status_widget.update(self._build_status_text())
 

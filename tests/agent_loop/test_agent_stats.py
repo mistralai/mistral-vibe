@@ -39,6 +39,7 @@ def make_config(
     active_model: str = "devstral-latest",
     input_price: float = 0.4,
     output_price: float = 2.0,
+    cached_input_price: float | None = None,
     disable_logging: bool = True,
     auto_compact_threshold: int = 0,
     include_project_context: bool = False,
@@ -53,6 +54,7 @@ def make_config(
             alias="devstral-latest",
             input_price=input_price,
             output_price=output_price,
+            cached_input_price=cached_input_price,
             auto_compact_threshold=auto_compact_threshold,
         ),
         ModelConfig(
@@ -181,6 +183,59 @@ class TestCachedTokenStats:
         dumped = stats.model_dump()
         assert dumped["session_cached_tokens"] == 42
         assert dumped["last_turn_cached_tokens"] == 7
+
+    def test_session_cost_discounts_cached_tokens(self) -> None:
+        stats = AgentStats(
+            session_prompt_tokens=1_000_000,
+            session_completion_tokens=0,
+            session_cached_tokens=400_000,
+            input_price_per_million=1.0,
+            output_price_per_million=2.0,
+            cached_input_price_per_million=0.1,
+        )
+        # 600k * $1/M + 400k * $0.1/M = $0.6 + $0.04 = $0.64
+        assert stats.session_cost == pytest.approx(0.64)
+
+    def test_session_cost_bills_cached_at_input_rate_when_unset(self) -> None:
+        stats = AgentStats(
+            session_prompt_tokens=1_000_000,
+            session_completion_tokens=0,
+            session_cached_tokens=400_000,
+            input_price_per_million=1.0,
+            output_price_per_million=2.0,
+        )
+        assert stats.session_cost == pytest.approx(1.0)
+
+    def test_session_cost_never_negative_when_cached_exceeds_prompt(self) -> None:
+        stats = AgentStats(
+            session_prompt_tokens=100_000,
+            session_completion_tokens=0,
+            session_cached_tokens=190_000,
+            input_price_per_million=1.0,
+            output_price_per_million=2.0,
+            cached_input_price_per_million=0.1,
+        )
+        # cached is clamped to the 100k prompt tokens, all billed at $0.1/M.
+        assert stats.session_cost == pytest.approx(0.01)
+
+    def test_update_pricing_sets_cached_rate(self) -> None:
+        stats = AgentStats(
+            session_prompt_tokens=1_000_000, session_cached_tokens=1_000_000
+        )
+        stats.update_pricing(1.0, 2.0, 0.1)
+        assert stats.cached_input_price_per_million == 0.1
+        assert stats.session_cost == pytest.approx(0.1)
+
+    @pytest.mark.asyncio
+    async def test_cached_price_wired_from_active_model(self) -> None:
+        backend = FakeBackend(mock_llm_chunk(content="Response"))
+        config = make_config(input_price=1.0, cached_input_price=0.1)
+        agent = build_test_agent_loop(config=config, backend=backend)
+
+        async for _ in agent.act("Hello"):
+            pass
+
+        assert agent.stats.cached_input_price_per_million == 0.1
 
 
 class TestReloadPreservesStats:

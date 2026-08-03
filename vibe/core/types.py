@@ -28,6 +28,7 @@ from pydantic import (
 from vibe.core.experiments.models import EvalResponse
 from vibe.core.tools.models import RequiredPermission
 from vibe.user_content import UserDisplayContent, UserResource
+from vibe.utils.pricing import session_token_cost
 from vibe.utils.tool_presentation import ToolCallPresentation, ToolResultPresentation
 
 
@@ -67,6 +68,7 @@ class AgentStats(BaseModel):
 
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
+    cached_input_price_per_million: float | None = None
 
     _listeners: dict[str, Callable[[AgentStats], None]] = PrivateAttr(
         default_factory=dict
@@ -105,21 +107,25 @@ class AgentStats(BaseModel):
     @computed_field
     @property
     def session_cost(self) -> float:
-        """Calculate the total session cost in dollars based on token usage and pricing.
+        """Total session cost in dollars from token usage and pricing.
 
-        NOTE: This is a rough estimate and is worst-case scenario.
-        The actual cost may be lower due to prompt caching.
         If the model changes mid-session, this uses current pricing for all tokens.
         """
-        input_cost = (
-            self.session_prompt_tokens / 1_000_000
-        ) * self.input_price_per_million
-        output_cost = (
-            self.session_completion_tokens / 1_000_000
-        ) * self.output_price_per_million
-        return input_cost + output_cost
+        return session_token_cost(
+            prompt_tokens=self.session_prompt_tokens,
+            completion_tokens=self.session_completion_tokens,
+            cached_tokens=self.session_cached_tokens,
+            input_price_per_million=self.input_price_per_million,
+            output_price_per_million=self.output_price_per_million,
+            cached_input_price_per_million=self.cached_input_price_per_million,
+        )
 
-    def update_pricing(self, input_price: float, output_price: float) -> None:
+    def update_pricing(
+        self,
+        input_price: float,
+        output_price: float,
+        cached_input_price: float | None = None,
+    ) -> None:
         """Update pricing info when model changes.
 
         NOTE: session_cost will be recalculated using new pricing for all
@@ -129,6 +135,7 @@ class AgentStats(BaseModel):
         """
         self.input_price_per_million = input_price
         self.output_price_per_million = output_price
+        self.cached_input_price_per_million = cached_input_price
 
     def reset_context_state(self) -> None:
         """Reset context-related fields while preserving cumulative session stats.

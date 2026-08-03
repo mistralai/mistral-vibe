@@ -68,6 +68,7 @@ from vibe.core.config import (
     TTSClient,
     TTSModelConfig,
     TTSProviderConfig,
+    VibeConfigSchema,
 )
 from vibe.core.log_reader import PaginatedLogs
 from vibe.core.tools.connectors.connector_registry import ConnectorAuthAction
@@ -85,7 +86,10 @@ from vibe.utils.tool_presentation import ToolCallPresentation
 
 
 def project_config(agent_loop: AgentLoop, *, base: bool = False) -> ConfigView:
-    config = agent_loop.base_config if base else agent_loop.config
+    return project_config_view(agent_loop.base_config if base else agent_loop.config)
+
+
+def project_config_view(config: VibeConfigSchema) -> ConfigView:
     transcribe_model = config.get_active_transcribe_model()
     tts_model = config.get_active_tts_model()
     return ConfigView(
@@ -182,8 +186,10 @@ def project_stats(agent_loop: AgentLoop) -> AgentStatsSnapshot:
         steps=stats.steps,
         session_prompt_tokens=stats.session_prompt_tokens,
         session_completion_tokens=stats.session_completion_tokens,
+        session_cached_tokens=stats.session_cached_tokens,
         input_price_per_million=stats.input_price_per_million,
         output_price_per_million=stats.output_price_per_million,
+        cached_input_price_per_million=stats.cached_input_price_per_million,
         tool_calls_agreed=stats.tool_calls_agreed,
         tool_calls_rejected=stats.tool_calls_rejected,
         tool_calls_failed=stats.tool_calls_failed,
@@ -191,6 +197,7 @@ def project_stats(agent_loop: AgentLoop) -> AgentStatsSnapshot:
         context_tokens=stats.context_tokens,
         last_turn_prompt_tokens=stats.last_turn_prompt_tokens,
         last_turn_completion_tokens=stats.last_turn_completion_tokens,
+        last_turn_cached_tokens=stats.last_turn_cached_tokens,
         last_turn_duration=stats.last_turn_duration,
         tokens_per_second=stats.tokens_per_second,
     )

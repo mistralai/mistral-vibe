@@ -36,7 +36,7 @@ from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.agent import VibeAcpAgent
 from vibe.app_server.local import LocalHarnessOptions
-from vibe.app_server.models import PublicError, PublicTurnStatus
+from vibe.app_server.models import PublicError, PublicTurnStatus, TurnErrorCode
 from vibe.app_server.session import AppServerSession, AppServerTurnError
 from vibe.core.config import SessionLoggingConfig
 from vibe.core.types import FunctionCall, ScheduledLoop, ToolCall
@@ -257,6 +257,63 @@ async def test_unsolicited_scheduled_turn_is_forwarded_to_acp(tmp_path: Path) ->
         await agent.close()
 
 
+@pytest.mark.asyncio
+async def test_retries_are_forwarded_as_an_ext_notification_not_a_session_update() -> (
+    None
+):
+    """Retrying is transient, so it must not enter the session update stream.
+
+    Every SessionUpdate variant renders as chat content and lands in history; a
+    turn that retried twice and then succeeded is a turn that worked.
+    """
+    backend = FakeBackend(
+        [mock_llm_chunk(content="Recovered")], retries_before_response=2
+    )
+
+    async def start_session(options: LocalHarnessOptions) -> AppServerSession:
+        loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+        backend.on_retry = loop.notice_retry
+        return await AppServerSession.start(
+            start_test_app_server(loop),
+            client_info=options.client.info,
+            capabilities=options.client.capabilities,
+            session_options=options.session_options,
+            client_tool_handler=options.client_tool_handler,
+        )
+
+    agent = VibeAcpAgent(session_starter=start_session)
+    client = FakeClient()
+    agent.on_connect(client)
+    client.on_connect(agent)
+    try:
+        created = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+        await agent.prompt(
+            session_id=created.session_id,
+            prompt=[TextContentBlock(type="text", text="Hello")],
+        )
+
+        assert client.ext_notifications == [
+            (
+                "session/retrying",
+                {"sessionId": created.session_id, "reason": "HTTP 429"},
+            ),
+            (
+                "session/retrying",
+                {"sessionId": created.session_id, "reason": "HTTP 429"},
+            ),
+        ]
+        texts = [
+            update.content.text
+            for notification in client._session_updates
+            if isinstance(update := notification.update, AgentMessageChunk)
+        ]
+        assert texts == ["Recovered"]
+        await backend.notice_retries()
+        assert len(client.ext_notifications) == 2
+    finally:
+        await agent.close()
+
+
 def test_acp_runtime_adapter_has_no_direct_core_dependency() -> None:
     root = Path(__file__).parents[2] / "vibe" / "acp"
     runtime_files = [
@@ -286,7 +343,7 @@ async def test_response_too_long_returns_max_tokens_stop_reason(
                 yield
             raise AppServerTurnError(
                 PublicError(
-                    code="response_too_long",
+                    code=TurnErrorCode.RESPONSE_TOO_LONG,
                     message="Response exceeded the output token limit",
                 )
             )

@@ -72,6 +72,7 @@ def persist_api_key(
     api_key: str,
     *,
     launch_context: LaunchContext | None = None,
+    custom_domain: bool = False,
 ) -> str:
     env_key = provider.api_key_env_var
     if not env_key:
@@ -101,7 +102,7 @@ def persist_api_key(
             telemetry = TelemetryClient(
                 config_getter=lambda: orchestrator.config, launch_context=launch_context
             )
-            telemetry.send_onboarding_api_key_added()
+            telemetry.send_onboarding_api_key_added(custom_domain=custom_domain)
         except Exception:
             pass
     return "completed"

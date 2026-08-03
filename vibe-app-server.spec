@@ -2,19 +2,9 @@
 # Onedir build for vibe-app-server — no per-launch extraction overhead.
 # Build: uv run --group build pyinstaller vibe-app-server.spec
 # Output: dist/vibe-app-server-dir/vibe-app-server  (+  dist/vibe-app-server-dir/_internal/)
-
-from pathlib import Path
+# UPX stays off: it rewrites the Mach-O header and invalidates the macOS code signature.
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
-
-entrypoint = Path("build/vibe-app-server-entrypoint.py")
-entrypoint.parent.mkdir(parents=True, exist_ok=True)
-entrypoint.write_text(
-    "from vibe.app_server.stdio import main\n\n"
-    "if __name__ == '__main__':\n"
-    "    main()\n",
-    encoding="utf-8",
-)
 
 _core_builtins_datas, core_builtins_binaries, core_builtins_hidden_imports = (
     collect_all("vibe.core.tools.builtins")
@@ -29,7 +19,13 @@ for item in core_builtins_hidden_imports:
 
 binaries = core_builtins_binaries
 
-datas = collect_data_files("vibe", includes=["**/*.md", "**/*.tcss"])
+datas = collect_data_files(
+    "vibe",
+    includes=[
+        "core/prompts/*.md",
+        "core/tools/builtins/prompts/*.md",
+    ],
+)
 datas += [("vibe/core/tools/builtins/*.py", "vibe/core/tools/builtins")]
 # Built-in skills are read from source files at runtime, so collect_data_files
 # must be allowed to include .py files here. By default it filters .py/.pyc out.
@@ -38,7 +34,7 @@ datas += collect_data_files(
 )
 
 a = Analysis(
-    [str(entrypoint)],
+    ["vibe/app_server/entrypoint.py"],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -61,7 +57,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     console=True,
     disable_windowed_traceback=False,
@@ -77,7 +73,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="vibe-app-server-dir",
 )

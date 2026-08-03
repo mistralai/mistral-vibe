@@ -52,6 +52,8 @@ from vibe.app_server.protocol import (
     EventNotificationParams,
     InitializeParams,
     InitializeResponse,
+    InvalidParamsData,
+    InvalidParamsIssue,
     JsonRpcErrorResponse,
     JsonRpcProtocolError,
     JsonRpcSuccessResponse,
@@ -76,7 +78,6 @@ from vibe.app_server.protocol import (
     SessionStartResponse,
     TransportKind,
     TurnStartParams,
-    WorkspaceTrustDecisionParams,
     validate_callback_acknowledgement,
     validate_json_rpc_envelope,
 )
@@ -101,6 +102,8 @@ _SESSION_ATTACHMENT_CANDIDATES = frozenset({
     "session/resume",
     "session/continue",
 })
+
+_SESSION_OPTIONAL_METHODS = frozenset({"config/read", "workspace/trust/decision"})
 
 
 @dataclass(slots=True)
@@ -582,7 +585,15 @@ class AppServer:
             return ProtocolError(
                 code=ProtocolErrorCode.INVALID_PARAMS,
                 message="Invalid request parameters",
-                data={"errorCount": exc.error_count()},
+                data=InvalidParamsData(
+                    error_count=exc.error_count(),
+                    issues=[
+                        InvalidParamsIssue(
+                            path=list(issue["loc"]), message=issue["msg"]
+                        )
+                        for issue in exc.errors()
+                    ],
+                ).model_dump(mode="json", by_alias=True),
             )
         except Exception as exc:
             return ProtocolError(
@@ -624,10 +635,8 @@ class AppServer:
             return await self._host_handler.dispatch(method, raw_params)
         if method == "session/delete":
             return await self._delete_session(raw_params)
-        if method == "workspace/trust/decision":
-            params = validate_wire(WorkspaceTrustDecisionParams, raw_params)
-            if params.session_id is None:
-                return await self._host_handler.dispatch(method, raw_params)
+        if _omits_session_id(method, raw_params):
+            return await self._host_handler.dispatch(method, raw_params)
         if self._root is None:
             return await self._dispatch_without_root(method, raw_params)
         result = await self._dispatch_to_root(method, raw_params)
@@ -1096,6 +1105,18 @@ class AppServer:
 
     def _event_watermark(self, session_id: str) -> int:
         return self._event_watermarks.get(session_id, 0)
+
+
+def _omits_session_id(method: str, raw_params: dict[str, Any]) -> bool:
+    """Whether a method that can answer from either scope named no session.
+
+    `_SESSION_OPTIONAL_METHODS` take an optional session id. When it is absent
+    the caller is asking the host, so they must not be routed to an attached
+    root: the answer would otherwise depend on whether a session happens to be
+    attached, and a `cwd` the host would have honoured would be silently
+    dropped. The handler still validates the params it was given.
+    """
+    return method in _SESSION_OPTIONAL_METHODS and raw_params.get("sessionId") is None
 
 
 def _notification_session_id(params: EventNotificationParams) -> str:

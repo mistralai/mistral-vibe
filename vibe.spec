@@ -2,6 +2,7 @@
 # Onedir build for vibe — no per-launch extraction overhead.
 # Build: uv run --group build pyinstaller vibe.spec
 # Output: dist/vibe-dir/vibe  (+  dist/vibe-dir/_internal/)
+# UPX stays off: it rewrites the Mach-O header and invalidates the macOS code signature.
 
 import sys
 
@@ -58,7 +59,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     console=True,
     disable_windowed_traceback=False,
@@ -74,7 +75,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="vibe-dir",
 )

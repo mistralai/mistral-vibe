@@ -10,7 +10,10 @@
     max-height: 85%;
     background: $surface;
     border: round $primary;
-    padding: 1 2;
+    border-title-align: left;
+    border-title-color: $primary;
+    border-title-style: bold;
+    padding: 1 2 0 2;
 }
 
 #config-edit-body {
@@ -53,12 +56,6 @@
     margin-top: 1;
     padding-top: 1;
     border-top: solid $foreground-muted;
-}
-
-.config-edit-title {
-    height: auto;
-    text-style: bold;
-    color: $primary;
 }
 
 .config-edit-description {

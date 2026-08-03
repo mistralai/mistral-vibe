@@ -482,7 +482,9 @@ class CoreRequestHandler:
                 raise RequestFailure(ProtocolErrorCode.NOT_FOUND, str(exc)) from exc
             state = await self._root_lifecycle.replace(session_id, params.history_limit)
             return DispatchResult(
-                SessionContinueResponse(state=state), session_attached=True
+                SessionContinueResponse(state=state),
+                session_attached=True,
+                runtime_updated=True,
             )
         params = validate_wire(SessionCloseParams, raw_params)
         self._require_attached(params.session_id)
@@ -601,12 +603,15 @@ class CoreRequestHandler:
                 params.session_id, params.history_limit
             )
             return DispatchResult(
-                SessionResumeResponse(state=state), session_attached=True
+                SessionResumeResponse(state=state),
+                session_attached=True,
+                runtime_updated=True,
             )
         self._root_session.attach(params.session_id)
         return DispatchResult(
             SessionResumeResponse(state=self._public_state(params.history_limit)),
             session_attached=True,
+            runtime_updated=True,
         )
 
     async def _session_title_update(
@@ -750,6 +755,7 @@ class CoreRequestHandler:
                 checkpoint_details={
                     "entryId": params.entry_id,
                     "restoreFiles": params.restore_files,
+                    "inplace": params.inplace,
                 },
             )
         return SessionRewindResponse(

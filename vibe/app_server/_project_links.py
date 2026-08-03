@@ -32,6 +32,7 @@ from vibe.core.vibe_code_project.selection import (
     normalize_repo_url,
     rank_project_items,
 )
+from vibe.observability.logging import logger
 from vibe.observability.sentry import capture_sentry_exception
 
 if TYPE_CHECKING:
@@ -115,6 +116,21 @@ def _candidate_page(
     return {"items": items, "nextCursor": state.next_cursor}
 
 
+def _report_store_delete_failure(exc: Exception, boundary_method: str) -> None:
+    logger.warning(
+        "Failed to delete project link while handling %s: %s", boundary_method, exc
+    )
+    capture_sentry_exception(
+        exc,
+        fatal=False,
+        tags={
+            "vibe_boundary": "project_links",
+            "project_links_method": boundary_method,
+            "error_type": type(exc).__name__,
+        },
+    )
+
+
 class ProjectLinksController:
     """Stateless projectLinks operations, resolved per absolute `root_path`."""
 
@@ -155,6 +171,71 @@ class ProjectLinksController:
             "eligible": True,
             "rejectReason": None,
             "root": _root_dict(repo_root, git_info),
+        }
+
+    async def inspect_root(self, root_path: str) -> dict[str, Any]:
+        path = Path(root_path).expanduser()
+        try:
+            git_info = await self._git_info(path)
+        except ServiceTeleportNotSupportedError as exc:
+            return {
+                "eligible": False,
+                "rejectReason": _resolve_root_reject_reason(exc),
+                "root": None,
+                "savedLink": None,
+                "staleLinkCleared": False,
+            }
+        except ServiceTeleportError:
+            return {
+                "eligible": False,
+                "rejectReason": "nested_unresolvable",
+                "root": None,
+                "savedLink": None,
+                "staleLinkCleared": False,
+            }
+
+        repo_root = git_info.repo_root or path.resolve()
+        if not git_info.remote_url:
+            return {
+                "eligible": False,
+                "rejectReason": "unsupported_remote",
+                "root": None,
+                "savedLink": None,
+                "staleLinkCleared": False,
+            }
+
+        store = VibeProjectsStore()
+        saved_link = await asyncio.to_thread(
+            store.get_remote_project, repo_root=repo_root
+        )
+        stale_link_cleared = False
+        stale_link_clear_failed = False
+        saved_link_summary: dict[str, Any] | None = None
+        if saved_link is not None:
+            if normalize_repo_url(saved_link.repo_url) == normalize_repo_url(
+                git_info.remote_url
+            ):
+                saved_link_summary = {
+                    "projectId": saved_link.project_id,
+                    "projectName": saved_link.project_name,
+                }
+            else:
+                try:
+                    await asyncio.to_thread(
+                        store.delete_remote_project, repo_root=repo_root
+                    )
+                    stale_link_cleared = True
+                except Exception as exc:
+                    _report_store_delete_failure(exc, "projectLinks/inspectRoot")
+                    stale_link_clear_failed = True
+
+        return {
+            "eligible": True,
+            "rejectReason": None,
+            "root": {**_root_dict(repo_root, git_info), "repoUrl": git_info.remote_url},
+            "savedLink": saved_link_summary,
+            "staleLinkCleared": stale_link_cleared,
+            "staleLinkClearFailed": stale_link_clear_failed,
         }
 
     async def picker_load(self, root_path: str) -> dict[str, Any]:
@@ -268,6 +349,34 @@ class ProjectLinksController:
         )
         return self._link_dict(link, repo_root)
 
+    async def save(
+        self, root_path: str, project_id: str, project_name: str, expected_repo_url: str
+    ) -> dict[str, Any]:
+        repo_root, git_info = await self._resolve_root(root_path)
+        if not git_info.remote_url:
+            raise ProjectLinksInvalidRequest(
+                "Not an eligible project root: unsupported_remote"
+            )
+        expected_repo_url = expected_repo_url.strip()
+        if not expected_repo_url:
+            raise ProjectLinksInvalidRequest("Expected repository URL is required.")
+        if normalize_repo_url(git_info.remote_url) != normalize_repo_url(
+            expected_repo_url
+        ):
+            raise ProjectLinksInvalidRequest(
+                "The repository remote changed before the link could be saved."
+            )
+
+        link = VibeCodeProjectLink(
+            repo_root=repo_root,
+            repo_url=git_info.remote_url,
+            project_id=project_id,
+            project_name=project_name,
+        )
+        store = VibeProjectsStore()
+        await asyncio.to_thread(store.upsert_remote_project, link)
+        return self._link_dict(link, repo_root)
+
     async def unlink(self, root_path: str) -> dict[str, Any]:
         # Unlink only needs the store key (repo_root). For a live checkout the
         # git-resolved root matches how the link was stored.
@@ -280,9 +389,11 @@ class ProjectLinksController:
             # pass a nested dir). Clear the stored link whose root contains the
             # chosen path so a stranded link can still be removed.
             return await asyncio.to_thread(self._unlink_stale_root, root_path)
-        service = await self._build_service(repo_root)
-        context = ProjectPickerContext(repo_root=repo_root, repo_url="", repo_name="")
-        await asyncio.to_thread(service.clear_project_link, context)
+        store = VibeProjectsStore()
+        try:
+            await asyncio.to_thread(store.delete_remote_project, repo_root=repo_root)
+        except Exception as exc:
+            _report_store_delete_failure(exc, "projectLinks/unlink")
         return {"unlinked": True}
 
     @staticmethod
@@ -299,7 +410,10 @@ class ProjectLinksController:
         if candidates:
             # Closest (deepest) ancestor wins when projects are nested.
             target = max(candidates, key=lambda link: len(link.repo_root.parts))
-            store.delete_remote_project(repo_root=target.repo_root)
+            try:
+                store.delete_remote_project(repo_root=target.repo_root)
+            except Exception as exc:
+                _report_store_delete_failure(exc, "projectLinks/unlink")
         return {"unlinked": True}
 
     # -- internals -------------------------------------------------------------

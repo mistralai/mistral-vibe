@@ -13,14 +13,22 @@ from tests.conftest import (
     build_test_vibe_app,
     build_test_vibe_config,
 )
+from tests.mock.utils import mock_llm_chunk
+from tests.stubs.fake_backend import FakeInterruptedStreamingBackend
+from vibe.app_server.events import CallbackRequested
 from vibe.app_server.models import (
     ApprovalCallbackDetail,
+    ApprovalCallbackOutput,
+    ApprovalDecision,
+    ApprovalDecisionType,
     EffectCallDisplay,
     GenericEffectDetail,
     OpenCallbackState,
     PublicCallbackEntry,
     PublicEntryGenerationStatus,
+    PublicError,
     QuestionChoice,
+    TurnErrorCode,
     UserAnswer,
     UserInputCallbackDetail,
     UserInputCallbackOutput,
@@ -30,12 +38,23 @@ from vibe.app_server.models import (
     WorkspaceTrustDetails,
 )
 from vibe.app_server.protocol import WorkspaceTrustStatusResponse
+from vibe.app_server.session import AppServerTurnError
 from vibe.cli.textual_ui import startup
 from vibe.cli.textual_ui.app import VibeApp
+from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
+from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
+from vibe.cli.textual_ui.widgets.messages import (
+    AssistantMessage,
+    ErrorMessage,
+    ReasoningMessage,
+    SlashCommandMessage,
+    UserMessage,
+)
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.core.config import SessionLoggingConfig
-from vibe.core.types import ScheduledLoop, UserMessageEvent
+from vibe.core.types import Role, ScheduledLoop, UserMessageEvent
 from vibe.setup.trusted_folders.trust_folder_dialog import TrustFolderApp
+from vibe.utils import VIBE_WARNING_TAG
 
 
 def _callback(detail: ApprovalCallbackDetail | UserInputCallbackDetail):
@@ -59,6 +78,17 @@ async def _wait_until(pilot, predicate, timeout: float = 2.0) -> None:
         if time.monotonic() >= deadline:
             raise AssertionError("Timed out waiting for UI state")
         await pilot.pause(0.01)
+
+
+def _turn_error(code: TurnErrorCode) -> AppServerTurnError:
+    return AppServerTurnError(PublicError(message="Network error", code=code))
+
+
+async def _wait_for_retry_error(app: VibeApp, pilot) -> None:
+    await _wait_until(
+        pilot,
+        lambda: any("/retry" in str(error._error) for error in app.query(ErrorMessage)),
+    )
 
 
 @pytest.mark.asyncio
@@ -244,6 +274,52 @@ async def test_question_answer_responds_to_public_callback() -> None:
     )
 
 
+def _approval_callback(callback_id: str) -> PublicCallbackEntry:
+    effect = GenericEffectDetail(
+        tool_name="example",
+        input={"value": "ok"},
+        display=EffectCallDisplay(summary="example", status_text="Running"),
+    )
+    callback = _callback(ApprovalCallbackDetail(effect=effect))
+    return callback.model_copy(
+        update={"id": f"callback:{callback_id}", "callback_id": callback_id}
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolving_a_callback_swaps_to_the_next_without_duplicate_mount(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    agent_loop = build_test_agent_loop(config=config)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+    first = _approval_callback("callback-1")
+    second = _approval_callback("callback-2")
+
+    async with app.run_test() as pilot:
+        await _wait_until(pilot, lambda: app._app_server is not None)
+        monkeypatch.setattr(app.app_server, "respond_to_callback", AsyncMock())
+
+        await app._handle_turn_event(CallbackRequested(first))
+        await _wait_until(pilot, lambda: app._active_callback is first)
+        assert len(app.query(ApprovalApp)) == 1
+
+        await app._handle_turn_event(CallbackRequested(second))
+        await pilot.pause()
+        assert list(app._pending_callbacks) == [second]
+        assert len(app.query(ApprovalApp)) == 1
+
+        await app._respond_to_active_callback(
+            ApprovalCallbackOutput(
+                decision=ApprovalDecision(type=ApprovalDecisionType.APPROVE)
+            )
+        )
+        await _wait_until(pilot, lambda: app._active_callback is second)
+        assert len(app.query(ApprovalApp)) == 1
+
+
 @pytest.mark.asyncio
 async def test_workspace_trust_round_trips_through_app_server(
     monkeypatch: pytest.MonkeyPatch,
@@ -314,3 +390,146 @@ async def test_escape_interrupts_unsolicited_server_turn(tmp_path: Path) -> None
 
         await asyncio.wait_for(interrupted.wait(), timeout=2)
         await _wait_until(pilot, lambda: not app.app_server.turn_active)
+
+
+def test_backend_error_message_hints_at_retry() -> None:
+    app = MagicMock()
+    app._retry_hint = VibeApp._retry_hint
+
+    message = VibeApp._resolve_turn_error_message(
+        app, _turn_error(TurnErrorCode.BACKEND_ERROR)
+    )
+
+    assert "/retry [additional instructions]" in message
+    assert "Network error" in message
+
+
+def test_internal_error_message_does_not_hint_at_retry() -> None:
+    app = MagicMock()
+
+    message = VibeApp._resolve_turn_error_message(
+        app, _turn_error(TurnErrorCode.INTERNAL_ERROR)
+    )
+
+    assert "/retry" not in message
+
+
+@pytest.mark.asyncio
+async def test_retry_command_reuses_interrupted_assistant_message() -> None:
+    backend = FakeInterruptedStreamingBackend([
+        [mock_llm_chunk(content="Ran three dummy read-only")],
+        [mock_llm_chunk(content=" tool calls successfully.")],
+    ])
+    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        chat_input = app.query_one(ChatInputContainer)
+        chat_input.post_message(ChatInputContainer.Submitted("hi"))
+        await _wait_for_retry_error(app, pilot)
+        await _wait_until(pilot, lambda: not app._agent_job_active())
+
+        chat_input.post_message(
+            ChatInputContainer.Submitted("/retry Keep the conclusion concise.")
+        )
+        await _wait_until(
+            pilot,
+            lambda: (
+                agent_loop.messages[-1].role is Role.assistant
+                and agent_loop.messages[-1].content == " tool calls successfully."
+            ),
+        )
+        await _wait_until(
+            pilot,
+            lambda: (
+                len(app.query(AssistantMessage)) == 1
+                and app.query_one(AssistantMessage).get_content()
+                == "Ran three dummy read-only tool calls successfully."
+            ),
+        )
+
+        visible_turn = [
+            widget
+            for widget in app._messages_area.children
+            if isinstance(widget, AssistantMessage | ErrorMessage | SlashCommandMessage)
+        ]
+        assert [type(widget) for widget in visible_turn] == [AssistantMessage]
+        assert [
+            message._content
+            for message in app.query(UserMessage)
+            if not isinstance(message, SlashCommandMessage)
+        ] == ["hi"]
+
+    assert backend.streaming_attempts == 2
+    retry_message = backend.requests_messages[-1][-1]
+    assert retry_message.injected is True
+    assert retry_message.content is not None
+    assert retry_message.content.startswith(f"<{VIBE_WARNING_TAG}>")
+    assert "without repeating text already produced" in retry_message.content
+    assert "additional instructions from the user" in retry_message.content
+    assert "Keep the conclusion concise." in retry_message.content
+
+
+@pytest.mark.asyncio
+async def test_retry_command_keeps_separate_assistant_after_reasoning() -> None:
+    backend = FakeInterruptedStreamingBackend([
+        [mock_llm_chunk(content="partial")],
+        [
+            mock_llm_chunk(content="", reasoning_content="thinking"),
+            mock_llm_chunk(content="recovered"),
+        ],
+    ])
+    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        chat_input = app.query_one(ChatInputContainer)
+        chat_input.post_message(ChatInputContainer.Submitted("hi"))
+        await _wait_for_retry_error(app, pilot)
+        await _wait_until(pilot, lambda: not app._agent_job_active())
+
+        chat_input.post_message(ChatInputContainer.Submitted("/retry"))
+        await _wait_until(
+            pilot,
+            lambda: (
+                agent_loop.messages[-1].role is Role.assistant
+                and agent_loop.messages[-1].content == "recovered"
+            ),
+        )
+        await _wait_until(pilot, lambda: len(app.query(AssistantMessage)) == 2)
+
+        assert [message.get_content() for message in app.query(AssistantMessage)] == [
+            "partial",
+            "recovered",
+        ]
+        assert len(app.query(ReasoningMessage)) == 1
+        assert len(app.query(ErrorMessage)) == 0
+        assert len(app.query(SlashCommandMessage)) == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_command_keeps_diagnostics_until_retry_progress() -> None:
+    backend = FakeInterruptedStreamingBackend([[mock_llm_chunk(content="partial")]])
+    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        chat_input = app.query_one(ChatInputContainer)
+        chat_input.post_message(ChatInputContainer.Submitted("hi"))
+        await _wait_for_retry_error(app, pilot)
+        await _wait_until(pilot, lambda: not app._agent_job_active())
+
+        backend._exception_to_raise = RuntimeError("retry failed")
+        chat_input.post_message(ChatInputContainer.Submitted("/retry"))
+        await _wait_until(pilot, lambda: backend.streaming_attempts == 2)
+        await _wait_until(pilot, lambda: not app._agent_job_active())
+        await _wait_until(pilot, lambda: len(app.query(ErrorMessage)) == 2)
+
+        assert [message.get_content() for message in app.query(AssistantMessage)] == [
+            "partial"
+        ]
+        assert len(app.query(ErrorMessage)) == 2
+        assert len(app.query(SlashCommandMessage)) == 1

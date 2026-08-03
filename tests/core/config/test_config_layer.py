@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+import tomllib
 from typing import Annotated, Any
 
 from jsonpatch import JsonPatchException
@@ -862,3 +864,39 @@ async def test_scenario_local_project_layer_trust_lifecycle() -> None:
     assert "/tmp/my-project" not in trust_store
     with pytest.raises(UntrustedLayerError):
         await layer2.load()
+
+
+def test_toml_snapshot_drops_none_optional_fields_and_round_trips(
+    tmp_path: Path,
+) -> None:
+    from vibe.core.config.layers._base import _read_toml_snapshot, _write_toml_snapshot
+    from vibe.core.config.models import ModelConfig
+
+    config = RawConfig.model_validate({
+        "active_model": "paid",
+        "models": {
+            "paid": ModelConfig(
+                name="paid-latest",
+                provider="mistral",
+                alias="paid",
+                input_price=1.5,
+                output_price=7.5,
+                cached_input_price=0.15,
+            ),
+            "free": ModelConfig(name="free-latest", provider="llamacpp", alias="free"),
+        },
+    })
+    path = tmp_path / "config.toml"
+
+    _write_toml_snapshot(path, config)
+
+    with path.open("rb") as file:
+        data = tomllib.load(file)
+    models = {model["alias"]: model for model in data["models"]}
+    assert models["paid"]["cached_input_price"] == 0.15
+    assert "cached_input_price" not in models["free"]
+
+    reloaded = _read_toml_snapshot(path).data
+    reloaded_models = reloaded["models"]
+    assert reloaded_models["paid"]["cached_input_price"] == 0.15
+    assert "cached_input_price" not in reloaded_models["free"]

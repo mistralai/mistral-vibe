@@ -3,11 +3,14 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from vibe.core.agents.models import BUILTIN_AGENTS, CHAT, AgentProfile, BuiltinAgentName
+from vibe.core.agents.models import (
+    BUILTIN_AGENTS,
+    AgentProfile,
+    AgentSafety,
+    BuiltinAgentName,
+)
 from vibe.core.config import VibeConfigSchema
 from vibe.core.middleware import (
-    CHAT_AGENT_EXIT,
-    CHAT_AGENT_REMINDER,
     PLAN_AGENT_EXIT,
     ConversationContext,
     MiddlewareAction,
@@ -398,10 +401,18 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
         assert result.action == MiddlewareAction.CONTINUE
 
     @pytest.mark.asyncio
-    async def test_direct_plan_to_chat_transition_delivers_both_messages(
+    async def test_direct_transition_between_read_only_agents_delivers_both_messages(
         self, ctx: ConversationContext
     ) -> None:
         plan_reminder = make_plan_agent_reminder("/tmp/test-plan.md")
+        other_reminder = "Other read-only mode is active"
+        other_exit = "Other read-only mode has ended"
+        other_profile = AgentProfile(
+            name="other-read-only",
+            display_name="Other Read Only",
+            description="Second read-only agent",
+            safety=AgentSafety.SAFE,
+        )
         current_profile: AgentProfile = BUILTIN_AGENTS[BuiltinAgentName.PLAN]
         pipeline = MiddlewarePipeline()
         pipeline.add(
@@ -414,10 +425,7 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
         )
         pipeline.add(
             ReadOnlyAgentMiddleware(
-                lambda: current_profile,
-                BuiltinAgentName.CHAT,
-                CHAT_AGENT_REMINDER,
-                CHAT_AGENT_EXIT,
+                lambda: current_profile, other_profile.name, other_reminder, other_exit
             )
         )
 
@@ -425,16 +433,16 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
         assert result.action == MiddlewareAction.INJECT_MESSAGE
         assert PLAN_REMINDER_SNIPPET in (result.message or "")
 
-        current_profile = CHAT
+        current_profile = other_profile
         result = await pipeline.run_before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
         assert PLAN_AGENT_EXIT in (result.message or "")
-        assert CHAT_AGENT_REMINDER in (result.message or "")
+        assert other_reminder in (result.message or "")
 
         current_profile = BUILTIN_AGENTS[BuiltinAgentName.PLAN]
         result = await pipeline.run_before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
-        assert CHAT_AGENT_EXIT in (result.message or "")
+        assert other_exit in (result.message or "")
         assert PLAN_REMINDER_SNIPPET in (result.message or "")
 
 

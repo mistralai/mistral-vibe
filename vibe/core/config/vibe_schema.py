@@ -113,6 +113,7 @@ DEFAULT_ACTIVE_MODEL_CONFIG = ModelConfig(
     temperature=1.0,
     input_price=1.5,
     output_price=7.5,
+    cached_input_price=0.15,
     thinking="high",
     supports_images=True,
 )
@@ -125,6 +126,7 @@ DEFAULT_MODELS = [
         alias="devstral-small",
         input_price=0.1,
         output_price=0.3,
+        cached_input_price=0.01,
     ),
     ModelConfig(
         name="devstral",

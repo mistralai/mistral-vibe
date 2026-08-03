@@ -511,6 +511,14 @@ class TestBackend:
             assert mock_api.calls.last.request.headers["user-agent"] == user_agent
 
 
+def _mistral_client_mock() -> tuple[MagicMock, MagicMock]:
+    """A Mistral stand-in, plus the hook registry basesdk reaches for."""
+    client = MagicMock()
+    hooks = MagicMock()
+    client.sdk_configuration.__dict__["_hooks"] = hooks
+    return client, hooks
+
+
 class TestMistralRetry:
     @staticmethod
     def _create_test_backend(
@@ -542,7 +550,7 @@ class TestMistralRetry:
         backend = self._create_test_backend()
 
         with patch("vibe.core.llm.backend.mistral.Mistral") as mock_mistral_class:
-            mock_mistral_class.return_value = MagicMock()
+            mock_mistral_class.return_value = _mistral_client_mock()[0]
             backend._get_client()
             call_kwargs = mock_mistral_class.call_args.kwargs
             assert call_kwargs["api_key"] == backend._api_key
@@ -550,6 +558,20 @@ class TestMistralRetry:
             assert call_kwargs["timeout_ms"] == 720000
             assert call_kwargs["retry_config"] is backend._retry_config
             assert "async_client" in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_client_creation_registers_both_retry_seams(self):
+        """429/5xx are only visible to httpx; connection errors only to the SDK."""
+        backend = self._create_test_backend()
+
+        with patch("vibe.core.llm.backend.mistral.Mistral") as mock_mistral_class:
+            client, hooks = _mistral_client_mock()
+            mock_mistral_class.return_value = client
+            backend._get_client()
+
+            http_client = mock_mistral_class.call_args.kwargs["async_client"]
+            assert backend._on_response in http_client.event_hooks["response"]
+            hooks.register_after_error_hook.assert_called_once()
 
     def test_retry_budget_uses_explicit_config(self):
         backend = self._create_test_backend(

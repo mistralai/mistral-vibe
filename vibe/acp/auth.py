@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC
@@ -11,6 +12,10 @@ from keyring.errors import KeyringError
 
 from vibe.acp.exceptions import ConfigurationError, InternalError, InvalidRequestError
 from vibe.core.config import ProviderConfig, load_dotenv_values
+from vibe.core.config._defaults import (
+    DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
+    DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
+)
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.setup.auth import (
     AuthState,
@@ -23,10 +28,18 @@ from vibe.setup.auth import (
 )
 from vibe.setup.auth.api_key_persistence import (
     persist_api_key,
+    persist_provider_to_config,
     remove_api_key,
     resolve_api_key_provider,
 )
-from vibe.setup.onboarding.context import OnboardingContext
+from vibe.setup.onboarding.context import (
+    OnboardingContext,
+    is_valid_custom_domain,
+    resolve_browser_auth_urls,
+)
+
+SIGN_IN_TARGET_MISTRAL = "mistral"
+SIGN_IN_TARGET_CUSTOM = "custom"
 
 
 class BrowserSignInServicePort(Protocol):
@@ -39,16 +52,29 @@ class BrowserSignInServicePort(Protocol):
     async def aclose(self) -> None: ...
 
 
+class ApiKeyPersister(Protocol):
+    def __call__(
+        self, provider: ProviderConfig, api_key: str, *, custom_domain: bool = False
+    ) -> str: ...
+
+
 type OnboardingContextLoader = Callable[[], OnboardingContext]
 type BrowserSignInServiceFactory = Callable[[ProviderConfig], BrowserSignInServicePort]
-type ApiKeyPersister = Callable[[ProviderConfig, str], str]
 type ApiKeyRemover = Callable[[ProviderConfig], None]
+type ProviderPersister = Callable[[ProviderConfig], bool]
 
 
 @dataclass(frozen=True, slots=True)
 class PendingBrowserSignIn:
     attempt: BrowserSignInAttempt
     provider: ProviderConfig
+
+
+def _custom_domain_of(provider: ProviderConfig) -> str | None:
+    base_url = provider.browser_auth_base_url
+    if not base_url or base_url == DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL:
+        return None
+    return base_url
 
 
 class AcpAuthController:
@@ -59,12 +85,14 @@ class AcpAuthController:
         service_factory: BrowserSignInServiceFactory | None = None,
         api_key_persister: ApiKeyPersister = persist_api_key,
         api_key_remover: ApiKeyRemover = remove_api_key,
+        provider_persister: ProviderPersister = persist_provider_to_config,
         environ_before_dotenv_load: Mapping[str, str] | None = None,
     ) -> None:
         self._load_context = context_loader or OnboardingContext.load
         self._service_factory = service_factory or self._build_service
         self._persist_api_key = api_key_persister
         self._remove_api_key = api_key_remover
+        self._persist_provider = provider_persister
         self._initial_environment = dict(
             environ_before_dotenv_load
             if environ_before_dotenv_load is not None
@@ -101,6 +129,9 @@ class AcpAuthController:
             ),
         )
 
+    def custom_domain(self) -> str | None:
+        return _custom_domain_of(self._load_context().provider)
+
     def sign_out(self) -> None:
         provider = self._load_context().provider
         state = self.status()
@@ -119,7 +150,7 @@ class AcpAuthController:
         action = arguments.get("action")
         if action not in {None, "start"}:
             raise InvalidRequestError(f"Unsupported browser auth action: {action}")
-        provider = self._enabled_provider()
+        provider = self._resolve_sign_in_provider(arguments)
         service = self._service_factory(provider)
         try:
             api_key = await service.authenticate()
@@ -127,11 +158,9 @@ class AcpAuthController:
             raise InternalError(str(exc)) from exc
         finally:
             await service.aclose()
-        result = self._persist_api_key(resolve_api_key_provider(provider), api_key)
+        meta = await self._persist_credentials(provider, api_key)
         return AuthenticateResponse(
-            field_meta={
-                "browser-auth": {"persistResult": result, "status": "completed"}
-            }
+            field_meta={"browser-auth": {**meta, "status": "completed"}}
         )
 
     async def _authenticate_delegated(
@@ -139,15 +168,15 @@ class AcpAuthController:
     ) -> AuthenticateResponse:
         action = arguments.get("action", "start")
         if action == "start":
-            return await self._start_delegated()
+            return await self._start_delegated(arguments)
         if action == "complete":
             return await self._complete_delegated(arguments)
         raise InvalidRequestError(
             f"Unsupported delegated browser auth action: {action}"
         )
 
-    async def _start_delegated(self) -> AuthenticateResponse:
-        provider = self._enabled_provider()
+    async def _start_delegated(self, arguments: dict[str, Any]) -> AuthenticateResponse:
+        provider = self._resolve_sign_in_provider(arguments)
         service = self._service_factory(provider)
         try:
             attempt = await service.start_attempt()
@@ -189,16 +218,58 @@ class AcpAuthController:
         finally:
             await service.aclose()
         self._pending.pop(attempt_id, None)
-        result = self._persist_api_key(
-            resolve_api_key_provider(pending.provider), api_key
-        )
+        meta = await self._persist_credentials(pending.provider, api_key)
         return AuthenticateResponse(
             field_meta={
                 "browser-auth-delegated": {
                     "attemptId": attempt_id,
-                    "persistResult": result,
+                    **meta,
                     "status": "completed",
                 }
+            }
+        )
+
+    async def _persist_credentials(
+        self, provider: ProviderConfig, api_key: str
+    ) -> dict[str, str]:
+        custom_domain = _custom_domain_of(provider)
+        meta = {
+            "persistResult": self._persist_api_key(
+                resolve_api_key_provider(provider),
+                api_key,
+                custom_domain=custom_domain is not None,
+            )
+        }
+        if provider == self._load_context().provider:
+            return meta
+        # Writing config.toml is blocking file I/O; keep it off the ACP event loop.
+        persisted = await asyncio.to_thread(self._persist_provider, provider)
+        return {**meta, "persistProviderResult": "completed" if persisted else "failed"}
+
+    def _resolve_sign_in_provider(self, arguments: dict[str, Any]) -> ProviderConfig:
+        provider = self._enabled_provider()
+        target = arguments.get("signInTarget")
+        if target is None:
+            return provider
+        if target == SIGN_IN_TARGET_MISTRAL:
+            return provider.model_copy(
+                update={
+                    "browser_auth_base_url": DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
+                    "browser_auth_api_base_url": (
+                        DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL
+                    ),
+                }
+            )
+        if target != SIGN_IN_TARGET_CUSTOM:
+            raise InvalidRequestError(f"Unsupported sign-in target: {target}")
+        domain = arguments.get("domain")
+        if not isinstance(domain, str) or not is_valid_custom_domain(domain):
+            raise InvalidRequestError(f"Invalid custom sign-in domain: {domain!r}")
+        base_url, api_base_url = resolve_browser_auth_urls(domain)
+        return provider.model_copy(
+            update={
+                "browser_auth_base_url": base_url,
+                "browser_auth_api_base_url": api_base_url,
             }
         )
 

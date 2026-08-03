@@ -63,6 +63,14 @@ class _TargetedEditScreen(ModalScreen[EditResult | None]):
     def _help_line(self, text: str) -> NoMarkupStatic:
         return NoMarkupStatic(shortcut_hint(text), classes="config-edit-help")
 
+    def _persistence_hint(self) -> str:
+        if len(self._targets) <= 1:
+            return ""
+        return f"  {shortcut('Tab')} Change Layer"
+
+    def _set_title(self) -> None:
+        self.query_one("#config-edit-content").border_title = self._view.name
+
     def action_toggle_target(self) -> None:
         if len(self._targets) <= 1:
             return
@@ -84,7 +92,6 @@ class _ChoiceEditScreen(_TargetedEditScreen):
         with Vertical(id="config-edit-content"):
             with Horizontal(id="config-edit-body"):
                 with Vertical(id="config-edit-main"):
-                    yield NoMarkupStatic(self._view.name, classes="config-edit-title")
                     if self._view.description:
                         yield NoMarkupStatic(
                             self._view.description, classes="config-edit-description"
@@ -100,10 +107,11 @@ class _ChoiceEditScreen(_TargetedEditScreen):
             yield from self._compose_save_bar()
             yield self._help_line(
                 f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Select  "
-                f"{shortcut('Esc')} Cancel"
+                f"{shortcut('Esc')} Cancel{self._persistence_hint()}"
             )
 
     def on_mount(self) -> None:
+        self._set_title()
         apply_stacked_width(self, self.query_one("#config-edit-content"))
         option_list = self.query_one(OptionList)
         option_list.focus()
@@ -141,7 +149,6 @@ class ValueEditScreen(_TargetedEditScreen):
         with Vertical(id="config-edit-content"):
             with Horizontal(id="config-edit-body"):
                 with Vertical(id="config-edit-main"):
-                    yield NoMarkupStatic(self._view.name, classes="config-edit-title")
                     if self._view.description:
                         yield NoMarkupStatic(
                             self._view.description, classes="config-edit-description"
@@ -163,9 +170,12 @@ class ValueEditScreen(_TargetedEditScreen):
                 yield from self._compose_side()
             yield from self._compose_save_bar()
             hint = "Ctrl+S Save" if self._multiline else "Enter Save"
-            yield self._help_line(f"{shortcut(hint)}  {shortcut('Esc')} Cancel")
+            yield self._help_line(
+                f"{shortcut(hint)}  {shortcut('Esc')} Cancel{self._persistence_hint()}"
+            )
 
     def on_mount(self) -> None:
+        self._set_title()
         apply_stacked_width(self, self.query_one("#config-edit-content"))
         if self._multiline:
             self.query_one(TextArea).focus()

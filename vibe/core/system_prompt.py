@@ -52,7 +52,16 @@ class ProjectContextProvider:
         self, args: list[str], timeout: float
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["git", "--no-optional-locks", *args],
+            # -c core.fsmonitor= overrides (and disables) any fsmonitor hook a
+            # repo's own .git/config declares, for this invocation only. This
+            # runs unconditionally on session start, before any trust prompt,
+            # so a malicious repo cloned/opened by the user could otherwise use
+            # `[core] fsmonitor = <payload>` to get its command executed by
+            # `git status`/`git branch`/`git log` here with the user's full
+            # privileges. -c on the command line takes precedence over the
+            # repo's own config, so this can't be overridden by the repo being
+            # inspected.
+            ["git", "-c", "core.fsmonitor=", "--no-optional-locks", *args],
             capture_output=True,
             check=True,
             cwd=self.root_path,

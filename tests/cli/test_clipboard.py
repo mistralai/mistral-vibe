@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import subprocess
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, mock_open, patch
@@ -10,15 +9,13 @@ import pytest
 from textual.app import App
 
 from vibe.cli.clipboard import (
+    NATIVE_COPY_HINT,
+    ClipboardCopyResult,
+    _copy_native,
     _copy_osc52,
-    _copy_pbcopy,
-    _copy_to_clipboard,
-    _copy_wl_copy,
-    _copy_xclip,
-    _read_clipboard,
     copy_selection_to_clipboard,
     copy_text_to_clipboard,
-    try_copy_text_to_clipboard,
+    copy_to_clipboard,
 )
 
 
@@ -97,7 +94,7 @@ def test_copy_selection_to_clipboard_no_notification(
     mock_app.notify.assert_not_called()
 
 
-@patch("vibe.cli.clipboard._copy_to_clipboard")
+@patch("vibe.cli.clipboard.copy_to_clipboard", return_value=True)
 def test_copy_selection_skips_detached_widget_and_collects_valid(
     mock_copy_to_clipboard: MagicMock, mock_app: MagicMock
 ) -> None:
@@ -109,11 +106,11 @@ def test_copy_selection_skips_detached_widget_and_collects_valid(
 
     result = copy_selection_to_clipboard(mock_app)
 
-    assert result == "valid text"
+    assert result == ClipboardCopyResult(text="valid text", verified=True)
     mock_copy_to_clipboard.assert_called_once_with("valid text")
 
 
-@patch("vibe.cli.clipboard._copy_to_clipboard")
+@patch("vibe.cli.clipboard.copy_to_clipboard", return_value=True)
 def test_copy_selection_to_clipboard_success(
     mock_copy_to_clipboard: MagicMock, mock_app: MagicMock
 ) -> None:
@@ -124,30 +121,10 @@ def test_copy_selection_to_clipboard_success(
 
     result = copy_selection_to_clipboard(mock_app)
 
-    assert result == "selected text"
+    assert result == ClipboardCopyResult(text="selected text", verified=True)
     mock_copy_to_clipboard.assert_called_once_with("selected text")
     mock_app.notify.assert_called_once_with(
         "Selection copied to clipboard", severity="information", timeout=2, markup=False
-    )
-
-
-@patch("vibe.cli.clipboard._copy_to_clipboard")
-def test_copy_selection_to_clipboard_shows_failure_when_all_strategies_raise(
-    mock_copy_to_clipboard: MagicMock, mock_app: MagicMock
-) -> None:
-    """When _copy_to_clipboard raises (all strategies failed), user sees 'Failed to copy' toast."""
-    widget = MockWidget(
-        text_selection=SimpleNamespace(), get_selection_result=("selected text", None)
-    )
-    mock_app.query.return_value = [widget]
-    mock_copy_to_clipboard.side_effect = RuntimeError("All clipboard strategies failed")
-
-    result = copy_selection_to_clipboard(mock_app)
-
-    assert result is None
-    mock_copy_to_clipboard.assert_called_once_with("selected text")
-    mock_app.notify.assert_called_once_with(
-        "Failed to copy - clipboard not available", severity="warning", timeout=3
     )
 
 
@@ -162,10 +139,14 @@ def test_copy_selection_to_clipboard_multiple_widgets(mock_app: MagicMock) -> No
     widget3 = MockWidget(text_selection=None)
     mock_app.query.return_value = [widget1, widget2, widget3]
 
-    with patch("vibe.cli.clipboard._copy_to_clipboard") as mock_copy_to_clipboard:
+    with patch(
+        "vibe.cli.clipboard.copy_to_clipboard", return_value=True
+    ) as mock_copy_to_clipboard:
         result = copy_selection_to_clipboard(mock_app)
 
-        assert result == "first selection\nsecond selection"
+        assert result == ClipboardCopyResult(
+            text="first selection\nsecond selection", verified=True
+        )
         mock_copy_to_clipboard.assert_called_once_with(
             "first selection\nsecond selection"
         )
@@ -177,7 +158,40 @@ def test_copy_selection_to_clipboard_multiple_widgets(mock_app: MagicMock) -> No
         )
 
 
-@patch("vibe.cli.clipboard._copy_to_clipboard")
+@pytest.mark.asyncio
+async def test_copy_selection_reconstructs_nested_list_indentation() -> None:
+    # End-to-end against a real Textual Markdown widget: nested list items sit
+    # further right than their parents, and that indentation must survive copy
+    # (VIBE-3663).
+    from textual.app import App as TextualApp, ComposeResult
+    from textual.widgets import Markdown
+
+    md = "1. First item\n2. Second item\n   - nested bullet A\n   - nested bullet B\n"
+
+    class _App(TextualApp):
+        def compose(self) -> ComposeResult:
+            yield Markdown(md)
+
+    app = _App()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.text_select_all()
+        await pilot.pause()
+        with patch("vibe.cli.clipboard.copy_to_clipboard", return_value=True):
+            result = copy_selection_to_clipboard(app, show_toast=False)
+
+    assert result == ClipboardCopyResult(
+        text=(
+            " 1.  First item\n"
+            " 2.  Second item\n"
+            "    •  nested bullet A\n"
+            "    •  nested bullet B"
+        ),
+        verified=True,
+    )
+
+
+@patch("vibe.cli.clipboard.copy_to_clipboard", return_value=True)
 def test_copy_text_to_clipboard_success(
     mock_copy_to_clipboard: MagicMock, mock_app: MagicMock
 ) -> None:
@@ -185,52 +199,49 @@ def test_copy_text_to_clipboard_success(
         mock_app, "assistant text", success_message="Agent message copied"
     )
 
-    assert result == "assistant text"
+    assert result == ClipboardCopyResult(text="assistant text", verified=True)
     mock_copy_to_clipboard.assert_called_once_with("assistant text")
     mock_app.notify.assert_called_once_with(
         "Agent message copied", severity="information", timeout=2, markup=False
     )
 
 
-@patch("vibe.cli.clipboard._copy_to_clipboard")
-def test_copy_text_to_clipboard_shows_failure_when_clipboard_unavailable(
+@patch("vibe.cli.clipboard.copy_to_clipboard", return_value=False)
+def test_copy_text_to_clipboard_returns_unverified_result(
     mock_copy_to_clipboard: MagicMock, mock_app: MagicMock
 ) -> None:
-    mock_copy_to_clipboard.side_effect = RuntimeError("All clipboard strategies failed")
+    result = copy_text_to_clipboard(mock_app, "assistant text", show_toast=False)
 
-    result = copy_text_to_clipboard(mock_app, "assistant text")
-
-    assert result is None
+    assert result == ClipboardCopyResult(text="assistant text", verified=False)
     mock_copy_to_clipboard.assert_called_once_with("assistant text")
+    mock_app.notify.assert_not_called()
+
+
+@patch("vibe.cli.clipboard.copy_to_clipboard", return_value=False)
+def test_copy_text_to_clipboard_appends_hint_to_toast_when_unverified(
+    mock_copy_to_clipboard: MagicMock, mock_app: MagicMock
+) -> None:
+    result = copy_text_to_clipboard(
+        mock_app, "assistant text", success_message="Agent message copied"
+    )
+
+    assert result == ClipboardCopyResult(text="assistant text", verified=False)
     mock_app.notify.assert_called_once_with(
-        "Failed to copy - clipboard not available", severity="warning", timeout=3
+        f"Agent message copied · {NATIVE_COPY_HINT}",
+        severity="information",
+        timeout=6,
+        markup=False,
     )
 
 
-@patch("vibe.cli.clipboard._copy_to_clipboard")
-def test_try_copy_text_to_clipboard_returns_true_when_copy_succeeds(
-    mock_copy_to_clipboard: MagicMock,
+@patch("vibe.cli.clipboard._copy_osc52")
+@patch("vibe.cli.clipboard._copy_native")
+def test_copy_to_clipboard_returns_false_for_empty_text(
+    copy_native: MagicMock, copy_osc52: MagicMock
 ) -> None:
-    result = try_copy_text_to_clipboard("assistant text")
-
-    assert result is True
-    mock_copy_to_clipboard.assert_called_once_with("assistant text")
-
-
-@patch("vibe.cli.clipboard._copy_to_clipboard")
-def test_try_copy_text_to_clipboard_returns_false_when_clipboard_unavailable(
-    mock_copy_to_clipboard: MagicMock,
-) -> None:
-    mock_copy_to_clipboard.side_effect = RuntimeError("All clipboard strategies failed")
-
-    result = try_copy_text_to_clipboard("assistant text")
-
-    assert result is False
-    mock_copy_to_clipboard.assert_called_once_with("assistant text")
-
-
-def test_try_copy_text_to_clipboard_returns_false_for_empty_text() -> None:
-    assert try_copy_text_to_clipboard("") is False
+    assert copy_to_clipboard("") is False
+    copy_native.assert_not_called()
+    copy_osc52.assert_not_called()
 
 
 def test_copy_text_to_clipboard_returns_none_for_empty_text(
@@ -241,116 +252,121 @@ def test_copy_text_to_clipboard_returns_none_for_empty_text(
     mock_app.notify.assert_not_called()
 
 
-def test_copy_to_clipboard_stops_after_verified_copy() -> None:
-    """Stops iterating once _read_clipboard confirms the text landed."""
-    mock_first = MagicMock()
-    mock_second = MagicMock()
-
-    with (
-        patch("vibe.cli.clipboard._COPY_METHODS", [mock_first, mock_second]),
-        patch("vibe.cli.clipboard._read_clipboard", return_value="hello"),
-    ):
-        _copy_to_clipboard("hello")
-
-    mock_first.assert_called_once_with("hello")
-    mock_second.assert_not_called()
+@patch("vibe.cli.clipboard.pyperclip.paste", return_value="hello")
+@patch("vibe.cli.clipboard.pyperclip.copy")
+def test_copy_native_verifies_exact_readback(
+    copy_mock: MagicMock, paste_mock: MagicMock
+) -> None:
+    assert _copy_native("hello") is True
+    copy_mock.assert_called_once_with("hello")
+    paste_mock.assert_called_once_with()
 
 
-def test_copy_to_clipboard_tries_all_when_verify_fails() -> None:
-    """Tries all strategies when _read_clipboard never confirms."""
-    mock_first = MagicMock()
-    mock_second = MagicMock()
-
-    with (
-        patch("vibe.cli.clipboard._COPY_METHODS", [mock_first, mock_second]),
-        patch("vibe.cli.clipboard._read_clipboard", return_value=None),
-    ):
-        _copy_to_clipboard("hello")
-
-    mock_first.assert_called_once_with("hello")
-    mock_second.assert_called_once_with("hello")
+@patch("vibe.cli.clipboard.pyperclip.paste", return_value="line one\r\nline two")
+@patch("vibe.cli.clipboard.pyperclip.copy")
+def test_copy_native_verifies_when_only_newlines_differ(
+    copy_mock: MagicMock, paste_mock: MagicMock
+) -> None:
+    assert _copy_native("line one\nline two") is True
+    copy_mock.assert_called_once_with("line one\nline two")
+    paste_mock.assert_called_once_with()
 
 
-def test_copy_to_clipboard_raises_when_all_strategies_raise() -> None:
-    """RuntimeError is raised when every strategy fails."""
-    mock_osc52 = MagicMock(side_effect=OSError("no tty"))
-    mock_pyperclip = MagicMock(side_effect=RuntimeError("pyperclip unavailable"))
-
-    with (
-        patch("vibe.cli.clipboard._COPY_METHODS", [mock_osc52, mock_pyperclip]),
-        pytest.raises(RuntimeError, match="All clipboard strategies failed"),
-    ):
-        _copy_to_clipboard("anything")
+@patch("vibe.cli.clipboard.pyperclip.paste", return_value="old value")
+@patch("vibe.cli.clipboard.pyperclip.copy")
+def test_copy_native_returns_unverified_when_readback_differs(
+    copy_mock: MagicMock, paste_mock: MagicMock
+) -> None:
+    assert _copy_native("hello") is False
+    copy_mock.assert_called_once_with("hello")
+    paste_mock.assert_called_once_with()
 
 
-def test_read_clipboard_returns_first_successful_reader() -> None:
-    mock_reader = MagicMock(return_value="hello")
-    mock_reader2 = MagicMock(side_effect=RuntimeError("no clipboard"))
-    with patch(
-        "vibe.cli.clipboard._READ_CLIPBOARD_METHODS", [mock_reader, mock_reader2]
-    ):
-        assert _read_clipboard() == "hello"
-    mock_reader.assert_called_once()
-    mock_reader2.assert_not_called()
+@patch("vibe.cli.clipboard.pyperclip.paste", side_effect=RuntimeError("unreadable"))
+@patch("vibe.cli.clipboard.pyperclip.copy")
+def test_copy_native_returns_unverified_when_readback_fails(
+    copy_mock: MagicMock, paste_mock: MagicMock
+) -> None:
+    assert _copy_native("hello") is False
+    copy_mock.assert_called_once_with("hello")
+    paste_mock.assert_called_once_with()
 
 
-def test_read_clipboard_falls_through_on_failure() -> None:
-    failing = MagicMock(side_effect=RuntimeError("no clipboard"))
-    with patch("vibe.cli.clipboard._READ_CLIPBOARD_METHODS", [failing]):
-        assert _read_clipboard() is None
+@patch("vibe.cli.clipboard._is_ssh_session", return_value=False)
+@patch("vibe.cli.clipboard._copy_osc52")
+@patch("vibe.cli.clipboard._copy_native", return_value=True)
+def test_copy_to_clipboard_also_emits_osc52_when_native_verified(
+    copy_native: MagicMock, copy_osc52: MagicMock, is_ssh: MagicMock
+) -> None:
+    assert copy_to_clipboard("hello") is True
+    copy_native.assert_called_once_with("hello")
+    copy_osc52.assert_called_once_with("hello")
 
 
-def test_read_clipboard_skips_failing_reader() -> None:
-    failing = MagicMock(side_effect=RuntimeError("broken"))
-    working = MagicMock(return_value="hello")
-    with patch("vibe.cli.clipboard._READ_CLIPBOARD_METHODS", [failing, working]):
-        assert _read_clipboard() == "hello"
-    working.assert_called_once()
+@patch("vibe.cli.clipboard._is_ssh_session", return_value=False)
+@patch("vibe.cli.clipboard._copy_osc52", side_effect=OSError("no tty"))
+@patch("vibe.cli.clipboard._copy_native", return_value=True)
+def test_copy_to_clipboard_stays_verified_when_bonus_osc52_fails(
+    copy_native: MagicMock, copy_osc52: MagicMock, is_ssh: MagicMock
+) -> None:
+    assert copy_to_clipboard("hello") is True
+    copy_native.assert_called_once_with("hello")
+    copy_osc52.assert_called_once_with("hello")
 
 
-@patch("subprocess.run")
-def test_copy_pbcopy(mock_run: MagicMock) -> None:
-    _copy_pbcopy("hello")
-    mock_run.assert_called_once_with(
-        ["pbcopy"], input=b"hello", check=True, stderr=subprocess.DEVNULL
-    )
+@patch("vibe.cli.clipboard._is_ssh_session", return_value=False)
+@patch("vibe.cli.clipboard._copy_osc52")
+@patch("vibe.cli.clipboard._copy_native", return_value=False)
+def test_copy_to_clipboard_falls_back_to_unverified_osc52(
+    copy_native: MagicMock, copy_osc52: MagicMock, is_ssh: MagicMock
+) -> None:
+    assert copy_to_clipboard("hello") is False
+    copy_native.assert_called_once_with("hello")
+    copy_osc52.assert_called_once_with("hello")
 
 
-@patch("subprocess.run")
-def test_copy_xclip(mock_run: MagicMock) -> None:
-    _copy_xclip("hello")
-    mock_run.assert_called_once_with(
-        ["xclip", "-selection", "clipboard"],
-        input=b"hello",
-        check=True,
-        stderr=subprocess.DEVNULL,
-    )
+@patch("vibe.cli.clipboard._is_ssh_session", return_value=False)
+@patch("vibe.cli.clipboard._copy_osc52")
+@patch("vibe.cli.clipboard._copy_native", side_effect=RuntimeError("unavailable"))
+def test_copy_to_clipboard_uses_osc52_when_native_copy_fails(
+    copy_native: MagicMock, copy_osc52: MagicMock, is_ssh: MagicMock
+) -> None:
+    assert copy_to_clipboard("hello") is False
+    copy_native.assert_called_once_with("hello")
+    copy_osc52.assert_called_once_with("hello")
 
 
-@patch("subprocess.run")
-def test_copy_wl_copy(mock_run: MagicMock) -> None:
-    _copy_wl_copy("hello")
-    mock_run.assert_called_once_with(
-        ["wl-copy"], input=b"hello", check=True, stderr=subprocess.DEVNULL
-    )
+@patch("vibe.cli.clipboard._is_ssh_session", return_value=False)
+@patch("vibe.cli.clipboard._copy_osc52", side_effect=OSError("no tty"))
+@patch("vibe.cli.clipboard._copy_native", side_effect=RuntimeError("unavailable"))
+def test_copy_to_clipboard_returns_false_when_native_and_osc52_fail(
+    copy_native: MagicMock, copy_osc52: MagicMock, is_ssh: MagicMock
+) -> None:
+    assert copy_to_clipboard("hello") is False
+    copy_native.assert_called_once_with("hello")
+    copy_osc52.assert_called_once_with("hello")
 
 
-def test_copy_methods_includes_available_commands() -> None:
-    """_COPY_METHODS is built at import time using _has_cmd; re-import with mocked shutil.which."""
-    import importlib
+@patch("vibe.cli.clipboard._is_ssh_session", return_value=True)
+@patch("vibe.cli.clipboard._copy_osc52")
+@patch("vibe.cli.clipboard._copy_native")
+def test_copy_to_clipboard_uses_only_osc52_in_ssh_session(
+    copy_native: MagicMock, copy_osc52: MagicMock, is_ssh: MagicMock
+) -> None:
+    assert copy_to_clipboard("hello") is False
+    copy_native.assert_not_called()
+    copy_osc52.assert_called_once_with("hello")
 
-    import vibe.cli.clipboard as mod
 
-    with patch(
-        "shutil.which",
-        side_effect=lambda cmd: "/usr/bin/xclip" if cmd == "xclip" else None,
-    ):
-        importlib.reload(mod)
-        assert mod._copy_xclip in mod._COPY_METHODS
-        assert mod._copy_pbcopy not in mod._COPY_METHODS
-        assert mod._copy_wl_copy not in mod._COPY_METHODS
-
-    importlib.reload(mod)
+@patch("vibe.cli.clipboard._is_ssh_session", return_value=True)
+@patch("vibe.cli.clipboard._copy_osc52", side_effect=OSError("no tty"))
+@patch("vibe.cli.clipboard._copy_native")
+def test_copy_to_clipboard_returns_false_in_ssh_when_osc52_fails(
+    copy_native: MagicMock, copy_osc52: MagicMock, is_ssh: MagicMock
+) -> None:
+    assert copy_to_clipboard("hello") is False
+    copy_native.assert_not_called()
+    copy_osc52.assert_called_once_with("hello")
 
 
 @patch("builtins.open", new_callable=mock_open)

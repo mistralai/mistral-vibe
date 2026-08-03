@@ -15,7 +15,13 @@ import pytest
 
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.agent import VibeAcpAgent
+from vibe.acp.exceptions import InvalidRequestError
 from vibe.app_server.models import PublicMessageEntry
+from vibe.app_server.protocol import (
+    AppServerResponseError,
+    ProtocolError,
+    ProtocolErrorCode,
+)
 
 
 async def _new_session(agent: VibeAcpAgent) -> str:
@@ -152,7 +158,33 @@ async def test_config_options_delegate_to_typed_app_server_resources(
         response is not None
         for response in (mode, model, thinking, max_turns, max_tokens)
     )
-    assert await acp_agent_loop.set_config_option("unknown", session_id, "x") is None
+    with pytest.raises(InvalidRequestError):
+        await acp_agent_loop.set_config_option("unknown", session_id, "x")
+
+
+@pytest.mark.asyncio
+async def test_set_config_option_raises_instead_of_reporting_an_empty_config(
+    acp_agent_loop: VibeAcpAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = await _new_session(acp_agent_loop)
+    session = acp_agent_loop.sessions[session_id]
+    active_model = session.app_server.resources.config.current.active_model.alias
+
+    async def busy(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AppServerResponseError(
+            ProtocolError(
+                code=ProtocolErrorCode.INTERNAL_ERROR,
+                message="Session is busy running prompt 1",
+            )
+        )
+
+    monkeypatch.setattr(session.app_server.resources.config, "update", busy)
+
+    with pytest.raises(InvalidRequestError) as excinfo:
+        await acp_agent_loop.set_config_option("model", session_id, active_model)
+
+    assert "busy" in str(excinfo.value)
 
 
 @pytest.mark.asyncio
@@ -166,7 +198,18 @@ async def test_prompt_reports_public_usage_and_stable_message_ids(
     response = await acp_agent_loop.prompt(
         session_id=session_id, prompt=[TextContentBlock(type="text", text="Hello")]
     )
-    await asyncio.sleep(0)
+
+    def usage_updates() -> list[UsageUpdate]:
+        return [
+            notification.update
+            for notification in client._session_updates
+            if isinstance(notification.update, UsageUpdate)
+        ]
+
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if len(usage_updates()) >= 2:
+            break
 
     assert response.usage is not None
     assert response.usage.total_tokens == 2
@@ -177,12 +220,9 @@ async def test_prompt_reports_public_usage_and_stable_message_ids(
     ]
     assert [message.content.text for message in messages] == ["Hello", "Hi"]
     assert all(message.message_id for message in messages)
-    usage = [
-        notification.update
-        for notification in client._session_updates
-        if isinstance(notification.update, UsageUpdate)
-    ]
-    assert len(usage) == 1
+    usage = usage_updates()
+    assert len(usage) >= 2
+    assert usage[-1].used == 2
 
 
 @pytest.mark.asyncio
@@ -215,6 +255,62 @@ async def test_fork_returns_session_state_without_replaying_history(
         )
     finally:
         await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_fork_session_sends_usage_update(
+    acp_agent_with_session_config: tuple[VibeAcpAgent, FakeClient],
+) -> None:
+    agent, client = acp_agent_with_session_config
+    try:
+        source_id = await _new_session(agent)
+        await agent.prompt(
+            session_id=source_id, prompt=[TextContentBlock(type="text", text="Hello")]
+        )
+        client._session_updates.clear()
+
+        await agent.fork_session(source_id, cwd=str(Path.cwd()), mcp_servers=[])
+        await asyncio.sleep(0)
+
+        usage_updates = [
+            notification.update
+            for notification in client._session_updates
+            if isinstance(notification.update, UsageUpdate)
+        ]
+        assert len(usage_updates) >= 1
+        assert usage_updates[-1].size > 0
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_session_sends_usage_update(
+    acp_agent_with_session_config: tuple[VibeAcpAgent, FakeClient],
+    temp_session_dir: Path,
+    create_test_session,
+) -> None:
+    agent, client = acp_agent_with_session_config
+    session_id = "resumable-with-stats"
+    create_test_session(
+        temp_session_dir,
+        session_id,
+        str(Path.cwd()),
+        messages=[{"role": "user", "content": "Hello"}],
+    )
+    client._session_updates.clear()
+
+    await agent.resume_session(
+        session_id=session_id, cwd=str(Path.cwd()), mcp_servers=[]
+    )
+    await asyncio.sleep(0)
+
+    usage_updates = [
+        notification.update
+        for notification in client._session_updates
+        if isinstance(notification.update, UsageUpdate)
+    ]
+    assert len(usage_updates) >= 1
+    await agent.close()
 
 
 @pytest.mark.asyncio

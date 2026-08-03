@@ -344,9 +344,10 @@ class TelemetryClient:
     def send_session_closed(self) -> None:
         self.send_telemetry_event("vibe.session_closed", {})
 
-    def send_onboarding_api_key_added(self) -> None:
+    def send_onboarding_api_key_added(self, *, custom_domain: bool = False) -> None:
         self.send_telemetry_event(
-            "vibe.onboarding_api_key_added", {"version": __version__}
+            "vibe.onboarding_api_key_added",
+            {"version": __version__, "custom_domain": custom_domain},
         )
 
     def send_request_sent(

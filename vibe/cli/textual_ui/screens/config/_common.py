@@ -190,9 +190,6 @@ def target_bar_text(target: str, targets: tuple[str, ...]) -> Content:
         parts.append(("● " if active else "○ ", style if active else "dim"))
         parts.append((origin_label(name), f"{style} bold" if active else "dim"))
         parts.append((f" ({target_hint(name)})", "dim"))
-    if len(targets) > 1:
-        parts.append("     ")
-        parts.append(("Tab to switch", "dim"))
     return Content.assemble(*parts)
 
 

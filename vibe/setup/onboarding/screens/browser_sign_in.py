@@ -16,6 +16,7 @@ from textual.timer import Timer
 from textual.widgets import Static
 from textual.worker import Worker
 
+from vibe.cli.clipboard import NATIVE_COPY_HINT
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
@@ -45,7 +46,10 @@ SUCCESS_HINT = "Finishing setup..."
 SIGN_IN_URL_HELP_PREFIX = "If your browser did not open, "
 SIGN_IN_URL_COPY_LABEL = "copy this URL"
 SIGN_IN_URL_HELP_SUFFIX = f" (press {shortcut('c')})."
-SIGN_IN_URL_REVEAL_PREFIX = "Copy failed. Open this URL manually:"
+SIGN_IN_URL_FALLBACK_PREFIX = (
+    "If copying to the clipboard was not successful, copy the following URL:"
+)
+SIGN_IN_URL_NATIVE_COPY_HINT = f"I{NATIVE_COPY_HINT[1:]}"
 SUCCESS_EXIT_DELAY_SECONDS: float = 2.0
 SIGN_IN_URL_HELP_DELAY_SECONDS: float = 4.0
 WAITING_FOR_AUTHENTICATION_MESSAGE = "Waiting for authentication..."
@@ -61,9 +65,7 @@ UNEXPECTED_ERROR_MESSAGE = (
 ERROR_MESSAGES = {
     BrowserSignInErrorCode.POLL_FAILED: "We couldn't complete sign-in. Please try again."
 }
-COPY_URL_SUCCESS_MESSAGE = "Sign-in URL copied to clipboard"
-
-CopySignInUrl = Callable[[str], bool]
+CopySignInUrl = Callable[[str], None]
 
 
 class BrowserSignInStep(IntEnum):
@@ -225,15 +227,7 @@ class BrowserSignInScreen(OnboardingScreen):
         if self.state.variant == "success" or self.state.sign_in_url is None:
             return
 
-        if self._copy_sign_in_url(self.state.sign_in_url):
-            self.app.notify(
-                COPY_URL_SUCCESS_MESSAGE,
-                severity="information",
-                timeout=2,
-                markup=False,
-            )
-            return
-
+        self._copy_sign_in_url(self.state.sign_in_url)
         self.state = replace(
             self.state, show_sign_in_url_help=True, reveal_sign_in_url=True
         )
@@ -495,8 +489,8 @@ class BrowserSignInScreen(OnboardingScreen):
             return help_text
 
         return (
-            f"{help_text} {escape(SIGN_IN_URL_REVEAL_PREFIX)} "
-            f"{escape(state.sign_in_url)}"
+            f"{escape(SIGN_IN_URL_FALLBACK_PREFIX)} "
+            f"{escape(state.sign_in_url)}. {escape(SIGN_IN_URL_NATIVE_COPY_HINT)}."
         )
 
     def _schedule_sign_in_url_help(self, attempt_number: int, sign_in_url: str) -> None:

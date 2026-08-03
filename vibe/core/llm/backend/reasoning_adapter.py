@@ -56,13 +56,14 @@ class ReasoningAdapter(APIAdapter):
     def _convert_assistant_message(self, msg: LLMMessage) -> dict[str, Any]:
         result: dict[str, Any] = {"role": "assistant"}
 
-        if msg.reasoning_content:
-            content: list[dict[str, Any]] = [
-                {
-                    "type": "thinking",
-                    "thinking": [{"type": "text", "text": msg.reasoning_content}],
-                }
-            ]
+        if msg.reasoning_content or msg.reasoning_signature:
+            thinking_block: dict[str, Any] = {
+                "type": "thinking",
+                "thinking": [{"type": "text", "text": msg.reasoning_content or ""}],
+            }
+            if msg.reasoning_signature:
+                thinking_block["signature"] = msg.reasoning_signature
+            content: list[dict[str, Any]] = [thinking_block]
             if msg.content:
                 content.append({"type": "text", "text": msg.content})
             result["content"] = content
@@ -122,25 +123,32 @@ class ReasoningAdapter(APIAdapter):
     @staticmethod
     def _parse_content_blocks(
         content: str | list[dict[str, Any]],
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None]:
         if isinstance(content, str):
-            return content or None, None
+            return content or None, None, None
 
         text_parts: list[str] = []
         thinking_parts: list[str] = []
+        signature_parts: list[str] = []
 
         for block in content:
             block_type = block.get("type")
             if block_type == "text":
                 text_parts.append(block.get("text", ""))
             elif block_type == "thinking":
+                if isinstance(signature := block.get("signature"), str):
+                    signature_parts.append(signature)
                 for inner in block.get("thinking", []):
                     if isinstance(inner, dict) and inner.get("type") == "text":
                         thinking_parts.append(inner.get("text", ""))
                     elif isinstance(inner, str):
                         thinking_parts.append(inner)
 
-        return ("".join(text_parts) or None, "".join(thinking_parts) or None)
+        return (
+            "".join(text_parts) or None,
+            "".join(thinking_parts) or None,
+            "".join(signature_parts) or None,
+        )
 
     @staticmethod
     def _parse_tool_calls(
@@ -164,14 +172,18 @@ class ReasoningAdapter(APIAdapter):
         content = msg_dict.get("content")
         text_content: str | None = None
         reasoning_content: str | None = None
+        reasoning_signature: str | None = None
 
         if content is not None:
-            text_content, reasoning_content = self._parse_content_blocks(content)
+            text_content, reasoning_content, reasoning_signature = (
+                self._parse_content_blocks(content)
+            )
 
         return LLMMessage(
             role=Role.assistant,
             content=text_content,
             reasoning_content=reasoning_content,
+            reasoning_signature=reasoning_signature,
             tool_calls=self._parse_tool_calls(msg_dict.get("tool_calls")),
         )
 

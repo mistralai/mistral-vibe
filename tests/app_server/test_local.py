@@ -13,11 +13,15 @@ from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from vibe.app_server import _runtime as runtime
 from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._model import validate_wire
+from vibe.app_server._projection import project_config, project_config_view
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.protocol import (
     AppServerResponseError,
     ClientCapabilities,
     ClientInfo,
+    ConfigReadParams,
+    ConfigReadResponse,
     ConfigSchemaReadParams,
     HistoryListParams,
     ProtocolErrorCode,
@@ -35,7 +39,7 @@ from vibe.app_server.server import AppServer
 from vibe.app_server.session import AppServerSession
 from vibe.app_server.transport import memory_transport_pair
 from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import SessionLoggingConfig, VibeConfigSchema
+from vibe.core.config import ModelConfig, SessionLoggingConfig, VibeConfigSchema
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -108,6 +112,30 @@ async def test_config_load_is_bound_to_harness_cwd(
     monkeypatch.setenv("VIBE_DEFAULT_AGENT", "lean")
     loaded = await runtime.build_default_orchestrator(harness_files=harness_files)
     assert loaded.config.default_agent == "lean"
+
+
+@pytest.mark.asyncio
+async def test_invalid_request_returns_validation_issues() -> None:
+    async def open_root(_request: runtime.RootOpenRequest) -> AgentLoop:
+        raise AssertionError("The request must not open a session")
+
+    client_transport, server_transport = memory_transport_pair()
+    server = AppServer(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(ClientInfo(name="validation-test", version="1"))
+    await client.notify("initialized")
+
+    try:
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await client.request("session/read", {})
+    finally:
+        await client.close()
+
+    assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert exc_info.value.error.data == {
+        "errorCount": 1,
+        "issues": [{"path": ["sessionId"], "message": "Field required"}],
+    }
 
 
 @pytest.mark.asyncio
@@ -384,6 +412,160 @@ async def test_passive_host_requests_do_not_open_runtime(
                 "session/delete", SessionDeleteParams(session_id=saved.session_id)
             )
         assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_config_read_serves_the_catalogue_with_and_without_a_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_config = build_test_vibe_config(
+        models=[
+            ModelConfig(
+                name="devstral-medium-latest",
+                provider="mistral",
+                alias="medium",
+                thinking="max",
+            ),
+            ModelConfig(
+                name="devstral-small-latest", provider="mistral", alias="small"
+            ),
+        ]
+    )
+    root = build_test_agent_loop()
+    workspace = Path("/workspace/project").resolve()
+    layer_roots: list[Path | None] = []
+
+    async def load_config(
+        data: dict[str, Any] | None = None,
+        *,
+        harness_files: HarnessFilesManager,
+        require_api_key: bool,
+    ) -> ConfigOrchestrator[VibeConfigSchema]:
+        del data, require_api_key
+        layer_roots.append(harness_files.cwd)
+        return FakeConfigOrchestrator(host_config)
+
+    monkeypatch.setattr("vibe.app_server._host.build_default_orchestrator", load_config)
+    opened: list[runtime.RootOpenRequest] = []
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        opened.append(request)
+        return root
+
+    client_transport, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        open_root=open_root,
+        host_handler=HostRequestHandler(HarnessFilesManager(sources=())),
+    )
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(ClientInfo(name="config-client", version="1"))
+    await client.notify("initialized")
+
+    try:
+        passive = validate_wire(
+            ConfigReadResponse,
+            await client.request("config/read", ConfigReadParams(cwd=str(workspace))),
+        )
+        assert opened == []
+        assert passive.config == project_config_view(host_config)
+        assert passive.base_config == passive.config
+        assert passive.stripped_history_images == 0
+        assert [model.alias for model in passive.config.models] == ["medium", "small"]
+        assert passive.config.active_model.thinking == "max"
+        assert layer_roots == [workspace]
+
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await client.request(
+                "config/read", ConfigReadParams(session_id="not-this-session")
+            )
+        assert exc_info.value.error.code is ProtocolErrorCode.NOT_FOUND
+        assert opened == []
+
+        await client.request("session/start", SessionStartParams(cwd=str(Path.cwd())))
+        attached = validate_wire(
+            ConfigReadResponse,
+            await client.request(
+                "config/read", ConfigReadParams(session_id=root.session_id)
+            ),
+        )
+        assert attached.config == project_config(root)
+        assert attached.base_config == project_config(root, base=True)
+        assert [model.alias for model in attached.config.models] != ["medium", "small"]
+
+        omitted = validate_wire(
+            ConfigReadResponse,
+            await client.request("config/read", ConfigReadParams(cwd=str(workspace))),
+        )
+        assert omitted == passive
+        assert omitted.config != attached.config
+        assert layer_roots == [workspace, workspace]
+
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await client.request(
+                "config/read", ConfigReadParams(session_id="not-this-session")
+            )
+        assert exc_info.value.error.code is ProtocolErrorCode.NOT_FOUND
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_config_mutations_are_rejected_without_a_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_test_vibe_config()
+
+    async def load_config(
+        data: dict[str, Any] | None = None,
+        *,
+        harness_files: HarnessFilesManager,
+        require_api_key: bool,
+    ) -> ConfigOrchestrator[VibeConfigSchema]:
+        del data, harness_files, require_api_key
+        return FakeConfigOrchestrator(config)
+
+    monkeypatch.setattr("vibe.app_server._host.build_default_orchestrator", load_config)
+    opened: list[runtime.RootOpenRequest] = []
+
+    root = build_test_agent_loop()
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        opened.append(request)
+        return root
+
+    client_transport, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        open_root=open_root,
+        host_handler=HostRequestHandler(HarnessFilesManager(sources=())),
+    )
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(ClientInfo(name="mutation-client", version="1"))
+    await client.notify("initialized")
+    session_scoped = (
+        ("config/thinking/write", {"level": "low"}),
+        ("config/patch", {"ops": []}),
+        ("config/reload", {}),
+        ("config/proxy/read", {}),
+        ("config/proxy/write", {"changes": {}}),
+        ("config/fields/read", {}),
+    )
+
+    try:
+        for method, params in session_scoped:
+            with pytest.raises(AppServerResponseError) as exc_info:
+                await client.request(method, params)
+            assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT, method
+        assert opened == []
+
+        await client.request("session/start", SessionStartParams(cwd=str(Path.cwd())))
+        for method, params in session_scoped:
+            with pytest.raises(AppServerResponseError) as exc_info:
+                await client.request(method, params)
+            assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS, method
     finally:
         await client.close()
 

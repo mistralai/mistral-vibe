@@ -15,6 +15,7 @@ from vibe.app_server.models import (
     PublicError,
     ResourceContentBlock,
     TextContentBlock,
+    TurnErrorCode,
 )
 from vibe.app_server.protocol import (
     ContextInjectParams,
@@ -22,6 +23,7 @@ from vibe.app_server.protocol import (
     TurnSteerParams,
 )
 from vibe.core.agent_loop import CompactionFailedError, ImagesNotSupportedError
+from vibe.core.llm.exceptions import BackendError
 from vibe.core.session.image_snapshot import ImageSnapshotError, snapshot_image_bytes
 from vibe.core.types import (
     ContextTooLongError,
@@ -94,28 +96,39 @@ def decode_input(
 
 def public_error(exc: Exception) -> PublicError:
     details: dict[str, JsonValue] = {}
-    for name in ("provider", "model", "category", "explanation"):
-        value = getattr(exc, name, None)
-        if isinstance(value, str):
-            details[name] = value
+    for source in (exc, exc.__cause__):
+        if source is None:
+            continue
+        for name in ("provider", "model", "category", "explanation"):
+            if name in details:
+                continue
+            value = getattr(source, name, None)
+            if isinstance(value, str):
+                details[name] = value
     match exc:
         case RateLimitError():
-            code = "rate_limit"
+            code = TurnErrorCode.RATE_LIMIT
         case ContextTooLongError():
-            code = "context_too_long"
+            code = TurnErrorCode.CONTEXT_TOO_LONG
         case ResponseTooLongError():
-            code = "response_too_long"
+            code = TurnErrorCode.RESPONSE_TOO_LONG
         case RefusalError():
-            code = "refusal"
+            code = TurnErrorCode.REFUSAL
         case ImageSnapshotError():
-            code = "invalid_image_attachment"
+            code = TurnErrorCode.INVALID_IMAGE_ATTACHMENT
         case ImagesNotSupportedError():
-            code = "images_not_supported"
+            code = TurnErrorCode.IMAGES_NOT_SUPPORTED
         case CompactionFailedError():
-            code = "compaction_failed"
+            code = TurnErrorCode.COMPACTION_FAILED
             details["reason"] = exc.reason
+        case BackendError():
+            code = TurnErrorCode.BACKEND_ERROR
+        case RuntimeError() if isinstance(cause := exc.__cause__, BackendError):
+            code = TurnErrorCode.BACKEND_ERROR
+            details["provider"] = cause.provider
+            details["model"] = cause.model
         case _:
-            code = "internal_error"
+            code = TurnErrorCode.INTERNAL_ERROR
     return PublicError(message=str(exc), code=code, details=details or None)
 
 

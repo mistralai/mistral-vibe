@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Sequence
+import asyncio
+from collections.abc import AsyncGenerator, Callable, Sequence
+from concurrent.futures import CancelledError, Future
+from contextlib import suppress
 import json
+import logging
 import types
-from typing import TYPE_CHECKING, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import httpx
 from mistralai.client import Mistral
+from mistralai.client._hooks.types import AfterErrorHook
 from mistralai.client.errors import SDKError
 from mistralai.client.models import (
     AssistantMessage,
@@ -46,6 +51,7 @@ from vibe.core.types import (
     StrToolChoice,
     ToolCall,
 )
+from vibe.core.utils import RetryObserver, describe_http_status, describe_retry_reason
 from vibe.utils.api_keys import resolve_api_key
 from vibe.utils.http import (
     VibeAsyncHTTPClient,
@@ -55,6 +61,34 @@ from vibe.utils.http import (
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
+
+logger = logging.getLogger("vibe")
+
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+_RETRYABLE_ERRORS = (httpx.NetworkError, httpx.TimeoutException)
+
+
+def _log_delivery_failure(future: Future[None]) -> None:
+    with suppress(CancelledError):
+        if (error := future.exception()) is not None:
+            logger.warning("Could not report retry: %s", error)
+
+
+class _RetryNoticeHook(AfterErrorHook):
+    def __init__(self, report: Callable[[Exception], None]) -> None:
+        self._report = report
+
+    def after_error(
+        self, hook_ctx: Any, response: httpx.Response | None, error: Exception | None
+    ) -> tuple[httpx.Response | None, Exception | None]:
+        if error is not None:
+            self._report(error)
+        return response, error
+
+
+def _register_retry_hook(client: Mistral, hook: AfterErrorHook) -> None:
+    registry = client.sdk_configuration.__dict__["_hooks"]
+    registry.register_after_error_hook(hook)
 
 
 def _cached_tokens(usage: object | None) -> int:
@@ -225,11 +259,14 @@ class MistralBackend:
         timeout: float = 720.0,
         retry_max_elapsed_time: float = 300.0,
         enable_otel: bool = False,
+        on_retry: RetryObserver | None = None,
     ) -> None:
         self._client: Mistral | None = None
         self._http_client: VibeAsyncHTTPClient | None = None
         self._provider = provider
         self._enable_otel = enable_otel
+        self._on_retry = on_retry
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._mapper = MistralMapper()
         self._api_key = resolve_api_key(self._provider.api_key_env_var)
 
@@ -265,6 +302,28 @@ class MistralBackend:
             retry_connection_errors=True,
         )
 
+    async def _on_response(self, response: httpx.Response) -> None:
+        if response.status_code in _RETRYABLE_STATUS_CODES:
+            await self._notice_retry(describe_http_status(response.status_code))
+
+    def _report_error(self, error: Exception) -> None:
+        # On a worker thread inside basesdk's except block: raising would
+        # replace the error being reported on.
+        if self._loop is None or not isinstance(error, _RETRYABLE_ERRORS):
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._notice_retry(describe_retry_reason(error)), self._loop
+            )
+        except RuntimeError:  # loop already closed
+            return
+        future.add_done_callback(_log_delivery_failure)
+
+    async def _notice_retry(self, reason: str) -> None:
+        logger.warning("Retrying request reason=%s", reason)
+        if self._on_retry is not None:
+            await self._on_retry(reason)
+
     async def __aenter__(self) -> MistralBackend:
         self._client = self._create_mistral_client()
         await self._client.__aenter__()
@@ -293,8 +352,11 @@ class MistralBackend:
         await self.__aexit__(None, None, None)
 
     def _create_mistral_client(self) -> Mistral:
+        self._loop = asyncio.get_running_loop()
         self._http_client = VibeAsyncHTTPClient(
-            verify=build_ssl_context(), follow_redirects=True
+            verify=build_ssl_context(),
+            follow_redirects=True,
+            event_hooks={"response": [self._on_response]},
         )
         client = Mistral(
             api_key=self._api_key,
@@ -303,6 +365,7 @@ class MistralBackend:
             retry_config=self._retry_config,
             async_client=self._http_client,
         )
+        _register_retry_hook(client, _RetryNoticeHook(self._report_error))
         if self._enable_otel:
             configure_telemetry(client, provider="global")
         return client

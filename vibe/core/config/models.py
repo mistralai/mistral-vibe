@@ -419,6 +419,9 @@ class ModelConfig(BaseModel):
     temperature: float = 0.2
     input_price: float = 0.0  # Price per million input tokens
     output_price: float = 0.0  # Price per million output tokens
+    cached_input_price: float | None = (
+        None  # Price per million cached input tokens; None bills them at input_price
+    )
     thinking: ThinkingLevel = "off"
     supports_images: bool = False
     auto_compact_threshold: int = DEFAULT_AUTO_COMPACT_THRESHOLD
@@ -444,14 +447,22 @@ def normalize_model_configs(value: Any) -> Any:
 
 
 def serialize_model_configs(value: Any) -> Any:
-    """Write the internal model map back as legacy [[models]] TOML entries."""
+    """Write the internal model map back as legacy [[models]] TOML entries.
+
+    None-valued fields are dropped: TOML has no null and tomli_w rejects it.
+    """
     normalized = normalize_model_configs(value)
     if not isinstance(normalized, Mapping):
         return normalized
-    return [
-        model.model_dump() if isinstance(model, ModelConfig) else model
-        for model in normalized.values()
-    ]
+    return [_serialize_model_entry(model) for model in normalized.values()]
+
+
+def _serialize_model_entry(model: Any) -> Any:
+    if isinstance(model, ModelConfig):
+        return model.model_dump(exclude_none=True)
+    if isinstance(model, Mapping):
+        return {key: value for key, value in model.items() if value is not None}
+    return model
 
 
 def normalize_model_configs_with_defaults(value: Any, defaults: Any) -> Any:

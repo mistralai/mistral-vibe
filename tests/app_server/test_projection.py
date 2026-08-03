@@ -10,8 +10,10 @@ from vibe.app_server._projection import (
     project_config,
     project_history,
     project_session_log,
+    project_stats,
 )
 from vibe.app_server.models import (
+    AgentStatsSnapshot,
     CancelledEffectState,
     CompletedEffectState,
     FailedEffectState,
@@ -98,6 +100,56 @@ def test_config_view_redacts_persistence_paths() -> None:
     config = project_config(agent_loop)
 
     assert "sessionLogging" not in config.model_dump(mode="json", by_alias=True)
+
+
+def test_stats_projection_includes_cached_token_counts() -> None:
+    agent_loop = build_test_agent_loop()
+    agent_loop.stats.session_cached_tokens = 42
+    agent_loop.stats.last_turn_cached_tokens = 7
+    agent_loop.stats.input_price_per_million = 1.0
+    agent_loop.stats.cached_input_price_per_million = 0.1
+
+    stats = project_stats(agent_loop)
+    serialized = stats.model_dump(mode="json", by_alias=True)
+
+    assert stats.session_cached_tokens == 42
+    assert stats.last_turn_cached_tokens == 7
+    assert stats.cached_input_price_per_million == 0.1
+    assert serialized["sessionCachedTokens"] == 42
+    assert serialized["lastTurnCachedTokens"] == 7
+
+
+def test_snapshot_session_cost_discounts_cached_tokens() -> None:
+    snapshot = AgentStatsSnapshot(
+        session_prompt_tokens=1_000_000,
+        session_completion_tokens=0,
+        session_cached_tokens=400_000,
+        input_price_per_million=1.0,
+        cached_input_price_per_million=0.1,
+    )
+    # 600k * $1/M + 400k * $0.1/M = $0.64
+    assert snapshot.session_cost == pytest.approx(0.64)
+
+
+def test_snapshot_session_cost_bills_cached_at_input_rate_when_unset() -> None:
+    snapshot = AgentStatsSnapshot(
+        session_prompt_tokens=1_000_000,
+        session_completion_tokens=0,
+        session_cached_tokens=400_000,
+        input_price_per_million=1.0,
+    )
+    assert snapshot.session_cost == pytest.approx(1.0)
+
+
+def test_snapshot_session_cost_never_negative_when_cached_exceeds_prompt() -> None:
+    snapshot = AgentStatsSnapshot(
+        session_prompt_tokens=100_000,
+        session_completion_tokens=0,
+        session_cached_tokens=190_000,
+        input_price_per_million=1.0,
+        cached_input_price_per_million=0.1,
+    )
+    assert snapshot.session_cost == pytest.approx(0.01)
 
 
 @pytest.mark.asyncio

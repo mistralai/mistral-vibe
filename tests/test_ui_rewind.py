@@ -13,6 +13,9 @@ from vibe.app_server.models import PublicCheckpointEntry
 from vibe.cli.textual_ui.app import BottomApp, VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
 from vibe.cli.textual_ui.widgets.messages import UserMessage
+from vibe.cli.textual_ui.widgets.rewind_app import RewindApp, _RewindStep
+from vibe.cli.textual_ui.widgets.rewind_fork_message import RewindForkMessage
+from vibe.utils.session_id import shorten_session_id
 
 
 def _make_app(num_responses: int = 3) -> VibeApp:
@@ -160,6 +163,26 @@ async def test_rewind_q_exits_mode() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rewind_q_exits_mode_from_persistence_step() -> None:
+    app = _make_app()
+    async with app.run_test() as pilot:
+        await _send_messages(pilot, ["hello", "world"])
+
+        await _enter_rewind(pilot)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+
+        rewind_app = app.query_one(RewindApp)
+        assert rewind_app._step == _RewindStep.PERSISTENCE
+
+        await pilot.press("q")
+        await _wait_until(pilot, lambda: not app._rewind_mode)
+
+        assert app._rewind_highlighted_widget is None
+        assert app._current_bottom_app == BottomApp.Input
+
+
+@pytest.mark.asyncio
 async def test_rewind_arrow_keys_navigate_messages() -> None:
     app = _make_app()
     async with app.run_test() as pilot:
@@ -200,7 +223,9 @@ async def test_rewind_confirm_edits_message_and_prefills_input() -> None:
 
         await _enter_rewind(pilot)
 
-        # Confirm with enter (selects "Edit message from here")
+        # First enter picks the action, second enter confirms persistence
+        await pilot.press("enter")
+        await pilot.pause(0.1)
         await pilot.press("enter")
         await _wait_until(pilot, lambda: not app._rewind_mode)
 
@@ -232,7 +257,9 @@ async def test_rewind_truncates_public_history_and_appends_checkpoint() -> None:
         assert app._rewind_highlighted_widget is not None
         assert app._rewind_highlighted_widget.get_content() == "second"
 
-        # Confirm
+        # Confirm: pick action, then confirm persistence
+        await pilot.press("enter")
+        await pilot.pause(0.1)
         await pilot.press("enter")
         await _wait_until(pilot, lambda: not app._rewind_mode)
 
@@ -305,9 +332,151 @@ async def test_rewind_option_selection_with_number_keys() -> None:
 
         await _enter_rewind(pilot)
 
-        # Press "1" to select first option directly
+        # Press "1" to select the first action, then "1" to confirm persistence
+        await pilot.press("1")
+        await pilot.pause(0.1)
         await pilot.press("1")
         await _wait_until(pilot, lambda: not app._rewind_mode)
 
         assert app._rewind_mode is False
         assert app._current_bottom_app == BottomApp.Input
+
+
+@pytest.mark.asyncio
+async def test_rewind_shows_persistence_step_after_action() -> None:
+    app = _make_app()
+    async with app.run_test() as pilot:
+        await _send_messages(pilot, ["hello", "world"])
+
+        await _enter_rewind(pilot)
+
+        rewind_app = app.query_one(RewindApp)
+        assert rewind_app._step == _RewindStep.ACTION
+
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+
+        # Persistence step defaults to the first (in-place) option
+        assert rewind_app._step == _RewindStep.PERSISTENCE
+        assert rewind_app.selected_option == 0
+
+
+@pytest.mark.asyncio
+async def test_rewind_escape_on_persistence_step_returns_to_action() -> None:
+    app = _make_app()
+    async with app.run_test() as pilot:
+        await _send_messages(pilot, ["hello", "world"])
+
+        await _enter_rewind(pilot)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+
+        rewind_app = app.query_one(RewindApp)
+        assert rewind_app._step == _RewindStep.PERSISTENCE
+
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+
+        # Back to action step, still in rewind mode
+        assert rewind_app._step == _RewindStep.ACTION
+        assert app._rewind_mode is True
+        assert app._current_bottom_app == BottomApp.Rewind
+
+
+@pytest.mark.asyncio
+async def test_rewind_in_place_persists_in_current_session(monkeypatch) -> None:
+    app = _make_app()
+    async with app.run_test() as pilot:
+        await _send_messages(pilot, ["hello", "world"])
+        old_session_id = app.app_server.session_id
+
+        captured: dict[str, object] = {}
+        rewind = app.app_server.resources.sessions.rewind
+
+        async def recording_rewind(
+            entry_id: str, *, restore_files: bool, inplace: bool = False
+        ):
+            captured["inplace"] = inplace
+            captured["restore_files"] = restore_files
+            return await rewind(entry_id, restore_files=restore_files, inplace=inplace)
+
+        monkeypatch.setattr(
+            app.app_server.resources.sessions, "rewind", recording_rewind
+        )
+
+        await _enter_rewind(pilot)
+        # Action, then confirm the default in-place option
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        await pilot.press("enter")
+        await _wait_until(pilot, lambda: not app._rewind_mode)
+
+        assert captured == {"inplace": True, "restore_files": False}
+        assert app.app_server.session_id == old_session_id
+
+
+@pytest.mark.asyncio
+async def test_rewind_fork_creates_new_session(monkeypatch) -> None:
+    app = _make_app()
+    async with app.run_test() as pilot:
+        await _send_messages(pilot, ["hello", "world"])
+
+        captured: dict[str, object] = {}
+        rewind = app.app_server.resources.sessions.rewind
+
+        async def recording_rewind(
+            entry_id: str, *, restore_files: bool, inplace: bool = False
+        ):
+            captured["inplace"] = inplace
+            return await rewind(entry_id, restore_files=restore_files, inplace=inplace)
+
+        monkeypatch.setattr(
+            app.app_server.resources.sessions, "rewind", recording_rewind
+        )
+
+        await _enter_rewind(pilot)
+        # Action, then pick the fork (second) persistence option
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        await pilot.press("2")
+        await _wait_until(pilot, lambda: not app._rewind_mode)
+
+        assert captured["inplace"] is False
+
+
+@pytest.mark.asyncio
+async def test_rewind_fork_shows_session_hint() -> None:
+    app = _make_app()
+    async with app.run_test() as pilot:
+        await _send_messages(pilot, ["hello", "world"])
+
+        old_session_id = app.app_server.session_id
+
+        await _enter_rewind(pilot)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        await pilot.press("2")
+        await _wait_until(pilot, lambda: not app._rewind_mode)
+
+        new_session_id = app.app_server.session_id
+        assert new_session_id != old_session_id
+
+        hint = app.query_one(RewindForkMessage)
+        content = hint.get_content()
+        assert shorten_session_id(old_session_id) in content
+        assert shorten_session_id(new_session_id) in content
+
+
+@pytest.mark.asyncio
+async def test_rewind_in_place_shows_no_session_hint() -> None:
+    app = _make_app()
+    async with app.run_test() as pilot:
+        await _send_messages(pilot, ["hello", "world"])
+
+        await _enter_rewind(pilot)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        await pilot.press("enter")
+        await _wait_until(pilot, lambda: not app._rewind_mode)
+
+        assert len(app.query(RewindForkMessage)) == 0

@@ -28,7 +28,7 @@ from typing import Any
 
 from acp import RequestError
 
-from vibe.app_server.models import PublicError
+from vibe.app_server.models import PublicError, TurnErrorCode
 from vibe.app_server.protocol import ProtocolError, ProtocolErrorCode
 
 # JSON-RPC 2.0 standard codes
@@ -199,13 +199,19 @@ def from_public_error(error: PublicError) -> VibeRequestError:
     model = details.get("model")
     reason = details.get("reason")
     match error.code:
-        case "rate_limit" if isinstance(provider, str) and isinstance(model, str):
+        case TurnErrorCode.RATE_LIMIT if isinstance(provider, str) and isinstance(
+            model, str
+        ):
             mapped: VibeRequestError = RateLimitError(provider, model)
-        case "context_too_long" if isinstance(provider, str) and isinstance(model, str):
+        case TurnErrorCode.CONTEXT_TOO_LONG if isinstance(provider, str) and isinstance(
+            model, str
+        ):
             mapped = ContextTooLongError(provider, model)
-        case "response_too_long":
+        case TurnErrorCode.RESPONSE_TOO_LONG:
             mapped = ConversationLimitError(error.message)
-        case "refusal" if isinstance(provider, str) and isinstance(model, str):
+        case TurnErrorCode.REFUSAL if isinstance(provider, str) and isinstance(
+            model, str
+        ):
             category = details.get("category")
             explanation = details.get("explanation")
             mapped = RefusalError(
@@ -214,13 +220,13 @@ def from_public_error(error: PublicError) -> VibeRequestError:
                 category if isinstance(category, str) else None,
                 explanation if isinstance(explanation, str) else None,
             )
-        case "invalid_image_attachment":
+        case TurnErrorCode.INVALID_IMAGE_ATTACHMENT:
             mapped = InvalidImageAttachmentError(
-                error.message, reason="invalid_image_attachment"
+                error.message, reason=TurnErrorCode.INVALID_IMAGE_ATTACHMENT.value
             )
-        case "images_not_supported" if isinstance(model, str):
+        case TurnErrorCode.IMAGES_NOT_SUPPORTED if isinstance(model, str):
             mapped = ImagesNotSupportedError(model)
-        case "compaction_failed" if isinstance(reason, str):
+        case TurnErrorCode.COMPACTION_FAILED if isinstance(reason, str):
             mapped = CompactionError(reason, error.message)
         case _:
             mapped = InternalError(error.message)

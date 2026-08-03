@@ -40,6 +40,10 @@ REPO_URL = "https://github.com/acme/widgets.git"
 REPO_ROOT = Path("/tmp/widgets")
 
 
+class FutureServiceTeleportError(ServiceTeleportError):
+    pass
+
+
 @pytest.fixture
 def controller() -> ProjectLinksController:
     return ProjectLinksController()
@@ -271,6 +275,112 @@ class TestResolveRoot:
         assert result["rejectReason"] == "nested_unresolvable"
 
 
+class TestInspectRoot:
+    @pytest.mark.asyncio
+    async def test_no_remote_is_ineligible(
+        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _info(root_path: Path) -> SimpleNamespace:
+            return _git_info(remote_url=None)
+
+        monkeypatch.setattr(controller, "_git_info", _info)
+        result = await controller.inspect_root(str(REPO_ROOT))
+        assert result == {
+            "eligible": False,
+            "rejectReason": "unsupported_remote",
+            "root": None,
+            "savedLink": None,
+            "staleLinkCleared": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_clears_stale_saved_link_when_remote_differs(
+        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _info(root_path: Path) -> SimpleNamespace:
+            return _git_info()
+
+        stale_link = VibeCodeProjectLink(
+            repo_root=REPO_ROOT,
+            repo_url="https://github.com/acme/old-widgets.git",
+            project_id="proj-old",
+            project_name="Old Widgets",
+        )
+        deleted: list[Path] = []
+        monkeypatch.setattr(controller, "_git_info", _info)
+        monkeypatch.setattr(
+            project_links,
+            "VibeProjectsStore",
+            lambda: SimpleNamespace(
+                get_remote_project=lambda **kw: stale_link,
+                delete_remote_project=lambda **kw: deleted.append(kw["repo_root"]),
+            ),
+        )
+
+        result = await controller.inspect_root(str(REPO_ROOT))
+
+        assert result["eligible"] is True
+        assert result["savedLink"] is None
+        assert result["staleLinkCleared"] is True
+        assert deleted == [REPO_ROOT]
+
+    @pytest.mark.asyncio
+    async def test_stale_link_delete_failure_keeps_inspection_usable(
+        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _info(root_path: Path) -> SimpleNamespace:
+            return _git_info()
+
+        stale_link = VibeCodeProjectLink(
+            repo_root=REPO_ROOT,
+            repo_url="https://github.com/acme/old-widgets.git",
+            project_id="proj-old",
+            project_name="Old Widgets",
+        )
+        captured: list[str] = []
+        monkeypatch.setattr(controller, "_git_info", _info)
+        monkeypatch.setattr(
+            project_links,
+            "capture_sentry_exception",
+            lambda exc, **kw: captured.append(str(exc)),
+        )
+        monkeypatch.setattr(
+            project_links,
+            "VibeProjectsStore",
+            lambda: SimpleNamespace(
+                get_remote_project=lambda **kw: stale_link,
+                delete_remote_project=lambda **kw: (_ for _ in ()).throw(
+                    OSError("store is read-only")
+                ),
+            ),
+        )
+
+        result = await controller.inspect_root(str(REPO_ROOT))
+
+        assert result["eligible"] is True
+        assert result["savedLink"] is None
+        assert result["staleLinkCleared"] is False
+        assert result["staleLinkClearFailed"] is True
+        assert captured == ["store is read-only"]
+
+    @pytest.mark.asyncio
+    async def test_service_teleport_subclass_is_nested_unresolvable(
+        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _raise(root_path: Path) -> SimpleNamespace:
+            raise FutureServiceTeleportError("future git metadata failure")
+
+        monkeypatch.setattr(controller, "_git_info", _raise)
+        result = await controller.inspect_root(str(REPO_ROOT))
+        assert result == {
+            "eligible": False,
+            "rejectReason": "nested_unresolvable",
+            "root": None,
+            "savedLink": None,
+            "staleLinkCleared": False,
+        }
+
+
 class TestPicker:
     @pytest.mark.asyncio
     async def test_load_returns_candidates(
@@ -470,14 +580,107 @@ class TestMutations:
         assert result["link"]["projectName"] == "Widgets"
 
     @pytest.mark.asyncio
-    async def test_unlink(
+    async def test_save_rejects_remote_change_before_persisting(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        service = _FakeService()
-        _wire_service(controller, monkeypatch, service)
+        async def _info(root_path: Path) -> SimpleNamespace:
+            return _git_info()
+
+        monkeypatch.setattr(controller, "_git_info", _info)
+        with pytest.raises(ProjectLinksInvalidRequest, match="remote changed"):
+            await controller.save(
+                str(REPO_ROOT),
+                "proj-1",
+                "Widgets",
+                "https://github.com/acme/old-widgets.git",
+            )
+
+    @pytest.mark.asyncio
+    async def test_save_rejects_remote_change_after_inspection(
+        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        remotes = iter([
+            _git_info(remote_url="https://github.com/acme/old-widgets.git"),
+            _git_info(remote_url="https://github.com/acme/widgets.git"),
+        ])
+
+        async def _info(root_path: Path) -> SimpleNamespace:
+            return next(remotes)
+
+        monkeypatch.setattr(controller, "_git_info", _info)
+        inspected = await controller.inspect_root(str(REPO_ROOT))
+        assert inspected["root"]["repoUrl"] == "https://github.com/acme/old-widgets.git"
+
+        with pytest.raises(ProjectLinksInvalidRequest, match="remote changed"):
+            await controller.save(
+                str(REPO_ROOT), "proj-1", "Widgets", inspected["root"]["repoUrl"]
+            )
+
+    @pytest.mark.asyncio
+    async def test_save_rejects_empty_expected_remote(
+        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _info(root_path: Path) -> SimpleNamespace:
+            return _git_info()
+
+        monkeypatch.setattr(controller, "_git_info", _info)
+        with pytest.raises(ProjectLinksInvalidRequest, match="required"):
+            await controller.save(str(REPO_ROOT), "proj-1", "Widgets", " ")
+
+    @pytest.mark.asyncio
+    async def test_unlink_deletes_local_store_without_api_key(
+        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        deleted: list[Path] = []
+        monkeypatch.setattr(
+            project_links,
+            "VibeProjectsStore",
+            lambda: SimpleNamespace(
+                delete_remote_project=lambda **kw: deleted.append(kw["repo_root"])
+            ),
+        )
+
+        async def _resolve(root_path: str) -> tuple[Path, SimpleNamespace]:
+            return REPO_ROOT, _git_info()
+
+        async def _build(repo_root: Path) -> _FakeService:
+            raise AssertionError("unlink must not require the project picker service")
+
+        monkeypatch.setattr(controller, "_resolve_root", _resolve)
+        monkeypatch.setattr(controller, "_build_service", _build)
         result = await controller.unlink(str(REPO_ROOT))
         assert result == {"unlinked": True}
-        assert service.cleared is True
+        assert deleted == [REPO_ROOT]
+
+    @pytest.mark.asyncio
+    async def test_unlink_delete_failure_is_non_fatal(
+        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: list[str] = []
+        monkeypatch.setattr(
+            project_links,
+            "capture_sentry_exception",
+            lambda exc, **kw: captured.append(str(exc)),
+        )
+        monkeypatch.setattr(
+            project_links,
+            "VibeProjectsStore",
+            lambda: SimpleNamespace(
+                delete_remote_project=lambda **kw: (_ for _ in ()).throw(
+                    OSError("store is read-only")
+                )
+            ),
+        )
+
+        async def _resolve(root_path: str) -> tuple[Path, SimpleNamespace]:
+            return REPO_ROOT, _git_info()
+
+        monkeypatch.setattr(controller, "_resolve_root", _resolve)
+
+        result = await controller.unlink(str(REPO_ROOT))
+
+        assert result == {"unlinked": True}
+        assert captured == ["store is read-only"]
 
     @pytest.mark.asyncio
     async def test_unlink_stale_root_clears_by_ancestor(
@@ -563,6 +766,22 @@ class _FakeProjectLinksController:
             },
         }
 
+    async def inspect_root(self, root_path: str) -> dict[str, Any]:
+        self.calls.append(("inspect_root", (root_path,)))
+        return {
+            "eligible": True,
+            "rejectReason": None,
+            "root": {
+                "repoLocalPath": "/repo",
+                "repoName": "widgets",
+                "currentBranch": "main",
+                "defaultBranch": "main",
+                "repoUrl": "https://github.com/acme/widgets.git",
+            },
+            "savedLink": {"projectId": "p1", "projectName": "Widgets"},
+            "staleLinkCleared": False,
+        }
+
     async def picker_load(self, root_path: str) -> dict[str, Any]:
         self.calls.append(("picker_load", (root_path,)))
         return {
@@ -601,6 +820,21 @@ class _FakeProjectLinksController:
             }
         }
 
+    async def save(
+        self, root_path: str, project_id: str, project_name: str, expected_repo_url: str
+    ) -> dict[str, Any]:
+        self.calls.append((
+            "save",
+            (root_path, project_id, project_name, expected_repo_url),
+        ))
+        return {
+            "link": {
+                "projectId": project_id,
+                "projectName": project_name,
+                "repoLocalPath": root_path,
+            }
+        }
+
     async def unlink(self, root_path: str) -> dict[str, Any]:
         self.calls.append(("unlink", (root_path,)))
         return {"unlinked": True}
@@ -610,11 +844,13 @@ class TestProjectLinksJsonRpc:
     def test_methods_are_advertised(self) -> None:
         assert {
             "projectLinks/create",
+            "projectLinks/inspectRoot",
             "projectLinks/link",
             "projectLinks/list",
             "projectLinks/picker/load",
             "projectLinks/picker/loadMore",
             "projectLinks/resolveRoot",
+            "projectLinks/save",
             "projectLinks/unlink",
         }.issubset(SERVER_METHODS)
 
@@ -640,6 +876,53 @@ class TestProjectLinksJsonRpc:
                 "currentBranch": "main",
                 "defaultBranch": "main",
             },
+        }
+
+    @pytest.mark.asyncio
+    async def test_dispatches_inspect_root_without_attached_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        controller = _FakeProjectLinksController()
+        handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+        monkeypatch.setattr(handler, "_project_links", controller)
+
+        result = await handler.dispatch(
+            "projectLinks/inspectRoot", {"rootPath": "/repo"}
+        )
+
+        assert controller.calls == [("inspect_root", ("/repo",))]
+        assert (
+            result.response.model_dump(mode="json", by_alias=True)["root"]["repoUrl"]
+            == "https://github.com/acme/widgets.git"
+        )
+
+    @pytest.mark.asyncio
+    async def test_dispatches_save_without_attached_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        controller = _FakeProjectLinksController()
+        handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+        monkeypatch.setattr(handler, "_project_links", controller)
+
+        result = await handler.dispatch(
+            "projectLinks/save",
+            {
+                "rootPath": "/repo",
+                "projectId": "p1",
+                "projectName": "Widgets",
+                "expectedRepoUrl": "https://github.com/acme/widgets.git",
+            },
+        )
+
+        assert controller.calls == [
+            ("save", ("/repo", "p1", "Widgets", "https://github.com/acme/widgets.git"))
+        ]
+        assert result.response.model_dump(mode="json", by_alias=True) == {
+            "link": {
+                "projectId": "p1",
+                "projectName": "Widgets",
+                "repoLocalPath": "/repo",
+            }
         }
 
     @pytest.mark.parametrize(

@@ -7,6 +7,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Container, Vertical
+from textual.content import Content
 from textual.message import Message
 from textual.widgets import Static
 
@@ -15,13 +16,33 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
 
 
+class _RewindStep(StrEnum):
+    ACTION = auto()
+    PERSISTENCE = auto()
+
+
 class _RewindAction(StrEnum):
     EDIT_AND_RESTORE = auto()
     EDIT_ONLY = auto()
 
 
+class _RewindPersistence(StrEnum):
+    IN_PLACE = auto()
+    FORK = auto()
+
+
+type _RewindChoice = _RewindAction | _RewindPersistence
+
+_MAX_OPTIONS = 2
+
+
 class RewindApp(VimNavigationMixin, Container):
-    """Bottom panel widget for rewind mode actions."""
+    """Bottom panel widget for rewind mode actions.
+
+    Two-step flow: first pick what to edit (restore files or not), then pick
+    how to persist the rewind (keep the current session in place, or fork to a
+    fresh session preserving the original as a parent).
+    """
 
     can_focus = True
     can_focus_children = False
@@ -37,11 +58,13 @@ class RewindApp(VimNavigationMixin, Container):
         Binding("2", "select_2", "Option 2", show=False),
     ]
 
-    class RewindWithRestore(Message):
-        """User chose to edit the message and restore files."""
+    class RewindConfirmed(Message):
+        """User confirmed a rewind with a restore and persistence choice."""
 
-    class RewindWithoutRestore(Message):
-        """User chose to edit the message without restoring files."""
+        def __init__(self, *, restore_files: bool, inplace: bool) -> None:
+            super().__init__()
+            self.restore_files = restore_files
+            self.inplace = inplace
 
     class EditPrev(Message):
         """User navigated to the previous editable message."""
@@ -56,13 +79,16 @@ class RewindApp(VimNavigationMixin, Container):
         super().__init__(id="rewind-app")
         self._message_preview = message_preview
         self._has_file_changes = has_file_changes
+        self._step = _RewindStep.ACTION
+        self._restore_files = False
         self.selected_option = 0
         self.option_widgets: list[Static] = []
         self._title_widget: NoMarkupStatic | None = None
-        self._options = self._build_options()
+        self._help_widget: NoMarkupStatic | None = None
+        self._options = self._build_action_options()
 
-    def _build_options(self) -> list[tuple[str, _RewindAction]]:
-        options: list[tuple[str, _RewindAction]] = []
+    def _build_action_options(self) -> list[tuple[str, _RewindChoice]]:
+        options: list[tuple[str, _RewindChoice]] = []
         if self._has_file_changes:
             options.append((
                 "Edit & restore files to this point",
@@ -76,49 +102,69 @@ class RewindApp(VimNavigationMixin, Container):
         options.append((edit_only_label, _RewindAction.EDIT_ONLY))
         return options
 
+    def _build_persistence_options(self) -> list[tuple[str, _RewindChoice]]:
+        return [
+            ("Keep in current session", _RewindPersistence.IN_PLACE),
+            ("Fork to a new session", _RewindPersistence.FORK),
+        ]
+
     @property
     def has_file_changes(self) -> bool:
         return self._has_file_changes
 
     def update_preview(self, message_preview: str) -> None:
         self._message_preview = message_preview
+        self._reset_to_action_step()
         if self._title_widget is not None:
-            self._title_widget.update(f"Rewind to: {message_preview[:80]}")
+            self._title_widget.update(self._title_text())
+
+    def _title_text(self) -> str:
+        return f"Rewind to: {self._message_preview[:80]}"
+
+    def _help_text(self) -> Content:
+        if self._step == _RewindStep.PERSISTENCE:
+            return shortcut_hint(
+                f"{shortcut('↑↓/jk')} pick option  "
+                f"{shortcut('Enter')} confirm  {shortcut('Esc')} back  "
+                f"{shortcut('q')} quit"
+            )
+        return shortcut_hint(
+            f"{shortcut('←/Esc')} previous  {shortcut('→')} next  "
+            f"{shortcut('↑↓/jk')} pick option  "
+            f"{shortcut('Enter')} confirm  {shortcut('q')} quit"
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="rewind-content"):
             self._title_widget = NoMarkupStatic(
-                f"Rewind to: {self._message_preview[:80]}", classes="rewind-title"
+                self._title_text(), classes="rewind-title"
             )
             yield self._title_widget
             yield NoMarkupStatic("")
-            for _ in range(len(self._options)):
+            for _ in range(_MAX_OPTIONS):
                 widget = NoMarkupStatic("", classes="rewind-option")
                 self.option_widgets.append(widget)
                 yield widget
             yield NoMarkupStatic("")
-            yield NoMarkupStatic(
-                shortcut_hint(
-                    f"{shortcut('←/Esc')} previous  {shortcut('→')} next  "
-                    f"{shortcut('Shift+↑↓')} scroll  {shortcut('↑↓')} pick option  "
-                    f"{shortcut('Enter')} accept  {shortcut('q')} quit"
-                ),
-                classes="rewind-help",
-            )
+            self._help_widget = NoMarkupStatic(self._help_text(), classes="rewind-help")
+            yield self._help_widget
 
     async def on_mount(self) -> None:
         self._update_options()
         self.focus()
 
     def _update_options(self) -> None:
-        for idx, ((text, _action), widget) in enumerate(
-            zip(self._options, self.option_widgets, strict=True)
-        ):
+        for idx, widget in enumerate(self.option_widgets):
+            if idx >= len(self._options):
+                widget.update("")
+                widget.display = False
+                continue
+
+            widget.display = True
+            text, _choice = self._options[idx]
             is_selected = idx == self.selected_option
             cursor = "› " if is_selected else "  "
-            option_text = f"{cursor}{idx + 1}. {text}"
-
-            widget.update(option_text)
+            widget.update(f"{cursor}{idx + 1}. {text}")
 
             widget.remove_class("rewind-cursor-selected")
             widget.remove_class("rewind-option-unselected")
@@ -127,6 +173,31 @@ class RewindApp(VimNavigationMixin, Container):
                 widget.add_class("rewind-cursor-selected")
             else:
                 widget.add_class("rewind-option-unselected")
+
+    def _render_step(self) -> None:
+        self._update_options()
+        if self._help_widget is not None:
+            self._help_widget.update(self._help_text())
+
+    def _reset_to_action_step(self) -> None:
+        self._step = _RewindStep.ACTION
+        self._restore_files = False
+        self._options = self._build_action_options()
+        self.selected_option = 0
+        self._render_step()
+
+    def _advance_to_persistence(self, *, restore_files: bool) -> None:
+        self._restore_files = restore_files
+        self._step = _RewindStep.PERSISTENCE
+        self._options = self._build_persistence_options()
+        self.selected_option = 0
+        self._render_step()
+
+    def go_back(self) -> bool:
+        if self._step != _RewindStep.PERSISTENCE:
+            return False
+        self._reset_to_action_step()
+        return True
 
     def _option_count(self) -> int:
         return len(self._options)
@@ -162,12 +233,26 @@ class RewindApp(VimNavigationMixin, Container):
         self.post_message(self.Quit())
 
     def _handle_selection(self, option: int) -> None:
-        _, action = self._options[option]
-        match action:
+        if option >= len(self._options):
+            return
+        _label, choice = self._options[option]
+        match choice:
             case _RewindAction.EDIT_AND_RESTORE:
-                self.post_message(self.RewindWithRestore())
+                self._advance_to_persistence(restore_files=True)
             case _RewindAction.EDIT_ONLY:
-                self.post_message(self.RewindWithoutRestore())
+                self._advance_to_persistence(restore_files=False)
+            case _RewindPersistence.IN_PLACE:
+                self.post_message(
+                    self.RewindConfirmed(
+                        restore_files=self._restore_files, inplace=True
+                    )
+                )
+            case _RewindPersistence.FORK:
+                self.post_message(
+                    self.RewindConfirmed(
+                        restore_files=self._restore_files, inplace=False
+                    )
+                )
 
     def on_key(self, event: events.Key) -> None:
         self._handle_vim_navigation_key(event)

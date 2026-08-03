@@ -503,7 +503,8 @@ class ResourceRequestHandler:
         return DispatchResult(response)
 
     def _config_read(self, params: ConfigReadParams) -> ConfigReadResponse:
-        self._require_session(params.session_id)
+        if params.session_id is not None:
+            self._require_session(params.session_id)
         return self._config_response()
 
     async def _config_patch(self, params: ConfigPatchParams) -> ConfigPatchResponse:

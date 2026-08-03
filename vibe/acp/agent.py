@@ -64,6 +64,7 @@ from vibe.acp.auth import (
     ApiKeyRemover,
     BrowserSignInServiceFactory,
     OnboardingContextLoader,
+    ProviderPersister,
 )
 from vibe.acp.commands import AcpCommandController, AcpCommandRegistry
 from vibe.acp.content import project_prompt
@@ -108,7 +109,13 @@ from vibe.app_server._project_links import (
     ProjectLinksInternalError,
     ProjectLinksInvalidRequest,
 )
-from vibe.app_server.events import AppServerEvent, CallbackRequested, TurnCompleted
+from vibe.app_server.events import (
+    AppServerEvent,
+    CallbackRequested,
+    StatsUpdated,
+    TurnCompleted,
+    TurnRetrying,
+)
 from vibe.app_server.host import AppServerHost
 from vibe.app_server.local import (
     ClientDescriptor,
@@ -126,6 +133,7 @@ from vibe.app_server.models import (
     PublicMessageEntry,
     PublicTurnStatus,
     PublicTurnStopReason,
+    TurnErrorCode,
 )
 from vibe.app_server.protocol import (
     AppServerResponseError,
@@ -223,6 +231,7 @@ class VibeAcpAgent(AcpAgent):
         browser_sign_in_service_factory: BrowserSignInServiceFactory | None = None,
         api_key_persister: ApiKeyPersister | None = None,
         api_key_remover: ApiKeyRemover | None = None,
+        provider_persister: ProviderPersister | None = None,
         environ_before_dotenv_load: Mapping[str, str] | None = None,
     ) -> None:
         self.sessions: dict[str, AcpSession] = {}
@@ -241,6 +250,8 @@ class VibeAcpAgent(AcpAgent):
             auth_kwargs["api_key_persister"] = api_key_persister
         if api_key_remover is not None:
             auth_kwargs["api_key_remover"] = api_key_remover
+        if provider_persister is not None:
+            auth_kwargs["provider_persister"] = provider_persister
         self._auth = AcpAuthController(**auth_kwargs)
         self._command_controller = AcpCommandController(
             lambda: self.client, self._send_config_options
@@ -342,6 +353,7 @@ class VibeAcpAgent(AcpAgent):
             mcp_servers=mcp_servers,
         )
         modes, _ = self._mode_state(session)
+        self._send_usage_update(session)
         return NewSessionResponse(
             session_id=session.id,
             modes=modes,
@@ -499,8 +511,18 @@ class VibeAcpAgent(AcpAgent):
         if isinstance(event, CallbackRequested):
             await self._answer_callback(session, event.callback)
             return
+        if isinstance(event, TurnRetrying):
+            await self._send_retrying(session, event)
+            return
         for update in session_updates_for_event(event):
             await self.client.session_update(session_id=session.id, update=update)
+        if isinstance(event, StatsUpdated):
+            self._send_usage_update(session)
+
+    async def _send_retrying(self, session: AcpSession, event: TurnRetrying) -> None:
+        await self.client.ext_notification(
+            "session/retrying", {"sessionId": session.id, "reason": event.params.reason}
+        )
 
     @override
     async def prompt(
@@ -549,7 +571,7 @@ class VibeAcpAgent(AcpAgent):
             self._send_usage_update(session)
             return PromptResponse(stop_reason="cancelled", usage=self._usage(session))
         except AppServerTurnError as exc:
-            if exc.error.code == "response_too_long":
+            if exc.error.code == TurnErrorCode.RESPONSE_TOO_LONG:
                 self._send_usage_update(session)
                 return PromptResponse(
                     stop_reason="max_tokens", usage=self._usage(session)
@@ -692,14 +714,12 @@ class VibeAcpAgent(AcpAgent):
     @override
     async def set_config_option(
         self, config_id: str, session_id: str, value: str | bool, **kwargs: Any
-    ) -> SetSessionConfigOptionResponse | None:
+    ) -> SetSessionConfigOptionResponse:
         del kwargs
         session = self._get_session(session_id)
         try:
             match config_id, value:
-                case "mode", str(mode):
-                    if not self._is_primary_mode(session, mode):
-                        return None
+                case "mode", str(mode) if self._is_primary_mode(session, mode):
                     await session.app_server.resources.agents.switch(mode)
                 case "model", str(model) if any(
                     candidate.alias == model
@@ -727,9 +747,13 @@ class VibeAcpAgent(AcpAgent):
                         max_tokens=int(raw)
                     )
                 case _:
-                    return None
-        except (ValueError, AppServerResponseError):
-            return None
+                    raise InvalidRequestError(
+                        f"Unsupported config option {config_id}={value!r}"
+                    )
+        except ValueError as exc:
+            raise InvalidRequestError(str(exc)) from exc
+        except AppServerResponseError as exc:
+            raise InvalidRequestError(exc.error.message) from exc
         return SetSessionConfigOptionResponse(
             config_options=self._config_options(session)
         )
@@ -762,6 +786,7 @@ class VibeAcpAgent(AcpAgent):
             mcp_servers=mcp_servers,
         )
         modes, _ = self._mode_state(child)
+        self._send_usage_update(child)
         return ForkSessionResponse(
             session_id=child.id, modes=modes, config_options=self._config_options(child)
         )
@@ -778,13 +803,16 @@ class VibeAcpAgent(AcpAgent):
     ) -> ResumeSessionResponse:
         del kwargs
         if session_id not in self.sessions:
-            await self._create_session(
+            session = await self._create_session(
                 Path(cwd),
                 ResumeSessionIntent(session_id),
                 acp_session_id=session_id,
                 workspace_roots=additional_directories,
                 mcp_servers=mcp_servers,
             )
+        else:
+            session = self._get_session(session_id)
+        self._send_usage_update(session)
         return ResumeSessionResponse()
 
     @override
@@ -796,6 +824,7 @@ class VibeAcpAgent(AcpAgent):
                     "authenticated": state.can_use_active_provider,
                     "authState": state.kind.value,
                     "signOutAvailable": state.sign_out_available,
+                    "customDomain": self._auth.custom_domain(),
                 }
             case "auth/signOut":
                 self._auth.sign_out()

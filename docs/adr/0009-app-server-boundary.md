@@ -198,7 +198,8 @@ Session creation and user execution are separate:
 - `session/read`, `session/list`, and `history/list` are passive reads;
 - `session/fork` creates a session from an existing public boundary;
 - `session/close` flushes and closes the attached runtime;
-- `turn/start` begins structured user input;
+- `turn/start` begins structured user input and may mark harness instructions as
+  injected so they remain hidden from public history;
 - `turn/steer` adds input to the active turn; and
 - `turn/interrupt` interrupts the active turn.
 

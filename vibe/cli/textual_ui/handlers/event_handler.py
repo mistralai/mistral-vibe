@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,7 @@ from vibe.app_server.events import (
     AppServerEvent,
     HistoryEntryAdded,
     HistoryEntryUpdated,
+    TurnRetrying,
 )
 from vibe.app_server.models import (
     AgentChangedNoticeDetail,
@@ -38,13 +40,19 @@ from vibe.app_server.models import (
     WaitingForInputNoticeDetail,
 )
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
-from vibe.cli.textual_ui.widgets.loading import DEFAULT_LOADING_STATUS
+from vibe.cli.textual_ui.widgets.loading import (
+    DEFAULT_LOADING_STATUS,
+    RETRYING_LOADING_STATUS,
+    THINKING_LOADING_STATUS,
+)
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
+    ErrorMessage,
     HookRunContainer,
     HookSystemMessageLine,
     PlanFileMessage,
     ReasoningMessage,
+    SlashCommandMessage,
     UserCommandMessage,
 )
 from vibe.cli.textual_ui.widgets.tools import (
@@ -64,6 +72,13 @@ _NON_GROUPED_EFFECT_KINDS = frozenset({
 })
 
 
+@dataclass(slots=True)
+class _RetryPresentation:
+    assistant: AssistantMessage | None
+    transient_widgets: list[Widget] = field(default_factory=list)
+    active: bool = False
+
+
 class EventHandler:
     def __init__(
         self,
@@ -81,12 +96,35 @@ class EventHandler:
         self.tool_calls: dict[str, ToolCallMessage] = {}
         self.current_compact: CompactMessage | None = None
         self.current_streaming_message: AssistantMessage | None = None
+        self._turn_assistant_message: AssistantMessage | None = None
         self.current_streaming_reasoning: ReasoningMessage | None = None
         self.current_tool_group: ToolGroup | None = None
         self.plan_file_message: PlanFileMessage | None = None
         self._hook_containers: dict[str, HookRunContainer] = {}
         self._tool_call_anchors: dict[str, Widget] = {}
         self._pending_error_results: list[ToolResultMessage] = []
+        self._retry_presentation: _RetryPresentation | None = None
+
+    def offer_retry(self, error: ErrorMessage) -> None:
+        presentation = self._retry_presentation
+        if presentation is None:
+            presentation = _RetryPresentation(self._turn_assistant_message)
+            self._retry_presentation = presentation
+        elif presentation.assistant is None:
+            presentation.assistant = self._turn_assistant_message
+        presentation.transient_widgets.append(error)
+        presentation.active = False
+
+    def begin_retry(self, command: SlashCommandMessage) -> bool:
+        if self._retry_presentation is None:
+            return False
+        self._retry_presentation.transient_widgets.append(command)
+        self._retry_presentation.active = True
+        return True
+
+    def cancel_retry_presentation(self) -> None:
+        self._retry_presentation = None
+        self._turn_assistant_message = None
 
     async def handle_event(
         self, event: AppServerEvent, loading_widget: LoadingWidget | None = None
@@ -96,6 +134,8 @@ class EventHandler:
                 return await self._handle_entry_added(entry, loading_widget)
             case HistoryEntryUpdated() as update:
                 await self._handle_entry_updated(update, loading_widget)
+            case TurnRetrying() if loading_widget is not None:
+                loading_widget.set_status(RETRYING_LOADING_STATUS)
             case _:
                 pass
         return None
@@ -112,27 +152,33 @@ class EventHandler:
                 if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
                     await self.finalize_streaming()
             case PublicMessageEntry(role="user"):
+                self.cancel_retry_presentation()
                 await self.finalize_streaming()
             case PublicMessageEntry(role="system"):
-                pass
+                await self._resolve_retry_presentation(continue_assistant=False)
             case PublicReasoningEntry():
+                await self._resolve_retry_presentation(continue_assistant=False)
                 await self._handle_reasoning_delta(entry.text, loading_widget)
                 if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
                     await self.finalize_streaming()
             case PublicEffectEntry():
+                await self._resolve_retry_presentation(continue_assistant=False)
                 await self.finalize_streaming()
                 tool_call = await self._handle_effect_started(entry, loading_widget)
                 if _effect_is_terminal(entry):
                     await self._handle_effect_completed(entry, loading_widget)
                 return tool_call
             case PublicCheckpointEntry(kind="compaction"):
+                await self._resolve_retry_presentation(continue_assistant=False)
                 await self.finalize_streaming()
                 await self._handle_compact_start()
                 if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
                     await self._handle_compact_end(entry)
             case PublicNoticeEntry():
+                await self._resolve_retry_presentation(continue_assistant=False)
                 await self._handle_notice(entry, loading_widget)
             case PublicCallbackEntry():
+                await self._resolve_retry_presentation(continue_assistant=False)
                 await self.finalize_streaming()
             case _:
                 raise TypeError(
@@ -219,17 +265,39 @@ class EventHandler:
         if self.current_streaming_message is None:
             if loading_widget is not None:
                 loading_widget.set_status(DEFAULT_LOADING_STATUS)
+            message = await self._resolve_retry_presentation(continue_assistant=True)
+            if message is not None:
+                self.current_streaming_message = message
+                self._turn_assistant_message = message
+                await message.append_content(content)
+                return
             message = AssistantMessage(content)
             self.current_streaming_message = message
+            self._turn_assistant_message = message
             await self.mount_callback(message)
             return
         await self.current_streaming_message.append_content(content)
+
+    async def _resolve_retry_presentation(
+        self, *, continue_assistant: bool
+    ) -> AssistantMessage | None:
+        presentation = self._retry_presentation
+        if presentation is None or not presentation.active:
+            return None
+        self._retry_presentation = None
+        for widget in presentation.transient_widgets:
+            if widget.parent is not None:
+                await widget.remove()
+        assistant = presentation.assistant
+        if not continue_assistant or assistant is None or assistant.parent is None:
+            return None
+        return assistant
 
     async def _handle_reasoning_delta(
         self, content: str, loading_widget: LoadingWidget | None
     ) -> None:
         if loading_widget is not None:
-            loading_widget.set_status("Thinking")
+            loading_widget.set_status(THINKING_LOADING_STATUS)
         if self.current_streaming_message is not None:
             await self.current_streaming_message.stop_stream()
             if self.current_streaming_message.is_stripped_content_empty():

@@ -19,8 +19,9 @@ from tests.stubs.app_server import (
     create_test_app_server_session,
     start_test_app_server,
 )
-from tests.stubs.fake_backend import FakeBackend
+from tests.stubs.fake_backend import FakeBackend, FakeInterruptedStreamingBackend
 from vibe.app_server._model import validate_wire
+from vibe.app_server._projection import project_history
 from vibe.app_server._runtime import (
     AgentRuntimeFactory,
     HarnessProcess,
@@ -52,6 +53,7 @@ from vibe.app_server.models import (
     PublicNoticeEntry,
     ResourceContentBlock,
     ScheduledLoopFiredNoticeDetail,
+    TurnErrorCode,
     UserAnswer,
     UserInputCallbackOutput,
     UserQuestionResult,
@@ -78,11 +80,11 @@ from vibe.app_server.protocol import (
     validate_callback_acknowledgement,
 )
 from vibe.app_server.server import AppServer
-from vibe.app_server.session import AppServerSession
+from vibe.app_server.session import AppServerSession, AppServerTurnError
 from vibe.app_server.transport import memory_transport_pair
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.compaction import CompactionFailedError
-from vibe.core.config import SessionLoggingConfig
+from vibe.core.config import ModelConfig, SessionLoggingConfig
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.tools.models import ToolPermission
 from vibe.core.types import (
@@ -99,6 +101,62 @@ from vibe.core.types import (
     UserMessageEvent,
 )
 from vibe.user_content import UserResourceLink
+
+
+@pytest.mark.asyncio
+async def test_injected_turn_hides_user_after_stream_failure() -> None:
+    backend = FakeInterruptedStreamingBackend([
+        [mock_llm_chunk(content="partial")],
+        [mock_llm_chunk(content="recovered")],
+    ])
+    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+    session = await create_test_app_server_session(agent_loop)
+
+    try:
+        with pytest.raises(AppServerTurnError) as exc_info:
+            await _consume(session.act("hi", client_message_id="u1"))
+
+        assert agent_loop.messages[-1].role is Role.assistant
+        assert agent_loop.messages[-1].content == "partial"
+        await _consume(session.act("hidden continuation", injected=True))
+        restored_history = project_history(agent_loop)
+    finally:
+        await session.close()
+        await agent_loop.aclose()
+
+    assert exc_info.value.error.code == TurnErrorCode.BACKEND_ERROR
+    assert backend.streaming_attempts == 2
+    assistant_messages = [
+        entry
+        for entry in session.history
+        if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
+    ]
+    assert [entry.text for entry in assistant_messages] == ["partial", "recovered"]
+    user_entries = [
+        entry
+        for entry in session.history
+        if isinstance(entry, PublicMessageEntry) and entry.role == "user"
+    ]
+    assert len(user_entries) == 1
+    restored_user_entries = [
+        entry
+        for entry in restored_history
+        if isinstance(entry, PublicMessageEntry) and entry.role == "user"
+    ]
+    restored_assistant_entries = [
+        entry
+        for entry in restored_history
+        if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
+    ]
+    assert len(restored_user_entries) == 1
+    assert [entry.text for entry in restored_assistant_entries] == [
+        "partial",
+        "recovered",
+    ]
+    injected_message = backend.requests_messages[-1][-1]
+    assert injected_message.role is Role.user
+    assert injected_message.injected is True
+    assert injected_message.content == "hidden continuation"
 
 
 @pytest.mark.asyncio
@@ -188,6 +246,53 @@ async def test_turn_streams_public_events_over_json_rpc() -> None:
     )
     assert assistant.text == "hello"
     assert all(entry.generation_status == "completed" for entry in session.history)
+
+
+@pytest.mark.asyncio
+async def test_turn_pushes_fresh_context_while_tool_runs() -> None:
+    tool_call = ToolCall(
+        id="todo-1",
+        index=0,
+        function=FunctionCall(name="todo", arguments='{"action":"read"}'),
+    )
+    backend = FakeBackend([
+        [
+            mock_llm_chunk(content="", reasoning_content="thinking"),
+            mock_llm_chunk(content="Let me check", tool_calls=[tool_call]),
+        ],
+        [mock_llm_chunk(content="Done")],
+    ])
+    config = build_test_vibe_config(
+        enabled_tools=["todo"],
+        tools={"todo": {"permission": ToolPermission.ALWAYS.value}},
+    )
+    agent_loop = build_test_agent_loop(
+        config=config, backend=backend, enable_streaming=True
+    )
+    session = await create_test_app_server_session(agent_loop)
+
+    try:
+        events = [event async for event in session.act("use a tool")]
+    finally:
+        await session.close()
+        await agent_loop.aclose()
+
+    tool_done_index = next(
+        index
+        for index, event in enumerate(events)
+        if isinstance(event, HistoryEntryUpdated)
+        and isinstance(event.entry, PublicEffectEntry)
+        and isinstance(event.entry.state, CompletedEffectState)
+    )
+    assert any(
+        isinstance(event, StatsUpdated) and event.params.stats.context_tokens > 0
+        for event in events[:tool_done_index]
+    )
+    zero_updates = sum(
+        isinstance(event, StatsUpdated) and event.params.stats.context_tokens == 0
+        for event in events
+    )
+    assert zero_updates == 1
 
 
 @pytest.mark.asyncio
@@ -364,6 +469,39 @@ async def test_in_process_resume_rebases_exit_usage(tmp_path: Path) -> None:
 
     assert summary.usage.input_tokens == 0
     assert summary.usage.output_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_backfills_cached_price_for_legacy_stats() -> None:
+    config = build_test_vibe_config(
+        models=[
+            ModelConfig(
+                name="cached-model",
+                provider="mistral",
+                alias="cached-model",
+                input_price=1.0,
+                output_price=2.0,
+                cached_input_price=0.1,
+            )
+        ]
+    )
+    replacement = build_test_agent_loop(config=config)
+    try:
+        legacy_metadata: dict[str, object] = {
+            "stats": {
+                "session_prompt_tokens": 100,
+                "session_completion_tokens": 50,
+                "input_price_per_million": 1.0,
+                "output_price_per_million": 2.0,
+            }
+        }
+        result = await AgentRuntimeFactory._hydrate_resumed(
+            replacement, loaded_messages=[], metadata=legacy_metadata
+        )
+        assert result.stats.session_prompt_tokens == 100
+        assert result.stats.cached_input_price_per_million == 0.1
+    finally:
+        await replacement.aclose()
 
 
 @pytest.mark.asyncio

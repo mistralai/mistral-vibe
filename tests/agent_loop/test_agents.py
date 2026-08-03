@@ -18,7 +18,6 @@ from vibe.core.agents._migration import migrate_agent_profile_config
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import (
     BUILTIN_AGENTS,
-    CHAT,
     AgentProfile,
     AgentSafety,
     AgentType,
@@ -56,8 +55,7 @@ class TestAgentSafety:
 
 class TestAgentProfile:
     def test_all_builtin_agents_have_valid_names(self) -> None:
-        acp_only = {BuiltinAgentName.CHAT}
-        assert set(BUILTIN_AGENTS.keys()) == set(BuiltinAgentName) - acp_only
+        assert set(BUILTIN_AGENTS.keys()) == set(BuiltinAgentName)
 
     def test_display_name_property(self) -> None:
         assert BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].display_name == "Default"
@@ -99,6 +97,18 @@ class TestAgentProfile:
         }
 
 
+ENABLED_TOOLS_PROFILE = AgentProfile(
+    name="enabled-tools",
+    display_name="Enabled Tools",
+    description="Profile with an explicit enabled_tools allowlist",
+    safety=AgentSafety.SAFE,
+    overrides={
+        "bypass_tool_permissions": True,
+        "enabled_tools": ["grep", "read_file", "ask_user_question", "task"],
+    },
+)
+
+
 class TestAgentApplyToConfig:
     def test_profile_disabled_tools_are_merged_with_base_config(
         self, make_config: Callable[..., VibeConfigSchema]
@@ -126,7 +136,7 @@ class TestAgentApplyToConfig:
         self, make_config: Callable[..., VibeConfigSchema]
     ) -> None:
         base = make_config(disabled_tools=["ask_*"])
-        result = CHAT.apply_to_config(base)
+        result = ENABLED_TOOLS_PROFILE.apply_to_config(base)
         manager = ToolManager(lambda: result)
 
         assert "ask_user_question" in result.enabled_tools
@@ -142,7 +152,7 @@ class TestAgentApplyToConfig:
     ) -> None:
         base = make_config(disabled_tools=[])
 
-        result = CHAT.apply_to_config(base)
+        result = ENABLED_TOOLS_PROFILE.apply_to_config(base)
 
         assert "ask_user_question" in result.enabled_tools
 

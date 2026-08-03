@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.conftest import build_test_vibe_app
+from vibe.cli.clipboard import ClipboardCopyResult
 from vibe.cli.textual_ui.widgets.messages import AssistantMessage
 
 
@@ -19,7 +20,9 @@ async def test_copy_command_copies_last_assistant_message() -> None:
         with (
             patch(
                 "vibe.cli.textual_ui.app.copy_text_to_clipboard",
-                return_value=stripped_second_reply,
+                return_value=ClipboardCopyResult(
+                    text=stripped_second_reply, verified=True
+                ),
             ) as mock_copy,
             patch.object(
                 app.app_server.resources.telemetry, "record"

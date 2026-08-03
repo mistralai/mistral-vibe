@@ -28,6 +28,7 @@ from vibe.app_server.protocol import (
     SessionUpdatedParams,
     StatsUpdatedParams,
     TurnCompletedParams,
+    TurnRetryingParams,
     TurnStartedParams,
 )
 
@@ -87,6 +88,11 @@ class CallbackRequested:
 
 
 @dataclass(frozen=True, slots=True)
+class TurnRetrying:
+    params: TurnRetryingParams
+
+
+@dataclass(frozen=True, slots=True)
 class ServerWarning:
     params: ServerWarningParams
 
@@ -107,6 +113,7 @@ type AppServerEvent = (
     | TurnCompleted
     | StatsUpdated
     | CallbackRequested
+    | TurnRetrying
     | ServerWarning
     | ServerError
 )
@@ -184,7 +191,7 @@ class UnknownNotificationError(RuntimeError):
 
 def parse_server_event(
     notification: Notification,
-) -> ServerWarning | ServerError | None:
+) -> ServerWarning | ServerError | TurnRetrying | None:
     match notification.method:
         case "warning":
             return ServerWarning(
@@ -192,6 +199,8 @@ def parse_server_event(
             )
         case "error":
             return ServerError(validate_wire(ServerErrorParams, notification.params))
+        case "turn/retrying":
+            return TurnRetrying(validate_wire(TurnRetryingParams, notification.params))
         case _:
             return None
 

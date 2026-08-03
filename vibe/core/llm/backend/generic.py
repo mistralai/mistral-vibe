@@ -26,7 +26,7 @@ from vibe.core.types import (
     Role,
     StrToolChoice,
 )
-from vibe.core.utils import async_generator_retry, async_retry
+from vibe.core.utils import RetryObserver, async_generator_retry, async_retry
 from vibe.core.utils.sse import iter_sse_lines
 from vibe.utils.api_keys import resolve_api_key
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
@@ -208,16 +208,22 @@ class GenericBackend:
         client: VibeAsyncHTTPClient | None = None,
         provider: ProviderConfig,
         timeout: float = 720.0,
+        on_retry: RetryObserver | None = None,
     ) -> None:
         """Initialize the backend.
 
         Args:
             client: Optional Vibe HTTP client to use. If not provided, one will be created.
+            on_retry: Notified before each retry backoff.
         """
         self._client = client
         self._owns_client = client is None
         self._provider = provider
         self._timeout = timeout
+        self._make_request = async_retry(tries=3, on_retry=on_retry)(self._send_request)
+        self._make_streaming_request = async_generator_retry(
+            tries=3, on_retry=on_retry
+        )(self._send_streaming_request)
 
     async def __aenter__(self) -> GenericBackend:
         if self._client is None:
@@ -382,8 +388,7 @@ class GenericBackend:
         data: dict[str, Any]
         headers: dict[str, str]
 
-    @async_retry(tries=3)
-    async def _make_request(
+    async def _send_request(
         self, url: str, data: bytes, headers: dict[str, str]
     ) -> HTTPResponse:
         client = self._get_client()
@@ -394,8 +399,7 @@ class GenericBackend:
         response_body = response.json()
         return self.HTTPResponse(response_body, response_headers)
 
-    @async_generator_retry(tries=3)
-    async def _make_streaming_request(
+    async def _send_streaming_request(
         self, url: str, data: bytes, headers: dict[str, str]
     ) -> AsyncGenerator[dict[str, Any]]:
         client = self._get_client()

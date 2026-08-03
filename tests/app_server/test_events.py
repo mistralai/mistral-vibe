@@ -14,6 +14,7 @@ from vibe.app_server.events import (
     ServerWarning,
     SessionCompacted,
     SessionSnapshot,
+    StatsUpdated,
     UnknownNotificationError,
     parse_server_event,
     reconcile_snapshot,
@@ -487,7 +488,7 @@ def test_session_handoff_atomically_replaces_projection_and_watermark() -> None:
 def test_stats_notification_updates_snapshot_token_usage() -> None:
     projection = _projection()
 
-    projection.consume(
+    event = projection.consume(
         Notification(
             method="session/statsUpdated",
             params={
@@ -495,7 +496,12 @@ def test_stats_notification_updates_snapshot_token_usage() -> None:
                 "sessionId": "session-1",
                 "emittedAt": 2,
                 "contextWindow": 100,
-                "stats": {"sessionPromptTokens": 12, "sessionCompletionTokens": 8},
+                "stats": {
+                    "sessionPromptTokens": 12,
+                    "sessionCompletionTokens": 8,
+                    "sessionCachedTokens": 5,
+                    "lastTurnCachedTokens": 3,
+                },
             },
         )
     )
@@ -505,6 +511,9 @@ def test_stats_notification_updates_snapshot_token_usage() -> None:
     assert usage.input_tokens == 12
     assert usage.output_tokens == 8
     assert usage.total_tokens == 20
+    assert isinstance(event, StatsUpdated)
+    assert event.params.stats.session_cached_tokens == 5
+    assert event.params.stats.last_turn_cached_tokens == 3
 
 
 @pytest.mark.parametrize("event_id", [0, -1, True])

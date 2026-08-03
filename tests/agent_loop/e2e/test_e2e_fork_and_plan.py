@@ -22,8 +22,8 @@ from vibe.core.types import (
     Role,
     UserInputRequestEvent,
 )
-from vibe.core.utils.tags import VIBE_WARNING_TAG
 from vibe.questions import UserAnswer as Answer
+from vibe.utils import VIBE_WARNING_TAG
 
 EXIT_PLAN_TOOL_CALL = [
     {

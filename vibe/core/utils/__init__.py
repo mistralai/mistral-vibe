@@ -14,14 +14,19 @@ from vibe.core.utils.concurrency import (
 )
 from vibe.core.utils.matching import name_matches
 from vibe.core.utils.merge import MergeConflictError, MergeStrategy
-from vibe.core.utils.retry import async_generator_retry, async_retry
+from vibe.core.utils.retry import (
+    RetryObserver,
+    async_generator_retry,
+    async_retry,
+    describe_http_status,
+    describe_retry_reason,
+)
 from vibe.core.utils.sse import iter_sse_lines
 from vibe.core.utils.tags import (
     CANCELLATION_TAG,
     KNOWN_TAGS,
     TOOL_ERROR_TAG,
     VIBE_STOP_EVENT_TAG,
-    VIBE_WARNING_TAG,
     CancellationReason,
     TaggedText,
     get_user_cancellation_message,
@@ -46,18 +51,20 @@ __all__ = [
     "KNOWN_TAGS",
     "TOOL_ERROR_TAG",
     "VIBE_STOP_EVENT_TAG",
-    "VIBE_WARNING_TAG",
     "AsyncExecutor",
     "CancellationReason",
     "ConversationLimitException",
     "MergeConflictError",
     "MergeStrategy",
+    "RetryObserver",
     "TaggedText",
     "WindowsShell",
     "WindowsShellKind",
     "async_generator_retry",
     "async_retry",
     "compact_complete_display",
+    "describe_http_status",
+    "describe_retry_reason",
     "get_platform_display_name",
     "get_platform_id",
     "get_platform_version",

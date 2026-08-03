@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 
 class BuiltinAgentName(StrEnum):
     DEFAULT = "default"
-    CHAT = "chat"
     PLAN = "plan"
     ACCEPT_EDITS = "accept-edits"
     AUTO_APPROVE = "auto-approve"
@@ -67,9 +66,6 @@ class AgentProfile:
         )
 
 
-CHAT_AGENT_TOOLS = ["grep", "read_file", "ask_user_question", "task"]
-
-
 def _plan_overrides() -> dict[str, Any]:
     plans_pattern = str(PLANS_DIR.path / "*")
     return {
@@ -94,13 +90,6 @@ PLAN = AgentProfile(
     "Read-only agent for exploration and planning",
     AgentSafety.SAFE,
     overrides=_plan_overrides(),
-)
-CHAT = AgentProfile(
-    BuiltinAgentName.CHAT,
-    "Chat",
-    "Read-only conversational mode for questions and discussions",
-    AgentSafety.SAFE,
-    overrides={"bypass_tool_permissions": True, "enabled_tools": CHAT_AGENT_TOOLS},
 )
 ACCEPT_EDITS = AgentProfile(
     BuiltinAgentName.ACCEPT_EDITS,

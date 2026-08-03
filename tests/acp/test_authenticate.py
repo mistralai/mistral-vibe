@@ -107,9 +107,23 @@ class InMemoryApiKeyPersister:
     def __init__(self, result: str = "completed") -> None:
         self.result = result
         self.saved: list[tuple[ProviderConfig, str]] = []
+        self.custom_domain_flags: list[bool] = []
 
-    def persist(self, provider: ProviderConfig, api_key: str) -> str:
+    def persist(
+        self, provider: ProviderConfig, api_key: str, *, custom_domain: bool = False
+    ) -> str:
         self.saved.append((provider, api_key))
+        self.custom_domain_flags.append(custom_domain)
+        return self.result
+
+
+class InMemoryProviderPersister:
+    def __init__(self, result: bool = True) -> None:
+        self.result = result
+        self.saved: list[ProviderConfig] = []
+
+    def persist(self, provider: ProviderConfig) -> bool:
+        self.saved.append(provider)
         return self.result
 
 
@@ -119,9 +133,30 @@ def build_acp_agent(
     browser_sign_in: FakeBrowserSignInService | None = None,
     api_key_persister: InMemoryApiKeyPersister | None = None,
 ) -> tuple[VibeAcpAgentLoop, MutableOnboardingContextLoader, InMemoryApiKeyPersister]:
+    agent, context_loader, key_persister, _ = build_acp_agent_with_provider_persister(
+        provider=provider,
+        browser_sign_in=browser_sign_in,
+        api_key_persister=api_key_persister,
+    )
+    return agent, context_loader, key_persister
+
+
+def build_acp_agent_with_provider_persister(
+    *,
+    provider: ProviderConfig | None = None,
+    browser_sign_in: FakeBrowserSignInService | None = None,
+    api_key_persister: InMemoryApiKeyPersister | None = None,
+    provider_persister: InMemoryProviderPersister | None = None,
+) -> tuple[
+    VibeAcpAgentLoop,
+    MutableOnboardingContextLoader,
+    InMemoryApiKeyPersister,
+    InMemoryProviderPersister,
+]:
     provider = provider or build_mistral_provider()
     browser_sign_in = browser_sign_in or FakeBrowserSignInService()
     api_key_persister = api_key_persister or InMemoryApiKeyPersister()
+    provider_persister = provider_persister or InMemoryProviderPersister()
     context_loader = MutableOnboardingContextLoader(provider)
 
     return (
@@ -129,9 +164,11 @@ def build_acp_agent(
             onboarding_context_loader=context_loader,
             browser_sign_in_service_factory=lambda _provider: browser_sign_in,
             api_key_persister=api_key_persister.persist,
+            provider_persister=provider_persister.persist,
         ),
         context_loader,
         api_key_persister,
+        provider_persister,
     )
 
 
@@ -385,3 +422,232 @@ class TestACPAuthenticate:
         }
         assert api_key_persister.saved == [(provider, "api-key")]
         assert browser_sign_in.close_count == 3
+
+
+class TestACPAuthenticateCustomDomain:
+    @pytest.mark.asyncio
+    async def test_start_uses_custom_domain_for_browser_auth_urls(self) -> None:
+        captured: list[ProviderConfig] = []
+        browser_sign_in = FakeBrowserSignInService()
+
+        def factory(provider: ProviderConfig) -> FakeBrowserSignInService:
+            captured.append(provider)
+            return browser_sign_in
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(
+                build_mistral_provider()
+            ),
+            browser_sign_in_service_factory=factory,
+        )
+
+        await acp_agent_loop.authenticate(
+            "browser-auth-delegated",
+            action="start",
+            signInTarget="custom",
+            domain="console.acme.internal",
+        )
+
+        assert captured[0].browser_auth_base_url == "https://console.acme.internal"
+        assert (
+            captured[0].browser_auth_api_base_url == "https://console.acme.internal/api"
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_without_sign_in_target_keeps_configured_urls(self) -> None:
+        captured: list[ProviderConfig] = []
+        provider = build_mistral_provider(
+            browser_auth_base_url="https://console.acme.internal",
+            browser_auth_api_base_url="https://console.acme.internal/api",
+        )
+
+        def factory(started: ProviderConfig) -> FakeBrowserSignInService:
+            captured.append(started)
+            return FakeBrowserSignInService()
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(provider),
+            browser_sign_in_service_factory=factory,
+        )
+
+        await acp_agent_loop.authenticate("browser-auth-delegated")
+
+        assert captured[0].browser_auth_base_url == "https://console.acme.internal"
+
+    @pytest.mark.asyncio
+    async def test_start_with_mistral_target_resets_configured_custom_domain(
+        self,
+    ) -> None:
+        captured: list[ProviderConfig] = []
+        provider = build_mistral_provider(
+            browser_auth_base_url="https://console.acme.internal",
+            browser_auth_api_base_url="https://console.acme.internal/api",
+        )
+
+        def factory(started: ProviderConfig) -> FakeBrowserSignInService:
+            captured.append(started)
+            return FakeBrowserSignInService()
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(provider),
+            browser_sign_in_service_factory=factory,
+        )
+
+        await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="start", signInTarget="mistral"
+        )
+
+        assert captured[0].browser_auth_base_url == "https://console.mistral.ai"
+        assert captured[0].browser_auth_api_base_url == "https://console.mistral.ai/api"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("domain", ["", "   ", "https://", "not a domain", None])
+    async def test_start_rejects_invalid_custom_domain(self, domain: Any) -> None:
+        acp_agent_loop, _, _ = build_acp_agent()
+
+        with pytest.raises(InvalidRequestError, match="Invalid custom sign-in domain"):
+            await acp_agent_loop.authenticate(
+                "browser-auth-delegated",
+                action="start",
+                signInTarget="custom",
+                domain=domain,
+            )
+
+    @pytest.mark.asyncio
+    async def test_start_rejects_unknown_sign_in_target(self) -> None:
+        acp_agent_loop, _, _ = build_acp_agent()
+
+        with pytest.raises(InvalidRequestError, match="Unsupported sign-in target"):
+            await acp_agent_loop.authenticate(
+                "browser-auth-delegated", action="start", signInTarget="elsewhere"
+            )
+
+    @pytest.mark.asyncio
+    async def test_completion_persists_provider_when_domain_was_overridden(
+        self,
+    ) -> None:
+        (acp_agent_loop, _, api_key_persister, provider_persister) = (
+            build_acp_agent_with_provider_persister()
+        )
+        start_response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated",
+            action="start",
+            signInTarget="custom",
+            domain="console.acme.internal",
+        )
+        attempt_id = require_auth_meta(start_response, "browser-auth-delegated")[
+            "attemptId"
+        ]
+
+        response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="complete", attemptId=attempt_id
+        )
+
+        assert require_auth_meta(response, "browser-auth-delegated") == {
+            "attemptId": attempt_id,
+            "persistResult": "completed",
+            "persistProviderResult": "completed",
+            "status": "completed",
+        }
+        assert len(provider_persister.saved) == 1
+        assert (
+            provider_persister.saved[0].browser_auth_base_url
+            == "https://console.acme.internal"
+        )
+        assert api_key_persister.custom_domain_flags == [True]
+
+    @pytest.mark.asyncio
+    async def test_completion_does_not_persist_provider_without_override(self) -> None:
+        (acp_agent_loop, _, api_key_persister, provider_persister) = (
+            build_acp_agent_with_provider_persister()
+        )
+        start_response = await acp_agent_loop.authenticate("browser-auth-delegated")
+        attempt_id = require_auth_meta(start_response, "browser-auth-delegated")[
+            "attemptId"
+        ]
+
+        response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="complete", attemptId=attempt_id
+        )
+
+        assert "persistProviderResult" not in require_auth_meta(
+            response, "browser-auth-delegated"
+        )
+        assert provider_persister.saved == []
+        assert api_key_persister.custom_domain_flags == [False]
+
+    @pytest.mark.asyncio
+    async def test_completion_persists_reset_to_mistral_defaults(self) -> None:
+        provider = build_mistral_provider(
+            browser_auth_base_url="https://console.acme.internal",
+            browser_auth_api_base_url="https://console.acme.internal/api",
+        )
+        (acp_agent_loop, _, api_key_persister, provider_persister) = (
+            build_acp_agent_with_provider_persister(provider=provider)
+        )
+        start_response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="start", signInTarget="mistral"
+        )
+        attempt_id = require_auth_meta(start_response, "browser-auth-delegated")[
+            "attemptId"
+        ]
+
+        await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="complete", attemptId=attempt_id
+        )
+
+        assert len(provider_persister.saved) == 1
+        assert (
+            provider_persister.saved[0].browser_auth_base_url
+            == "https://console.mistral.ai"
+        )
+        assert api_key_persister.custom_domain_flags == [False]
+
+    @pytest.mark.asyncio
+    async def test_completion_reports_failed_provider_persistence_without_failing(
+        self,
+    ) -> None:
+        (acp_agent_loop, _, _, _) = build_acp_agent_with_provider_persister(
+            provider_persister=InMemoryProviderPersister(result=False)
+        )
+        start_response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated",
+            action="start",
+            signInTarget="custom",
+            domain="console.acme.internal",
+        )
+        attempt_id = require_auth_meta(start_response, "browser-auth-delegated")[
+            "attemptId"
+        ]
+
+        response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="complete", attemptId=attempt_id
+        )
+
+        meta = require_auth_meta(response, "browser-auth-delegated")
+        assert meta["persistResult"] == "completed"
+        assert meta["persistProviderResult"] == "failed"
+        assert meta["status"] == "completed"
+
+
+class TestACPAuthStatusCustomDomain:
+    @pytest.mark.asyncio
+    async def test_status_reports_configured_custom_domain(self) -> None:
+        acp_agent_loop, _, _ = build_acp_agent(
+            provider=build_mistral_provider(
+                browser_auth_base_url="https://console.acme.internal",
+                browser_auth_api_base_url="https://console.acme.internal/api",
+            )
+        )
+
+        response = await acp_agent_loop.ext_method("auth/status", {})
+
+        assert response["customDomain"] == "https://console.acme.internal"
+
+    @pytest.mark.asyncio
+    async def test_status_reports_no_custom_domain_for_default_urls(self) -> None:
+        acp_agent_loop, _, _ = build_acp_agent()
+
+        response = await acp_agent_loop.ext_method("auth/status", {})
+
+        assert response["customDomain"] is None

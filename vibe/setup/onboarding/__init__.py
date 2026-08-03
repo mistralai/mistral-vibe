@@ -8,7 +8,7 @@ from typing import Any
 from rich import print as rprint
 from textual.app import App
 
-from vibe.cli.clipboard import try_copy_text_to_clipboard
+from vibe.cli.clipboard import copy_to_clipboard
 from vibe.cli.theme import resolve_auto_theme, resolve_theme, resolve_theme_name
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config._defaults import (
@@ -148,7 +148,15 @@ class OnboardingApp(App[str | None]):
 
     def persist_credentials(self, api_key: str) -> str:
         resolved = resolve_api_key_provider(self._provider)
-        result = persist_api_key(resolved, api_key, launch_context=self._launch_context)
+        base_url = self._provider.browser_auth_base_url
+        result = persist_api_key(
+            resolved,
+            api_key,
+            launch_context=self._launch_context,
+            custom_domain=bool(
+                base_url and base_url != DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL
+            ),
+        )
         if result == "completed" and self._provider != self._config.provider:
             if not persist_provider_to_config(self._provider):
                 return "provider_config_error:failed to persist provider config"
@@ -182,8 +190,8 @@ class OnboardingApp(App[str | None]):
             or self._build_browser_sign_in_service_factory()
         )
 
-    def _copy_sign_in_url_to_clipboard(self, text: str) -> bool:
-        return try_copy_text_to_clipboard(text)
+    def _copy_sign_in_url_to_clipboard(self, text: str) -> None:
+        copy_to_clipboard(text)
 
 
 def run_onboarding(

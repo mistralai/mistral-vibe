@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from vibe.core.llm.types import BackendLike
+    from vibe.core.utils import RetryObserver
 
 
 def _create_mistral_backend(**kwargs: Any) -> BackendLike:
@@ -38,6 +39,7 @@ def create_backend(
     timeout: float = 720.0,
     retry_max_elapsed_time: float = 300.0,
     enable_otel: bool = False,
+    on_retry: RetryObserver | None = None,
 ) -> BackendLike:
     backend = Backend(provider.backend)
     factory = BACKEND_FACTORY[backend]
@@ -47,5 +49,6 @@ def create_backend(
             timeout=timeout,
             retry_max_elapsed_time=retry_max_elapsed_time,
             enable_otel=enable_otel,
+            on_retry=on_retry,
         )
-    return factory(provider=provider, timeout=timeout)
+    return factory(provider=provider, timeout=timeout, on_retry=on_retry)

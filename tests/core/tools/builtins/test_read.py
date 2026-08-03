@@ -24,7 +24,7 @@ from vibe.core.tools.builtins.read_file import (
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.core.utils import VIBE_WARNING_TAG
+from vibe.utils import VIBE_WARNING_TAG
 
 
 def _make_read() -> ReadFile:

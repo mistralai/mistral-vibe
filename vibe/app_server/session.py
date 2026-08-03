@@ -280,6 +280,7 @@ class AppServerSession:
         resources: list[UserResource] | None = None,
         user_display_content: UserDisplayContent | None = None,
         mention_stats: MentionStats | None = None,
+        injected: bool = False,
     ) -> AsyncGenerator[AppServerEvent, None]:
         client = await self._ensure_attached()
         if self.turn_active:
@@ -293,6 +294,7 @@ class AppServerSession:
                     TurnStartParams(
                         session_id=self.session_id,
                         input=_content_blocks(message, images, resources),
+                        injected=injected,
                         client_user_message_id=client_message_id,
                         auto_title=auto_title,
                         user_display_content=user_display_content,

@@ -8,14 +8,14 @@ from vibe.acp.exceptions import (
     from_app_server_error,
     from_public_error,
 )
-from vibe.app_server.models import PublicError
+from vibe.app_server.models import PublicError, TurnErrorCode
 from vibe.app_server.protocol import ProtocolError, ProtocolErrorCode
 
 
 def test_public_compaction_error_maps_to_acp_error() -> None:
     error = from_public_error(
         PublicError(
-            code="compaction_failed",
+            code=TurnErrorCode.COMPACTION_FAILED,
             message="Compaction failed",
             details={"reason": "tool_call"},
         )
@@ -43,7 +43,7 @@ def test_app_server_compaction_error_maps_to_acp_error() -> None:
 def test_public_images_not_supported_maps_to_acp_error() -> None:
     error = from_public_error(
         PublicError(
-            code="images_not_supported",
+            code=TurnErrorCode.IMAGES_NOT_SUPPORTED,
             message="model does not support images",
             details={"model": "text-model"},
         )
