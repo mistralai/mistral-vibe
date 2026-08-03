@@ -16,6 +16,11 @@ from vibe.core.config.patch import ConfigPatch, ReplaceOperationPatch
 # One-shot id: syncs an existing bash allowlist up to the current default
 # read-only commands once, so users keep the ability to remove any of them.
 BASH_READ_ONLY_MIGRATION = "bash_read_only_defaults_v1"
+MODEL_RENAME_MIGRATION = "model_rename_devstral_2_to_mistral_medium_3_5_v1"
+
+_LEGACY_MODEL_ALIAS = "devstral-2"
+_CURRENT_MODEL_ALIAS = "mistral-medium-3.5"
+_OFFICIAL_MODEL_NAME = "mistral-vibe-cli-latest"
 
 # Old tool name -> new tool name. The new tools replaced these in-place, so
 # existing user configs keyed by the old names need their settings moved over.
@@ -106,55 +111,80 @@ def _migrate_bash_read_only(data: dict[str, Any]) -> bool:
 
 
 def _migrate_model_renames(data: dict[str, Any]) -> bool:
-    """Rename devstral-2 to mistral-medium-3.5 and update its config."""
-    changed = False
+    """Migrate the legacy official model alias without changing custom bindings."""
     models = data.get("models", [])
-    model_entries: Iterable[dict[str, Any]]
     if isinstance(models, dict):
-        model_entries = [model for model in models.values() if isinstance(model, dict)]
+        model_entries = models.values()
+        target_occupied = _CURRENT_MODEL_ALIAS in models
     elif isinstance(models, list):
-        model_entries = [model for model in models if isinstance(model, dict)]
+        model_entries = models
+        target_occupied = False
     else:
-        model_entries = []
+        model_entries = ()
+        target_occupied = False
 
+    legacy_model: dict[str, Any] | None = None
+    changed = False
     for model in model_entries:
-        if (
-            model.get("name") == "mistral-vibe-cli-latest"
-            and model.get("alias") == "devstral-2"
-        ):
-            model["alias"] = "mistral-medium-3.5"
-            model["temperature"] = 1.0
-            model["input_price"] = 1.5
-            model["output_price"] = 7.5
-            model["thinking"] = "high"
-            changed = True
+        if not isinstance(model, dict):
+            continue
 
-            if isinstance(models, dict):
-                _rekey_model_entry(
-                    models, old_alias="devstral-2", new_alias="mistral-medium-3.5"
-                )
+        alias = model.get("alias")
+        if alias == _LEGACY_MODEL_ALIAS and legacy_model is None:
+            legacy_model = model
+        if alias != _CURRENT_MODEL_ALIAS:
+            continue
 
-        if (
-            model.get("name") == "mistral-vibe-cli-latest"
-            and model.get("alias") == "mistral-medium-3.5"
-            and "supports_images" not in model
-        ):
+        target_occupied = True
+        if model.get("name") == _OFFICIAL_MODEL_NAME and "supports_images" not in model:
             model["supports_images"] = True
             changed = True
 
-    if data.get("active_model") == "devstral-2":
-        data["active_model"] = "mistral-medium-3.5"
-        changed = True
+    applied: list[str] = data.get("applied_migrations", [])
+    if MODEL_RENAME_MIGRATION in applied:
+        return changed
 
-    return changed
+    active_is_legacy = data.get("active_model") == _LEGACY_MODEL_ALIAS
+    if legacy_model is None and not active_is_legacy:
+        return changed
+
+    if legacy_model is None:
+        data["active_model"] = _CURRENT_MODEL_ALIAS
+    else:
+        _rename_official_model_binding(
+            data, models, legacy_model, target_occupied=target_occupied
+        )
+
+    data["applied_migrations"] = [*applied, MODEL_RENAME_MIGRATION]
+    return True
 
 
-def _rekey_model_entry(
-    models: dict[str, Any], *, old_alias: str, new_alias: str
+def _rename_official_model_binding(
+    data: dict[str, Any],
+    models: object,
+    model: dict[str, Any],
+    *,
+    target_occupied: bool,
 ) -> None:
-    if old_alias not in models or old_alias == new_alias:
+    if model.get("name") != _OFFICIAL_MODEL_NAME or target_occupied:
         return
-    models[new_alias] = models.pop(old_alias)
+
+    if isinstance(models, dict):
+        if _LEGACY_MODEL_ALIAS not in models:
+            return
+        models[_CURRENT_MODEL_ALIAS] = models.pop(_LEGACY_MODEL_ALIAS)
+
+    model.update(
+        alias=_CURRENT_MODEL_ALIAS,
+        temperature=1.0,
+        input_price=1.5,
+        output_price=7.5,
+        thinking="high",
+    )
+    if "supports_images" not in model:
+        model["supports_images"] = True
+    if data.get("active_model") == _LEGACY_MODEL_ALIAS:
+        data["active_model"] = _CURRENT_MODEL_ALIAS
 
 
 def _migrate_renamed_tools(data: dict[str, Any]) -> bool:

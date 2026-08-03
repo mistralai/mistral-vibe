@@ -8,6 +8,7 @@ import pytest
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import MissingAPIKeyError, build_default_orchestrator
+from vibe.core.config._migration import MODEL_RENAME_MIGRATION
 from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.config.layers.discovered import DiscoveredConfigLayer
 from vibe.core.config.patch import AddOperationPatch
@@ -459,6 +460,140 @@ provider = "mistral"
         persisted = tomllib.load(file)
     assert persisted["active_model"] == "mistral-medium-3.5"
     assert persisted["models"][0]["alias"] == "mistral-medium-3.5"
+    assert persisted["applied_migrations"] == [MODEL_RENAME_MIGRATION]
+
+
+@pytest.mark.asyncio
+async def test_build_default_orchestrator_preserves_sparse_custom_legacy_model(
+    config_dir: Path,
+) -> None:
+    config_path = config_dir / "config.toml"
+    config_path.write_text(
+        """\
+active_model = "devstral-2"
+
+[[models]]
+name = "custom-model"
+alias = "devstral-2"
+provider = "mistral"
+""",
+        encoding="utf-8",
+    )
+
+    orchestrator = await build_default_orchestrator()
+
+    assert orchestrator.config.active_model == "devstral-2"
+    model = orchestrator.config.get_active_model()
+    assert model.name == "custom-model"
+    assert model.temperature == 0.2
+    assert model.input_price == 0.0
+    assert model.output_price == 0.0
+    assert model.thinking == "off"
+    assert model.supports_images is False
+    with config_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["active_model"] == "devstral-2"
+    assert persisted["models"] == [
+        {"name": "custom-model", "alias": "devstral-2", "provider": "mistral"}
+    ]
+    assert persisted["applied_migrations"] == [MODEL_RENAME_MIGRATION]
+
+
+@pytest.mark.asyncio
+async def test_build_default_orchestrator_migrates_legacy_default_reference(
+    config_dir: Path,
+) -> None:
+    config_path = config_dir / "config.toml"
+    config_path.write_text('active_model = "devstral-2"\n', encoding="utf-8")
+
+    orchestrator = await build_default_orchestrator()
+
+    assert orchestrator.config.active_model == "mistral-medium-3.5"
+    assert orchestrator.config.get_active_model().name == "mistral-vibe-cli-latest"
+    with config_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted == {
+        "active_model": "mistral-medium-3.5",
+        "applied_migrations": [MODEL_RENAME_MIGRATION],
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_default_orchestrator_preserves_ambiguous_corrupted_state(
+    config_dir: Path,
+) -> None:
+    config_path = config_dir / "config.toml"
+    config_path.write_text(
+        """\
+active_model = "mistral-medium-3.5"
+
+[[models]]
+name = "custom-model"
+alias = "devstral-2"
+provider = "mistral"
+""",
+        encoding="utf-8",
+    )
+
+    orchestrator = await build_default_orchestrator()
+
+    assert orchestrator.config.active_model == "mistral-medium-3.5"
+    assert orchestrator.config.get_active_model().name == "mistral-vibe-cli-latest"
+    assert orchestrator.config.models["devstral-2"].name == "custom-model"
+    with config_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["active_model"] == "mistral-medium-3.5"
+    assert persisted["models"] == [
+        {"name": "custom-model", "alias": "devstral-2", "provider": "mistral"}
+    ]
+    assert persisted["applied_migrations"] == [MODEL_RENAME_MIGRATION]
+
+
+@pytest.mark.asyncio
+async def test_build_default_orchestrator_preserves_model_alias_collision(
+    config_dir: Path,
+) -> None:
+    config_path = config_dir / "config.toml"
+    config_path.write_text(
+        """\
+active_model = "devstral-2"
+
+[[models]]
+name = "mistral-vibe-cli-latest"
+alias = "devstral-2"
+provider = "mistral"
+
+[[models]]
+name = "custom-target"
+alias = "mistral-medium-3.5"
+provider = "mistral"
+thinking = "off"
+""",
+        encoding="utf-8",
+    )
+
+    orchestrator = await build_default_orchestrator()
+
+    assert orchestrator.config.active_model == "devstral-2"
+    assert orchestrator.config.get_active_model().name == "mistral-vibe-cli-latest"
+    assert orchestrator.config.models["mistral-medium-3.5"].name == "custom-target"
+    with config_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["active_model"] == "devstral-2"
+    assert persisted["models"] == [
+        {
+            "name": "mistral-vibe-cli-latest",
+            "alias": "devstral-2",
+            "provider": "mistral",
+        },
+        {
+            "name": "custom-target",
+            "alias": "mistral-medium-3.5",
+            "provider": "mistral",
+            "thinking": "off",
+        },
+    ]
+    assert persisted["applied_migrations"] == [MODEL_RENAME_MIGRATION]
 
 
 @pytest.mark.asyncio

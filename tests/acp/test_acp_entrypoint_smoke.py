@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 from typing import Any, cast
 
 from acp import (
@@ -17,8 +18,16 @@ from acp import (
     RequestError,
     connect_to_agent,
 )
-from acp.schema import ClientCapabilities, Implementation
+from acp.schema import (
+    ClientCapabilities,
+    Implementation,
+    NewSessionResponse,
+    SessionConfigOptionSelect,
+    SessionConfigSelectOption,
+    SetSessionConfigOptionResponse,
+)
 import pexpect
+from pydantic import ValidationError
 import pytest
 
 from tests import TESTS_ROOT
@@ -91,6 +100,25 @@ class _AcpSmokeClient(Client):
 @pytest.fixture
 def vibe_home_dir(tmp_path: Path) -> Path:
     return tmp_path / ".vibe"
+
+
+def _write_vibe_config(vibe_home_dir: Path, content: str) -> None:
+    vibe_home_dir.mkdir(parents=True, exist_ok=True)
+    (vibe_home_dir / "config.toml").write_text(content, encoding="utf-8")
+
+
+def _model_config_option(
+    response: NewSessionResponse | SetSessionConfigOptionResponse,
+) -> SessionConfigOptionSelect:
+    assert response.config_options is not None
+    option = next(option for option in response.config_options if option.id == "model")
+    assert isinstance(option, SessionConfigOptionSelect)
+    return option
+
+
+def _model_option_values(option: SessionConfigOptionSelect) -> set[str]:
+    options = cast("list[SessionConfigSelectOption]", option.options)
+    return {candidate.value for candidate in options}
 
 
 async def _spawn_vibe_acp(env: dict[str, str]) -> asyncio.subprocess.Process:
@@ -209,6 +237,127 @@ async def test_vibe_acp_initialize_and_new_session(vibe_home_dir: Path) -> None:
         )
 
         assert session.session_id
+    finally:
+        await _terminate_process(proc)
+
+
+@pytest.mark.asyncio
+async def test_vibe_acp_preserves_fresh_custom_legacy_model(
+    vibe_home_dir: Path,
+) -> None:
+    _write_vibe_config(
+        vibe_home_dir,
+        """\
+enable_telemetry = false
+active_model = "devstral-2"
+
+[[models]]
+name = "custom-model"
+alias = "devstral-2"
+provider = "mistral"
+""",
+    )
+    proc, _initialize_response, conn = await _connect_and_initialize(
+        vibe_home_dir=vibe_home_dir, include_api_key=True
+    )
+
+    try:
+        session = await asyncio.wait_for(
+            conn.new_session(cwd=str(Path.cwd()), mcp_servers=[]), timeout=10
+        )
+
+        model = _model_config_option(session)
+        assert model.current_value == "devstral-2"
+        assert _model_option_values(model) >= {"devstral-2"}
+    finally:
+        await _terminate_process(proc)
+
+
+@pytest.mark.asyncio
+async def test_vibe_acp_custom_model_selection_survives_restart(
+    vibe_home_dir: Path,
+) -> None:
+    _write_vibe_config(
+        vibe_home_dir,
+        """\
+enable_telemetry = false
+active_model = "mistral-medium-3.5"
+
+[[models]]
+name = "custom-model"
+alias = "devstral-2"
+provider = "mistral"
+""",
+    )
+    proc, _initialize_response, conn = await _connect_and_initialize(
+        vibe_home_dir=vibe_home_dir, include_api_key=True
+    )
+
+    try:
+        session = await asyncio.wait_for(
+            conn.new_session(cwd=str(Path.cwd()), mcp_servers=[]), timeout=10
+        )
+        initial_model = _model_config_option(session)
+        assert initial_model.current_value == "mistral-medium-3.5"
+        assert _model_option_values(initial_model) >= {
+            "devstral-2",
+            "mistral-medium-3.5",
+        }
+
+        selected = await asyncio.wait_for(
+            conn.set_config_option("model", session.session_id, "devstral-2"),
+            timeout=10,
+        )
+        assert selected is not None
+        assert _model_config_option(selected).current_value == "devstral-2"
+
+        with pytest.raises(ValidationError):
+            await asyncio.wait_for(
+                conn.set_config_option("model", session.session_id, "unknown-model"),
+                timeout=10,
+            )
+        with (vibe_home_dir / "config.toml").open("rb") as file:
+            assert tomllib.load(file)["active_model"] == "devstral-2"
+    finally:
+        await _terminate_process(proc)
+
+    proc, _initialize_response, conn = await _connect_and_initialize(
+        vibe_home_dir=vibe_home_dir, include_api_key=True
+    )
+    try:
+        restarted_session = await asyncio.wait_for(
+            conn.new_session(cwd=str(Path.cwd()), mcp_servers=[]), timeout=10
+        )
+
+        assert _model_config_option(restarted_session).current_value == "devstral-2"
+    finally:
+        await _terminate_process(proc)
+
+
+@pytest.mark.asyncio
+async def test_vibe_acp_migrates_official_legacy_model(vibe_home_dir: Path) -> None:
+    _write_vibe_config(
+        vibe_home_dir,
+        """\
+enable_telemetry = false
+active_model = "devstral-2"
+
+[[models]]
+name = "mistral-vibe-cli-latest"
+alias = "devstral-2"
+provider = "mistral"
+""",
+    )
+    proc, _initialize_response, conn = await _connect_and_initialize(
+        vibe_home_dir=vibe_home_dir, include_api_key=True
+    )
+
+    try:
+        session = await asyncio.wait_for(
+            conn.new_session(cwd=str(Path.cwd()), mcp_servers=[]), timeout=10
+        )
+
+        assert _model_config_option(session).current_value == "mistral-medium-3.5"
     finally:
         await _terminate_process(proc)
 
