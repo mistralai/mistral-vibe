@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.conftest import build_test_vibe_app
+from vibe.cli.clipboard import ClipboardCopyResult
 from vibe.cli.textual_ui.widgets.messages import AssistantMessage
 
 
@@ -19,10 +20,12 @@ async def test_copy_command_copies_last_assistant_message() -> None:
         with (
             patch(
                 "vibe.cli.textual_ui.app.copy_text_to_clipboard",
-                return_value=stripped_second_reply,
+                return_value=ClipboardCopyResult(
+                    text=stripped_second_reply, verified=True
+                ),
             ) as mock_copy,
             patch.object(
-                app.agent_loop.telemetry_client, "send_user_copied_text"
+                app.app_server.resources.telemetry, "record"
             ) as mock_telemetry,
         ):
             handled = await app._handle_command("/copy")
@@ -34,7 +37,9 @@ async def test_copy_command_copies_last_assistant_message() -> None:
         stripped_second_reply,
         success_message="Last agent message copied to clipboard",
     )
-    mock_telemetry.assert_called_once_with(stripped_second_reply)
+    mock_telemetry.assert_any_call(
+        "vibe.user_copied_text", {"text_length": len(stripped_second_reply)}
+    )
 
 
 @pytest.mark.asyncio

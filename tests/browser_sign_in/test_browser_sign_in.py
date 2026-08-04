@@ -18,11 +18,15 @@ from tests.browser_sign_in.stubs import (
     noop_sleep,
 )
 from vibe.setup.auth import (
+    BrowserSignInAttemptStarted,
     BrowserSignInError,
     BrowserSignInErrorCode,
+    BrowserSignInEvent,
     BrowserSignInPollResult,
     BrowserSignInProcess,
     BrowserSignInService,
+    BrowserSignInStatus,
+    BrowserSignInStatusChanged,
 )
 
 TEST_NOW = datetime(2026, 3, 16, tzinfo=UTC)
@@ -33,7 +37,7 @@ TEST_SIGN_IN_URL = "https://console.mistral.ai/codestral/cli/authenticate#" + ur
     "complete_token": f"complete-token-{TEST_PROCESS_ID}",
     "state": f"state-{TEST_PROCESS_ID}",
 })
-TEST_POLL_URL = "https://api.mistral.ai/api/vibe/sign-in/poll/poll-token-process-1"
+TEST_POLL_URL = "https://console.mistral.ai/api/vibe/sign-in/poll/poll-token-process-1"
 
 
 def build_code_challenge(verifier: str) -> str:
@@ -68,7 +72,7 @@ def build_test_service(
 @pytest.mark.asyncio
 async def test_authenticate_returns_api_key_after_pending_poll() -> None:
     opened_urls: list[str] = []
-    statuses: list[str] = []
+    events: list[BrowserSignInEvent] = []
     gateway, service = build_test_service(
         poll_results=[
             BrowserSignInPollResult(status="pending"),
@@ -77,18 +81,62 @@ async def test_authenticate_returns_api_key_after_pending_poll() -> None:
         open_browser=lambda url: opened_urls.append(url) or True,
     )
 
-    api_key = await service.authenticate(status_callback=statuses.append)
+    api_key = await service.authenticate(event_callback=events.append)
 
     code_verifier = gateway.exchange_requests[0].code_verifier
     assert gateway.code_challenges == [build_code_challenge(code_verifier)]
     assert api_key == "sk-browser-key"
     assert opened_urls == [TEST_SIGN_IN_URL]
-    assert statuses == [
-        "opening_browser",
-        "waiting_for_browser_sign_in",
-        "exchanging",
-        "completed",
+    assert events == [
+        BrowserSignInAttemptStarted(
+            sign_in_url=TEST_SIGN_IN_URL,
+            expires_at=build_sign_in_process(TEST_NOW).expires_at,
+        ),
+        BrowserSignInStatusChanged(status=BrowserSignInStatus.OPENING_BROWSER),
+        BrowserSignInStatusChanged(
+            status=BrowserSignInStatus.WAITING_FOR_BROWSER_SIGN_IN
+        ),
+        BrowserSignInStatusChanged(status=BrowserSignInStatus.EXCHANGING),
+        BrowserSignInStatusChanged(status=BrowserSignInStatus.COMPLETED),
     ]
+    assert gateway.polled_urls == [TEST_POLL_URL, TEST_POLL_URL]
+    assert gateway.exchange_requests[0].exchange_token == "exchange-1"
+
+
+@pytest.mark.asyncio
+async def test_start_attempt_returns_attempt_without_opening_browser() -> None:
+    opened_urls: list[str] = []
+    gateway, service = build_test_service(
+        poll_results=[], open_browser=lambda url: opened_urls.append(url) or True
+    )
+
+    attempt = await service.start_attempt()
+
+    assert opened_urls == []
+    assert attempt.process_id == TEST_PROCESS_ID
+    assert attempt.sign_in_url == TEST_SIGN_IN_URL
+    assert attempt.poll_url == TEST_POLL_URL
+    assert attempt.expires_at == build_sign_in_process(TEST_NOW).expires_at
+    assert gateway.exchange_requests == []
+    assert gateway.code_challenges == [build_code_challenge(attempt.code_verifier)]
+
+
+@pytest.mark.asyncio
+async def test_complete_attempt_returns_api_key_without_opening_browser() -> None:
+    opened_urls: list[str] = []
+    gateway, service = build_test_service(
+        poll_results=[
+            BrowserSignInPollResult(status="pending"),
+            BrowserSignInPollResult(status="completed", exchange_token="exchange-1"),
+        ],
+        open_browser=lambda url: opened_urls.append(url) or True,
+    )
+    attempt = await service.start_attempt()
+
+    api_key = await service.complete_attempt(attempt)
+
+    assert api_key == "sk-browser-key"
+    assert opened_urls == []
     assert gateway.polled_urls == [TEST_POLL_URL, TEST_POLL_URL]
     assert gateway.exchange_requests[0].exchange_token == "exchange-1"
 
@@ -196,10 +244,19 @@ async def test_authenticate_raises_on_unknown_poll_state() -> None:
 
 @pytest.mark.asyncio
 async def test_authenticate_raises_when_browser_cannot_be_opened() -> None:
+    events: list[BrowserSignInEvent] = []
     _, service = build_test_service(poll_results=[], open_browser=lambda _: False)
 
     with pytest.raises(BrowserSignInError, match="open browser"):
-        await service.authenticate()
+        await service.authenticate(event_callback=events.append)
+
+    assert events == [
+        BrowserSignInAttemptStarted(
+            sign_in_url=TEST_SIGN_IN_URL,
+            expires_at=build_sign_in_process(TEST_NOW).expires_at,
+        ),
+        BrowserSignInStatusChanged(status=BrowserSignInStatus.OPENING_BROWSER),
+    ]
 
 
 @pytest.mark.asyncio

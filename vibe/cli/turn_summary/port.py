@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from typing import Protocol
 
 from pydantic import BaseModel, Field
-
-from vibe.core.types import BaseEvent
 
 
 class TurnSummaryData(BaseModel):
@@ -18,6 +17,17 @@ class TurnSummaryData(BaseModel):
 class TurnSummaryResult(BaseModel):
     generation: int
     summary: str | None
+
+
+class TurnSummaryGenerator(Protocol):
+    async def summarize(
+        self,
+        *,
+        user_message: str,
+        assistant_text: str,
+        error: str | None,
+        message_id: str | None,
+    ) -> str | None: ...
 
 
 class TurnSummaryPort(ABC):
@@ -37,7 +47,10 @@ class TurnSummaryPort(ABC):
     def start_turn(self, user_message: str) -> None: ...
 
     @abstractmethod
-    def track(self, event: BaseEvent) -> None: ...
+    def track_user_message(self, message_id: str) -> None: ...
+
+    @abstractmethod
+    def track_assistant_text(self, content: str) -> None: ...
 
     @abstractmethod
     def set_error(self, message: str) -> None: ...

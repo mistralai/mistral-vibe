@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from contextlib import aclosing
 import fnmatch
-from typing import ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
-from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import AgentType, BuiltinAgentName
-from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.subagents import TaskArgs, TaskResult
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -19,33 +16,9 @@ from vibe.core.tools.base import (
     ToolPermission,
 )
 from vibe.core.tools.permissions import PermissionContext
-from vibe.core.tools.ui import (
-    ToolCallDisplay,
-    ToolResultDisplay,
-    ToolUIData,
-    ToolUIDataAdapter,
-)
-from vibe.core.types import (
-    AssistantEvent,
-    Role,
-    ToolCallEvent,
-    ToolResultEvent,
-    ToolStreamEvent,
-)
-
-
-class TaskArgs(BaseModel):
-    task: str = Field(description="The task to delegate to the subagent")
-    agent: str = Field(
-        default="explore",
-        description="Name of the agent profile to use (must be a subagent)",
-    )
-
-
-class TaskResult(BaseModel):
-    response: str = Field(description="The accumulated response from the subagent")
-    turns_used: int = Field(description="Number of turns the subagent used")
-    completed: bool = Field(description="Whether the task completed normally")
+from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
+from vibe.utils.tool_presentation import ToolEffectKind
 
 
 class TaskToolConfig(BaseToolConfig):
@@ -57,19 +30,27 @@ class Task(
     BaseTool[TaskArgs, TaskResult, TaskToolConfig, BaseToolState],
     ToolUIData[TaskArgs, TaskResult],
 ):
-    description: ClassVar[str] = (
-        "Delegate a task to a subagent for independent execution. "
-        "Useful for exploration, research, or parallel work that doesn't "
-        "require user interaction. The subagent runs in-memory and "
-        "saves interaction logs."
-    )
+    effect_kind = ToolEffectKind.SUBAGENT
 
     @classmethod
     def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
         args = event.args
         if isinstance(args, TaskArgs):
-            return ToolCallDisplay(summary=f"Running {args.agent} agent: {args.task}")
-        return ToolCallDisplay(summary="Running subagent")
+            message = f"{args.agent} agent: {args.task}"
+            return ToolCallDisplay(
+                summary=f"Running {message}",
+                verb="Running",
+                message=message,
+                settled_verb="Ran",
+                settled_message=message,
+            )
+        return ToolCallDisplay(
+            summary="Running subagent",
+            verb="Running",
+            message="subagent",
+            settled_verb="Ran",
+            settled_message="subagent",
+        )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -79,13 +60,15 @@ class Task(
             if not result.completed:
                 return ToolResultDisplay(
                     success=False,
-                    message=f"Agent interrupted after {result.turns_used} {turn_word}",
+                    verb="Interrupted",
+                    message=f"after {result.turns_used} {turn_word}",
                 )
             return ToolResultDisplay(
                 success=True,
-                message=f"Agent completed in {result.turns_used} {turn_word}",
+                verb="Completed",
+                message=f"in {result.turns_used} {turn_word}",
             )
-        return ToolResultDisplay(success=True, message="Agent completed")
+        return ToolResultDisplay(success=True, verb="Completed", message="")
 
     @classmethod
     def get_status_text(cls) -> str:
@@ -111,6 +94,11 @@ class Task(
             raise ToolError("Task tool requires agent_manager in context")
 
         agent_manager = ctx.agent_manager
+        if agent_manager.active_profile.agent_type is AgentType.SUBAGENT:
+            raise ToolError(
+                "Agent depth limit of 1 reached. Complete the task in the current "
+                "subagent."
+            )
 
         try:
             agent_profile = agent_manager.get_agent(args.agent)
@@ -123,67 +111,8 @@ class Task(
                 f"Only subagents can be used with the task tool. "
                 f"This is a security constraint to prevent recursive spawning."
             )
+        if ctx.subagent_runner is None:
+            raise ToolError("Task tool requires a subagent runner in context")
 
-        session_logging = SessionLoggingConfig(
-            save_dir=str(ctx.session_dir / "agents") if ctx.session_dir else "",
-            session_prefix=args.agent,
-            enabled=ctx.session_dir is not None,
-        )
-        base_config = VibeConfig.load(session_logging=session_logging)
-        subagent_loop = AgentLoop(
-            config=base_config,
-            agent_name=args.agent,
-            entrypoint_metadata=ctx.entrypoint_metadata,
-            is_subagent=True,
-            defer_heavy_init=True,
-        )
-
-        if ctx and ctx.approval_callback:
-            subagent_loop.set_approval_callback(ctx.approval_callback)
-
-        task_text = args.task
-        if ctx.scratchpad_dir:
-            task_text = (
-                f"Scratchpad directory: {ctx.scratchpad_dir}\n"
-                "You can read and write files here without permission prompts.\n\n"
-                f"{args.task}"
-            )
-
-        accumulated_response: list[str] = []
-        completed = True
-        try:
-            async with aclosing(subagent_loop.act(task_text)) as events:
-                async for event in events:
-                    if isinstance(event, AssistantEvent) and event.content:
-                        accumulated_response.append(event.content)
-                        if event.stopped_by_middleware:
-                            completed = False
-                    elif isinstance(event, ToolResultEvent):
-                        if event.skipped:
-                            completed = False
-                        elif event.result and event.tool_class:
-                            adapter = ToolUIDataAdapter(event.tool_class)
-                            display = adapter.get_result_display(event)
-                            message = f"{event.tool_name}: {display.message}"
-                            yield ToolStreamEvent(
-                                tool_name=self.get_name(),
-                                message=message,
-                                tool_call_id=ctx.tool_call_id,
-                            )
-
-            turns_used = sum(
-                msg.role == Role.assistant for msg in subagent_loop.messages
-            )
-
-        except Exception as e:
-            completed = False
-            accumulated_response.append(f"\n[Subagent error: {e}]")
-            turns_used = sum(
-                msg.role == Role.assistant for msg in subagent_loop.messages
-            )
-
-        yield TaskResult(
-            response="".join(accumulated_response),
-            turns_used=turns_used,
-            completed=completed,
-        )
+        async for event in ctx.subagent_runner.run(args, ctx):
+            yield event

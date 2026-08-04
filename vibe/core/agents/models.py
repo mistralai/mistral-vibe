@@ -1,43 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum, auto
+from enum import StrEnum
 from pathlib import Path
 import tomllib
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+from vibe.agents import AgentSafety, AgentType
+from vibe.core.agents._migration import (
+    LEGACY_BASE_DISABLED_KEY,
+    migrate_agent_profile_config,
+)
 from vibe.core.paths import PLANS_DIR
-from vibe.core.utils import name_matches
+from vibe.core.utils.merge import MergeStrategy
 
 if TYPE_CHECKING:
-    from vibe.core.config import VibeConfig
-
-
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    result = base.copy()
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
-
-
-class AgentSafety(StrEnum):
-    SAFE = auto()
-    NEUTRAL = auto()
-    DESTRUCTIVE = auto()
-    YOLO = auto()
-
-
-class AgentType(StrEnum):
-    AGENT = auto()
-    SUBAGENT = auto()
+    from vibe.core.config import VibeConfigSchema
 
 
 class BuiltinAgentName(StrEnum):
     DEFAULT = "default"
-    CHAT = "chat"
     PLAN = "plan"
     ACCEPT_EDITS = "accept-edits"
     AUTO_APPROVE = "auto-approve"
@@ -55,35 +37,25 @@ class AgentProfile:
     overrides: dict[str, Any] = field(default_factory=dict)
     install_required: bool = False
 
-    def apply_to_config(self, base: VibeConfig) -> VibeConfig:
-        from vibe.core.config import VibeConfig as VC
-
-        merged = _deep_merge(
-            base.model_dump(),
-            {k: v for k, v in self.overrides.items() if k != "base_disabled"},
+    def apply_to_config(self, base: VibeConfigSchema) -> VibeConfigSchema:
+        merged = cast(
+            dict[str, Any],
+            MergeStrategy.DEEP_MERGE.apply(base.model_dump(), self.overrides),
         )
-        base_disabled = self.overrides.get("base_disabled")
-        if isinstance(base_disabled, list):
-            merged["disabled_tools"] = list({
-                *base_disabled,
-                *merged.get("disabled_tools", []),
-            })
+        profile_disabled_tools = self.overrides.get("disabled_tools")
+        if isinstance(profile_disabled_tools, list):
+            merged["disabled_tools"] = list(
+                dict.fromkeys([*base.disabled_tools, *profile_disabled_tools])
+            )
 
-        # Environment-level disables (set by ACP/programmatic mode) must take
-        # precedence over an agent's enabled_tools allowlist
-        if base.disabled_tools and merged.get("enabled_tools"):
-            merged["enabled_tools"] = [
-                t
-                for t in merged["enabled_tools"]
-                if not name_matches(t, base.disabled_tools)
-            ]
-
-        return VC.model_validate(merged)
+        return type(base).model_validate(merged)
 
     @classmethod
     def from_toml(cls, path: Path) -> AgentProfile:
         with path.open("rb") as f:
             data = tomllib.load(f)
+        migrate_agent_profile_config(data)
+        data.pop(LEGACY_BASE_DISABLED_KEY, None)
         return cls(
             name=path.stem,
             display_name=data.pop("display_name", path.stem.replace("-", " ").title()),
@@ -94,15 +66,13 @@ class AgentProfile:
         )
 
 
-CHAT_AGENT_TOOLS = ["grep", "read_file", "ask_user_question", "task"]
-
-
 def _plan_overrides() -> dict[str, Any]:
     plans_pattern = str(PLANS_DIR.path / "*")
     return {
         "tools": {
             "write_file": {"permission": "never", "allowlist": [plans_pattern]},
-            "search_replace": {"permission": "never", "allowlist": [plans_pattern]},
+            "edit": {"permission": "never", "allowlist": [plans_pattern]},
+            "read_file": {"allowlist": [plans_pattern]},
         }
     }
 
@@ -112,7 +82,7 @@ DEFAULT = AgentProfile(
     "Default",
     "Requires approval for tool executions",
     AgentSafety.NEUTRAL,
-    overrides={"base_disabled": ["exit_plan_mode"]},
+    overrides={"disabled_tools": ["exit_plan_mode"]},
 )
 PLAN = AgentProfile(
     BuiltinAgentName.PLAN,
@@ -121,23 +91,16 @@ PLAN = AgentProfile(
     AgentSafety.SAFE,
     overrides=_plan_overrides(),
 )
-CHAT = AgentProfile(
-    BuiltinAgentName.CHAT,
-    "Chat",
-    "Read-only conversational mode for questions and discussions",
-    AgentSafety.SAFE,
-    overrides={"bypass_tool_permissions": True, "enabled_tools": CHAT_AGENT_TOOLS},
-)
 ACCEPT_EDITS = AgentProfile(
     BuiltinAgentName.ACCEPT_EDITS,
     "Accept Edits",
     "Auto-approves file edits only",
     AgentSafety.DESTRUCTIVE,
     overrides={
-        "base_disabled": ["exit_plan_mode"],
+        "disabled_tools": ["exit_plan_mode"],
         "tools": {
             "write_file": {"permission": "always"},
-            "search_replace": {"permission": "always"},
+            "edit": {"permission": "always"},
         },
     },
 )
@@ -146,7 +109,7 @@ AUTO_APPROVE = AgentProfile(
     "Auto Approve",
     "Auto-approves all tool executions",
     AgentSafety.YOLO,
-    overrides={"bypass_tool_permissions": True, "base_disabled": ["exit_plan_mode"]},
+    overrides={"bypass_tool_permissions": True, "disabled_tools": ["exit_plan_mode"]},
 )
 
 EXPLORE = AgentProfile(
@@ -178,12 +141,12 @@ LEAN = AgentProfile(
         ],
         "models": [
             {
-                "name": "labs-leanstral-2603",
+                "name": "labs-leanstral-1-5",
                 "provider": "mistral-testing",
                 "alias": "leanstral",
                 "thinking": "high",
                 "temperature": 1.0,
-                "auto_compact_threshold": 168_000,
+                "auto_compact_threshold": 200_000,
             }
         ],
         "compaction_model": {
@@ -194,7 +157,7 @@ LEAN = AgentProfile(
             "thinking": "off",
         },
         "tools": {"bash": {"default_timeout": 1200}},
-        "base_disabled": ["exit_plan_mode"],
+        "disabled_tools": ["exit_plan_mode"],
     },
 )
 

@@ -6,10 +6,10 @@ from enum import StrEnum, auto
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vibe.core.agents import AgentProfile
-from vibe.core.utils import VIBE_WARNING_TAG
+from vibe.utils import VIBE_WARNING_TAG
 
 if TYPE_CHECKING:
-    from vibe.core.config import VibeConfig
+    from vibe.core.config import VibeConfigSchema
     from vibe.core.types import AgentStats, MessageList
 
 
@@ -29,7 +29,7 @@ class ResetReason(StrEnum):
 class ConversationContext:
     messages: MessageList
     stats: AgentStats
-    config: VibeConfig
+    config: VibeConfigSchema
 
 
 @dataclass
@@ -78,18 +78,31 @@ class PriceLimitMiddleware:
         pass
 
 
+class TokenLimitMiddleware:
+    def __init__(self, max_tokens: int) -> None:
+        self.max_tokens = max_tokens
+
+    async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
+        if context.stats.session_total_llm_tokens > self.max_tokens:
+            return MiddlewareResult(
+                action=MiddlewareAction.STOP,
+                reason=(
+                    "Token limit exceeded: "
+                    f"{context.stats.session_total_llm_tokens:,} > {self.max_tokens:,}"
+                ),
+            )
+        return MiddlewareResult()
+
+    def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
+        pass
+
+
 class AutoCompactMiddleware:
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
         threshold = context.config.get_active_model().auto_compact_threshold
 
         if threshold > 0 and context.stats.context_tokens >= threshold:
-            return MiddlewareResult(
-                action=MiddlewareAction.COMPACT,
-                metadata={
-                    "old_tokens": context.stats.context_tokens,
-                    "threshold": threshold,
-                },
-            )
+            return MiddlewareResult(action=MiddlewareAction.COMPACT)
         return MiddlewareResult()
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
@@ -132,7 +145,7 @@ def make_plan_agent_reminder(
     has_exit_plan_mode: bool = True,
 ) -> str:
     instructions = [
-        "Research the user's query using read-only tools (grep, read_file, etc.)"
+        "Research the user's query using read-only tools (grep, read, etc.)"
     ]
     if has_ask_user_question:
         instructions.append(
@@ -152,7 +165,7 @@ def make_plan_agent_reminder(
     return f"""<{VIBE_WARNING_TAG}>Plan mode is active. You MUST NOT make any edits (except to the plan file below, or in your scratchpad), run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
 
 ## Plan File Info
-Create or edit your plan at {plan_file_path} using the write_file and search_replace tools.
+Create or edit your plan at {plan_file_path} using the write_file and edit tools.
 Build your plan incrementally by writing to or editing this file.
 This is the only file you are allowed to edit. Make sure to create it early and edit as soon as you internally update your plan.
 
@@ -161,14 +174,6 @@ This is the only file you are allowed to edit. Make sure to create it early and 
 
 
 PLAN_AGENT_EXIT = f"""<{VIBE_WARNING_TAG}>Plan mode has ended. If you have a plan ready, you can now start executing it. If not, you can now use editing tools and make changes to the system.</{VIBE_WARNING_TAG}>"""
-
-CHAT_AGENT_REMINDER = f"""<{VIBE_WARNING_TAG}>Chat mode is active. The user wants to have a conversation -- ask questions, get explanations, or discuss code and architecture. You MUST NOT make any edits, run any non-readonly tools, or otherwise make any changes to the system. This supersedes any other instructions you have received. Instead, you should:
-1. Answer the user's questions directly and comprehensively
-2. Explain code, concepts, or architecture as requested
-3. Use read-only tools (grep, read_file) to look up relevant code when needed
-4. Focus on being informative and conversational -- your response IS the deliverable, not a precursor to action</{VIBE_WARNING_TAG}>"""
-
-CHAT_AGENT_EXIT = f"""<{VIBE_WARNING_TAG}>Chat mode has ended. You can now use editing tools and make changes to the system.</{VIBE_WARNING_TAG}>"""
 
 
 class ReadOnlyAgentMiddleware:

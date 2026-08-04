@@ -36,7 +36,9 @@
         "${input:test_identifier}",
         "-vvv",
         "-s",
-        "--no-header"
+        "--no-header",
+        "-n",
+        "0"
       ],
       "console": "integratedTerminal",
       "justMyCode": false,
@@ -54,7 +56,12 @@
       "program": "vibe/cli/entrypoint.py",
       "args": [],
       "console": "integratedTerminal",
-      "justMyCode": false
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
     },
     {
       "name": "Attach using PID",

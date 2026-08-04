@@ -6,12 +6,9 @@ import json
 from typing import Any
 
 import httpx
-from mistralai.client.errors import SDKError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from vibe.core.types import AvailableTool, LLMMessage, StrToolChoice
-
-type HttpError = SDKError | httpx.HTTPStatusError
 
 _CONTEXT_TOO_LONG_SUBSTRINGS = (
     "context too long",
@@ -19,7 +16,12 @@ _CONTEXT_TOO_LONG_SUBSTRINGS = (
     "input too large",
     "couldn't fit with truncation",
     "prompt is too long",
+    # orchestral_runtime returns these as 422
+    "model_context_exceeded",
+    "prompt_too_long",
 )
+
+_RESPONSE_TOO_LONG_SUBSTRINGS = ("max_tokens_exceeded", "finish_reason=length")
 
 
 class ErrorDetail(BaseModel):
@@ -63,10 +65,17 @@ class BackendError(RuntimeError):
 
     @property
     def is_context_too_long(self) -> bool:
-        if self.status != HTTPStatus.BAD_REQUEST:
+        if self.status not in {HTTPStatus.BAD_REQUEST, HTTPStatus.UNPROCESSABLE_ENTITY}:
             return False
         body = (self.body_text or "").lower()
         return any(s in body for s in _CONTEXT_TOO_LONG_SUBSTRINGS)
+
+    @property
+    def is_response_too_long(self) -> bool:
+        if self.status != HTTPStatus.UNPROCESSABLE_ENTITY:
+            return False
+        body = (self.body_text or "").lower()
+        return any(s in body for s in _RESPONSE_TOO_LONG_SUBSTRINGS)
 
     def _fmt(self) -> str:
         if self.status == HTTPStatus.UNAUTHORIZED:
@@ -133,14 +142,19 @@ class BackendErrorBuilder:
         *,
         provider: str,
         endpoint: str,
-        error: HttpError,
+        error: Exception,
+        response: httpx.Response,
         model: str,
         messages: Sequence[LLMMessage],
         temperature: float,
         has_tools: bool,
         tool_choice: StrToolChoice | AvailableTool | None,
     ) -> BackendError:
-        response = error.raw_response if isinstance(error, SDKError) else error.response
+        """Build a BackendError from an HTTP error.
+
+        `response` is the HTTP response carried by `error`; the caller extracts
+        it since each client library stores it under a different attribute.
+        """
         body_text = cls._read_response_body(response, error)
 
         return BackendError(
@@ -185,7 +199,7 @@ class BackendErrorBuilder:
         )
 
     @staticmethod
-    def _read_response_body(response: httpx.Response, error: HttpError) -> str | None:
+    def _read_response_body(response: httpx.Response, error: Exception) -> str | None:
         try:
             response.read()
             return response.text

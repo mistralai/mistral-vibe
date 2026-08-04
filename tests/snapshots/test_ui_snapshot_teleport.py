@@ -4,17 +4,18 @@ from textual.app import App, ComposeResult
 from textual.containers import Container
 from textual.pilot import Pilot
 
-from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
 from tests.snapshots.snap_compare import SnapCompare
-from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
+from tests.stubs.fake_account_gateway import FakeAccountGateway
+from vibe.app_server._account import WhoAmIResult
+from vibe.app_server.models import (
+    AccountPlanKind,
+    QuestionChoice,
+    UserQuestion,
+    UserQuestionRequest,
+)
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
-from vibe.core.tools.builtins.ask_user_question import (
-    AskUserQuestionArgs,
-    Choice,
-    Question,
-)
 
 
 class TeleportMessageTestApp(App):
@@ -87,14 +88,17 @@ class TeleportMessageErrorApp(TeleportMessageTestApp):
         widget.set_error("Git repository has uncommitted changes")
 
 
-def _push_confirmation_args(count: int) -> AskUserQuestionArgs:
+def _push_confirmation_args(count: int) -> UserQuestionRequest:
     word = f"commit{'s' if count != 1 else ''}"
-    return AskUserQuestionArgs(
+    return UserQuestionRequest(
         questions=[
-            Question(
+            UserQuestion(
                 question=f"You have {count} unpushed {word}. Push to continue?",
                 header="Push",
-                options=[Choice(label="Push and continue"), Choice(label="Cancel")],
+                options=[
+                    QuestionChoice(label="Push and continue"),
+                    QuestionChoice(label="Cancel"),
+                ],
                 hide_other=True,
             )
         ]
@@ -128,34 +132,22 @@ def _teleport_snapshot_config():
 
 
 class TeleportCommandHelpSnapshotApp(BaseSnapshotTestApp):
-    def __init__(self, gateway: FakeWhoAmIGateway):
-        super().__init__(config=_teleport_snapshot_config(), plan_offer_gateway=gateway)
+    def __init__(self, gateway: FakeAccountGateway):
+        super().__init__(config=_teleport_snapshot_config(), account_gateway=gateway)
 
     async def on_mount(self) -> None:
         await super().on_mount()
+        await self._refresh_account()
         await self._show_help()
 
 
 class TeleportCommandHelpProApp(TeleportCommandHelpSnapshotApp):
     def __init__(self):
         super().__init__(
-            FakeWhoAmIGateway(
-                WhoAmIResponse(
-                    plan_type=WhoAmIPlanType.CHAT,
+            FakeAccountGateway(
+                WhoAmIResult(
+                    plan_type=AccountPlanKind.CHAT,
                     plan_name="INDIVIDUAL",
-                    prompt_switching_to_pro_plan=False,
-                )
-            )
-        )
-
-
-class TeleportCommandHelpFreeApp(TeleportCommandHelpSnapshotApp):
-    def __init__(self):
-        super().__init__(
-            FakeWhoAmIGateway(
-                WhoAmIResponse(
-                    plan_type=WhoAmIPlanType.API,
-                    plan_name="FREE",
                     prompt_switching_to_pro_plan=False,
                 )
             )
@@ -287,31 +279,5 @@ def test_snapshot_teleport_push_confirmation_cancel_selected(
     assert snap_compare(
         "test_ui_snapshot_teleport.py:TeleportPushConfirmationMultipleCommitsApp",
         terminal_size=(80, 12),
-        run_before=run_before,
-    )
-
-
-def test_snapshot_teleport_command_visible_for_pro_account(
-    snap_compare: SnapCompare,
-) -> None:
-    async def run_before(pilot: Pilot) -> None:
-        await pilot.pause(0.2)
-
-    assert snap_compare(
-        "test_ui_snapshot_teleport.py:TeleportCommandHelpProApp",
-        terminal_size=(120, 48),
-        run_before=run_before,
-    )
-
-
-def test_snapshot_teleport_command_hidden_for_non_pro_account(
-    snap_compare: SnapCompare,
-) -> None:
-    async def run_before(pilot: Pilot) -> None:
-        await pilot.pause(0.2)
-
-    assert snap_compare(
-        "test_ui_snapshot_teleport.py:TeleportCommandHelpFreeApp",
-        terminal_size=(120, 48),
         run_before=run_before,
     )

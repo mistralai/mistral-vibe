@@ -5,22 +5,37 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.logger import logger
+from vibe.core.config.harness_files import (
+    HarnessFilesManager,
+    get_harness_files_manager,
+)
 from vibe.core.skills.builtins import BUILTIN_SKILLS
-from vibe.core.skills.models import ParsedSkillCommand, SkillInfo, SkillMetadata
+from vibe.core.skills.models import (
+    ParsedSkillCommand,
+    SkillConfigIssue,
+    SkillInfo,
+    SkillMetadata,
+)
 from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
 from vibe.core.utils import name_matches
-from vibe.core.utils.io import read_safe
+from vibe.observability.logging import logger
+from vibe.utils.io import read_safe
 
 if TYPE_CHECKING:
-    from vibe.core.config import VibeConfig
+    from vibe.core.config import VibeConfigSchema
 
 
 class SkillManager:
-    def __init__(self, config_getter: Callable[[], VibeConfig]) -> None:
+    def __init__(
+        self,
+        config_getter: Callable[[], VibeConfigSchema],
+        *,
+        harness_files: HarnessFilesManager | None = None,
+    ) -> None:
         self._config_getter = config_getter
+        self._harness_files = harness_files or get_harness_files_manager()
         self._search_paths = self._compute_search_paths(self._config)
+        self._config_issues: list[SkillConfigIssue] = []
         self.available_skills: Mapping[str, SkillInfo] = MappingProxyType(
             self._apply_filters(self._discover_skills())
         )
@@ -33,8 +48,12 @@ class SkillManager:
             )
 
     @property
-    def _config(self) -> VibeConfig:
+    def _config(self) -> VibeConfigSchema:
         return self._config_getter()
+
+    @property
+    def config_issues(self) -> tuple[SkillConfigIssue, ...]:
+        return tuple(self._config_issues)
 
     def _apply_filters(self, skills: dict[str, SkillInfo]) -> dict[str, SkillInfo]:
         if self._config.enabled_skills:
@@ -51,15 +70,14 @@ class SkillManager:
             }
         return dict(skills)
 
-    @staticmethod
-    def _compute_search_paths(config: VibeConfig) -> list[Path]:
+    def _compute_search_paths(self, config: VibeConfigSchema) -> list[Path]:
         paths: list[Path] = []
 
         for path in config.skill_paths:
             if path.is_dir():
                 paths.append(path)
 
-        mgr = get_harness_files_manager()
+        mgr = self._harness_files
         paths.extend(mgr.project_skills_dirs)
         paths.extend(mgr.user_skills_dirs)
 
@@ -121,6 +139,9 @@ class SkillManager:
             skill_info = self._parse_skill_file(skill_file)
         except Exception as e:
             logger.warning("Failed to parse skill at %s: %s", skill_file, e)
+            self._config_issues.append(
+                SkillConfigIssue(file=skill_file, message=f"Failed to load: {e}")
+            )
             return None
         return skill_info
 
@@ -162,7 +183,7 @@ class SkillManager:
 
         skill_name = parts[0].lower()
         skill_info = self.get_skill(skill_name)
-        if skill_info is None:
+        if skill_info is None or not skill_info.user_invocable:
             return None
 
         extra_instructions = parts[1] if len(parts) > 1 else None
@@ -172,9 +193,3 @@ class SkillManager:
             content=skill_info.prompt,
             extra_instructions=extra_instructions,
         )
-
-    @staticmethod
-    def build_skill_prompt(text_prompt: str, parsed: ParsedSkillCommand) -> str:
-        if parsed.extra_instructions is not None:
-            return f"{text_prompt}\n\n{parsed.content}"
-        return parsed.content

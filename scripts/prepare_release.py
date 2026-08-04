@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run python
 
 from __future__ import annotations
 
@@ -7,6 +7,10 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from typing import Any, cast
+
+import tomlkit
+from tomlkit.items import Array
 
 
 def run_git_command(
@@ -217,6 +221,79 @@ def squash_commits(
     print("Successfully created release commit with co-authors")
 
 
+def get_pinned_dependencies(group: str | None = None) -> list[str]:
+    cmd = [
+        "uv",
+        "export",
+        "--no-hashes",
+        "--no-emit-project",
+        "--frozen",
+        "--format",
+        "requirements.txt",
+        "--no-annotate",
+        "--no-header",
+    ]
+    if group is None:
+        cmd.append("--no-dev")
+    else:
+        cmd += ["--only-group", group]
+
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+    pins: list[str] = []
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        pins.append(line)
+
+    if not pins:
+        target = group or "[project].dependencies"
+        raise ValueError(f"uv export returned no dependencies for {target}")
+
+    return pins
+
+
+def make_multiline_array(pins: list[str]) -> Array:
+    arr = tomlkit.array()
+    arr.extend(pins)
+    arr.multiline(True)
+    return arr
+
+
+def pin_dependencies(version: str) -> None:
+    print("Pinning dependencies for release...")
+
+    pyproject_path = Path("pyproject.toml")
+    if not pyproject_path.exists():
+        raise FileNotFoundError("pyproject.toml not found in current directory")
+
+    project_pins = get_pinned_dependencies()
+    build_pins = get_pinned_dependencies(group="build")
+
+    doc = tomlkit.parse(pyproject_path.read_text())
+    cast(dict[str, Any], doc["project"])["dependencies"] = make_multiline_array(
+        project_pins
+    )
+    cast(dict[str, Any], doc["dependency-groups"])["build"] = make_multiline_array(
+        build_pins
+    )
+    pyproject_path.write_text(tomlkit.dumps(doc))
+    print(
+        f"Pinned {len(project_pins)} project deps and "
+        f"{len(build_pins)} build-group deps in pyproject.toml"
+    )
+
+    print("Refreshing uv.lock...")
+    subprocess.run(["uv", "lock"], check=True)
+
+    run_git_command("add", "pyproject.toml", "uv.lock")
+    run_git_command(
+        "commit", "--allow-empty", "-m", f"chore: pin dependencies for v{version}"
+    )
+    print(f"Committed pinned dependencies for v{version}")
+
+
 def get_commits_summary(previous_version: str, current_version: str) -> str:
     previous_tag = f"v{previous_version}-private"
     current_tag = f"v{current_version}-private"
@@ -352,7 +429,13 @@ def main() -> None:
             # Step 7: Cherry-pick commits
             cherry_pick_commits(previous_private_tag, current_private_tag)
 
-        # Step 8: Squash commits
+        # Step 8: Pin dependencies from uv.lock so the published wheel
+        # has frozen Requires-Dist metadata. When squashing, this commit
+        # is folded into the release commit; otherwise it stays as the
+        # final commit on the release branch.
+        pin_dependencies(current_version)
+
+        # Step 9: Squash commits
         if squash:
             squash_commits(
                 previous_version,
@@ -361,7 +444,7 @@ def main() -> None:
                 current_private_tag,
             )
 
-        # Step 8: Get summary information
+        # Step 10: Get summary information
         commits_summary = get_commits_summary(previous_version, current_version)
         changelog_entry = get_changelog_entry(current_version)
 

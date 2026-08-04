@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from tests.conftest import build_test_vibe_app, build_test_vibe_config
+from vibe.cli.textual_ui.widgets.messages import ErrorMessage, UserCommandMessage
+from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
+from vibe.core.config import SessionLoggingConfig
+from vibe.core.session.resume_sessions import short_session_id
+
+
+def _enabled_session_config(save_dir: Path) -> SessionLoggingConfig:
+    return SessionLoggingConfig(enabled=True, save_dir=str(save_dir))
+
+
+class FakeSessionPicker:
+    def __init__(self, *, has_sessions_after_remove: bool = True) -> None:
+        self.has_sessions = True
+        self.removed_option_ids: list[str] = []
+        self.cleared_pending_option_ids: list[str] = []
+        self._has_sessions_after_remove = has_sessions_after_remove
+
+    def remove_session(self, option_id: str) -> bool:
+        self.removed_option_ids.append(option_id)
+        self.has_sessions = self._has_sessions_after_remove
+        return True
+
+    def clear_pending_delete(self, option_id: str) -> bool:
+        self.cleared_pending_option_ids.append(option_id)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_session_delete_request_deletes_local_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=_enabled_session_config(tmp_path), enable_connectors=False
+    )
+    app = build_test_vibe_app(config=config)
+    await app.prepare()
+    picker = FakeSessionPicker()
+    mounted_widgets: list[object] = []
+    deleted_sessions: list[str] = []
+
+    async def delete_session(session_id: str) -> None:
+        deleted_sessions.append(session_id)
+
+    async def mount_and_scroll(widget: object, after: object | None = None) -> None:
+        mounted_widgets.append(widget)
+
+    monkeypatch.setattr(app.app_server.resources.sessions, "delete", delete_session)
+    monkeypatch.setattr(app, "query_one", lambda _selector: picker)
+    monkeypatch.setattr(app, "_mount_and_scroll", mount_and_scroll)
+
+    await app.on_session_picker_app_session_delete_requested(
+        SessionPickerApp.SessionDeleteRequested("deleted-session", "deleted-session")
+    )
+
+    assert deleted_sessions == ["deleted-session"]
+    assert picker.removed_option_ids == ["deleted-session"]
+    assert any(
+        isinstance(widget, UserCommandMessage)
+        and widget._content
+        == f"Deleted session `{short_session_id('deleted-session')}`."
+        for widget in mounted_widgets
+    )
+    await app.shutdown_cleanup()
+
+
+@pytest.mark.asyncio
+async def test_session_delete_request_keeps_picker_on_delete_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=_enabled_session_config(tmp_path), enable_connectors=False
+    )
+    app = build_test_vibe_app(config=config)
+    await app.prepare()
+    picker = FakeSessionPicker()
+    mounted_widgets: list[object] = []
+
+    async def delete_session(session_id: str) -> None:
+        raise RuntimeError("disk said no")
+
+    async def mount_and_scroll(widget: object, after: object | None = None) -> None:
+        mounted_widgets.append(widget)
+
+    monkeypatch.setattr(app.app_server.resources.sessions, "delete", delete_session)
+    monkeypatch.setattr(app, "query_one", lambda _selector: picker)
+    monkeypatch.setattr(app, "_mount_and_scroll", mount_and_scroll)
+
+    await app.on_session_picker_app_session_delete_requested(
+        SessionPickerApp.SessionDeleteRequested("deleted-session", "deleted-session")
+    )
+
+    assert picker.removed_option_ids == []
+    assert picker.cleared_pending_option_ids == ["deleted-session"]
+    assert any(
+        isinstance(widget, ErrorMessage)
+        and widget._error == "Failed to delete session: disk said no"
+        for widget in mounted_widgets
+    )
+    await app.shutdown_cleanup()
+
+
+@pytest.mark.asyncio
+async def test_session_delete_request_returns_to_input_when_picker_becomes_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=_enabled_session_config(tmp_path), enable_connectors=False
+    )
+    app = build_test_vibe_app(config=config)
+    await app.prepare()
+    picker = FakeSessionPicker(has_sessions_after_remove=False)
+    mounted_widgets: list[object] = []
+    switched_to_input = False
+
+    async def delete_session(session_id: str) -> None:
+        pass
+
+    async def mount_and_scroll(widget: object, after: object | None = None) -> None:
+        mounted_widgets.append(widget)
+
+    async def switch_to_input() -> None:
+        nonlocal switched_to_input
+        switched_to_input = True
+
+    monkeypatch.setattr(app.app_server.resources.sessions, "delete", delete_session)
+    monkeypatch.setattr(app, "query_one", lambda _selector: picker)
+    monkeypatch.setattr(app, "_mount_and_scroll", mount_and_scroll)
+    monkeypatch.setattr(app, "_switch_to_input_app", switch_to_input)
+
+    await app.on_session_picker_app_session_delete_requested(
+        SessionPickerApp.SessionDeleteRequested("deleted-session", "deleted-session")
+    )
+
+    assert switched_to_input is True
+    assert picker.removed_option_ids == ["deleted-session"]
+    assert [
+        widget._content
+        for widget in mounted_widgets
+        if isinstance(widget, UserCommandMessage)
+    ] == [
+        f"Deleted session `{short_session_id('deleted-session')}`.",
+        "No saved sessions left for this directory.",
+    ]
+    await app.shutdown_cleanup()
+
+
+@pytest.mark.asyncio
+async def test_session_delete_request_rejects_current_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=_enabled_session_config(tmp_path), enable_connectors=False
+    )
+    app = build_test_vibe_app(config=config)
+    await app.prepare()
+    picker = FakeSessionPicker()
+    mounted_widgets: list[object] = []
+    deleted_sessions: list[str] = []
+
+    async def delete_session(session_id: str) -> None:
+        deleted_sessions.append(session_id)
+
+    async def mount_and_scroll(widget: object, after: object | None = None) -> None:
+        mounted_widgets.append(widget)
+
+    monkeypatch.setattr(app.app_server.resources.sessions, "delete", delete_session)
+    monkeypatch.setattr(app, "query_one", lambda _selector: picker)
+    monkeypatch.setattr(app, "_mount_and_scroll", mount_and_scroll)
+
+    session_id = app.app_server.session_id
+    await app.on_session_picker_app_session_delete_requested(
+        SessionPickerApp.SessionDeleteRequested(session_id, session_id)
+    )
+
+    assert deleted_sessions == []
+    assert picker.cleared_pending_option_ids == [session_id]
+    assert any(
+        isinstance(widget, ErrorMessage)
+        and widget._error == "Deleting the current session is not supported."
+        for widget in mounted_widgets
+    )
+    await app.shutdown_cleanup()

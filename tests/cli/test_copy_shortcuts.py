@@ -3,8 +3,10 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from textual.widgets import TextArea
 
 from tests.conftest import build_test_vibe_app, build_test_vibe_config
+from vibe.cli.clipboard import copy_selection_to_clipboard
 
 
 @pytest.mark.asyncio
@@ -37,7 +39,7 @@ async def test_mouse_up_respects_autocopy_config_enabled() -> None:
     with patch("vibe.cli.textual_ui.app.copy_selection_to_clipboard") as mock_copy:
         async with app.run_test() as pilot:
             await pilot.click()
-            mock_copy.assert_called_once_with(app, show_toast=True)
+            mock_copy.assert_called_once_with(app, show_toast=False)
 
 
 @pytest.mark.asyncio
@@ -51,3 +53,21 @@ async def test_mouse_up_respects_autocopy_config_disabled() -> None:
         async with app.run_test() as pilot:
             await pilot.click()
             mock_copy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_copy_selection_copies_text_area_selection() -> None:
+    app = build_test_vibe_app()
+
+    with patch("vibe.cli.clipboard.copy_to_clipboard", return_value=True) as mock_copy:
+        async with app.run_test():
+            text_area = app.query_one(TextArea)
+            text_area.load_text("hello world")
+            text_area.select_all()
+
+            result = copy_selection_to_clipboard(app, show_toast=False)
+
+    assert result is not None
+    assert result.text == "hello world"
+    assert result.verified is True
+    mock_copy.assert_called_once_with("hello world")

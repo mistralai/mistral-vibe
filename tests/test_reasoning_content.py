@@ -14,20 +14,19 @@ import pytest
 import respx
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.constants import CHAT_COMPLETIONS_PATH
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 from vibe.core.llm.backend.generic import GenericBackend, OpenAIAdapter
 from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper, ParsedContent
 from vibe.core.llm.format import APIToolFormatHandler
 from vibe.core.types import AssistantEvent, LLMMessage, ReasoningEvent, Role
+from vibe.user_content import UserDisplayContent
 
 
-def make_config() -> VibeConfig:
+def make_config() -> VibeConfigSchema:
     return build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
-        include_prompt_detail=False,
         include_model_info=False,
         include_commit_signature=False,
         enabled_tools=[],
@@ -194,7 +193,7 @@ class TestGenericBackendReasoningContent:
         }
 
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/chat/completions").mock(
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(
                 return_value=httpx.Response(status_code=200, json=json_response)
             )
             provider = ProviderConfig(
@@ -228,7 +227,7 @@ class TestGenericBackendReasoningContent:
         ]
 
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/chat/completions").mock(
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(
                 return_value=httpx.Response(
                     status_code=200,
                     stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),
@@ -455,6 +454,49 @@ class TestReasoningFieldNameConversion:
         assert payload["messages"][0]["reasoning_content"] == "Thinking..."
         assert "reasoning_state" not in payload["messages"][0]
 
+    def test_prepare_request_excludes_user_display_content_from_completions_payload(
+        self,
+    ):
+        adapter = OpenAIAdapter()
+        provider = ProviderConfig(
+            name="test",
+            api_base="https://api.example.com/v1",
+            api_key_env_var="API_KEY",
+        )
+
+        request = adapter.prepare_request(
+            model_name="test-model",
+            messages=[
+                LLMMessage(
+                    role=Role.user,
+                    content="Look at app.ts",
+                    user_display_content=UserDisplayContent(
+                        version="1.0.0",
+                        host="mistral-vscode",
+                        content=[
+                            {"type": "text", "text": "Look at "},
+                            {
+                                "type": "workspace_mention",
+                                "kind": "file",
+                                "uri": "file:///repo/src/app.ts",
+                                "name": "app.ts",
+                            },
+                        ],
+                    ),
+                )
+            ],
+            temperature=0.2,
+            tools=None,
+            max_tokens=None,
+            tool_choice=None,
+            enable_streaming=False,
+            provider=provider,
+        )
+
+        payload = json.loads(request.body)
+
+        assert payload["messages"][0] == {"role": "user", "content": "Look at app.ts"}
+
     @pytest.mark.asyncio
     async def test_complete_with_custom_reasoning_field_name(self):
         base_url = "https://api.example.com"
@@ -478,7 +520,7 @@ class TestReasoningFieldNameConversion:
         }
 
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/chat/completions").mock(
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(
                 return_value=httpx.Response(status_code=200, json=json_response)
             )
             provider = ProviderConfig(
@@ -515,7 +557,7 @@ class TestReasoningFieldNameConversion:
         ]
 
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/chat/completions").mock(
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(
                 return_value=httpx.Response(
                     status_code=200,
                     stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import ClassVar, final
+from typing import final
 
 import anyio
 from pydantic import BaseModel, Field
 
-from vibe.core.rewind.manager import FileSnapshot
-from vibe.core.scratchpad import is_scratchpad_path
+from vibe.core.checkpoints import FileSnapshot
+from vibe.core.scratchpad import is_scratchpad_display_path
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -17,24 +17,24 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.io_port import ToolIOPort
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
+from vibe.utils.tool_presentation import ToolEffectKind
 
 
 class WriteFileArgs(BaseModel):
-    path: str
-    content: str
-    overwrite: bool = Field(
-        default=False, description="Must be set to true to overwrite an existing file."
+    file_path: str = Field(
+        description="The absolute path to the file to write (must be absolute, not relative)"
     )
+    content: str = Field(description="The content to write to the file")
 
 
 class WriteFileResult(BaseModel):
-    path: str
+    file_path: str
     bytes_written: int
-    file_existed: bool
     content: str
 
 
@@ -52,25 +52,34 @@ class WriteFile(
     BaseTool[WriteFileArgs, WriteFileResult, WriteFileConfig, BaseToolState],
     ToolUIData[WriteFileArgs, WriteFileResult],
 ):
-    description: ClassVar[str] = (
-        "Create or overwrite a UTF-8 file. Fails if file exists unless 'overwrite=True'."
-    )
+    effect_kind = ToolEffectKind.FILE_WRITE
 
     @classmethod
     def format_call_display(cls, args: WriteFileArgs) -> ToolCallDisplay:
-        tag = " (scratchpad)" if is_scratchpad_path(args.path) else ""
-        overwrite = " (overwrite)" if args.overwrite else ""
+        suffix = "(scratchpad)" if is_scratchpad_display_path(args.file_path) else ""
         return ToolCallDisplay(
-            summary=f"Writing {args.path}{overwrite}{tag}", content=args.content
+            summary=f"Writing {args.file_path}",
+            content=args.content,
+            suffix=suffix,
+            verb="Creating",
+            message=args.file_path,
+            settled_verb="Created",
+            settled_message=args.file_path,
         )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
         if isinstance(event.result, WriteFileResult):
-            action = "Overwritten" if event.result.file_existed else "Created"
-            tag = " (scratchpad)" if is_scratchpad_path(event.result.path) else ""
+            suffix = (
+                "(scratchpad)"
+                if is_scratchpad_display_path(event.result.file_path)
+                else ""
+            )
             return ToolResultDisplay(
-                success=True, message=f"{action} {Path(event.result.path).name}{tag}"
+                success=True,
+                verb="Created",
+                message=Path(event.result.file_path).name,
+                suffix=suffix,
             )
 
         return ToolResultDisplay(success=True, message="File written")
@@ -80,35 +89,37 @@ class WriteFile(
         return "Writing file"
 
     def get_file_snapshot(self, args: WriteFileArgs) -> FileSnapshot | None:
-        return self.get_file_snapshot_for_path(args.path)
+        return self.get_file_snapshot_for_path(args.file_path)
 
     def resolve_permission(self, args: WriteFileArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
-            args.path,
+            args.file_path,
             tool_name=self.get_name(),
             allowlist=self.config.allowlist,
             denylist=self.config.denylist,
             config_permission=self.config.permission,
             sensitive_patterns=self.config.sensitive_patterns,
+            cwd=self.cwd,
+            project_roots=self.harness_files.project_roots,
+            scratchpad_dir=self.scratchpad_dir,
         )
 
     @final
     async def run(
         self, args: WriteFileArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | WriteFileResult, None]:
-        file_path, file_existed, content_bytes = self._prepare_and_validate_path(args)
+        file_path, content_bytes = self._prepare_and_validate_path(args)
 
-        await self._write_file(args, file_path)
-
-        yield WriteFileResult(
-            path=str(file_path),
-            bytes_written=content_bytes,
-            file_existed=file_existed,
-            content=args.content,
+        await self._write_file(
+            args, file_path, ctx.tool_io if ctx is not None else None
         )
 
-    def _prepare_and_validate_path(self, args: WriteFileArgs) -> tuple[Path, bool, int]:
-        if not args.path.strip():
+        yield WriteFileResult(
+            file_path=str(file_path), bytes_written=content_bytes, content=args.content
+        )
+
+    def _prepare_and_validate_path(self, args: WriteFileArgs) -> tuple[Path, int]:
+        if not args.file_path.strip():
             raise ToolError("Path cannot be empty")
 
         content_bytes = len(args.content.encode("utf-8"))
@@ -117,16 +128,14 @@ class WriteFile(
                 f"Content exceeds {self.config.max_write_bytes} bytes limit"
             )
 
-        file_path = Path(args.path).expanduser()
+        file_path = Path(args.file_path).expanduser()
         if not file_path.is_absolute():
-            file_path = Path.cwd() / file_path
+            file_path = self.cwd / file_path
         file_path = file_path.resolve()
 
-        file_existed = file_path.exists()
-
-        if file_existed and not args.overwrite:
+        if file_path.exists():
             raise ToolError(
-                f"File '{file_path}' exists. Set overwrite=True to replace."
+                f"File '{file_path}' already exists. Use edit to modify it."
             )
 
         if self.config.create_parent_dirs:
@@ -134,13 +143,22 @@ class WriteFile(
         elif not file_path.parent.exists():
             raise ToolError(f"Parent directory does not exist: {file_path.parent}")
 
-        return file_path, file_existed, content_bytes
+        return file_path, content_bytes
 
-    async def _write_file(self, args: WriteFileArgs, file_path: Path) -> None:
+    async def _write_file(
+        self, args: WriteFileArgs, file_path: Path, tool_io: ToolIOPort | None = None
+    ) -> None:
         try:
+            if tool_io is not None and tool_io.supports_write:
+                await tool_io.write_text(file_path, args.content)
+                return
             async with await anyio.Path(file_path).open(
-                mode="w", encoding="utf-8"
+                mode="x", encoding="utf-8"
             ) as f:
                 await f.write(args.content)
+        except FileExistsError as e:
+            raise ToolError(
+                f"File '{file_path}' already exists. Use edit to modify it."
+            ) from e
         except Exception as e:
             raise ToolError(f"Error writing {file_path}: {e}") from e

@@ -4,16 +4,16 @@ import argparse
 import os
 from pathlib import Path
 import sys
-
-from rich import print as rprint
+from typing import TYPE_CHECKING
 
 from vibe import __version__
-from vibe.core.config.harness_files import init_harness_files_manager
-from vibe.core.trusted_folders import find_trustable_files, trusted_folders_manager
-from vibe.setup.trusted_folders.trust_folder_dialog import (
-    TrustDialogQuitException,
-    ask_trust_folder,
-)
+
+# Anything heavier than argparse is imported inside the functions below, after
+# argument parsing, so that --help/--version don't pay for the config stack
+# (pydantic, textual, rich) at import time.
+
+if TYPE_CHECKING:
+    from vibe.core.worktree import PreparedWorktree, WorktreeCleanupState
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -21,6 +21,8 @@ def parse_arguments() -> argparse.Namespace:
         description="Run the Mistral Vibe interactive CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
+            "Commands:\n"
+            "  mcp            Manage MCP server configuration (vibe mcp --help).\n\n"
             "Environment variables:\n"
             "  VIBE_HOME       Override the Vibe home directory (default: ~/.vibe)\n"
             "  LOG_LEVEL       Logging level: DEBUG, INFO, WARNING (default), ERROR, CRITICAL.\n"
@@ -44,8 +46,9 @@ def parse_arguments() -> argparse.Namespace:
         nargs="?",
         const="",
         metavar="TEXT",
-        help="Run in programmatic mode: send prompt, auto-approve all tools, "
-        "output response, and exit.",
+        help="Run in programmatic mode: send prompt, output response, and exit. "
+        "Tool approval follows the selected --agent (or 'default_agent' config); "
+        "pass --auto-approve or --yolo to allow all tool calls.",
     )
     parser.add_argument(
         "--max-turns",
@@ -62,11 +65,27 @@ def parse_arguments() -> argparse.Namespace:
         "Session will be interrupted if cost exceeds this limit.",
     )
     parser.add_argument(
+        "--max-tokens",
+        type=int,
+        metavar="N",
+        help="Maximum total prompt + completion tokens across the session "
+        "(only applies in programmatic mode with -p). "
+        "Session will be interrupted if usage exceeds this limit.",
+    )
+    parser.add_argument(
         "--enabled-tools",
         action="append",
         metavar="TOOL",
         help="Enable specific tools. In programmatic mode (-p), this disables "
         "all other tools. "
+        "Can use exact names, glob patterns (e.g., 'bash*'), or "
+        "regex with 're:' prefix. Can be specified multiple times.",
+    )
+    parser.add_argument(
+        "--disabled-tools",
+        action="append",
+        metavar="TOOL",
+        help="Disable specific tools after --enabled-tools filtering. "
         "Can use exact names, glob patterns (e.g., 'bash*'), or "
         "regex with 're:' prefix. Can be specified multiple times.",
     )
@@ -84,17 +103,43 @@ def parse_arguments() -> argparse.Namespace:
         metavar="NAME",
         default=None,
         help="Agent to use (builtin: default, plan, accept-edits, auto-approve, "
-        "or custom from ~/.vibe/agents/NAME.toml). In interactive mode, "
-        "defaults to the 'default_agent' config setting. In programmatic "
-        "mode (-p/--prompt), defaults to auto-approve and 'default_agent' "
-        "is ignored.",
+        "or custom from ~/.vibe/agents/NAME.toml). Defaults to the "
+        "'default_agent' config setting in both interactive and programmatic "
+        "(-p/--prompt) mode.",
+    )
+    parser.add_argument(
+        "--auto-approve",
+        "--yolo",
+        action="store_true",
+        help="Approves all tool calls without prompting for the selected agent.",
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
+    parser.add_argument(
+        "--check-upgrade",
+        action="store_true",
+        help="Check for a Vibe update now, prompt to install it, and exit",
+    )
     parser.add_argument(
         "--workdir",
         type=Path,
         metavar="DIR",
         help="Change to this directory before running",
+    )
+    parser.add_argument(
+        "--worktree",
+        metavar="NAME",
+        help="Create (or reuse) a git worktree under $VIBE_HOME/worktrees on "
+        "a branch named NAME and run inside it. Implicitly trusted for the "
+        "session. Ignored with --setup and --check-upgrade.",
+    )
+    parser.add_argument(
+        "--add-dir",
+        action="append",
+        metavar="DIR",
+        default=[],
+        help="Additional working directory for file access and context. "
+        "Implicitly trusted for the session (same semantics as --trust). "
+        "Can be specified multiple times.",
     )
     parser.add_argument(
         "--trust",
@@ -126,36 +171,106 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def check_and_resolve_trusted_folder(cwd: Path) -> None:
-    if cwd.resolve() == Path.home().resolve():
-        return
+def _prompt_remove_worktree(
+    worktree: PreparedWorktree, cleanup_state: WorktreeCleanupState
+) -> bool:
+    from rich import print as rprint
 
-    detected_files = find_trustable_files(cwd)
+    reasons = ", ".join(cleanup_state.reasons)
+    rprint(f"[yellow]Worktree {worktree.name!r} has {reasons}.[/]", file=sys.stderr)
+    rprint(
+        "[yellow]Remove it and delete its branch? This discards worktree changes, "
+        "untracked files, and commits.[/]",
+        file=sys.stderr,
+    )
+    sys.stderr.write("Remove worktree? [y/N] ")
+    sys.stderr.flush()
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        sys.stderr.write("\n")
+        return False
+    return answer in {"y", "yes", "remove"}
 
-    if not detected_files:
-        return
 
-    is_folder_trusted = trusted_folders_manager.is_trusted(cwd)
+def _prompt_delete_attached_branch(worktree: PreparedWorktree) -> bool:
+    from rich import print as rprint
 
-    if is_folder_trusted is not None:
-        return
+    rprint(
+        f"[yellow]Branch {worktree.branch!r} existed before this session "
+        f"and was attached, not created by Vibe.[/]",
+        file=sys.stderr,
+    )
+    sys.stderr.write(f"Also delete branch {worktree.branch!r}? [y/N] ")
+    sys.stderr.flush()
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        sys.stderr.write("\n")
+        return False
+    return answer in {"y", "yes", "delete"}
+
+
+def _cleanup_worktree_on_exit(worktree: PreparedWorktree) -> None:
+    from rich import print as rprint
+
+    from vibe.core.worktree import (
+        WorktreeError,
+        inspect_worktree_for_cleanup,
+        remove_worktree,
+    )
 
     try:
-        is_folder_trusted = ask_trust_folder(cwd, detected_files)
-    except (KeyboardInterrupt, EOFError, TrustDialogQuitException):
-        sys.exit(0)
-    except Exception as e:
-        rprint(f"[yellow]Error showing trust dialog: {e}[/]")
+        cleanup_state = inspect_worktree_for_cleanup(worktree)
+    except WorktreeError as e:
+        rprint(
+            f"[yellow]Could not inspect worktree for cleanup: {e}[/]", file=sys.stderr
+        )
         return
 
-    if is_folder_trusted is True:
-        trusted_folders_manager.add_trusted(cwd)
-    elif is_folder_trusted is False:
-        trusted_folders_manager.add_untrusted(cwd)
+    if not cleanup_state.is_clean and not _prompt_remove_worktree(
+        worktree, cleanup_state
+    ):
+        rprint(f"[dim]Keeping worktree: {worktree.root}[/]", file=sys.stderr)
+        return
+
+    delete_branch = worktree.branch_created or _prompt_delete_attached_branch(worktree)
+
+    try:
+        rprint(f"[dim]Removing worktree: {worktree.root}[/]", file=sys.stderr)
+        remove_worktree(worktree, delete_branch=delete_branch)
+    except WorktreeError as e:
+        rprint(f"[yellow]Could not remove worktree: {e}[/]", file=sys.stderr)
+        return
+
+    rprint(f"[dim]Removed worktree: {worktree.root}[/]", file=sys.stderr)
+    if not delete_branch:
+        rprint(f"[dim]Kept branch: {worktree.branch}[/]", file=sys.stderr)
 
 
 def main() -> None:
+    from vibe.core.utils.windows_asyncio import (
+        silence_proactor_transport_teardown_warnings,
+    )
+
+    silence_proactor_transport_teardown_warnings()
+
+    if sys.argv[1:2] == ["mcp"]:
+        from vibe.cli.mcp_command import run_mcp_cli
+
+        run_mcp_cli(sys.argv[2:])
+        return
+
     args = parse_arguments()
+    worktree_session: PreparedWorktree | None = None
+
+    from rich import print as rprint
+
+    from vibe.core.config.harness_files import init_harness_files_manager
+    from vibe.core.paths import LOG_FILE
+    from vibe.observability.logging import init_file_logging
+
+    init_file_logging(LOG_FILE.path)
 
     if args.workdir:
         workdir = args.workdir.expanduser().resolve()
@@ -166,8 +281,23 @@ def main() -> None:
             sys.exit(1)
         os.chdir(workdir)
 
+    # Must run before `cwd` is read and before run_cli so that session lookups
+    # (-c / --resume picker) scope to the worktree directory.
+    if args.worktree and not (args.setup or args.check_upgrade):
+        from vibe.core.worktree import WorktreeError, prepare_worktree_session
+
+        rprint(f"[dim]Preparing worktree {args.worktree!r}...[/]", file=sys.stderr)
+        try:
+            worktree_session = prepare_worktree_session(args.worktree, Path.cwd())
+        except WorktreeError as e:
+            rprint(f"[red]Error: {e}[/]")
+            sys.exit(1)
+        target = worktree_session.path
+        rprint(f"[dim]Using worktree: {target}[/]", file=sys.stderr)
+        os.chdir(target)
+
     try:
-        cwd = Path.cwd()
+        Path.cwd()
     except FileNotFoundError:
         rprint(
             "[red]Error: Current working directory no longer exists.[/]\n"
@@ -177,17 +307,46 @@ def main() -> None:
         )
         sys.exit(1)
 
-    if args.trust:
-        trusted_folders_manager.trust_for_session(cwd)
+    additional_dirs: list[Path] = []
+    for d in args.add_dir:
+        resolved = Path(d).expanduser().resolve()
+        if not resolved.is_dir():
+            rprint(
+                f"[red]Error: --add-dir path does not exist "
+                f"or is not a directory: {d}[/]"
+            )
+            sys.exit(1)
+        additional_dirs.append(resolved)
 
-    is_interactive = args.prompt is None
-    if is_interactive:
-        check_and_resolve_trusted_folder(cwd)
+    args.add_dir = [str(path) for path in additional_dirs]
     init_harness_files_manager("user", "project")
 
+    _run_cli_with_worktree_cleanup(args, worktree_session)
+
+
+def _run_cli_with_worktree_cleanup(
+    args: argparse.Namespace, worktree_session: PreparedWorktree | None
+) -> None:
     from vibe.cli.cli import run_cli
 
-    run_cli(args)
+    session_started = False
+    try:
+        run_cli(args)
+        session_started = True
+    except SystemExit as e:
+        session_started = e.code in {0, None}
+        raise
+    finally:
+        # Only auto-clean worktrees Vibe created this run, and only once a
+        # session actually ran — a startup failure (bad config, --continue with
+        # no sessions) must not delete a reused worktree or its branch.
+        if (
+            worktree_session is not None
+            and worktree_session.created
+            and args.prompt is None
+            and session_started
+        ):
+            _cleanup_worktree_on_exit(worktree_session)
 
 
 if __name__ == "__main__":

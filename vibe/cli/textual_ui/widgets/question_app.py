@@ -1,33 +1,35 @@
 from __future__ import annotations
 
 import itertools
+import time
 from typing import TYPE_CHECKING, ClassVar
 
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Input
 
-from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown
+from vibe.app_server.models import (
+    QuestionChoice,
+    UserAnswer,
+    UserQuestion,
+    UserQuestionRequest,
+)
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
 from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
 
+_INPUT_GRACE_PERIOD_S = 0.5
+
 if TYPE_CHECKING:
-    from vibe.core.tools.builtins.ask_user_question import (
-        AskUserQuestionArgs,
-        Choice,
-        Question,
-    )
-
-from vibe.core.tools.builtins.ask_user_question import Answer
+    from textual.widget import Widget
 
 
-class QuestionApp(Container):
-    MAX_OPTIONS: ClassVar[int] = 4
-
+class QuestionApp(VimNavigationMixin, Container):
     can_focus = True
     can_focus_children = False
 
@@ -42,17 +44,18 @@ class QuestionApp(Container):
     ]
 
     class Answered(Message):
-        def __init__(self, answers: list[Answer]) -> None:
+        def __init__(self, answers: list[UserAnswer]) -> None:
             super().__init__()
             self.answers = answers
 
     class Cancelled(Message):
         pass
 
-    def __init__(self, args: AskUserQuestionArgs) -> None:
+    def __init__(self, args: UserQuestionRequest) -> None:
         super().__init__(id="question-app")
         self.args = args
         self.questions = args.questions
+        self.max_options = max(len(q.options) for q in self.questions)
 
         self.answers: dict[int, tuple[str, bool]] = {}
         self.multi_selections: dict[int, set[int]] = {}
@@ -66,9 +69,10 @@ class QuestionApp(Container):
         self.submit_widget: NoMarkupStatic | None = None
         self.help_widget: NoMarkupStatic | None = None
         self.tabs_widget: NoMarkupStatic | None = None
+        self._mount_time: float = 0.0
 
     @property
-    def _current_question(self) -> Question:
+    def _current_question(self) -> UserQuestion:
         return self.questions[self.current_question_idx]
 
     @property
@@ -110,16 +114,7 @@ class QuestionApp(Container):
         )
 
     def compose(self) -> ComposeResult:
-        if self.args.content_preview:
-            with VerticalScroll(classes="question-content-preview"):
-                yield AnsiMarkdown(
-                    self.args.content_preview, classes="question-content-preview-text"
-                )
-
-        question_content_classes = (
-            "question-content-docked" if self.args.content_preview else ""
-        )
-        with Vertical(id="question-content", classes=question_content_classes):
+        with Vertical(id="question-content"):
             if len(self.questions) > 1:
                 self.tabs_widget = NoMarkupStatic("", classes="question-tabs")
                 yield self.tabs_widget
@@ -127,7 +122,7 @@ class QuestionApp(Container):
             self.title_widget = NoMarkupStatic("", classes="question-title")
             yield self.title_widget
 
-            for _ in range(self.MAX_OPTIONS):
+            for _ in range(self.max_options):
                 widget = NoMarkupStatic("", classes="question-option")
                 self.option_widgets.append(widget)
                 yield widget
@@ -147,12 +142,21 @@ class QuestionApp(Container):
             self.submit_widget = NoMarkupStatic("", classes="question-submit")
             yield self.submit_widget
 
+            if self.args.footer_note:
+                yield NoMarkupStatic(
+                    self.args.footer_note, classes="question-footer-note"
+                )
+
             self.help_widget = NoMarkupStatic("", classes="question-help")
             yield self.help_widget
 
     async def on_mount(self) -> None:
+        self._mount_time = time.monotonic()
         self._update_display()
         self.focus()
+
+    def is_within_grace_period(self) -> bool:
+        return (time.monotonic() - self._mount_time) < _INPUT_GRACE_PERIOD_S
 
     def _watch_current_question_idx(self) -> None:
         self._update_display()
@@ -217,7 +221,7 @@ class QuestionApp(Container):
         self,
         widget: NoMarkupStatic,
         idx: int,
-        opt: Choice,
+        opt: QuestionChoice,
         is_multi: bool,
         is_focused: bool,
         is_selected: bool,
@@ -304,12 +308,18 @@ class QuestionApp(Container):
         if not self.help_widget:
             return
         if self._current_question.multi_select:
-            help_text = "↑↓ navigate  Enter toggle  Esc cancel"
+            help_text = (
+                f"{shortcut('↑↓/jk')} navigate  {shortcut('Enter')} toggle  "
+                f"{shortcut('Esc')} cancel"
+            )
         else:
-            help_text = "↑↓ navigate  Enter select  Esc cancel"
+            help_text = (
+                f"{shortcut('↑↓/jk')} navigate  {shortcut('Enter')} select  "
+                f"{shortcut('Esc')} cancel"
+            )
         if len(self.questions) > 1:
-            help_text = "←→ questions  " + help_text
-        self.help_widget.update(help_text)
+            help_text = f"{shortcut('←→')} questions  {help_text}"
+        self.help_widget.update(shortcut_hint(help_text))
 
     def _store_other_text(self) -> None:
         if self.other_input:
@@ -361,6 +371,8 @@ class QuestionApp(Container):
         self._switch_question(new_idx)
 
     def action_select(self) -> None:
+        if self.is_within_grace_period():
+            return
         if self._current_question.multi_select:
             self._handle_multi_select_action()
         else:
@@ -370,10 +382,9 @@ class QuestionApp(Container):
         """Handle Enter key in multi-select mode: toggle option or submit."""
         if self._is_submit_selected:
             self._save_current_answer()
+            if self.current_question_idx not in self.answers:
+                return
             self._advance_or_submit()
-        elif self._is_other_selected:
-            if self.other_input:
-                self.other_input.focus()
         else:
             self._toggle_selection(self.selected_option)
 
@@ -400,6 +411,13 @@ class QuestionApp(Container):
             selections.add(option_idx)
         self._update_display()
 
+    def _select_option(self, option_idx: int) -> None:
+        """Mark an option as selected without toggling it off (multi-select only)."""
+        self.multi_selections.setdefault(self.current_question_idx, set()).add(
+            option_idx
+        )
+        self._update_display()
+
     def _advance_or_submit(self) -> None:
         if self._all_answered():
             self._submit()
@@ -415,37 +433,33 @@ class QuestionApp(Container):
             self._switch_question(new_idx)
 
     def action_cancel(self) -> None:
+        if self.is_within_grace_period():
+            return
         self.post_message(self.Cancelled())
 
     def on_input_submitted(self, _event: Input.Submitted) -> None:
-        if not self.other_input or not self.other_input.value.strip():
+        if self._current_question.multi_select:
+            self._toggle_selection(self._other_option_idx)
             return
 
-        q = self._current_question
-        if q.multi_select:
-            self.selected_option = self._submit_option_idx
-        else:
-            self._save_current_answer()
-            self._advance_or_submit()
+        if not self.other_input or not self.other_input.value.strip():
+            return
+        self._save_current_answer()
+        self._advance_or_submit()
 
     def on_input_changed(self, _event: Input.Changed) -> None:
         self._store_other_text()
-        self._sync_other_selection_with_text()
+        self._sync_free_choice_selection()
         self._update_display()
 
-    def _sync_other_selection_with_text(self) -> None:
-        """Auto-select/deselect 'Other' option based on whether text is entered (multi-select only)."""
+    def _sync_free_choice_selection(self) -> None:
         if not self._current_question.multi_select or not self.other_input:
             return
-
-        other_idx = self._other_option_idx
         selections = self.multi_selections.setdefault(self.current_question_idx, set())
-        has_text = bool(self.other_input.value.strip())
-
-        if has_text and other_idx not in selections:
-            selections.add(other_idx)
-        elif not has_text and other_idx in selections:
-            selections.discard(other_idx)
+        if self.other_input.value.strip():
+            selections.add(self._other_option_idx)
+        else:
+            selections.discard(self._other_option_idx)
 
     def _handle_number_key(self, event: events.Key) -> bool:
         """Handle number key press to quickly select an option. Returns True if handled."""
@@ -463,8 +477,11 @@ class QuestionApp(Container):
 
         event.stop()
         event.prevent_default()
-        self.selected_option = option_idx
 
+        if self.is_within_grace_period():
+            return True
+
+        self.selected_option = option_idx
         if not (self._has_other and option_idx == self._other_option_idx):
             self.action_select()
         return True
@@ -473,9 +490,13 @@ class QuestionApp(Container):
         if self._handle_number_key(event):
             return
 
+        other_input_focused = bool(self.other_input and self.other_input.has_focus)
+        if not other_input_focused and self._handle_vim_navigation_key(event):
+            return
+
         if len(self.questions) <= 1:
             return
-        if self.other_input and self.other_input.has_focus:
+        if other_input_focused:
             return
         if event.key == "left":
             self.action_prev_question()
@@ -532,13 +553,50 @@ class QuestionApp(Container):
         return all(i in self.answers for i in range(len(self.questions)))
 
     def _submit(self) -> None:
-        result: list[Answer] = []
+        result: list[UserAnswer] = []
         for i, q in enumerate(self.questions):
             answer_text, is_other = self.answers.get(i, ("", False))
             result.append(
-                Answer(question=q.question, answer=answer_text, is_other=is_other)
+                UserAnswer(question=q.question, answer=answer_text, is_other=is_other)
             )
         self.post_message(self.Answered(answers=result))
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        if (
+            self.other_input
+            and event.widget is self.other_input
+            and self._has_other
+            and self.selected_option != self._other_option_idx
+        ):
+            self.selected_option = self._other_option_idx
+
+    def on_click(self, event: events.Click) -> None:
+        idx = self._clicked_option_idx(event.widget)
+        if idx is None:
+            return
+        self.selected_option = idx
+        if not self._current_question.multi_select:
+            return
+        if idx == self._other_option_idx:
+            self._select_option(idx)
+        elif idx != self._submit_option_idx:
+            self._toggle_selection(idx)
+
+    def _clicked_option_idx(self, widget: Widget | None) -> int | None:
+        if widget is None:
+            return None
+        for i, option_widget in enumerate(self.option_widgets):
+            if widget is option_widget and i < len(self._current_question.options):
+                return i
+        if self._has_other and (
+            widget is self.other_prefix
+            or widget is self.other_input
+            or widget is self.other_static
+        ):
+            return self._other_option_idx
+        if self._current_question.multi_select and widget is self.submit_widget:
+            return self._submit_option_idx
+        return None
 
     def on_blur(self, _event: events.Blur) -> None:
         self.call_after_refresh(self._refocus_if_needed)

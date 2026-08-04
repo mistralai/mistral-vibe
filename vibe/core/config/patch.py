@@ -1,70 +1,160 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from abc import ABC, abstractmethod
+from collections.abc import Sequence
+import copy
+from typing import Annotated, Any
+
+from jsonpointer import JsonPointer, JsonPointerException
+from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints
 
 
-@dataclass(frozen=True, slots=True)
-class SetField:
-    """Set a top-level or nested field to a value."""
+class ConfigPatch:
+    """A storage-agnostic set of config changes expressed as JSON Patch operations."""
 
-    key: str
+    def __init__(
+        self, *operations: PatchOp, fingerprint: str, reason: str = ""
+    ) -> None:
+        self.operations = list(operations)
+        self.fingerprint = fingerprint
+        self.reason = reason
+
+    def add(self, *operations: PatchOp) -> ConfigPatch:
+        """Append operations after construction."""
+        self.operations.extend(operations)
+        return self
+
+    def to_json_patch(self) -> list[dict[str, Any]]:
+        return [op.to_json_patch() for op in self.operations]
+
+    def describe(self) -> list[str]:
+        """Human-readable summary of each operation."""
+        return [op.describe() for op in self.operations]
+
+
+class _OperationPatch(BaseModel, ABC):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    @staticmethod
+    def _validate_json_pointer(path: str) -> str:
+        try:
+            JsonPointer(path)
+        except JsonPointerException as e:
+            raise ValueError("path must be a valid JSON Pointer") from e
+
+        return path
+
+    path: Annotated[str, AfterValidator(_validate_json_pointer)]
+    target_layer_name: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] | None
+    ) = None
+
+    @abstractmethod
+    def to_json_patch(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def describe(self) -> str:
+        raise NotImplementedError
+
+
+class AddOperationPatch(_OperationPatch):
+    """Add a value at a JSON Pointer path."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     value: Any
 
-    def __post_init__(self) -> None:
-        _validate_key_path(self.key)
+    def to_json_patch(self) -> dict[str, Any]:
+        return {"op": "add", "path": self.path, "value": self.value}
+
+    def describe(self) -> str:
+        return f"add {self.path!r} = {self.value!r}"
 
 
-@dataclass(frozen=True, slots=True)
-class AppendToList:
-    """Append items to a list field."""
+class ReplaceOperationPatch(_OperationPatch):
+    """Replace the existing value at a JSON Pointer path."""
 
-    key: str
-    items: tuple[Any, ...]
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    def __post_init__(self) -> None:
-        _validate_key_path(self.key)
-        _validate_tuple_value("AppendToList.items", self.items)
+    value: Any
 
+    def to_json_patch(self) -> dict[str, Any]:
+        return {"op": "replace", "path": self.path, "value": self.value}
 
-@dataclass(frozen=True, slots=True)
-class RemoveFromList:
-    """Remove items from a list field by value."""
-
-    key: str
-    values: tuple[Any, ...]
-
-    def __post_init__(self) -> None:
-        _validate_key_path(self.key)
-        _validate_tuple_value("RemoveFromList.values", self.values)
+    def describe(self) -> str:
+        return f"replace {self.path!r} = {self.value!r}"
 
 
-@dataclass(frozen=True, slots=True)
-class DeleteField:
-    """Remove a field entirely from the config."""
+class RemoveOperationPatch(_OperationPatch):
+    """Remove the existing value at a JSON Pointer path."""
 
-    key: str
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    def __post_init__(self) -> None:
-        _validate_key_path(self.key)
+    def to_json_patch(self) -> dict[str, Any]:
+        return {"op": "remove", "path": self.path}
+
+    def describe(self) -> str:
+        return f"remove {self.path!r}"
 
 
-PatchOp = SetField | AppendToList | RemoveFromList | DeleteField
+type PatchOp = AddOperationPatch | ReplaceOperationPatch | RemoveOperationPatch
 
 
-def _validate_key_path(key: object) -> None:
-    if not isinstance(key, str):
-        raise TypeError(
-            f"Patch operation key must be a string, got {type(key).__name__}"
+def escape_json_pointer_token(value: str) -> str:
+    """Escape one JSON Pointer path segment for use inside a pointer string."""
+    return value.replace("~", "~0").replace("/", "~1")
+
+
+def resolve_upsert_op(
+    existing: Any,
+    path: str,
+    key_field: str,
+    value: dict[str, Any],
+    target_layer_name: str | None = None,
+) -> AddOperationPatch | ReplaceOperationPatch:
+    """Pick the JSON Patch op that upserts *value* into a list at *path*.
+
+    When *existing* is a list, the entry whose ``key_field`` matches
+    ``value[key_field]`` is replaced in place; otherwise *value* is
+    appended. A missing or non-list *existing* creates the section fresh.
+    """
+    if not isinstance(existing, list) or not existing:
+        return AddOperationPatch(
+            path=path, value=[value], target_layer_name=target_layer_name
         )
-    if not key:
-        raise ValueError("Patch operation key must not be empty")
-    if any(not segment for segment in key.split(".")):
-        raise ValueError(
-            "Patch operation key must be a dot-separated path without empty segments"
-        )
+    key_value = value.get(key_field)
+    for index, entry in enumerate(existing):
+        if isinstance(entry, dict) and entry.get(key_field) == key_value:
+            return ReplaceOperationPatch(
+                path=f"{path}/{index}", value=value, target_layer_name=target_layer_name
+            )
+    return AddOperationPatch(
+        path=f"{path}/-", value=value, target_layer_name=target_layer_name
+    )
 
 
-def _validate_tuple_value(field_name: str, value: object) -> None:
-    if not isinstance(value, tuple):
-        raise TypeError(f"{field_name} must be a tuple, got {type(value).__name__}")
+def ensure_parent_paths(
+    data: dict[str, Any], operations: Sequence[PatchOp]
+) -> dict[str, Any]:
+    """Auto-vivify missing intermediate dicts for object-key ``add`` ops.
+
+    Returns a deep copy of *data* with intermediate dicts filled in so a leaf
+    like ``/tools/bash/allowlist`` can be set on a config with no ``[tools.bash]``
+    table. Array-index and ``-`` append tokens are skipped, and existing non-dict
+    parents are left untouched. The input is never mutated.
+    """
+    data = copy.deepcopy(data)
+    for op in operations:
+        if not isinstance(op, AddOperationPatch):
+            continue
+        current: Any = data
+        for token in JsonPointer(op.path).parts[:-1]:
+            if not isinstance(current, dict) or token == "-" or token.isdigit():
+                break
+            if token not in current:
+                current[token] = {}
+            elif not isinstance(current[token], dict):
+                break
+            current = current[token]
+    return data

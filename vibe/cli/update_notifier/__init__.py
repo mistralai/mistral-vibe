@@ -19,7 +19,9 @@ from vibe.cli.update_notifier.ports.update_gateway import (
 from vibe.cli.update_notifier.update import (
     UpdateAvailability,
     UpdateError,
+    get_pending_update_from_cache,
     get_update_if_available,
+    mark_update_as_dismissed,
 )
 from vibe.cli.update_notifier.whats_new import (
     load_whats_new_content,
@@ -40,8 +42,10 @@ __all__ = [
     "UpdateGateway",
     "UpdateGatewayCause",
     "UpdateGatewayError",
+    "get_pending_update_from_cache",
     "get_update_if_available",
     "load_whats_new_content",
+    "mark_update_as_dismissed",
     "mark_version_as_seen",
     "should_show_whats_new",
 ]

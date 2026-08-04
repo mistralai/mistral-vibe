@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import time
 
 from vibe import VIBE_ROOT
@@ -7,7 +8,7 @@ from vibe.cli.update_notifier.ports.update_cache_repository import (
     UpdateCache,
     UpdateCacheRepository,
 )
-from vibe.core.utils.io import read_safe
+from vibe.utils.io import read_safe
 
 
 async def should_show_whats_new(
@@ -40,11 +41,5 @@ async def mark_version_as_seen(version: str, repository: UpdateCacheRepository) 
                 seen_whats_new_version=version,
             )
         )
-    else:
-        await repository.set(
-            UpdateCache(
-                latest_version=cache.latest_version,
-                stored_at_timestamp=cache.stored_at_timestamp,
-                seen_whats_new_version=version,
-            )
-        )
+        return
+    await repository.set(replace(cache, seen_whats_new_version=version))

@@ -20,20 +20,27 @@ jobs:
         id: set-matrix
         run: |
           # Linux: manylinux_2_28 containers → binary works on glibc >= 2.28 (RHEL 8+, Ubuntu 20.04+)
+          # Container images pinned by digest (supply-chain integrity)
           matrix='{
             "include": [
-              {"runner": "ubuntu-22.04", "os": "linux", "arch": "x86_64", "container": "quay.io/pypa/manylinux_2_28_x86_64"},
-              {"runner": "ubuntu-22.04-arm", "os": "linux", "arch": "aarch64", "container": "quay.io/pypa/manylinux_2_28_aarch64"},
+              {"runner": "ubuntu-22.04", "os": "linux", "arch": "x86_64", "container": "quay.io/pypa/manylinux_2_28_x86_64@sha256:65140ef21cef92d0c13d001708afd7d304d7a154f7120d039df99dac708f3ffb"},
+              {"runner": "ubuntu-22.04-arm", "os": "linux", "arch": "aarch64", "container": "quay.io/pypa/manylinux_2_28_aarch64@sha256:360bf4ec4349372e9bcfb123bf11bcc4f085072bfa4f3b946d98f5a28f9c03b0"},
               {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
               {"runner": "macos-14", "os": "darwin", "arch": "aarch64"},
               {"runner": "windows-2022", "os": "windows", "arch": "x86_64"},
               {"runner": "windows-11-arm", "os": "windows", "arch": "aarch64"}
             ]
           }'
+          # TODO: Re-enable macOS standalone artifact smoke tests once the PyInstaller
+          # binaries are Developer ID signed and notarized. The direct GitHub zip
+          # download path gets Gatekeeper-assessed via quarantine and currently rejects
+          # ad-hoc signed binaries, even though vibe-acp continues to work when bundled
+          # through the VS Code extension.
+          # almalinux:8 pinned by digest in the matrix entry below (supply-chain integrity)
           smoke_matrix='{
             "include": [
               {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64"},
-              {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64", "tag": "old-glibc", "container": "almalinux:8"},
+              {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64", "tag": "old-glibc", "container": "almalinux:8@sha256:4a87d2615a770506e204c27d6248ac97f4df67f4e41e2e9c47c81f0ed0be98cb"},
               {"runner": "ubuntu-24.04-arm", "os": "linux", "arch": "aarch64"},
               {"runner": "macos-15", "os": "darwin", "arch": "aarch64"},
               {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
@@ -56,10 +63,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Install uv with caching
-        uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           version: "latest"
           enable-cache: true
@@ -67,21 +74,14 @@ jobs:
 
       - name: Set up Python
         if: ${{ matrix.os != 'linux' }}
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
       - name: Install Python (Linux)
         if: ${{ matrix.os == 'linux' }}
-        run: |
-          uv python install 3.12
-          # Install patchelf >= 0.18 (yum/EPEL8 ships 0.12 which lacks --clear-execstack)
-          PATCHELF_VERSION=0.18.0
-          curl -sL "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}-$(uname -m).tar.gz" \
-            | tar xz -C /usr/local
-          # python-build-standalone ships libpython with GNU_STACK RWE (executable stack)
-          # which is rejected by hardened Linux kernels — clear it with patchelf
-          find "$(uv python dir)" -name 'libpython*.so*' -exec patchelf --clear-execstack {} \;
+        shell: bash
+        run: bash ./scripts/ci/setup-linux-pyinstaller-build.sh
 
       - name: Install OpenSSL (Windows aarch64)
         if: ${{ matrix.runner == 'windows-11-arm' }}
@@ -90,29 +90,72 @@ jobs:
           echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
           vcpkg install openssl:arm64-windows-static-md
 
-      - name: Sync dependencies
-        run: uv sync --no-dev --group build
+      - name: Inject Sentry DSN
+        shell: bash
+        env:
+          CLI_SENTRY_DSN: ${{ secrets.CLI_SENTRY_DSN }}
+          ACP_SENTRY_DSN: ${{ secrets.ACP_SENTRY_DSN }}
+          REQUIRE_SENTRY_DSN: ${{ github.event_name == 'release' && 'true' || 'false' }}
+        run: bash ./scripts/ci/inject-sentry-dsn.sh
 
-      - name: Build with PyInstaller
-        run: uv run --no-dev --group build pyinstaller vibe-acp.spec
+      - name: Build PyInstaller binaries
+        shell: bash
+        run: bash ./scripts/ci/build-pyinstaller-binaries.sh vibe-acp.spec vibe.spec
 
       - name: Clear executable stack on bundled libraries
         if: ${{ matrix.os == 'linux' }}
-        run: |
-          find dist/vibe-acp-dir/_internal -name '*.so*' -type f -print0 \
-            | xargs -0 -I{} patchelf --clear-execstack {}
-          patchelf --clear-execstack dist/vibe-acp-dir/vibe-acp || true
+        shell: bash
+        run: bash ./scripts/ci/clear-linux-execstack.sh dist/vibe-acp-dir dist/vibe-dir
 
       - name: Get package version
         id: get_version
         shell: bash
         run: echo "version=$(uv version | cut -d' ' -f2)" >> $GITHUB_OUTPUT
 
-      - name: Upload binary as artifact
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - name: Package PyInstaller artifacts
+        shell: bash
+        run: bash ./scripts/ci/package-pyinstaller-artifacts.sh ${{ matrix.os }} ${{ matrix.arch }} ${{ steps.get_version.outputs.version }} vibe-acp vibe
+
+      - name: Smoke Zed ACP archive
+        shell: bash
+        run: |
+          extract_dir="dist/zed-acp-smoke-dir"
+          mkdir -p "$extract_dir"
+
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            archive="dist/release-assets/vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}.zip"
+            powershell -NoProfile -Command "Expand-Archive -Path '$archive' -DestinationPath '$extract_dir' -Force"
+          else
+            archive="dist/release-assets/vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}.tar.gz"
+            tar -xzf "$archive" -C "$extract_dir"
+          fi
+
+          if [ "${{ matrix.os }}" = "darwin" ] && [ -d "$extract_dir/_internal/Python.framework" ]; then
+            test -e "$extract_dir/_internal/Python"
+            test -L "$extract_dir/_internal/Python"
+            file -L "$extract_dir/_internal/Python" | grep -q "Mach-O"
+          fi
+
+          uv run --no-dev python tests/acp/smoke_binary.py "$extract_dir"
+
+      - name: Upload ACP release asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}
-          path: dist/vibe-acp-dir/
+          path: dist/release-assets/vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}.zip
+          archive: false
+
+      - name: Upload ACP tar release asset
+        if: ${{ matrix.os != 'windows' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: dist/release-assets/vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}.tar.gz
+          archive: false
+
+      - name: Upload CLI release asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: dist/release-assets/vibe-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}.zip
+          archive: false
 
   nix-build:
     needs: configure
@@ -125,11 +168,11 @@ jobs:
     steps:
       - name: Checkout repository
         if: matrix.os != 'windows'
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Install Nix
         if: matrix.os != 'windows'
-        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
 
       - name: Build with Nix
         if: matrix.os != 'windows'
@@ -155,30 +198,100 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Python
         if: ${{ !matrix.container }}
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
       - name: Set up Python (container)
         if: ${{ matrix.container }}
-        run: yum install -y python3.11 python3.11-pip
+        run: yum install -y python3.11 python3.11-pip unzip tar gzip
 
       - name: Install smoke test deps
-        run: ${{ matrix.container && 'python3.11' || 'python' }} -m pip install agent-client-protocol==0.9.0
+        run: ${{ matrix.container && 'python3.11' || 'python' }} -m pip install agent-client-protocol==0.11.0
 
-      - name: Download artifact
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      - name: Download ACP zip artifact
+        if: ${{ matrix.os == 'windows' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-*
+          pattern: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-*.zip
           merge-multiple: true
-          path: dist/vibe-acp-dir
+          skip-decompress: true
+          path: artifacts/vibe-acp
 
-      - name: Run smoke tests
+      - name: Download ACP tar artifact
+        if: ${{ matrix.os != 'windows' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-*.tar.gz
+          merge-multiple: true
+          skip-decompress: true
+          path: artifacts/vibe-acp
+
+      - name: Download CLI artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: vibe-${{ matrix.os }}-${{ matrix.arch }}-*.zip
+          merge-multiple: true
+          skip-decompress: true
+          path: artifacts/vibe
+
+      - name: Extract release assets
+        shell: bash
+        run: |
+          shopt -s nullglob
+          mkdir -p dist/vibe-acp-dir dist/vibe-dir
+
+          extract_zip_asset() {
+            local artifact_dir="$1"
+            local output_dir="$2"
+            local zips=("$artifact_dir"/*.zip)
+
+            if [ "${#zips[@]}" -ne 1 ]; then
+              echo "Expected one zip in $artifact_dir, found ${#zips[@]}" >&2
+              exit 1
+            fi
+
+            if [ "${{ matrix.os }}" = "windows" ]; then
+              powershell -NoProfile -Command "Expand-Archive -Path '${zips[0]}' -DestinationPath '$output_dir' -Force"
+              return
+            fi
+
+            unzip -oq "${zips[0]}" -d "$output_dir"
+          }
+
+          extract_tar_asset() {
+            local artifact_dir="$1"
+            local output_dir="$2"
+            local tarballs=("$artifact_dir"/*.tar.gz)
+
+            if [ "${#tarballs[@]}" -ne 1 ]; then
+              echo "Expected one tar.gz in $artifact_dir, found ${#tarballs[@]}" >&2
+              exit 1
+            fi
+
+            tar -xzf "${tarballs[0]}" -C "$output_dir"
+          }
+
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            extract_zip_asset artifacts/vibe-acp dist/vibe-acp-dir
+          else
+            extract_tar_asset artifacts/vibe-acp dist/vibe-acp-dir
+          fi
+
+          extract_zip_asset artifacts/vibe dist/vibe-dir
+
+      - name: Run ACP smoke tests
         run: ${{ matrix.container && 'python3.11' || 'python' }} tests/acp/smoke_binary.py dist/vibe-acp-dir
+
+      - name: Run CLI smoke tests
+        shell: bash
+        env:
+          PYTHON_BIN: ${{ matrix.container && 'python3.11' || 'python' }}
+        run: bash ./scripts/ci/smoke-pyinstaller-cli.sh dist/vibe-dir
 
   attach-to-release:
     needs: [build-and-upload, smoke-test]
@@ -188,24 +301,24 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          skip-decompress: true
           path: artifacts
 
-      - name: Zip artifacts
+      - name: Collect release assets
+        shell: bash
         run: |
           mkdir release-assets
-          for dir in artifacts/*; do
-            name=$(basename "$dir")
-            if [ -f "$dir/vibe-acp" ] || [ -f "$dir/vibe-acp.exe" ]; then
-              chmod -f +x "$dir/vibe-acp" 2>/dev/null || true
-              (cd "$dir" && zip -r "../../release-assets/${name}.zip" .)
-            fi
-          done
+          find artifacts -name '*.zip' -exec cp {} release-assets/ \;
+          find artifacts -name '*.tar.gz' -exec cp {} release-assets/ \;
+          test "$(find release-assets -type f | wc -l)" -gt 0
 
       - name: Attach binaries to release
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
-          files: release-assets/*.zip
+          files: |
+            release-assets/*.zip
+            release-assets/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

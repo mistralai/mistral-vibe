@@ -1,87 +1,53 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
-import os
-from pathlib import Path
+from typing import Protocol
 
-from vibe.core.logger import logger
+from vibe.core.checkpoints import Checkpointer, FileStore
 from vibe.core.types import LLMMessage, MessageList, Role
+
+
+class SaveMessages(Protocol):
+    async def __call__(self, *, allow_empty: bool = False) -> None: ...
 
 
 class RewindError(Exception):
     """Raised when a rewind operation fails."""
 
 
-@dataclass(frozen=True, slots=True)
-class FileSnapshot:
-    """Snapshot of a single file's content at a point in time.
-
-    content is None if the file did not exist (was created after the snapshot).
-    """
-
-    path: str
-    content: bytes | None
-
-
-@dataclass
-class Checkpoint:
-    """Snapshot of tracked files taken before a user message."""
-
-    message_index: int
-    files: list[FileSnapshot] = field(default_factory=list)
-
-
 class RewindManager:
-    """Manages conversation rewind: file snapshots, message truncation, and session forking."""
+    """Impure shell over the shared Checkpointer: restores files from disk and
+    truncates and forks the conversation to rewind to an earlier user message.
+    """
 
     def __init__(
         self,
+        checkpointer: Checkpointer,
         messages: MessageList,
-        save_messages: Callable[[], Awaitable[None]],
-        reset_session: Callable[[], None],
+        save_messages: SaveMessages,
+        reset_session: Callable[[], Awaitable[None]],
+        files: FileStore | None = None,
     ) -> None:
-        self._checkpoints: list[Checkpoint] = []
+        self._checkpointer = checkpointer
         self._messages = messages
         self._save_messages = save_messages
         self._reset_session = reset_session
+        self._files = files or FileStore()
         self._is_rewinding = False
         self._messages.on_reset(self._on_messages_reset)
 
-    # -- Checkpoint management -------------------------------------------------
-
-    @property
-    def checkpoints(self) -> list[Checkpoint]:
-        return list(self._checkpoints)
-
-    def create_checkpoint(self) -> None:
-        """Snapshot known files and start a new checkpoint at the current message position.
-
-        Files known from the previous checkpoint are re-read from disk so
-        that each checkpoint captures the actual state at that point in time.
-        """
-        files: list[FileSnapshot] = []
-        if self._checkpoints:
-            for snap in self._checkpoints[-1].files:
-                files.append(self._read_snapshot(snap.path))
-        self._checkpoints.append(
-            Checkpoint(message_index=len(self._messages), files=files)
-        )
-
-    def add_snapshot(self, snapshot: FileSnapshot) -> None:
-        """Record a file snapshot into every checkpoint that doesn't have it yet."""
-        for cp in self._checkpoints:
-            if all(s.path != snapshot.path for s in cp.files):
-                cp.files.append(snapshot)
+    def restorable_paths_at(self, message_index: int) -> list[str]:
+        """Paths whose on-disk content would change if rewinding to this turn."""
+        history = self._checkpointer.view()
+        if not history.has_turn(message_index):
+            return []
+        plan = history.restore_plan_to_turn(message_index)
+        return [
+            path for path, target in plan.items() if self._files.read(path) != target
+        ]
 
     def has_file_changes_at(self, message_index: int) -> bool:
-        """Check if files have changed since the checkpoint at *message_index*."""
-        checkpoint = self._get_checkpoint(message_index)
-        if checkpoint is None:
-            return False
-        return self._has_changes_since(checkpoint)
-
-    # -- Rewind operations -----------------------------------------------------
+        return bool(self.restorable_paths_at(message_index))
 
     def get_rewindable_messages(self) -> list[tuple[int, str]]:
         """Return (message_index, content) for each user message."""
@@ -91,15 +57,37 @@ class RewindManager:
             if msg.role == Role.user and msg.content and not msg.injected
         ]
 
+    def index_for_message_id(self, message_id: str) -> int:
+        """Resolve a rewindable user message id to its index.
+
+        Raises:
+            RewindError: If no non-injected user message carries this id.
+        """
+        for index, msg in enumerate(self._messages):
+            if (
+                msg.role == Role.user
+                and not msg.injected
+                and msg.message_id == message_id
+            ):
+                return index
+        raise RewindError(f"No rewindable user message with id: {message_id}")
+
     async def rewind_to_message(
-        self, message_index: int, *, restore_files: bool
-    ) -> tuple[str, list[str]]:
+        self, message_index: int, *, restore_files: bool, inplace: bool = False
+    ) -> tuple[str, list[str], list[str]]:
         """Rewind the session to the given user message index.
 
-        Saves the current session, truncates messages, optionally restores
-        files, and forks to a new session.
+        Optionally restores files, then applies one of two persistence
+        strategies:
 
-        Returns a tuple of (message_content, restore_errors).
+        - ``inplace=False`` (default, fork): save the full history under the
+          current session, truncate, then fork to a fresh session so the
+          original conversation is preserved as a parent.
+        - ``inplace=True``: truncate first, then persist the truncated history
+          under the *same* session. The rewound turns are dropped for good and
+          no new session is created.
+
+        Returns a tuple of (message_content, restore_errors, restored_paths).
 
         Raises:
             RewindError: If the message index is invalid or not a user message.
@@ -114,79 +102,46 @@ class RewindManager:
 
         message_content = user_msg.content or ""
         restore_errors: list[str] = []
+        restored_paths: list[str] = []
 
         if restore_files:
-            checkpoint = self._get_checkpoint(message_index)
-            if checkpoint:
-                restore_errors = self._restore_checkpoint(checkpoint)
+            restore_errors, restored_paths = self._files.apply(
+                self._checkpointer.view().restore_plan_to_turn(message_index)
+            )
 
-        await self._save_messages()
-        self._checkpoints = [
-            cp for cp in self._checkpoints if cp.message_index < message_index
-        ]
+        if inplace:
+            self._truncate(messages, message_index)
+            await self._save_messages(allow_empty=True)
+        else:
+            await self._save_messages()
+            self._truncate(messages, message_index)
+            await self._reset_session()
+
+        return message_content, restore_errors, restored_paths
+
+    def _truncate(self, messages: Sequence[LLMMessage], message_index: int) -> None:
+        self._checkpointer.drop_turns_from(message_index)
         self._is_rewinding = True
         try:
             self._messages.reset(list(messages[:message_index]))
         finally:
             self._is_rewinding = False
-        self._reset_session()
-
-        return message_content, restore_errors
-
-    # -- Private helpers -------------------------------------------------------
-
-    def _get_checkpoint(self, message_index: int) -> Checkpoint | None:
-        for cp in self._checkpoints:
-            if cp.message_index == message_index:
-                return cp
-        return None
-
-    def _restore_checkpoint(self, checkpoint: Checkpoint) -> list[str]:
-        """Restore files on disk to match the checkpoint state.
-
-        Returns a list of human-readable error messages for files that
-        could not be restored (empty when everything succeeded).
-        """
-        errors: list[str] = []
-        for snap in checkpoint.files:
-            path = Path(snap.path)
-            if snap.content is None:
-                if path.exists():
-                    try:
-                        os.remove(path)
-                    except Exception:
-                        errors.append(f"Failed to delete file: {snap.path}")
-            else:
-                try:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(snap.content)
-                except Exception:
-                    errors.append(f"Failed to restore file: {snap.path}")
-        return errors
-
-    @staticmethod
-    def _has_changes_since(checkpoint: Checkpoint) -> bool:
-        for snap in checkpoint.files:
-            try:
-                current: bytes | None = Path(snap.path).read_bytes()
-            except FileNotFoundError:
-                current = None
-            if current != snap.content:
-                return True
-        return False
-
-    @staticmethod
-    def _read_snapshot(path: str) -> FileSnapshot:
-        try:
-            content: bytes | None = Path(path).read_bytes()
-        except FileNotFoundError:
-            content = None
-        except Exception:
-            logger.warning("Failed to read file for checkpoint: %s", path)
-            content = None
-        return FileSnapshot(path=path, content=content)
 
     def _on_messages_reset(self) -> None:
-        """Called when the message list is reset (session switch, clear, compact, etc.)."""
-        if not self._is_rewinding:
-            self._checkpoints.clear()
+        """Called when the message list is reset (session switch, clear, compact, etc.).
+
+        Skipped while rewinding: the rewind's own _truncate handles the log. In
+        every other case the checkpoint log is cleared, including mid-act
+        compaction: the open turn's turn_id is now stale (it references a
+        pre-compaction message index), and keeping it would block
+        accepted_turn_frontier with PENDING hunks from a dead context. When a
+        turn was open (mid-act compaction), re-open one so the remaining tool
+        loop can keep recording snapshots — act() won't call create_checkpoint
+        again.
+        """
+        if self._is_rewinding:
+            return
+        was_open = self._checkpointer.has_open_turn
+        self._checkpointer.clear()
+        if was_open:
+            self._checkpointer.begin_turn(len(self._messages))

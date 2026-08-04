@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from tests.conftest import build_test_vibe_config
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfigSchema
 
 
 @pytest.fixture
@@ -18,12 +18,8 @@ def skills_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def skill_config(skills_dir: Path) -> VibeConfig:
-    return build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
-        skill_paths=[skills_dir],
-    )
+def skill_config(skills_dir: Path) -> VibeConfigSchema:
+    return build_test_vibe_config(skill_paths=[skills_dir])
 
 
 def create_skill(

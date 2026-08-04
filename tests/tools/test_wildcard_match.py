@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibe.core.tools.utils import wildcard_match
+from vibe.core.tools.permissions import wildcard_match
 
 
 class TestWildcardMatch:

@@ -64,6 +64,27 @@ class TestFeedbackBarState:
         assert msg.rating == 3
         bar.set_timer.assert_called_once()
 
+    def test_handle_snooze_key_posts_message_and_deactivates(self):
+        bar = FeedbackBar()
+        bar.set_timer = MagicMock()
+        bar.post_message = MagicMock()
+        bar.query_one = MagicMock()
+        mock_text_area = MagicMock()
+        mock_text_area.feedback_active = True
+        mock_app = MagicMock()
+        mock_app.query_one.return_value = mock_text_area
+
+        with patch.object(
+            type(bar), "app", new_callable=lambda: property(lambda self: mock_app)
+        ):
+            bar.handle_snooze_key()
+
+        assert mock_text_area.feedback_active is False
+        bar.post_message.assert_called_once()
+        msg = bar.post_message.call_args[0][0]
+        assert isinstance(msg, FeedbackBar.SnoozeKeyPressed)
+        bar.set_timer.assert_called_once()
+
 
 class TestFeedbackGivenMessage:
     def test_message_stores_rating(self):

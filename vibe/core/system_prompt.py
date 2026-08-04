@@ -1,22 +1,32 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 import html
 import os
 from pathlib import Path
 from string import Template
 import subprocess
-import sys
 from typing import TYPE_CHECKING
 
-from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.config import VibeConfigSchema
+from vibe.core.config.harness_files import (
+    HarnessFilesManager,
+    get_harness_files_manager,
+)
 from vibe.core.paths import VIBE_HOME
 from vibe.core.prompts import UtilityPrompt
-from vibe.core.utils import is_dangerous_directory, is_windows
+from vibe.core.utils import (
+    WindowsShellKind,
+    get_platform_display_name,
+    is_windows,
+    resolve_windows_shell,
+)
+from vibe.utils.paths import is_dangerous_directory
 
 if TYPE_CHECKING:
     from vibe.core.agents import AgentManager
-    from vibe.core.config import ProjectContextConfig, VibeConfig
+    from vibe.core.config import ProjectContextConfig
     from vibe.core.skills.manager import SkillManager
     from vibe.core.tools.manager import ToolManager
 
@@ -42,12 +52,23 @@ class ProjectContextProvider:
         self, args: list[str], timeout: float
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["git", "--no-optional-locks", *args],
+            # -c core.fsmonitor= overrides (and disables) any fsmonitor hook a
+            # repo's own .git/config declares, for this invocation only. This
+            # runs unconditionally on session start, before any trust prompt,
+            # so a malicious repo cloned/opened by the user could otherwise use
+            # `[core] fsmonitor = <payload>` to get its command executed by
+            # `git status`/`git branch`/`git log` here with the user's full
+            # privileges. -c on the command line takes precedence over the
+            # repo's own config, so this can't be overridden by the repo being
+            # inspected.
+            ["git", "-c", "core.fsmonitor=", "--no-optional-locks", *args],
             capture_output=True,
             check=True,
             cwd=self.root_path,
             stdin=subprocess.DEVNULL if is_windows() else None,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
 
@@ -131,8 +152,8 @@ class ProjectContextProvider:
         except Exception as e:
             return f"Error getting git status: {e}"
 
-    def get_full_context(self, *, include_git_status: bool = True) -> str:
-        git_status = self.get_git_status() if include_git_status else ""
+    def get_full_context(self) -> str:
+        git_status = self.get_git_status()
 
         template = UtilityPrompt.PROJECT_CONTEXT.read()
         return Template(template).safe_substitute(
@@ -140,49 +161,89 @@ class ProjectContextProvider:
         )
 
 
-def _get_platform_name() -> str:
-    platform_names = {
-        "win32": "Windows",
-        "darwin": "macOS",
-        "linux": "Linux",
-        "freebsd": "FreeBSD",
-        "openbsd": "OpenBSD",
-        "netbsd": "NetBSD",
-    }
-    return platform_names.get(sys.platform, "Unix-like")
+def _get_os_system_prompt(
+    *, use_git_bash_treatment: bool = False, use_powershell_treatment: bool = False
+) -> str:
+    platform_name = get_platform_display_name()
 
+    if not is_windows():
+        shell = os.environ.get("SHELL", "sh")
+        return f"The operating system is {platform_name} with shell `{shell}`"
 
-def _get_default_shell() -> str:
-    """Get the default shell used by asyncio.create_subprocess_shell.
+    if use_git_bash_treatment:
+        return (
+            f"The operating system is {platform_name} with shell `Git Bash`"
+            "\n" + _get_windows_bash_system_prompt()
+        )
 
-    On Unix, uses $SHELL env var and default to sh.
-    On Windows, this is COMSPEC or cmd.exe.
-    """
-    if is_windows():
-        return os.environ.get("COMSPEC", "cmd.exe")
-    return os.environ.get("SHELL", "sh")
+    if use_powershell_treatment:
+        return (
+            f"The operating system is {platform_name} with shell `PowerShell`"
+            "\n" + _get_windows_powershell_system_prompt()
+        )
 
+    shell = resolve_windows_shell()
+    if shell.kind is WindowsShellKind.BASH and shell.executable is not None:
+        shell_display = f"bash ({shell.executable})"
+    else:
+        shell_display = shell.executable or "cmd.exe"
 
-def _get_os_system_prompt() -> str:
-    shell = _get_default_shell()
-    platform_name = _get_platform_name()
-    prompt = f"The operating system is {platform_name} with shell `{shell}`"
-
-    if is_windows():
-        prompt += "\n" + _get_windows_system_prompt()
+    prompt = f"The operating system is {platform_name} with shell `{shell_display}`"
+    prompt += "\n" + _get_windows_system_prompt(shell.kind)
     return prompt
 
 
-def _get_windows_system_prompt() -> str:
+def _format_current_date() -> str:
+    today = date.today()
+    return f"{today.isoformat()} ({today.strftime('%A')})"
+
+
+def _get_windows_bash_system_prompt() -> str:
     return (
         "### COMMAND COMPATIBILITY RULES (MUST FOLLOW):\n"
-        "- DO NOT use Unix commands like `ls`, `grep`, `cat` - they won't work on Windows\n"
-        "- Use: `dir` (Windows) for directory listings\n"
-        "- Use: backslashes (\\\\) for paths\n"
-        "- Check command availability with: `where command` (Windows)\n"
+        "- Commands run through bash (Git Bash), so Unix commands like `ls`, "
+        "`grep`, `cat`, `find` work - this is NOT cmd.exe or PowerShell\n"
+        "- Discard output with `2>/dev/null` - NEVER `2>nul` or `2>$null`\n"
+        "- `&&` and `||` are valid for command chaining\n"
+        "- Prefer forward slashes in paths; bash resolves Windows drives as "
+        "`/c/Users/...`\n"
+        "- Check command availability with: `command -v <command>`\n"
+        "### ALWAYS verify commands work on the detected platform before suggesting them"
+    )
+
+
+def _get_windows_cmd_system_prompt() -> str:
+    return (
+        "### COMMAND COMPATIBILITY RULES (MUST FOLLOW):\n"
+        "- The shell is cmd.exe, NOT bash or PowerShell\n"
+        "- DO NOT use Unix commands like `ls`, `grep`, `cat` - they won't work; "
+        "use `dir`, `findstr`, `type`\n"
+        "- Use backslashes (\\\\) for paths\n"
+        "- Discard output with `2>nul` - NEVER `2>/dev/null` or `2>$null`\n"
+        "- `&&` and `||` are valid for command chaining in cmd.exe\n"
+        "- Check command availability with: `where command`\n"
         "- Script shebang: Not applicable on Windows\n"
         "### ALWAYS verify commands work on the detected platform before suggesting them"
     )
+
+
+def _get_windows_powershell_system_prompt() -> str:
+    return (
+        "### COMMAND COMPATIBILITY RULES (MUST FOLLOW):\n"
+        "- The shell is PowerShell, NOT bash or cmd.exe\n"
+        "- Use PowerShell syntax for variables, quoting, pipes, redirects, and conditionals\n"
+        "- Use backslashes (\\\\) for Windows paths unless a command explicitly accepts another form\n"
+        "- Discard output with `*> $null` or `2>$null` as appropriate - NEVER `2>/dev/null` or `2>nul`\n"
+        "- Check command availability with: `Get-Command <command>`\n"
+        "- Prefer `Get-ChildItem`, `Get-Content`, and `Select-String` over Unix-only shell commands when a dedicated Vibe tool is not available\n"
+        "### ALWAYS verify commands work on the detected platform before suggesting them"
+    )
+
+
+def _get_windows_system_prompt(shell_kind: WindowsShellKind) -> str:
+    if shell_kind is WindowsShellKind.BASH:
+        return _get_windows_bash_system_prompt()
+    return _get_windows_cmd_system_prompt()
 
 
 def _add_commit_signature() -> str:
@@ -208,6 +269,12 @@ def _get_available_skills_section(skill_manager: SkillManager) -> str:
         "",
         "You have access to the following skills. When a task matches a skill's description,",
         "use the `skill` tool if available to load the full skill instructions, if it is not available, read the files manually if they exist.",
+        "",
+        "When a user message is exactly `/skill-name` (optionally followed by extra",
+        "instructions), the user has explicitly invoked that skill. Its instructions are",
+        "loaded for you automatically: you will see a `skill` tool call and result",
+        "immediately after that message. Treat the loaded content as the active",
+        "instructions and act on it — you do not need to call the `skill` tool yourself.",
         "",
         "<available_skills>",
     ]
@@ -253,6 +320,10 @@ def _get_scratchpad_section(scratchpad_dir: Path | None) -> str | None:
     )
 
 
+def _interpolate_prompt(prompt: str) -> str:
+    return Template(prompt).safe_substitute(current_date=_format_current_date())
+
+
 def _get_headless_section() -> str:
     return (
         "# Headless Mode\n\n"
@@ -264,17 +335,34 @@ def _get_headless_section() -> str:
     )
 
 
-def get_universal_system_prompt(  # noqa: PLR0912
-    tool_manager: ToolManager,
-    config: VibeConfig,
+def _get_tool_aware_os_system_prompt(tool_manager: ToolManager | None) -> str:
+    if tool_manager is None:
+        return _get_os_system_prompt()
+
+    available_tools = tool_manager.available_tools
+    use_git_bash_treatment = "git_bash" in available_tools
+    return _get_os_system_prompt(
+        use_git_bash_treatment=use_git_bash_treatment,
+        use_powershell_treatment=(
+            "powershell" in available_tools and not use_git_bash_treatment
+        ),
+    )
+
+
+def get_universal_system_prompt(
+    config: VibeConfigSchema,
     skill_manager: SkillManager,
     agent_manager: AgentManager,
     *,
-    include_git_status: bool = True,
     scratchpad_dir: Path | None = None,
     headless: bool = False,
+    cwd: Path | None = None,
+    harness_files: HarnessFilesManager | None = None,
+    tool_manager: ToolManager | None = None,
 ) -> str:
-    sections = [config.system_prompt]
+    cwd = (cwd or Path.cwd()).resolve()
+    harness_files = harness_files or get_harness_files_manager()
+    sections = [_interpolate_prompt(config.system_prompt)]
 
     if headless:
         sections.append(_get_headless_section())
@@ -286,13 +374,7 @@ def get_universal_system_prompt(  # noqa: PLR0912
         sections.append(f"Your model name is: `{config.active_model}`")
 
     if config.include_prompt_detail:
-        sections.append(_get_os_system_prompt())
-        tool_prompts = []
-        for tool_class in tool_manager.available_tools.values():
-            if prompt := tool_class.get_tool_prompt():
-                tool_prompts.append(prompt)
-        if tool_prompts:
-            sections.append("\n---\n".join(tool_prompts))
+        sections.append(_get_tool_aware_os_system_prompt(tool_manager))
 
         skills_section = _get_available_skills_section(skill_manager)
         if skills_section:
@@ -305,22 +387,35 @@ def get_universal_system_prompt(  # noqa: PLR0912
         sections.extend(filter(None, [_get_scratchpad_section(scratchpad_dir)]))
 
     if config.include_project_context:
-        is_dangerous, reason = is_dangerous_directory()
+        is_dangerous, reason = is_dangerous_directory(cwd)
         if is_dangerous:
             template = UtilityPrompt.DANGEROUS_DIRECTORY.read()
             context = Template(template).safe_substitute(
-                reason=reason.lower(), abs_path=Path(".").resolve()
+                reason=reason.lower(), abs_path=cwd.resolve()
             )
         else:
             context = ProjectContextProvider(
-                config=config.project_context, root_path=Path.cwd()
-            ).get_full_context(include_git_status=include_git_status)
+                config=config.project_context, root_path=cwd
+            ).get_full_context()
 
         sections.append(context)
 
-        mgr = get_harness_files_manager()
-        user_doc = mgr.load_user_doc()
-        project_docs = mgr.load_project_docs()
+        cwd_resolved = cwd.resolve()
+        extra_roots = [
+            root
+            for root in harness_files.project_roots
+            if root.resolve() != cwd_resolved
+        ]
+        if extra_roots:
+            dirs_lines = "\n".join(f" - {d}" for d in extra_roots)
+            sections.append(
+                "Additional working directories (treated with the same "
+                "file-access permissions as the primary working directory):\n"
+                + dirs_lines
+            )
+
+        user_doc = harness_files.load_user_doc()
+        project_docs = harness_files.load_project_docs()
 
         doc_sections: list[str] = []
         if user_doc.strip():

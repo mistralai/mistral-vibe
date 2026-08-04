@@ -32,18 +32,60 @@ from tests.backend.data.fireworks import (
 )
 from tests.backend.data.mistral import (
     SIMPLE_CONVERSATION_PARAMS as MISTRAL_SIMPLE_CONVERSATION_PARAMS,
+    STREAMED_EMPTY_CHOICES_PARAMS as MISTRAL_STREAMED_EMPTY_CHOICES_PARAMS,
     STREAMED_SIMPLE_CONVERSATION_PARAMS as MISTRAL_STREAMED_SIMPLE_CONVERSATION_PARAMS,
     STREAMED_TOOL_CONVERSATION_PARAMS as MISTRAL_STREAMED_TOOL_CONVERSATION_PARAMS,
     TOOL_CONVERSATION_PARAMS as MISTRAL_TOOL_CONVERSATION_PARAMS,
 )
+from tests.constants import CHAT_COMPLETIONS_PATH
 from vibe.core.config import ModelConfig, ProviderConfig
-from vibe.core.llm.backend.factory import BACKEND_FACTORY
-from vibe.core.llm.backend.generic import GenericBackend
-from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper
+from vibe.core.llm.backend.base import build_chat_payload
+from vibe.core.llm.backend.factory import BACKEND_FACTORY, create_backend
+from vibe.core.llm.backend.generic import GenericBackend, OpenAIAdapter
+from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper, _cached_tokens
 from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder
 from vibe.core.llm.types import BackendLike
 from vibe.core.types import Backend, FunctionCall, LLMChunk, LLMMessage, Role, ToolCall
-from vibe.core.utils import get_user_agent
+from vibe.utils.http import get_user_agent
+from vibe.utils.tool_presentation import (
+    EffectCallDisplay,
+    ToolCallPresentation,
+    ToolEffectKind,
+)
+
+
+def test_internal_tool_presentation_is_not_sent_to_provider() -> None:
+    message = LLMMessage(
+        role=Role.assistant,
+        tool_calls=[
+            ToolCall(
+                id="call-1",
+                function=FunctionCall(name="bash", arguments='{"command":"pwd"}'),
+                presentation=ToolCallPresentation(
+                    kind=ToolEffectKind.SHELL,
+                    display=EffectCallDisplay(
+                        summary="bash: pwd", status_text="Running command"
+                    ),
+                ),
+            )
+        ],
+    )
+
+    request = OpenAIAdapter().prepare_request(
+        model_name="model",
+        messages=[message],
+        temperature=0.0,
+        tools=None,
+        max_tokens=None,
+        tool_choice=None,
+        enable_streaming=False,
+        provider=ProviderConfig(
+            name="provider", api_base="https://example.com/v1", api_key_env_var=""
+        ),
+    )
+
+    payload = json.loads(request.body)
+    assert "presentation" not in payload["messages"][0]["tool_calls"][0]
 
 
 class TestBackend:
@@ -71,7 +113,7 @@ class TestBackend:
         self, base_url: Url, json_response: JsonResponse, result_data: ResultData
     ):
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/chat/completions").mock(
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(
                 return_value=httpx.Response(status_code=200, json=json_response)
             )
             provider = ProviderConfig(
@@ -133,13 +175,14 @@ class TestBackend:
             *FIREWORKS_STREAMED_TOOL_CONVERSATION_PARAMS,
             *MISTRAL_STREAMED_SIMPLE_CONVERSATION_PARAMS,
             *MISTRAL_STREAMED_TOOL_CONVERSATION_PARAMS,
+            *MISTRAL_STREAMED_EMPTY_CHOICES_PARAMS,
         ],
     )
     async def test_backend_complete_streaming(
         self, base_url: Url, chunks: list[Chunk], result_data: list[ResultData]
     ):
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/chat/completions").mock(
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(
                 return_value=httpx.Response(
                     status_code=200,
                     stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),
@@ -206,6 +249,59 @@ class TestBackend:
                         )
 
     @pytest.mark.asyncio
+    async def test_backend_complete_streaming_keeps_unicode_line_breaks(self):
+        content = "first\u2028second\u0085third"
+        chunk = json.dumps(
+            {
+                "id": "fake_id_1234",
+                "object": "chat.completion.chunk",
+                "created": 1234567890,
+                "model": "model_name",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": content},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ).encode()
+        with respx.mock(base_url="https://api.fireworks.ai") as mock_api:
+            mock_api.post("/v1/chat/completions").mock(
+                return_value=httpx.Response(
+                    status_code=200,
+                    stream=httpx.ByteStream(
+                        stream=b"data: " + chunk + b"\n\ndata: [DONE]\n\n"
+                    ),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            )
+            provider = ProviderConfig(
+                name="provider_name",
+                api_base="https://api.fireworks.ai/v1",
+                api_key_env_var="API_KEY",
+            )
+            backend = GenericBackend(provider=provider)
+            model = ModelConfig(
+                name="model_name", provider="provider_name", alias="model_alias"
+            )
+
+            results: list[LLMChunk] = []
+            async for result in backend.complete_streaming(
+                model=model,
+                messages=[LLMMessage(role=Role.user, content="hi")],
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            ):
+                results.append(result)
+
+        assert [result.message.content for result in results] == [content]
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "base_url,backend_class,response",
         [
@@ -238,7 +334,7 @@ class TestBackend:
         response: httpx.Response,
     ):
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/chat/completions").mock(return_value=response)
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(return_value=response)
             provider = ProviderConfig(
                 name="provider_name",
                 api_base=f"{base_url}/v1",
@@ -282,7 +378,7 @@ class TestBackend:
         self, base_url: Url, provider_name: str, expected_stream_options: dict
     ):
         with respx.mock(base_url=base_url) as mock_api:
-            route = mock_api.post("/v1/chat/completions").mock(
+            route = mock_api.post(CHAT_COMPLETIONS_PATH).mock(
                 return_value=httpx.Response(
                     status_code=200,
                     stream=httpx.ByteStream(
@@ -346,7 +442,7 @@ class TestBackend:
             ],
         }
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/chat/completions").mock(
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(
                 return_value=httpx.Response(status_code=200, json=json_response)
             )
 
@@ -388,7 +484,7 @@ class TestBackend:
                 stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),
                 headers={"Content-Type": "text/event-stream"},
             )
-            mock_api.post("/v1/chat/completions").mock(return_value=mock_response)
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(return_value=mock_response)
 
             provider = ProviderConfig(
                 name="provider_name",
@@ -415,22 +511,46 @@ class TestBackend:
             assert mock_api.calls.last.request.headers["user-agent"] == user_agent
 
 
+def _mistral_client_mock() -> tuple[MagicMock, MagicMock]:
+    """A Mistral stand-in, plus the hook registry basesdk reaches for."""
+    client = MagicMock()
+    hooks = MagicMock()
+    client.sdk_configuration.__dict__["_hooks"] = hooks
+    return client, hooks
+
+
 class TestMistralRetry:
     @staticmethod
-    def _create_test_backend() -> MistralBackend:
+    def _create_test_backend(
+        timeout: float = 720.0, retry_max_elapsed_time: float = 300.0
+    ) -> MistralBackend:
         provider = ProviderConfig(
             name="test_provider",
             api_base="https://api.mistral.ai/v1",
             api_key_env_var="API_KEY",
         )
-        return MistralBackend(provider=provider)
+        return MistralBackend(
+            provider=provider,
+            timeout=timeout,
+            retry_max_elapsed_time=retry_max_elapsed_time,
+        )
+
+    @staticmethod
+    def _build_fast_http_retry_config() -> RetryConfig:
+        return RetryConfig(
+            strategy="backoff",
+            backoff=BackoffStrategy(
+                initial_interval=1, max_interval=1, exponent=1, max_elapsed_time=10000
+            ),
+            retry_connection_errors=True,
+        )
 
     @pytest.mark.asyncio
     async def test_client_creation_includes_timeout_and_retry_config(self):
         backend = self._create_test_backend()
 
         with patch("vibe.core.llm.backend.mistral.Mistral") as mock_mistral_class:
-            mock_mistral_class.return_value = MagicMock()
+            mock_mistral_class.return_value = _mistral_client_mock()[0]
             backend._get_client()
             call_kwargs = mock_mistral_class.call_args.kwargs
             assert call_kwargs["api_key"] == backend._api_key
@@ -438,6 +558,75 @@ class TestMistralRetry:
             assert call_kwargs["timeout_ms"] == 720000
             assert call_kwargs["retry_config"] is backend._retry_config
             assert "async_client" in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_client_creation_registers_both_retry_seams(self):
+        """429/5xx are only visible to httpx; connection errors only to the SDK."""
+        backend = self._create_test_backend()
+
+        with patch("vibe.core.llm.backend.mistral.Mistral") as mock_mistral_class:
+            client, hooks = _mistral_client_mock()
+            mock_mistral_class.return_value = client
+            backend._get_client()
+
+            http_client = mock_mistral_class.call_args.kwargs["async_client"]
+            assert backend._on_response in http_client.event_hooks["response"]
+            hooks.register_after_error_hook.assert_called_once()
+
+    def test_retry_budget_uses_explicit_config(self):
+        backend = self._create_test_backend(
+            timeout=7200.0, retry_max_elapsed_time=1234.0
+        )
+
+        assert backend._timeout == 7200.0
+        assert backend._retry_config.backoff.max_elapsed_time == 1234000
+
+    def test_create_backend_passes_retry_budget(self):
+        provider = ProviderConfig(
+            name="test_provider",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="API_KEY",
+            backend=Backend.MISTRAL,
+        )
+
+        backend = create_backend(
+            provider=provider, timeout=7200.0, retry_max_elapsed_time=1234.0
+        )
+
+        assert isinstance(backend, MistralBackend)
+        assert backend._timeout == 7200.0
+        assert backend._retry_config.backoff.max_elapsed_time == 1234000
+
+    @pytest.mark.asyncio
+    async def test_complete_retries_retryable_http_error(self):
+        with respx.mock(base_url="https://api.mistral.ai") as mock_api:
+            route = mock_api.post("/v1/chat/completions").mock(
+                side_effect=[
+                    httpx.Response(status_code=502, text="Bad Gateway"),
+                    httpx.Response(
+                        status_code=200, json=MISTRAL_SIMPLE_CONVERSATION_PARAMS[0][1]
+                    ),
+                ]
+            )
+            backend = self._create_test_backend()
+            backend._retry_config = self._build_fast_http_retry_config()
+            model = ModelConfig(
+                name="model_name", provider="test_provider", alias="model_alias"
+            )
+            messages = [LLMMessage(role=Role.user, content="Just say hi")]
+
+            result = await backend.complete(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+            assert result.message.content == "Some content"
+            assert route.call_count == 2
 
 
 class TestMistralMapperPrepareMessage:
@@ -530,6 +719,29 @@ class TestMistralMapperPrepareMessage:
         assert result.content == "Hello!"
 
 
+class TestGenericBackendReasoningEffort:
+    @pytest.mark.parametrize(
+        ("thinking", "expect_in_payload"),
+        [("off", False), ("low", True), ("medium", True), ("high", True)],
+    )
+    def test_build_payload_reasoning_effort(
+        self, thinking: str, expect_in_payload: bool
+    ) -> None:
+        payload = build_chat_payload(
+            model_name="test-model",
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.7,
+            tools=None,
+            max_tokens=None,
+            tool_choice=None,
+            thinking=thinking,
+        )
+        if expect_in_payload:
+            assert payload["reasoning_effort"] == thinking
+        else:
+            assert "reasoning_effort" not in payload
+
+
 class TestMistralBackendReasoningEffort:
     """Tests that MistralBackend correctly passes reasoning_effort to the SDK."""
 
@@ -592,6 +804,52 @@ class TestMistralBackendReasoningEffort:
             assert call_kwargs["reasoning_effort"] == expected_effort
             assert call_kwargs["temperature"] == expected_temperature
 
+    @pytest.mark.asyncio
+    async def test_complete_omits_reasoning_content_when_thinking_off(
+        self, backend: MistralBackend
+    ) -> None:
+        model = ModelConfig(
+            name="devstral-small-latest",
+            provider="mistral",
+            alias="devstral-small",
+            thinking="off",
+        )
+        messages = [
+            LLMMessage(role=Role.user, content="Hi"),
+            LLMMessage(
+                role=Role.assistant,
+                content="Answer",
+                reasoning_content="Hidden reasoning",
+            ),
+        ]
+
+        with patch.object(backend, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "ok"
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.usage.prompt_tokens = 10
+            mock_response.usage.completion_tokens = 5
+            mock_client.chat.complete_async = AsyncMock(return_value=mock_response)
+            mock_get_client.return_value = mock_client
+
+            await backend.complete(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+            call_kwargs = mock_client.chat.complete_async.call_args.kwargs
+            sent_messages = call_kwargs["messages"]
+            assert len(sent_messages) == 2
+            assert isinstance(sent_messages[1], AssistantMessage)
+            assert sent_messages[1].content == "Answer"
+
 
 class TestBuildHttpErrorBodyReading:
     _MESSAGES: ClassVar[list[LLMMessage]] = [LLMMessage(role=Role.user, content="hi")]
@@ -622,7 +880,9 @@ class TestBuildHttpErrorBodyReading:
             request=httpx.Request("POST", "https://api.test.com"),
         )
         err = BackendErrorBuilder.build_http_error(
-            error=self._make_sdk_error(response), **self._COMMON_KWARGS
+            error=self._make_sdk_error(response),
+            response=response,
+            **self._COMMON_KWARGS,
         )
         assert err.status == 400
         assert err.parsed_error == "invalid temperature"
@@ -635,7 +895,9 @@ class TestBuildHttpErrorBodyReading:
             request=httpx.Request("POST", "https://api.test.com"),
         )
         err = BackendErrorBuilder.build_http_error(
-            error=self._make_http_status_error(response), **self._COMMON_KWARGS
+            error=self._make_http_status_error(response),
+            response=response,
+            **self._COMMON_KWARGS,
         )
         assert err.status == 400
         assert err.parsed_error == "invalid temperature"
@@ -650,7 +912,9 @@ class TestBuildHttpErrorBodyReading:
         sdk_err = SDKError(
             "sdk error", response, body='{"message": "context too long"}'
         )
-        err = BackendErrorBuilder.build_http_error(error=sdk_err, **self._COMMON_KWARGS)
+        err = BackendErrorBuilder.build_http_error(
+            error=sdk_err, response=response, **self._COMMON_KWARGS
+        )
         assert err.parsed_error == "context too long"
         assert "context too long" in err.body_text
 
@@ -661,7 +925,9 @@ class TestBuildHttpErrorBodyReading:
             request=httpx.Request("POST", "https://api.test.com"),
         )
         err = BackendErrorBuilder.build_http_error(
-            error=self._make_http_status_error(response), **self._COMMON_KWARGS
+            error=self._make_http_status_error(response),
+            response=response,
+            **self._COMMON_KWARGS,
         )
         assert err.parsed_error == "context too long"
         assert "context too long" in err.body_text
@@ -675,7 +941,9 @@ class TestBuildHttpErrorBodyReading:
         response.read.side_effect = Exception("closed")
 
         sdk_err = SDKError("sdk msg", response, body='{"message": "context too long"}')
-        err = BackendErrorBuilder.build_http_error(error=sdk_err, **self._COMMON_KWARGS)
+        err = BackendErrorBuilder.build_http_error(
+            error=sdk_err, response=response, **self._COMMON_KWARGS
+        )
         assert err.body_text == '{"message": "context too long"}'
         assert err.parsed_error == "context too long"
 
@@ -692,6 +960,108 @@ class TestBuildHttpErrorBodyReading:
             "http error with details", request=response.request, response=response
         )
         err = BackendErrorBuilder.build_http_error(
-            error=http_err, **self._COMMON_KWARGS
+            error=http_err, response=response, **self._COMMON_KWARGS
         )
         assert "http error with details" in err.body_text
+
+
+class TestCachedTokens:
+    @pytest.fixture
+    def provider(self) -> ProviderConfig:
+        return ProviderConfig(
+            name="provider_name",
+            api_base="https://api.example.com/v1",
+            api_key_env_var="API_KEY",
+        )
+
+    def test_openai_adapter_reads_cached_tokens(self, provider: ProviderConfig) -> None:
+        data = {
+            "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+            "usage": {
+                "prompt_tokens": 200,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 128},
+            },
+        }
+        chunk = OpenAIAdapter().parse_response(data, provider)
+        assert chunk.usage is not None
+        assert chunk.usage.cached_tokens == 128
+
+    def test_openai_adapter_defaults_cached_tokens_to_zero(
+        self, provider: ProviderConfig
+    ) -> None:
+        data = {
+            "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+            "usage": {"prompt_tokens": 200, "completion_tokens": 10},
+        }
+        chunk = OpenAIAdapter().parse_response(data, provider)
+        assert chunk.usage is not None
+        assert chunk.usage.cached_tokens == 0
+
+    def test_mistral_helper_reads_dict_details(self) -> None:
+        usage = MagicMock()
+        usage.prompt_tokens_details = {"cached_tokens": 77}
+        assert _cached_tokens(usage) == 77
+
+    def test_mistral_helper_reads_object_details(self) -> None:
+        details = MagicMock()
+        details.cached_tokens = 55
+        usage = MagicMock()
+        usage.prompt_tokens_details = details
+        assert _cached_tokens(usage) == 55
+
+    def test_mistral_helper_handles_missing_details(self) -> None:
+        usage = MagicMock()
+        usage.prompt_tokens_details = None
+        assert _cached_tokens(usage) == 0
+
+    def test_mistral_helper_handles_none_usage(self) -> None:
+        assert _cached_tokens(None) == 0
+
+    def test_mistral_helper_tolerates_unparsable_value(self) -> None:
+        usage = MagicMock()
+        usage.prompt_tokens_details = {"cached_tokens": "60.0"}
+        assert _cached_tokens(usage) == 0
+
+    def test_mistral_helper_coerces_numeric_string(self) -> None:
+        usage = MagicMock()
+        usage.prompt_tokens_details = {"cached_tokens": "60"}
+        assert _cached_tokens(usage) == 60
+
+    @pytest.mark.asyncio
+    async def test_mistral_backend_complete_flows_cached_tokens(self) -> None:
+        provider = ProviderConfig(
+            name="mistral",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="API_KEY",
+        )
+        backend = MistralBackend(provider=provider)
+        model = ModelConfig(
+            name="mistral-small-latest", provider="mistral", alias="mistral-small"
+        )
+
+        with patch.object(backend, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "hello"
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.usage.prompt_tokens = 200
+            mock_response.usage.completion_tokens = 5
+            mock_response.usage.prompt_tokens_details = {"cached_tokens": 128}
+            mock_client.chat.complete_async = AsyncMock(return_value=mock_response)
+            mock_get_client.return_value = mock_client
+
+            chunk = await backend.complete(
+                model=model,
+                messages=[LLMMessage(role=Role.user, content="hi")],
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+        assert chunk.usage is not None
+        assert chunk.usage.prompt_tokens == 200
+        assert chunk.usage.cached_tokens == 128

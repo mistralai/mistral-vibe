@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from enum import StrEnum, auto
-from typing import ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from vibe.core.tools.base import (
     BaseTool,
@@ -16,6 +15,7 @@ from vibe.core.tools.base import (
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
+from vibe.utils.tool_presentation import ToolEffectKind
 
 
 class TodoStatus(StrEnum):
@@ -32,23 +32,39 @@ class TodoPriority(StrEnum):
 
 
 class TodoItem(BaseModel):
-    id: str
-    content: str
-    status: TodoStatus = TodoStatus.PENDING
-    priority: TodoPriority = TodoPriority.MEDIUM
+    id: str = Field(
+        description="Stable unique identifier for the task, reused across updates"
+    )
+    content: str = Field(description="Brief description of the task")
+    status: TodoStatus = Field(
+        default=TodoStatus.PENDING,
+        description="Current status of the task: pending, in_progress, completed, cancelled",
+    )
+    priority: TodoPriority = Field(
+        default=TodoPriority.MEDIUM,
+        description="Priority level of the task: high, medium, low",
+    )
 
 
 class TodoArgs(BaseModel):
-    action: str = Field(description="Either 'read' or 'write'")
+    action: str = Field(
+        description="Required on every call: 'read' to view the current list, or 'write' to replace it"
+    )
     todos: list[TodoItem] | None = Field(
-        default=None, description="Complete list of todos when writing."
+        default=None,
+        description="Required when action='write': the full todo list, which replaces the previous one",
     )
 
 
 class TodoResult(BaseModel):
-    message: str
+    verb: str
     todos: list[TodoItem]
     total_count: int
+
+    @computed_field
+    @property
+    def message(self) -> str:
+        return f"{self.verb} {self.total_count} todos"
 
 
 class TodoConfig(BaseToolConfig):
@@ -64,20 +80,36 @@ class Todo(
     BaseTool[TodoArgs, TodoResult, TodoConfig, TodoState],
     ToolUIData[TodoArgs, TodoResult],
 ):
-    description: ClassVar[str] = (
-        "Manage todos. Use action='read' to view, action='write' with complete list to update."
-    )
+    effect_kind = ToolEffectKind.TODO
 
     @classmethod
     def format_call_display(cls, args: TodoArgs) -> ToolCallDisplay:
         match args.action:
             case "read":
-                return ToolCallDisplay(summary="Reading todos")
+                return ToolCallDisplay(
+                    summary="Reading todos",
+                    verb="Retrieving",
+                    message="todos",
+                    settled_verb="Retrieved",
+                    settled_message="todos",
+                )
             case "write":
                 count = len(args.todos) if args.todos else 0
-                return ToolCallDisplay(summary=f"Writing {count} todos")
+                return ToolCallDisplay(
+                    summary=f"Writing {count} todos",
+                    verb="Updating",
+                    message=f"{count} todos",
+                    settled_verb="Updated",
+                    settled_message=f"{count} todos",
+                )
             case _:
-                return ToolCallDisplay(summary=f"Unknown action: {args.action}")
+                return ToolCallDisplay(
+                    summary=f"Unknown action: {args.action}",
+                    verb="Running",
+                    message=f"unknown todo action: {args.action}",
+                    settled_verb="Ran",
+                    settled_message=f"unknown todo action: {args.action}",
+                )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -85,8 +117,9 @@ class Todo(
             return ToolResultDisplay(success=True, message="Success")
 
         result = event.result
-
-        return ToolResultDisplay(success=True, message=result.message)
+        return ToolResultDisplay(
+            success=True, verb=result.verb, message=f"{result.total_count} todos"
+        )
 
     @classmethod
     def get_status_text(cls) -> str:
@@ -107,9 +140,7 @@ class Todo(
 
     def _read_todos(self) -> TodoResult:
         return TodoResult(
-            message=f"Retrieved {len(self.state.todos)} todos",
-            todos=self.state.todos,
-            total_count=len(self.state.todos),
+            verb="Retrieved", todos=self.state.todos, total_count=len(self.state.todos)
         )
 
     def _write_todos(self, todos: list[TodoItem]) -> TodoResult:
@@ -123,7 +154,5 @@ class Todo(
         self.state.todos = todos
 
         return TodoResult(
-            message=f"Updated {len(todos)} todos",
-            todos=self.state.todos,
-            total_count=len(self.state.todos),
+            verb="Updated", todos=self.state.todos, total_count=len(self.state.todos)
         )

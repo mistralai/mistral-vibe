@@ -3,17 +3,21 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from vibe.core.agents.models import BUILTIN_AGENTS, CHAT, AgentProfile, BuiltinAgentName
-from vibe.core.config import VibeConfig
+from vibe.core.agents.models import (
+    BUILTIN_AGENTS,
+    AgentProfile,
+    AgentSafety,
+    BuiltinAgentName,
+)
+from vibe.core.config import VibeConfigSchema
 from vibe.core.middleware import (
-    CHAT_AGENT_EXIT,
-    CHAT_AGENT_REMINDER,
     PLAN_AGENT_EXIT,
     ConversationContext,
     MiddlewareAction,
     MiddlewarePipeline,
     ReadOnlyAgentMiddleware,
     ResetReason,
+    TokenLimitMiddleware,
     make_plan_agent_reminder,
 )
 from vibe.core.types import AgentStats, MessageList
@@ -33,7 +37,7 @@ def _build_middleware(
 
 
 @pytest.fixture
-def ctx(vibe_config: VibeConfig) -> ConversationContext:
+def ctx(vibe_config: VibeConfigSchema) -> ConversationContext:
     return ConversationContext(
         messages=MessageList(), stats=AgentStats(), config=vibe_config
     )
@@ -397,10 +401,18 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
         assert result.action == MiddlewareAction.CONTINUE
 
     @pytest.mark.asyncio
-    async def test_direct_plan_to_chat_transition_delivers_both_messages(
+    async def test_direct_transition_between_read_only_agents_delivers_both_messages(
         self, ctx: ConversationContext
     ) -> None:
         plan_reminder = make_plan_agent_reminder("/tmp/test-plan.md")
+        other_reminder = "Other read-only mode is active"
+        other_exit = "Other read-only mode has ended"
+        other_profile = AgentProfile(
+            name="other-read-only",
+            display_name="Other Read Only",
+            description="Second read-only agent",
+            safety=AgentSafety.SAFE,
+        )
         current_profile: AgentProfile = BUILTIN_AGENTS[BuiltinAgentName.PLAN]
         pipeline = MiddlewarePipeline()
         pipeline.add(
@@ -413,10 +425,7 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
         )
         pipeline.add(
             ReadOnlyAgentMiddleware(
-                lambda: current_profile,
-                BuiltinAgentName.CHAT,
-                CHAT_AGENT_REMINDER,
-                CHAT_AGENT_EXIT,
+                lambda: current_profile, other_profile.name, other_reminder, other_exit
             )
         )
 
@@ -424,16 +433,16 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
         assert result.action == MiddlewareAction.INJECT_MESSAGE
         assert PLAN_REMINDER_SNIPPET in (result.message or "")
 
-        current_profile = CHAT
+        current_profile = other_profile
         result = await pipeline.run_before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
         assert PLAN_AGENT_EXIT in (result.message or "")
-        assert CHAT_AGENT_REMINDER in (result.message or "")
+        assert other_reminder in (result.message or "")
 
         current_profile = BUILTIN_AGENTS[BuiltinAgentName.PLAN]
         result = await pipeline.run_before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
-        assert CHAT_AGENT_EXIT in (result.message or "")
+        assert other_exit in (result.message or "")
         assert PLAN_REMINDER_SNIPPET in (result.message or "")
 
 
@@ -452,12 +461,7 @@ class TestReadOnlyAgentMiddlewareIntegration:
         self,
     ) -> None:
         config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            include_prompt_detail=False,
-            include_model_info=False,
-            include_commit_signature=False,
-            enabled_tools=[],
+            include_model_info=False, include_commit_signature=False, enabled_tools=[]
         )
         agent = build_test_agent_loop(config=config, agent_name=BuiltinAgentName.PLAN)
 
@@ -485,12 +489,7 @@ class TestReadOnlyAgentMiddlewareIntegration:
     @pytest.mark.asyncio
     async def test_switch_agent_allows_reinjection_on_reentry(self) -> None:
         config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            include_prompt_detail=False,
-            include_model_info=False,
-            include_commit_signature=False,
-            enabled_tools=[],
+            include_model_info=False, include_commit_signature=False, enabled_tools=[]
         )
         agent = build_test_agent_loop(config=config, agent_name=BuiltinAgentName.PLAN)
 
@@ -521,12 +520,7 @@ class TestReadOnlyAgentMiddlewareIntegration:
     @pytest.mark.asyncio
     async def test_switch_plan_to_auto_approve_fires_exit(self) -> None:
         config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            include_prompt_detail=False,
-            include_model_info=False,
-            include_commit_signature=False,
-            enabled_tools=[],
+            include_model_info=False, include_commit_signature=False, enabled_tools=[]
         )
         agent = build_test_agent_loop(config=config, agent_name=BuiltinAgentName.PLAN)
 
@@ -549,12 +543,7 @@ class TestReadOnlyAgentMiddlewareIntegration:
     @pytest.mark.asyncio
     async def test_switch_between_non_plan_agents_no_injection(self) -> None:
         config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            include_prompt_detail=False,
-            include_model_info=False,
-            include_commit_signature=False,
-            enabled_tools=[],
+            include_model_info=False, include_commit_signature=False, enabled_tools=[]
         )
         agent = build_test_agent_loop(
             config=config, agent_name=BuiltinAgentName.DEFAULT
@@ -580,12 +569,7 @@ class TestReadOnlyAgentMiddlewareIntegration:
     async def test_full_lifecycle_plan_default_plan_default(self) -> None:
         """Integration test for a full plan -> default -> plan -> default cycle."""
         config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            include_prompt_detail=False,
-            include_model_info=False,
-            include_commit_signature=False,
-            enabled_tools=[],
+            include_model_info=False, include_commit_signature=False, enabled_tools=[]
         )
         agent = build_test_agent_loop(config=config, agent_name=BuiltinAgentName.PLAN)
 
@@ -634,3 +618,31 @@ class TestReadOnlyAgentMiddlewareIntegration:
         # 8. Stay in default: no injection
         r = await plan_middleware.before_turn(_ctx())
         assert r.action == MiddlewareAction.CONTINUE
+
+
+class TestTokenLimitMiddleware:
+    @pytest.mark.asyncio
+    async def test_stops_when_session_total_tokens_exceeds_limit(
+        self, ctx: ConversationContext
+    ) -> None:
+        middleware = TokenLimitMiddleware(14)
+        ctx.stats.session_prompt_tokens = 10
+        ctx.stats.session_completion_tokens = 5
+
+        result = await middleware.before_turn(ctx)
+
+        assert result.action == MiddlewareAction.STOP
+        assert result.reason == "Token limit exceeded: 15 > 14"
+
+    @pytest.mark.asyncio
+    async def test_allows_when_session_total_tokens_matches_limit(
+        self, ctx: ConversationContext
+    ) -> None:
+        middleware = TokenLimitMiddleware(15)
+        ctx.stats.session_prompt_tokens = 10
+        ctx.stats.session_completion_tokens = 5
+
+        result = await middleware.before_turn(ctx)
+
+        assert result.action == MiddlewareAction.CONTINUE
+        assert result.reason is None

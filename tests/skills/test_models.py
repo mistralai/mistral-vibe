@@ -27,7 +27,7 @@ class TestSkillMetadata:
             license="MIT",
             compatibility="Requires git",
             metadata={"author": "Test Author", "version": "1.0"},
-            allowed_tools=["bash", "read_file"],
+            allowed_tools=["bash", "read"],
             user_invocable=False,
         )
 
@@ -36,7 +36,7 @@ class TestSkillMetadata:
         assert meta.license == "MIT"
         assert meta.compatibility == "Requires git"
         assert meta.metadata == {"author": "Test Author", "version": "1.0"}
-        assert meta.allowed_tools == ["bash", "read_file"]
+        assert meta.allowed_tools == ["bash", "read"]
         assert meta.user_invocable is False
 
     def test_raises_error_for_uppercase_name(self) -> None:
@@ -63,17 +63,17 @@ class TestSkillMetadata:
         meta = SkillMetadata(
             name="test",
             description="A test skill",
-            allowed_tools="bash read_file grep",  # type: ignore[arg-type]
+            allowed_tools="bash read grep",  # type: ignore[arg-type]
         )
 
-        assert meta.allowed_tools == ["bash", "read_file", "grep"]
+        assert meta.allowed_tools == ["bash", "read", "grep"]
 
     def test_parses_allowed_tools_from_list(self) -> None:
         meta = SkillMetadata(
-            name="test", description="A test skill", allowed_tools=["bash", "read_file"]
+            name="test", description="A test skill", allowed_tools=["bash", "read"]
         )
 
-        assert meta.allowed_tools == ["bash", "read_file"]
+        assert meta.allowed_tools == ["bash", "read"]
 
     def test_parses_allowed_tools_handles_none(self) -> None:
         meta = SkillMetadata(

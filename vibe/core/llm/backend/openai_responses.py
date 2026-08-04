@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, cast
 
 from pydantic import TypeAdapter
 
+from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
-from vibe.core.llm.message_utils import merge_consecutive_user_messages
 from vibe.core.types import (
     AvailableTool,
     FunctionCall,
@@ -29,9 +29,14 @@ logger = logging.getLogger(__name__)
 _EMPTY_USAGE = LLMUsage(prompt_tokens=0, completion_tokens=0)
 
 
+class _ResponsesInputTokensDetails(TypedDict, total=False):
+    cached_tokens: int
+
+
 class _ResponsesUsageData(TypedDict, total=False):
     input_tokens: int
     output_tokens: int
+    input_tokens_details: _ResponsesInputTokensDetails
 
 
 class _ResponsesFunctionCallItem(TypedDict, total=False):
@@ -129,9 +134,11 @@ class _OpenAIResponsesStreamParser:
     @staticmethod
     def _usage_from_response(usage_data: _ResponsesUsageData | None) -> LLMUsage:
         usage = usage_data or {}
+        input_details = usage.get("input_tokens_details") or {}
         return LLMUsage(
             prompt_tokens=usage.get("input_tokens", 0),
             completion_tokens=usage.get("output_tokens", 0),
+            cached_tokens=input_details.get("cached_tokens", 0),
         )
 
     @staticmethod
@@ -435,7 +442,20 @@ class OpenAIResponsesAdapter(APIAdapter):
                     input_items.append({"role": "system", "content": msg.content or ""})
 
                 case Role.user:
-                    input_items.append({"role": "user", "content": msg.content or ""})
+                    if msg.images:
+                        parts: list[dict[str, Any]] = []
+                        if msg.content:
+                            parts.append({"type": "input_text", "text": msg.content})
+                        parts.extend(
+                            {"type": "input_image", "image_url": _to_data_uri(att)}
+                            for att in msg.images
+                        )
+                        input_items.append({"role": "user", "content": parts})
+                    else:
+                        input_items.append({
+                            "role": "user",
+                            "content": msg.content or "",
+                        })
 
                 case Role.assistant:
                     for encrypted_content in msg.reasoning_state or []:
@@ -539,8 +559,7 @@ class OpenAIResponsesAdapter(APIAdapter):
         api_key: str | None = None,
         thinking: str = "off",
     ) -> PreparedRequest:
-        merged_messages = merge_consecutive_user_messages(messages)
-        input_items = self._convert_messages(merged_messages)
+        input_items = self._convert_messages(messages)
 
         payload = self.build_payload(
             model_name=model_name,

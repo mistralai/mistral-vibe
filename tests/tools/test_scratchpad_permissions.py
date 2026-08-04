@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-import vibe.core.scratchpad as scratchpad_mod
 from vibe.core.scratchpad import init_scratchpad
 from vibe.core.tools.base import BaseToolState, ToolPermission
 from vibe.core.tools.builtins.bash import (
@@ -14,8 +13,8 @@ from vibe.core.tools.builtins.bash import (
 from vibe.core.tools.builtins.read_file import (
     ReadFile,
     ReadFileArgs,
+    ReadFileConfig,
     ReadFileState,
-    ReadFileToolConfig,
 )
 from vibe.core.tools.builtins.write_file import (
     WriteFile,
@@ -25,39 +24,47 @@ from vibe.core.tools.builtins.write_file import (
 from vibe.core.tools.permissions import PermissionContext, PermissionScope
 
 
-@pytest.fixture(autouse=True)
-def _setup_scratchpad():
-    init_scratchpad("test-session")
+@pytest.fixture
+def scratchpad():
+    path = init_scratchpad("test-session")
+    assert path is not None
+    return path
 
 
 class TestFileToolScratchpadPermissions:
-    def test_write_file_scratchpad_always_allowed(self):
-        sp = scratchpad_mod.get_scratchpad_dir("test-session")
-        assert sp is not None
-        tool = WriteFile(config_getter=lambda: WriteFileConfig(), state=BaseToolState())
+    def test_write_file_scratchpad_always_allowed(self, scratchpad):
+        tool = WriteFile(
+            config_getter=lambda: WriteFileConfig(),
+            state=BaseToolState(),
+            scratchpad_dir=scratchpad,
+        )
         result = tool.resolve_permission(
-            WriteFileArgs(path=str(sp / "draft.py"), content="x")
+            WriteFileArgs(file_path=str(scratchpad / "draft.py"), content="x")
         )
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ALWAYS
 
-    def test_read_file_scratchpad_always_allowed(self):
-        sp = scratchpad_mod.get_scratchpad_dir("test-session")
-        assert sp is not None
+    def test_read_scratchpad_always_allowed(self, scratchpad):
         tool = ReadFile(
-            config_getter=lambda: ReadFileToolConfig(), state=ReadFileState()
+            config_getter=lambda: ReadFileConfig(),
+            state=ReadFileState(),
+            scratchpad_dir=scratchpad,
         )
-        result = tool.resolve_permission(ReadFileArgs(path=str(sp / "notes.txt")))
+        result = tool.resolve_permission(
+            ReadFileArgs(file_path=str(scratchpad / "notes.txt"))
+        )
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ALWAYS
 
-    def test_scratchpad_env_file_still_allowed(self):
+    def test_scratchpad_env_file_still_allowed(self, scratchpad):
         """Scratchpad bypasses sensitive pattern checks."""
-        sp = scratchpad_mod.get_scratchpad_dir("test-session")
-        assert sp is not None
-        tool = WriteFile(config_getter=lambda: WriteFileConfig(), state=BaseToolState())
+        tool = WriteFile(
+            config_getter=lambda: WriteFileConfig(),
+            state=BaseToolState(),
+            scratchpad_dir=scratchpad,
+        )
         result = tool.resolve_permission(
-            WriteFileArgs(path=str(sp / ".env"), content="SECRET=x")
+            WriteFileArgs(file_path=str(scratchpad / ".env"), content="SECRET=x")
         )
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ALWAYS
@@ -65,28 +72,30 @@ class TestFileToolScratchpadPermissions:
     def test_non_scratchpad_outside_dir_still_asks(self):
         tool = WriteFile(config_getter=lambda: WriteFileConfig(), state=BaseToolState())
         result = tool.resolve_permission(
-            WriteFileArgs(path="/tmp/not-scratchpad/file.txt", content="x")
+            WriteFileArgs(file_path="/tmp/not-scratchpad/file.txt", content="x")
         )
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ASK
 
 
 class TestBashScratchpadPermissions:
-    def test_scratchpad_path_not_flagged_as_outside_dir(self):
-        sp = scratchpad_mod.get_scratchpad_dir("test-session")
-        assert sp is not None
-        dirs = _collect_outside_dirs([f"cat {sp}/file.txt"])
+    def test_scratchpad_path_not_flagged_as_outside_dir(self, scratchpad):
+        dirs = _collect_outside_dirs(
+            [f"cat {scratchpad}/file.txt"], scratchpad_dir=scratchpad
+        )
         assert len(dirs) == 0
 
     def test_non_scratchpad_outside_path_still_flagged(self):
         dirs = _collect_outside_dirs(["cat /etc/hosts"])
         assert len(dirs) >= 1
 
-    def test_bash_scratchpad_mkdir_no_outside_dir_permission(self):
-        sp = scratchpad_mod.get_scratchpad_dir("test-session")
-        assert sp is not None
-        bash = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
-        result = bash.resolve_permission(BashArgs(command=f"mkdir {sp}/subdir"))
+    def test_bash_scratchpad_mkdir_no_outside_dir_permission(self, scratchpad):
+        bash = Bash(
+            config_getter=lambda: BashToolConfig(),
+            state=BaseToolState(),
+            scratchpad_dir=scratchpad,
+        )
+        result = bash.resolve_permission(BashArgs(command=f"mkdir {scratchpad}/subdir"))
         assert isinstance(result, PermissionContext)
         outside = [
             rp

@@ -23,7 +23,13 @@ import sys
 import tempfile
 from typing import Any, NoReturn
 
-from acp import PROTOCOL_VERSION, Client, RequestError, connect_to_agent
+from acp import (
+    PROTOCOL_VERSION,
+    Client,
+    CreateElicitationResponse,
+    RequestError,
+    connect_to_agent,
+)
 from acp.schema import ClientCapabilities, Implementation
 
 
@@ -42,6 +48,14 @@ class _SmokeClient(Client):
 
     async def create_terminal(self, *args: Any, **kwargs: Any) -> Any:
         raise RequestError.method_not_found("terminal/create")
+
+    async def create_elicitation(
+        self, message: str, mode: Any, **kwargs: Any
+    ) -> CreateElicitationResponse:
+        raise RequestError.method_not_found("elicitation/create")
+
+    async def complete_elicitation(self, elicitation_id: str, **kwargs: Any) -> None:
+        raise RequestError.method_not_found("elicitation/complete")
 
     async def terminal_output(self, *args: Any, **kwargs: Any) -> Any:
         raise RequestError.method_not_found("terminal/output")
@@ -99,6 +113,7 @@ async def test_acp_initialize(binary: Path) -> None:
         env = os.environ.copy()
         env["VIBE_HOME"] = str(vibe_home)
         env["MISTRAL_API_KEY"] = "smoke-test-mock-key"
+        env["VIBE_TEST_DISABLE_KEYRING"] = "1"
 
         proc = await asyncio.create_subprocess_exec(
             str(binary),

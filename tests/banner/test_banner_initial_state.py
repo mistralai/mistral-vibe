@@ -1,34 +1,41 @@
 from __future__ import annotations
 
-from unittest.mock import Mock
-
+from tests.stubs.app_config import build_test_app_config
+from vibe.app_server.config import ConfigView, ThinkingLevel
+from vibe.app_server.models import (
+    MCPSourceKind,
+    MCPSourceStatus,
+    MCPSourceSummary,
+    MCPState,
+)
 from vibe.cli.textual_ui.widgets.banner.banner import Banner, BannerState, _pluralize
-from vibe.core.config import VibeConfig
-from vibe.core.config._settings import ModelConfig, ThinkingLevel
-from vibe.core.skills.manager import SkillManager
-from vibe.core.tools.mcp.registry import MCPRegistry
 
 
-def _make_mock_config(
+def _make_config(
     active_model: str = "test-model", thinking: ThinkingLevel = "off"
-) -> Mock:
-    config = Mock(spec=VibeConfig)
-    config.active_model = active_model
-    config.models = [active_model]
-    config.mcp_servers = []
-    config.connectors = []
-    config.disable_welcome_banner_animation = False
-    config.get_active_model.return_value = ModelConfig(
-        name=active_model, provider="mistral", alias=active_model, thinking=thinking
+) -> ConfigView:
+    config = build_test_app_config()
+    model = config.active_model.model_copy(
+        update={"name": active_model, "alias": active_model, "thinking": thinking}
     )
-    return config
+    return config.model_copy(update={"active_model": model, "models": [model]})
+
+
+def _mcp_server(name: str, *, disabled: bool = False) -> MCPSourceSummary:
+    return MCPSourceSummary(
+        name=name,
+        kind=MCPSourceKind.SERVER,
+        transport="stdio",
+        status=(MCPSourceStatus.DISABLED if disabled else MCPSourceStatus.ENABLED),
+    )
+
+
+def _mcp_state(*sources: MCPSourceSummary) -> MCPState:
+    return MCPState(sources=list(sources))
 
 
 class TestBannerInitialState:
-    """Test that Banner properly displays initial state including connectors/MCP."""
-
     def test_pluralize(self) -> None:
-        """Test pluralization helper."""
         assert _pluralize(0, "model") == "0 models"
         assert _pluralize(1, "model") == "1 model"
         assert _pluralize(2, "model") == "2 models"
@@ -37,102 +44,161 @@ class TestBannerInitialState:
         assert _pluralize(2, "connector") == "2 connectors"
 
     def test_banner_initial_state_includes_connectors(self) -> None:
-        skill_manager = Mock(spec=SkillManager)
-        skill_manager.custom_skills_count = 0
-
-        mcp_registry = Mock(spec=MCPRegistry)
-        mcp_registry.count_loaded.return_value = 0
-
         banner = Banner(
-            config=_make_mock_config(),
-            skill_manager=skill_manager,
-            mcp_registry=mcp_registry,
-            connectors_count=5,
+            config=_make_config(),
+            skills_count=0,
+            connectors_connected=5,
+            connectors_total=5,
         )
 
         assert banner._initial_state.active_model == "test-model[off]"
         assert banner._initial_state.models_count == 1
-        assert banner._initial_state.mcp_servers_count == 0
-        assert banner._initial_state.connectors_count == 5
+        assert banner._initial_state.mcp_servers_enabled == 0
+        assert banner._initial_state.mcp_servers_total == 0
+        assert banner._initial_state.connectors_connected == 5
+        assert banner._initial_state.connectors_total == 5
         assert banner._initial_state.skills_count == 0
 
     def test_banner_initial_state_with_no_connectors(self) -> None:
-        skill_manager = Mock(spec=SkillManager)
-        skill_manager.custom_skills_count = 0
+        banner = Banner(config=_make_config(), skills_count=0)
 
-        mcp_registry = Mock(spec=MCPRegistry)
-        mcp_registry.count_loaded.return_value = 0
-
-        banner = Banner(
-            config=_make_mock_config(),
-            skill_manager=skill_manager,
-            mcp_registry=mcp_registry,
-        )
-
-        assert banner._initial_state.connectors_count == 0
+        assert banner._initial_state.connectors_connected == 0
+        assert banner._initial_state.connectors_total == 0
 
     def test_banner_shows_thinking_level(self) -> None:
-        skill_manager = Mock(spec=SkillManager)
-        skill_manager.custom_skills_count = 0
-
-        mcp_registry = Mock(spec=MCPRegistry)
-        mcp_registry.count_loaded.return_value = 0
-
-        banner = Banner(
-            config=_make_mock_config(thinking="max"),
-            skill_manager=skill_manager,
-            mcp_registry=mcp_registry,
-        )
+        banner = Banner(config=_make_config(thinking="max"), skills_count=0)
 
         assert banner._initial_state.active_model == "test-model[max]"
 
     def test_format_meta_counts_includes_connectors(self) -> None:
-        skill_manager = Mock(spec=SkillManager)
-        skill_manager.custom_skills_count = 0
+        banner = Banner(config=_make_config(), skills_count=0)
 
-        mcp_registry = Mock(spec=MCPRegistry)
-        mcp_registry.count_loaded.return_value = 0
-
-        banner = Banner(
-            config=_make_mock_config(),
-            skill_manager=skill_manager,
-            mcp_registry=mcp_registry,
-        )
-
-        # Now test _format_meta_counts by setting state
         banner.state = BannerState(
-            models_count=2, mcp_servers_count=1, connectors_count=3, skills_count=5
+            models_count=2,
+            mcp_servers_enabled=1,
+            mcp_servers_total=2,
+            connectors_connected=3,
+            connectors_total=3,
+            skills_count=5,
         )
         result = banner._format_meta_counts()
         assert "2 models" in result
         assert "3 connectors" in result
-        assert "1 MCP server" in result
+        assert "1/2 MCP servers" in result
         assert "5 skills" in result
 
-        # Test without connectors
         banner.state = BannerState(
-            models_count=2, mcp_servers_count=1, connectors_count=0, skills_count=5
+            models_count=2,
+            mcp_servers_enabled=1,
+            mcp_servers_total=2,
+            connectors_connected=0,
+            connectors_total=0,
+            skills_count=5,
         )
         result = banner._format_meta_counts()
         assert "2 models" in result
-        assert "connectors" not in result  # Should not appear when 0
-        assert "1 MCP server" in result
+        assert "connectors" not in result
+        assert "1/2 MCP servers" in result
         assert "5 skills" in result
+
+
+class TestBannerMCPServersCount:
+    def test_banner_counts_enabled_mcp_servers(self) -> None:
+        banner = Banner(
+            config=_make_config(),
+            skills_count=0,
+            mcp=_mcp_state(
+                _mcp_server("server1"),
+                _mcp_server("server2"),
+                _mcp_server("server3", disabled=True),
+            ),
+        )
+
+        assert banner._initial_state.mcp_servers_enabled == 2
+        assert banner._initial_state.mcp_servers_total == 3
+
+    def test_banner_shows_zero_mcp_servers(self) -> None:
+        banner = Banner(config=_make_config(), skills_count=0, mcp=MCPState())
+
+        assert banner._initial_state.mcp_servers_enabled == 0
+        assert banner._initial_state.mcp_servers_total == 0
+
+    def test_banner_shows_disabled_count_in_xy_format(self) -> None:
+        banner = Banner(
+            config=_make_config(),
+            skills_count=0,
+            mcp=_mcp_state(
+                _mcp_server("s1"), _mcp_server("s2"), _mcp_server("s3", disabled=True)
+            ),
+        )
+
+        assert banner._initial_state.mcp_servers_enabled == 2
+        assert banner._initial_state.mcp_servers_total == 3
+        banner.state = banner._initial_state
+        assert "2/3 MCP servers" in banner._format_meta_counts()
+
+    def test_banner_shows_simple_count_when_all_enabled(self) -> None:
+        banner = Banner(
+            config=_make_config(),
+            skills_count=0,
+            mcp=_mcp_state(_mcp_server("s1"), _mcp_server("s2")),
+        )
+
+        assert banner._initial_state.mcp_servers_enabled == 2
+        assert banner._initial_state.mcp_servers_total == 2
+        banner.state = banner._initial_state
+        result = banner._format_meta_counts()
+        assert "2 MCP servers" in result
+        assert "/" not in result
 
 
 class TestBannerConnectorsCount:
     def test_connectors_count_passed_through(self) -> None:
-        skill_manager = Mock(spec=SkillManager)
-        skill_manager.custom_skills_count = 0
-
-        mcp_registry = Mock(spec=MCPRegistry)
-        mcp_registry.count_loaded.return_value = 0
-
         banner = Banner(
-            config=_make_mock_config(),
-            skill_manager=skill_manager,
-            mcp_registry=mcp_registry,
-            connectors_count=5,
+            config=_make_config(),
+            skills_count=0,
+            connectors_connected=3,
+            connectors_total=5,
         )
 
-        assert banner._initial_state.connectors_count == 5
+        assert banner._initial_state.connectors_connected == 3
+        assert banner._initial_state.connectors_total == 5
+
+
+class TestBannerHooksCount:
+    def test_hooks_count_passed_through(self) -> None:
+        banner = Banner(config=_make_config(), skills_count=0, hooks_count=4)
+
+        assert banner._initial_state.hooks_count == 4
+
+    def test_hooks_count_defaults_to_zero(self) -> None:
+        banner = Banner(config=_make_config(), skills_count=0)
+
+        assert banner._initial_state.hooks_count == 0
+
+    def test_format_meta_counts_shows_hooks_when_present(self) -> None:
+        banner = Banner(config=_make_config(), skills_count=0)
+        banner.state = BannerState(models_count=1, skills_count=0, hooks_count=3)
+
+        assert "3 hooks" in banner._format_meta_counts()
+
+    def test_format_meta_counts_singular_hook(self) -> None:
+        banner = Banner(config=_make_config(), skills_count=0)
+        banner.state = BannerState(models_count=1, skills_count=0, hooks_count=1)
+
+        result = banner._format_meta_counts()
+        assert "1 hook" in result
+        assert "1 hooks" not in result
+
+    def test_format_meta_counts_hides_hooks_when_zero(self) -> None:
+        banner = Banner(config=_make_config(), skills_count=0)
+        banner.state = BannerState(models_count=1, skills_count=0, hooks_count=0)
+
+        assert "hook" not in banner._format_meta_counts()
+
+    def test_set_state_updates_hooks_count(self) -> None:
+        banner = Banner(config=_make_config(), skills_count=0, hooks_count=0)
+
+        banner.set_state(config=_make_config(), skills_count=0, hooks_count=7)
+
+        assert banner.state.hooks_count == 7

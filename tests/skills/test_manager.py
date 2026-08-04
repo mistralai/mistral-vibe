@@ -7,22 +7,15 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from tests.skills.conftest import create_skill
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.skills.builtins import BUILTIN_SKILLS
 from vibe.core.skills.manager import SkillManager
 from vibe.core.trusted_folders import trusted_folders_manager
 
 
 @pytest.fixture
-def config() -> VibeConfig:
-    return build_test_vibe_config(
-        system_prompt_id="tests", include_project_context=False
-    )
-
-
-@pytest.fixture
-def skill_manager(config: VibeConfig) -> SkillManager:
-    return SkillManager(lambda: config)
+def skill_manager(vibe_config: VibeConfigSchema) -> SkillManager:
+    return SkillManager(lambda: vibe_config)
 
 
 class TestSkillManagerDiscovery:
@@ -39,11 +32,7 @@ class TestSkillManagerDiscovery:
     def test_discovers_skill_from_skill_paths(self, skills_dir: Path) -> None:
         create_skill(skills_dir, "test-skill", "A test skill")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         assert "test-skill" in manager.available_skills
@@ -54,11 +43,7 @@ class TestSkillManagerDiscovery:
         create_skill(skills_dir, "skill-two", "Second skill")
         create_skill(skills_dir, "skill-three", "Third skill")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         assert len(manager.available_skills) == 3 + len(BUILTIN_SKILLS)
@@ -75,11 +60,7 @@ class TestSkillManagerDiscovery:
         # Create a valid skill
         create_skill(skills_dir, "valid-skill", "A valid skill")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
@@ -94,11 +75,7 @@ class TestSkillManagerDiscovery:
         # Create a valid skill
         create_skill(skills_dir, "valid-skill", "A valid skill")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
@@ -115,14 +92,10 @@ class TestSkillManagerParsing:
             license="MIT",
             compatibility="Requires git",
             metadata={"author": "Test Author", "version": "1.0"},
-            allowed_tools="bash read_file",
+            allowed_tools="bash read",
         )
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         skill = manager.get_skill("full-skill")
@@ -132,16 +105,12 @@ class TestSkillManagerParsing:
         assert skill.license == "MIT"
         assert skill.compatibility == "Requires git"
         assert skill.metadata == {"author": "Test Author", "version": "1.0"}
-        assert skill.allowed_tools == ["bash", "read_file"]
+        assert skill.allowed_tools == ["bash", "read"]
 
     def test_sets_correct_skill_path(self, skills_dir: Path) -> None:
         create_skill(skills_dir, "test-skill", "A test skill")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         skill = manager.get_skill("test-skill")
@@ -158,11 +127,7 @@ class TestSkillManagerParsing:
         # Create a valid skill
         create_skill(skills_dir, "valid-skill", "A valid skill")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
@@ -179,11 +144,7 @@ class TestSkillManagerParsing:
         # Create a valid skill
         create_skill(skills_dir, "valid-skill", "A valid skill")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
@@ -200,9 +161,7 @@ class TestSkillManagerSearchPaths:
         vibe_skills.mkdir(parents=True)
         create_skill(vibe_skills, "vibe-skill", "Skill from .vibe/skills")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False, skill_paths=[]
-        )
+        config = build_test_vibe_config(skill_paths=[])
         manager = SkillManager(lambda: config)
 
         assert "vibe-skill" in manager.available_skills
@@ -219,9 +178,7 @@ class TestSkillManagerSearchPaths:
         agents_skills.mkdir(parents=True)
         create_skill(agents_skills, "agents-skill", "Skill from .agents/skills")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False, skill_paths=[]
-        )
+        config = build_test_vibe_config(skill_paths=[])
         manager = SkillManager(lambda: config)
 
         assert "agents-skill" in manager.available_skills
@@ -241,9 +198,7 @@ class TestSkillManagerSearchPaths:
         create_skill(vibe_skills, "vibe-only", "From .vibe")
         create_skill(agents_skills, "agents-only", "From .agents")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False, skill_paths=[]
-        )
+        config = build_test_vibe_config(skill_paths=[])
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
@@ -262,9 +217,7 @@ class TestSkillManagerSearchPaths:
         create_skill(vibe_skills, "shared-skill", "First from .vibe")
         create_skill(agents_skills, "shared-skill", "Second from .agents")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False, skill_paths=[]
-        )
+        config = build_test_vibe_config(skill_paths=[])
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
@@ -281,11 +234,7 @@ class TestSkillManagerSearchPaths:
         skills_dir_2.mkdir()
         create_skill(skills_dir_2, "skill-from-dir2", "Skill from directory 2")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir_1, skills_dir_2],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir_1, skills_dir_2])
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
@@ -303,11 +252,7 @@ class TestSkillManagerSearchPaths:
         skills_dir_2.mkdir()
         create_skill(skills_dir_2, "duplicate-skill", "Second version")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir_1, skills_dir_2],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir_1, skills_dir_2])
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
@@ -320,9 +265,7 @@ class TestSkillManagerSearchPaths:
         create_skill(skills_dir, "valid-skill", "A valid skill")
 
         config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir, tmp_path / "nonexistent"],
+            skill_paths=[skills_dir, tmp_path / "nonexistent"]
         )
         manager = SkillManager(lambda: config)
 
@@ -335,11 +278,7 @@ class TestSkillManagerGetSkill:
     def test_returns_skill_by_name(self, skills_dir: Path) -> None:
         create_skill(skills_dir, "test-skill", "A test skill")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         skill = manager.get_skill("test-skill")
@@ -357,10 +296,7 @@ class TestSkillManagerFiltering:
         create_skill(skills_dir, "skill-c", "Skill C")
 
         config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-            enabled_skills=["skill-a", "skill-c"],
+            skill_paths=[skills_dir], enabled_skills=["skill-a", "skill-c"]
         )
         manager = SkillManager(lambda: config)
 
@@ -376,10 +312,7 @@ class TestSkillManagerFiltering:
         create_skill(skills_dir, "skill-c", "Skill C")
 
         config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-            disabled_skills=["skill-b"],
+            skill_paths=[skills_dir], disabled_skills=["skill-b"]
         )
         manager = SkillManager(lambda: config)
 
@@ -396,8 +329,6 @@ class TestSkillManagerFiltering:
         create_skill(skills_dir, "skill-b", "Skill B")
 
         config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
             skill_paths=[skills_dir],
             enabled_skills=["skill-a"],
             disabled_skills=["skill-a"],  # Should be ignored
@@ -414,10 +345,7 @@ class TestSkillManagerFiltering:
         create_skill(skills_dir, "other-skill", "Other skill")
 
         config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-            enabled_skills=["search-*"],
+            skill_paths=[skills_dir], enabled_skills=["search-*"]
         )
         manager = SkillManager(lambda: config)
 
@@ -433,10 +361,7 @@ class TestSkillManagerFiltering:
         create_skill(skills_dir, "other-skill", "Other skill")
 
         config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-            enabled_skills=["re:skill-v\\d+"],
+            skill_paths=[skills_dir], enabled_skills=["re:skill-v\\d+"]
         )
         manager = SkillManager(lambda: config)
 
@@ -451,10 +376,7 @@ class TestSkillManagerFiltering:
         create_skill(skills_dir, "disabled-skill", "Disabled")
 
         config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-            disabled_skills=["disabled-skill"],
+            skill_paths=[skills_dir], disabled_skills=["disabled-skill"]
         )
         manager = SkillManager(lambda: config)
 
@@ -466,11 +388,7 @@ class TestSkillUserInvocable:
     def test_user_invocable_defaults_to_true(self, skills_dir: Path) -> None:
         create_skill(skills_dir, "default-skill", "A default skill")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         skill = manager.get_skill("default-skill")
@@ -480,11 +398,7 @@ class TestSkillUserInvocable:
     def test_user_invocable_can_be_set_to_false(self, skills_dir: Path) -> None:
         create_skill(skills_dir, "hidden-skill", "A hidden skill", user_invocable=False)
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         skill = manager.get_skill("hidden-skill")
@@ -498,11 +412,7 @@ class TestSkillUserInvocable:
             skills_dir, "explicit-skill", "An explicit skill", user_invocable=True
         )
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         skill = manager.get_skill("explicit-skill")
@@ -514,11 +424,7 @@ class TestSkillUserInvocable:
         create_skill(skills_dir, "hidden-skill", "Hidden", user_invocable=False)
         create_skill(skills_dir, "default-skill", "Default")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
@@ -539,7 +445,7 @@ class TestParseSkillCommand:
         assert skill_manager.parse_skill_command("/") is None
 
     def test_parses_skill_without_args(
-        self, skills_dir: Path, skill_config: VibeConfig
+        self, skills_dir: Path, skill_config: VibeConfigSchema
     ) -> None:
         create_skill(skills_dir, "my-skill", body="Do the thing.")
         manager = SkillManager(lambda: skill_config)
@@ -551,7 +457,7 @@ class TestParseSkillCommand:
         assert parsed.extra_instructions is None
 
     def test_parses_skill_with_args(
-        self, skills_dir: Path, skill_config: VibeConfig
+        self, skills_dir: Path, skill_config: VibeConfigSchema
     ) -> None:
         create_skill(skills_dir, "my-skill", body="Do the thing.")
         manager = SkillManager(lambda: skill_config)
@@ -561,7 +467,9 @@ class TestParseSkillCommand:
         assert parsed.name == "my-skill"
         assert parsed.extra_instructions == "fix the bug"
 
-    def test_case_insensitive(self, skills_dir: Path, skill_config: VibeConfig) -> None:
+    def test_case_insensitive(
+        self, skills_dir: Path, skill_config: VibeConfigSchema
+    ) -> None:
         create_skill(skills_dir, "my-skill", body="Do the thing.")
         manager = SkillManager(lambda: skill_config)
 
@@ -569,24 +477,68 @@ class TestParseSkillCommand:
         assert parsed is not None
         assert parsed.name == "my-skill"
 
+    def test_non_user_invocable_skill_returns_none(
+        self, skills_dir: Path, skill_config: VibeConfigSchema
+    ) -> None:
+        create_skill(skills_dir, "hidden-skill", user_invocable=False)
+        manager = SkillManager(lambda: skill_config)
 
-class TestBuildSkillPrompt:
-    def test_without_args(self, skills_dir: Path, skill_config: VibeConfig) -> None:
+        assert manager.get_skill("hidden-skill") is not None
+        assert manager.parse_skill_command("/hidden-skill") is None
+
+
+class TestSkillManagerConfigIssues:
+    def test_invalid_frontmatter_records_config_issue(self, skills_dir: Path) -> None:
+        broken_dir = skills_dir / "broken-skill"
+        broken_dir.mkdir()
+        (broken_dir / "SKILL.md").write_text("No frontmatter here")
+
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        manager = SkillManager(lambda: config)
+
+        assert len(manager.config_issues) == 1
+        issue = manager.config_issues[0]
+        assert issue.file == broken_dir / "SKILL.md"
+        assert "Failed to load" in issue.message
+
+    def test_multiple_invalid_skills_accumulate_issues(self, skills_dir: Path) -> None:
+        broken_dir_a = skills_dir / "broken-skill-a"
+        broken_dir_a.mkdir()
+        (broken_dir_a / "SKILL.md").write_text("not valid")
+        broken_dir = skills_dir / "broken-skill"
+        broken_dir.mkdir()
+        (broken_dir / "SKILL.md").write_text("not valid")
+        create_skill(skills_dir, "good-skill", "Works fine")
+
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        manager = SkillManager(lambda: config)
+
+        assert {
+            (i.file, i.message.startswith("Failed to load"))
+            for i in manager.config_issues
+        } == {(broken_dir_a / "SKILL.md", True), (broken_dir / "SKILL.md", True)}
+        assert "good-skill" in manager.available_skills
+
+
+class TestParseSkillCommandExtras:
+    def test_without_args(
+        self, skills_dir: Path, skill_config: VibeConfigSchema
+    ) -> None:
         create_skill(skills_dir, "my-skill", body="Do the thing.")
         manager = SkillManager(lambda: skill_config)
 
         parsed = manager.parse_skill_command("/my-skill")
         assert parsed is not None
-        prompt = SkillManager.build_skill_prompt("/my-skill", parsed)
-        assert prompt == parsed.content
+        assert parsed.name == "my-skill"
+        assert parsed.content == "Do the thing."
+        assert parsed.extra_instructions is None
 
-    def test_with_args(self, skills_dir: Path, skill_config: VibeConfig) -> None:
+    def test_with_args(self, skills_dir: Path, skill_config: VibeConfigSchema) -> None:
         create_skill(skills_dir, "my-skill", body="Do the thing.")
         manager = SkillManager(lambda: skill_config)
 
-        text = "/my-skill fix the bug"
-        parsed = manager.parse_skill_command(text)
+        parsed = manager.parse_skill_command("/my-skill fix the bug")
         assert parsed is not None
-        prompt = SkillManager.build_skill_prompt(text, parsed)
-        assert prompt.startswith("/my-skill fix the bug")
-        assert "Do the thing." in prompt
+        assert parsed.name == "my-skill"
+        assert parsed.content == "Do the thing."
+        assert parsed.extra_instructions == "fix the bug"

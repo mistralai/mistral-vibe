@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import threading
+
+from vibe.core.config import load_dotenv_values
+
+
+def _write_env_file(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+
+
+def test_skips_missing_file(tmp_path: Path) -> None:
+    environ = {"EXISTING": "1"}
+    missing_path = tmp_path / "missing.env"
+
+    load_dotenv_values(env_path=missing_path, environ=environ)
+
+    assert environ == {"EXISTING": "1"}
+
+
+def test_adds_missing_values_without_overriding_existing(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    _write_env_file(
+        env_path,
+        "\n".join([
+            "MISTRAL_API_KEY=new-key",
+            "HTTPS_PROXY=https://local-proxy:8080",
+            "OTHER=from-env",
+            "NEW_KEY=added",
+            "FOO=replace",
+        ])
+        + "\n",
+    )
+    environ = {
+        "MISTRAL_API_KEY": "old-key",
+        "HTTPS_PROXY": "old-https",
+        "OTHER": "keep",
+        "FOO": "keep",
+    }
+
+    load_dotenv_values(env_path=env_path, environ=environ)
+
+    # An explicit process/shell value wins over the .env file.
+    assert environ["MISTRAL_API_KEY"] == "old-key"
+    assert environ["HTTPS_PROXY"] == "old-https"
+    assert environ["OTHER"] == "keep"
+    assert environ["FOO"] == "keep"
+    # Keys absent from the process env are still loaded from the .env file.
+    assert environ["NEW_KEY"] == "added"
+
+
+def test_adds_dotenv_value_when_process_env_is_empty(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    _write_env_file(env_path, "MISTRAL_API_KEY=file-key\n")
+    environ = {"MISTRAL_API_KEY": ""}
+
+    load_dotenv_values(env_path=env_path, environ=environ)
+
+    assert environ["MISTRAL_API_KEY"] == "file-key"
+
+
+def test_ignores_empty_values(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    _write_env_file(
+        env_path, "\n".join(["EMPTY=", "MISTRAL_API_KEY=", "NO_VALUE"]) + "\n"
+    )
+    environ: dict[str, str] = {}
+
+    load_dotenv_values(env_path=env_path, environ=environ)
+
+    assert "EMPTY" not in environ
+    assert "MISTRAL_API_KEY" not in environ
+    assert "NO_VALUE" not in environ
+
+
+def test_reads_from_fifo(tmp_path: Path) -> None:
+    fifo_path = tmp_path / ".env.fifo"
+    os.mkfifo(fifo_path)
+    environ: dict[str, str] = {}
+
+    def write_to_fifo() -> None:
+        with open(fifo_path, "w") as f:
+            f.write("FIFO_KEY=fifo-value\n")
+
+    writer = threading.Thread(target=write_to_fifo)
+    writer.start()
+
+    load_dotenv_values(env_path=fifo_path, environ=environ)
+
+    writer.join()
+    assert environ["FIFO_KEY"] == "fifo-value"

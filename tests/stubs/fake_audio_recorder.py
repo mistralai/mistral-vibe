@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable
 
-from vibe.core.audio_recorder import (
-    AlreadyRecordingError,
-    AudioRecording,
-    RecordingMode,
-)
+from vibe.cli.audio_recorder import AlreadyRecordingError, AudioRecording, RecordingMode
 
 FAKE_WAV_DATA = b"RIFF\x00\x00\x00\x00WAVEfmt "
 

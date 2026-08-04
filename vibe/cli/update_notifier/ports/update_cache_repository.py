@@ -9,6 +9,7 @@ class UpdateCache:
     latest_version: str
     stored_at_timestamp: int
     seen_whats_new_version: str | None = None
+    dismissed_version: str | None = None
 
 
 class UpdateCacheRepository(Protocol):

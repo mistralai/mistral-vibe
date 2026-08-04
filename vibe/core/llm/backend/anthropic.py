@@ -6,6 +6,7 @@ import re
 from typing import Any, ClassVar
 
 from vibe.core.config import ProviderConfig
+from vibe.core.llm.backend._image import to_base64 as _to_base64
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
 from vibe.core.types import (
     AvailableTool,
@@ -14,9 +15,17 @@ from vibe.core.types import (
     LLMMessage,
     LLMUsage,
     Role,
+    StopInfo,
     StrToolChoice,
     ToolCall,
 )
+
+
+def _parse_stop_info(reason: str | None, raw: Any) -> StopInfo | None:
+    if reason is None and not isinstance(raw, dict):
+        return None
+    details = raw if isinstance(raw, dict) else {}
+    return StopInfo.model_validate({"reason": reason, **details})
 
 
 class AnthropicMapper:
@@ -36,6 +45,18 @@ class AnthropicMapper:
                     user_content: list[dict[str, Any]] = []
                     if msg.content:
                         user_content.append({"type": "text", "text": msg.content})
+                    if msg.images:
+                        user_content.extend(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": att.mime_type,
+                                    "data": _to_base64(att),
+                                },
+                            }
+                            for att in msg.images
+                        )
                     converted.append({"role": "user", "content": user_content or ""})
                 case Role.assistant:
                     converted.append(self._convert_assistant_message(msg))
@@ -49,14 +70,12 @@ class AnthropicMapper:
 
     def _convert_assistant_message(self, msg: LLMMessage) -> dict[str, Any]:
         content: list[dict[str, Any]] = []
-        if msg.reasoning_content:
-            block: dict[str, Any] = {
+        if msg.reasoning_content and msg.reasoning_signature:
+            content.append({
                 "type": "thinking",
                 "thinking": msg.reasoning_content,
-            }
-            if msg.reasoning_signature:
-                block["signature"] = msg.reasoning_signature
-            content.append(block)
+                "signature": msg.reasoning_signature,
+            })
         if msg.content:
             content.append({"type": "text", "text": msg.content})
         if msg.tool_calls:
@@ -157,7 +176,9 @@ class AnthropicMapper:
                 )
 
         usage_data = data.get("usage", {})
-        # Total input tokens = input_tokens + cache_creation + cache_read
+        # Anthropic excludes cached tokens from input_tokens, so fold cache
+        # creation and cache read back in to match the OpenTelemetry convention
+        # that prompt_tokens includes cached tokens.
         total_input_tokens = (
             usage_data.get("input_tokens", 0)
             + usage_data.get("cache_creation_input_tokens", 0)
@@ -166,6 +187,7 @@ class AnthropicMapper:
         usage = LLMUsage(
             prompt_tokens=total_input_tokens,
             completion_tokens=usage_data.get("output_tokens", 0),
+            cached_tokens=usage_data.get("cache_read_input_tokens", 0),
         )
 
         return LLMChunk(
@@ -177,130 +199,8 @@ class AnthropicMapper:
                 tool_calls=tool_calls if tool_calls else None,
             ),
             usage=usage,
+            stop=_parse_stop_info(data.get("stop_reason"), data.get("stop_details")),
         )
-
-    def parse_streaming_event(
-        self, event_type: str, data: dict[str, Any], current_index: int
-    ) -> tuple[LLMChunk | None, int]:
-        handler = {
-            "content_block_start": self._handle_block_start,
-            "content_block_delta": self._handle_block_delta,
-            "message_delta": self._handle_message_delta,
-            "message_start": self._handle_message_start,
-        }.get(event_type)
-        if handler is None:
-            return None, current_index
-        return handler(data, current_index)
-
-    def _handle_block_start(
-        self, data: dict[str, Any], current_index: int
-    ) -> tuple[LLMChunk | None, int]:
-        block = data.get("content_block", {})
-        idx = data.get("index", current_index)
-
-        match block.get("type"):
-            case "tool_use":
-                chunk = LLMChunk(
-                    message=LLMMessage(
-                        role=Role.assistant,
-                        tool_calls=[
-                            ToolCall(
-                                id=block.get("id"),
-                                index=idx,
-                                function=FunctionCall(
-                                    name=block.get("name"), arguments=""
-                                ),
-                            )
-                        ],
-                    )
-                )
-                return chunk, idx
-            case "thinking":
-                chunk = LLMChunk(
-                    message=LLMMessage(
-                        role=Role.assistant, reasoning_content=block.get("thinking", "")
-                    )
-                )
-                return chunk, idx
-            case _:
-                return None, idx
-
-    def _handle_block_delta(
-        self, data: dict[str, Any], current_index: int
-    ) -> tuple[LLMChunk | None, int]:
-        delta = data.get("delta", {})
-        idx = data.get("index", current_index)
-
-        match delta.get("type"):
-            case "text_delta":
-                chunk = LLMChunk(
-                    message=LLMMessage(
-                        role=Role.assistant, content=delta.get("text", "")
-                    )
-                )
-            case "thinking_delta":
-                chunk = LLMChunk(
-                    message=LLMMessage(
-                        role=Role.assistant, reasoning_content=delta.get("thinking", "")
-                    )
-                )
-            case "signature_delta":
-                chunk = LLMChunk(
-                    message=LLMMessage(
-                        role=Role.assistant,
-                        reasoning_signature=delta.get("signature", ""),
-                    )
-                )
-            case "input_json_delta":
-                chunk = LLMChunk(
-                    message=LLMMessage(
-                        role=Role.assistant,
-                        tool_calls=[
-                            ToolCall(
-                                index=idx,
-                                function=FunctionCall(
-                                    arguments=delta.get("partial_json", "")
-                                ),
-                            )
-                        ],
-                    )
-                )
-            case _:
-                chunk = None
-        return chunk, idx
-
-    def _handle_message_delta(
-        self, data: dict[str, Any], current_index: int
-    ) -> tuple[LLMChunk | None, int]:
-        usage_data = data.get("usage", {})
-        if not usage_data:
-            return None, current_index
-        chunk = LLMChunk(
-            message=LLMMessage(role=Role.assistant),
-            usage=LLMUsage(
-                prompt_tokens=0, completion_tokens=usage_data.get("output_tokens", 0)
-            ),
-        )
-        return chunk, current_index
-
-    def _handle_message_start(
-        self, data: dict[str, Any], current_index: int
-    ) -> tuple[LLMChunk | None, int]:
-        message = data.get("message", {})
-        usage_data = message.get("usage", {})
-        if not usage_data:
-            return None, current_index
-        # Total input tokens = input_tokens + cache_creation + cache_read
-        total_input_tokens = (
-            usage_data.get("input_tokens", 0)
-            + usage_data.get("cache_creation_input_tokens", 0)
-            + usage_data.get("cache_read_input_tokens", 0)
-        )
-        chunk = LLMChunk(
-            message=LLMMessage(role=Role.assistant),
-            usage=LLMUsage(prompt_tokens=total_input_tokens, completion_tokens=0),
-        )
-        return chunk, current_index
 
 
 STREAMING_EVENT_TYPES = {
@@ -324,12 +224,6 @@ class AnthropicAdapter(APIAdapter):
         "prompt-caching-2024-07-31,"
         "context-1m-2025-08-07"
     )
-    THINKING_BUDGETS: ClassVar[dict[str, int]] = {
-        "low": 1024,
-        "medium": 10_000,
-        "high": 32_000,
-        "max": 128_000,
-    }
     DEFAULT_ADAPTIVE_MAX_TOKENS: ClassVar[int] = 32_768
     DEFAULT_MAX_TOKENS = 8192
 
@@ -375,66 +269,32 @@ class AnthropicAdapter(APIAdapter):
         if last_block.get("type") in {"text", "image", "tool_result"}:
             last_block["cache_control"] = {"type": "ephemeral"}
 
-    # Anthropic models that require the `thinking={"type":"adaptive"}` +
-    # `output_config.effort` shape and reject the older
-    # `thinking={"type":"enabled","budget_tokens":...}` shape. Add new
-    # adaptive-only model families here as Anthropic ships them.
-    ADAPTIVE_MODEL_TAGS: ClassVar[frozenset[str]] = frozenset({"opus-4-6", "opus-4-7"})
-
-    # Anthropic models that have deprecated the `temperature` parameter and
-    # reject any payload containing it. Add new families here as Anthropic
-    # ships them.
-    TEMPERATURE_DEPRECATED_MODEL_TAGS: ClassVar[frozenset[str]] = frozenset({
-        "opus-4-7"
-    })
-
-    @classmethod
-    def _is_adaptive_model(cls, model_name: str) -> bool:
-        return any(tag in model_name for tag in cls.ADAPTIVE_MODEL_TAGS)
-
-    @classmethod
-    def _is_temperature_deprecated_model(cls, model_name: str) -> bool:
-        return any(tag in model_name for tag in cls.TEMPERATURE_DEPRECATED_MODEL_TAGS)
-
     def _apply_thinking_config(
         self,
         payload: dict[str, Any],
         *,
-        model_name: str,
         messages: list[dict[str, Any]],
-        temperature: float,
         max_tokens: int | None,
         thinking: str,
     ) -> None:
         has_thinking = self._has_thinking_content(messages)
         thinking_level = thinking
-        temperature_deprecated = self._is_temperature_deprecated_model(model_name)
 
         if thinking_level == "off" and not has_thinking:
-            if not temperature_deprecated:
-                payload["temperature"] = temperature
-            if max_tokens is not None:
-                payload["max_tokens"] = max_tokens
-            else:
-                payload["max_tokens"] = self.DEFAULT_MAX_TOKENS
+            payload["max_tokens"] = (
+                max_tokens if max_tokens is not None else self.DEFAULT_MAX_TOKENS
+            )
             return
 
         # Resolve effective level: use config, or fallback to "medium" when
         # forced by thinking content in history
         effective_level = thinking_level if thinking_level != "off" else "medium"
 
-        if self._is_adaptive_model(model_name):
-            payload["thinking"] = {"type": "adaptive", "display": "summarized"}
-            payload["output_config"] = {"effort": effective_level}
-            default_max = self.DEFAULT_ADAPTIVE_MAX_TOKENS
-        else:
-            budget = self.THINKING_BUDGETS[effective_level]
-            payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            default_max = budget + self.DEFAULT_MAX_TOKENS
-
-        if not temperature_deprecated:
-            payload["temperature"] = 1
-        payload["max_tokens"] = max_tokens if max_tokens is not None else default_max
+        payload["thinking"] = {"type": "adaptive", "display": "summarized"}
+        payload["output_config"] = {"effort": effective_level}
+        payload["max_tokens"] = (
+            max_tokens if max_tokens is not None else self.DEFAULT_ADAPTIVE_MAX_TOKENS
+        )
 
     def _build_payload(
         self,
@@ -442,7 +302,6 @@ class AnthropicAdapter(APIAdapter):
         model_name: str,
         system_prompt: str | None,
         messages: list[dict[str, Any]],
-        temperature: float,
         tools: list[dict[str, Any]] | None,
         max_tokens: int | None,
         tool_choice: dict[str, Any] | None,
@@ -452,12 +311,7 @@ class AnthropicAdapter(APIAdapter):
         payload: dict[str, Any] = {"model": model_name, "messages": messages}
 
         self._apply_thinking_config(
-            payload,
-            model_name=model_name,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            thinking=thinking,
+            payload, messages=messages, max_tokens=max_tokens, thinking=thinking
         )
 
         if system_blocks := self._build_system_blocks(system_prompt):
@@ -498,7 +352,6 @@ class AnthropicAdapter(APIAdapter):
             model_name=model_name,
             system_prompt=system_prompt,
             messages=converted_messages,
-            temperature=temperature,
             tools=converted_tools,
             max_tokens=max_tokens,
             tool_choice=converted_tool_choice,
@@ -562,7 +415,11 @@ class AnthropicAdapter(APIAdapter):
         )
         return LLMChunk(
             message=LLMMessage(role=Role.assistant, content=None),
-            usage=LLMUsage(prompt_tokens=total_input_tokens, completion_tokens=0),
+            usage=LLMUsage(
+                prompt_tokens=total_input_tokens,
+                completion_tokens=0,
+                cached_tokens=usage_data.get("cache_read_input_tokens", 0),
+            ),
         )
 
     def _parse_content_block_start(self, data: dict[str, Any]) -> LLMChunk | None:
@@ -642,12 +499,17 @@ class AnthropicAdapter(APIAdapter):
         return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
 
     def _parse_message_delta(self, data: dict[str, Any]) -> LLMChunk:
+        delta = data.get("delta", {})
         usage_data = data.get("usage", {})
-        if not usage_data:
-            return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
+        usage = (
+            LLMUsage(
+                prompt_tokens=0, completion_tokens=usage_data.get("output_tokens", 0)
+            )
+            if usage_data
+            else None
+        )
         return LLMChunk(
             message=LLMMessage(role=Role.assistant, content=None),
-            usage=LLMUsage(
-                prompt_tokens=0, completion_tokens=usage_data.get("output_tokens", 0)
-            ),
+            usage=usage,
+            stop=_parse_stop_info(delta.get("stop_reason"), delta.get("stop_details")),
         )

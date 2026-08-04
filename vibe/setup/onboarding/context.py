@@ -4,19 +4,70 @@ from dataclasses import dataclass
 import os
 import tomllib
 from typing import Any
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, HttpUrl, TypeAdapter, ValidationError
 
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
-from vibe.core.config._settings import (
-    DEFAULT_ACTIVE_MODEL,
+from vibe.core.config import (
+    DEFAULT_ACTIVE_MODEL_CONFIG,
     DEFAULT_MODELS,
     DEFAULT_PROVIDERS,
+    DEFAULT_THEME,
+    DEFAULT_VIBE_BASE_URL,
+    ModelConfig,
+    ProviderConfig,
+    VibeConfigSchema,
 )
 from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.logger import logger
+from vibe.core.config.models import normalize_model_configs
+from vibe.observability.logging import logger
 
 _ONBOARDING_LIST_ADAPTER = TypeAdapter(list[Any])
+
+
+def _normalize_origin(value: str) -> str:
+    origin = value.strip()
+    if "://" not in origin:
+        origin = f"https://{origin}"
+    return origin.rstrip("/")
+
+
+_HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
+
+
+def is_valid_custom_domain(value: str) -> bool:
+    # http:// is accepted on purpose so users can target local auth gateways
+    # (e.g. http://localhost:8080); _normalize_origin only upgrades scheme-less
+    # inputs to https://, an explicit scheme is always respected.
+    origin = value.strip()
+    if "://" not in origin and ":/" in origin:
+        return False
+    try:
+        _HTTP_URL_ADAPTER.validate_python(_normalize_origin(origin))
+    except ValidationError:
+        return False
+    return True
+
+
+def resolve_browser_auth_urls(domain: str) -> tuple[str, str]:
+    base = _normalize_origin(domain)
+    api = f"{base}/api"
+    return base, api
+
+
+def is_likely_mistral_private_cloud_domain(domain: str) -> bool:
+    """Heuristic: a Mistral-hosted subdomain that is not the default auth host.
+
+    Private-cloud Studio redirects users to a custom `*.mistral.ai` URL, but
+    Vibe CLI browser sign-in for Mistral-hosted accounts uses `console.mistral.ai`.
+    Surfacing this lets the wizard warn users who paste their Studio URL.
+    """
+    host = urlparse(_normalize_origin(domain)).hostname or ""
+    return (
+        host != "console.mistral.ai"
+        and host.startswith("console.")
+        and host.endswith(".mistral.ai")
+    )
 
 
 def _default_provider_payloads() -> list[dict[str, Any]]:
@@ -28,7 +79,9 @@ def _default_model_payloads() -> list[dict[str, Any]]:
 
 
 class _OnboardingSnapshot(BaseModel):
-    active_model: str = DEFAULT_ACTIVE_MODEL
+    active_model: str = DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    theme: str = DEFAULT_THEME
+    vibe_base_url: str = DEFAULT_VIBE_BASE_URL
     providers: list[Any] = Field(default_factory=_default_provider_payloads)
     models: list[Any] = Field(default_factory=_default_model_payloads)
 
@@ -70,11 +123,21 @@ def _load_onboarding_toml_payload() -> dict[str, Any]:
     except OSError as err:
         raise RuntimeError(f"Cannot read {config_file}: {err}") from err
 
-    return {
+    payload = {
         field_name: toml_data[field_name]
         for field_name in _ONBOARDING_FIELDS
         if field_name in toml_data
     }
+    if "models" in payload:
+        payload["models"] = _normalize_onboarding_model_payloads(payload["models"])
+    return payload
+
+
+def _normalize_onboarding_model_payloads(value: Any) -> Any:
+    normalized = normalize_model_configs(value)
+    if isinstance(normalized, dict):
+        return list(normalized.values())
+    return normalized
 
 
 def _load_onboarding_env_payload_for_fields(
@@ -97,6 +160,13 @@ def _load_onboarding_env_payload_for_fields(
         and (models := _find_env_value("VIBE_MODELS")) is not None
     ):
         payload["models"] = _ONBOARDING_LIST_ADAPTER.validate_json(models)
+    if (
+        "vibe_base_url" in field_names
+        and (vibe_base_url := _find_env_value("VIBE_VIBE_BASE_URL")) is not None
+    ):
+        payload["vibe_base_url"] = vibe_base_url
+    if "theme" in field_names and (theme := _find_env_value("VIBE_THEME")) is not None:
+        payload["theme"] = theme
 
     return payload
 
@@ -161,7 +231,7 @@ def _resolve_provider(
 
     models = _validated_payloads(snapshot.models, ModelConfig)
 
-    for model_alias in (active_model, DEFAULT_ACTIVE_MODEL):
+    for model_alias in (active_model, DEFAULT_ACTIVE_MODEL_CONFIG.alias):
         for model in models:
             if model.alias != model_alias:
                 continue
@@ -181,14 +251,20 @@ def _resolve_provider(
 @dataclass(frozen=True)
 class OnboardingContext:
     provider: ProviderConfig
+    vibe_base_url: str = DEFAULT_VIBE_BASE_URL
+    theme: str = DEFAULT_THEME
 
     @property
     def supports_browser_sign_in(self) -> bool:
         return self.provider.supports_browser_sign_in
 
     @classmethod
-    def from_config(cls, config: VibeConfig) -> OnboardingContext:
-        return cls(provider=config.get_active_provider())
+    def from_config(cls, config: VibeConfigSchema) -> OnboardingContext:
+        return cls(
+            provider=config.get_active_provider(),
+            vibe_base_url=config.vibe_base_url,
+            theme=config.theme,
+        )
 
     @classmethod
     def load(cls, **overrides: Any) -> OnboardingContext:
@@ -199,10 +275,12 @@ class OnboardingContext:
             return cls(
                 provider=_resolve_provider(
                     active_model=snapshot.active_model, snapshot=snapshot
-                )
+                ),
+                vibe_base_url=snapshot.vibe_base_url,
+                theme=snapshot.theme,
             )
         except (RuntimeError, ValidationError, ValueError):
             logger.warning(
                 "Onboarding config fallback activated; using defaults", exc_info=True
             )
-            return cls.from_config(VibeConfig.model_construct())
+            return cls.from_config(VibeConfigSchema.model_construct())

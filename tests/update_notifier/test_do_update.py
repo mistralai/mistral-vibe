@@ -8,7 +8,7 @@ from vibe.cli.update_notifier.update import do_update
 
 
 @pytest.mark.asyncio
-async def test_do_update_returns_true_when_first_command_succeeds() -> None:
+async def test_do_update_runs_all_commands_even_when_first_succeeds() -> None:
     mock_process = MagicMock()
     mock_process.wait = AsyncMock(return_value=None)
     mock_process.returncode = 0
@@ -24,8 +24,9 @@ async def test_do_update_returns_true_when_first_command_succeeds() -> None:
             result = await do_update()
 
             assert result is True
-            mock_create.assert_called_once()
-            assert "command_1" in mock_create.call_args[0][0]
+            assert mock_create.call_count == 2
+            assert "command_1" in mock_create.call_args_list[0][0][0]
+            assert "command_2" in mock_create.call_args_list[1][0][0]
 
 
 @pytest.mark.asyncio

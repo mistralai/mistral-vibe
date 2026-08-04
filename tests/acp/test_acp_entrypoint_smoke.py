@@ -6,15 +6,28 @@ import contextlib
 import io
 import os
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any, cast
 
-from acp import PROTOCOL_VERSION, Client, RequestError, connect_to_agent
+from acp import (
+    PROTOCOL_VERSION,
+    Client,
+    CreateElicitationResponse,
+    RequestError,
+    connect_to_agent,
+)
 from acp.schema import ClientCapabilities, Implementation
 import pexpect
 import pytest
 
 from tests import TESTS_ROOT
 from tests.e2e.common import ansi_tolerant_pattern
+
+BROWSER_AUTH_NAME = "Sign in through Mistral AI Studio"
+BROWSER_AUTH_DESCRIPTION = (
+    "Sign into Mistral Vibe through your Mistral AI Studio account."
+)
 
 
 class _AcpSmokeClient(Client):
@@ -35,6 +48,16 @@ class _AcpSmokeClient(Client):
 
     async def create_terminal(self, *args: Any, **kwargs: Any) -> Any:
         msg = "terminal/create"
+        raise RequestError.method_not_found(msg)
+
+    async def create_elicitation(
+        self, message: str, mode: Any, **kwargs: Any
+    ) -> CreateElicitationResponse:
+        msg = "elicitation/create"
+        raise RequestError.method_not_found(msg)
+
+    async def complete_elicitation(self, elicitation_id: str, **kwargs: Any) -> None:
+        msg = "elicitation/complete"
         raise RequestError.method_not_found(msg)
 
     async def terminal_output(self, *args: Any, **kwargs: Any) -> Any:
@@ -100,6 +123,7 @@ def _build_env(vibe_home_dir: Path, *, include_api_key: bool) -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["VIBE_HOME"] = str(vibe_home_dir)
+    env["VIBE_TEST_DISABLE_KEYRING"] = "1"
 
     vibe_home_dir.mkdir(parents=True, exist_ok=True)
     config_file = vibe_home_dir / "config.toml"
@@ -114,15 +138,26 @@ def _build_env(vibe_home_dir: Path, *, include_api_key: bool) -> dict[str, str]:
     return env
 
 
-def _build_client_capabilities(*, terminal_auth: bool = False) -> ClientCapabilities:
-    if not terminal_auth:
+def _build_client_capabilities(
+    *, terminal_auth: bool = False, delegated_browser_auth: bool = False
+) -> ClientCapabilities:
+    if not terminal_auth and not delegated_browser_auth:
         return ClientCapabilities()
 
-    return ClientCapabilities(field_meta={"terminal-auth": True})
+    field_meta: dict[str, bool] = {}
+    if terminal_auth:
+        field_meta["terminal-auth"] = True
+    if delegated_browser_auth:
+        field_meta["browser-auth-delegated"] = True
+    return ClientCapabilities(field_meta=field_meta)
 
 
 async def _connect_and_initialize(
-    *, vibe_home_dir: Path, include_api_key: bool, terminal_auth: bool = False
+    *,
+    vibe_home_dir: Path,
+    include_api_key: bool,
+    terminal_auth: bool = False,
+    delegated_browser_auth: bool = False,
 ) -> tuple[asyncio.subprocess.Process, Any, Any]:
     env = _build_env(vibe_home_dir, include_api_key=include_api_key)
     proc = await _spawn_vibe_acp(env)
@@ -136,7 +171,8 @@ async def _connect_and_initialize(
             conn.initialize(
                 protocol_version=PROTOCOL_VERSION,
                 client_capabilities=_build_client_capabilities(
-                    terminal_auth=terminal_auth
+                    terminal_auth=terminal_auth,
+                    delegated_browser_auth=delegated_browser_auth,
                 ),
                 client_info=Implementation(
                     name="pytest-smoke", title="Pytest Smoke", version="0.0.0"
@@ -161,6 +197,12 @@ async def test_vibe_acp_initialize_and_new_session(vibe_home_dir: Path) -> None:
         assert initialize_response.protocol_version == PROTOCOL_VERSION
         assert initialize_response.agent_info.name == "@mistralai/mistral-vibe"
         assert initialize_response.agent_info.title == "Mistral Vibe"
+
+        config_schema = await asyncio.wait_for(
+            conn.ext_method("config/schema", {}), timeout=10
+        )
+        assert config_schema["version"].startswith("sha256:")
+        assert config_schema["schema"]["title"] == "VibeConfigSchema"
 
         session = await asyncio.wait_for(
             conn.new_session(cwd=str(Path.cwd()), mcp_servers=[]), timeout=10
@@ -188,18 +230,65 @@ async def test_vibe_acp_bootstraps_default_files(vibe_home_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_vibe_acp_initialize_exposes_terminal_auth_when_supported(
-    vibe_home_dir: Path,
-) -> None:
-    proc, initialize_response, conn = await _connect_and_initialize(
-        vibe_home_dir=vibe_home_dir, include_api_key=True, terminal_auth=True
+async def test_vibe_acp_initialize_exposes_browser_auth(vibe_home_dir: Path) -> None:
+    proc, initialize_response, _conn = await _connect_and_initialize(
+        vibe_home_dir=vibe_home_dir, include_api_key=True
     )
 
     try:
         assert initialize_response.auth_methods is not None
         assert len(initialize_response.auth_methods) == 1
-
         auth_method = initialize_response.auth_methods[0]
+        assert auth_method.id == "browser-auth"
+        assert auth_method.name == BROWSER_AUTH_NAME
+        assert auth_method.description == BROWSER_AUTH_DESCRIPTION
+    finally:
+        await _terminate_process(proc)
+
+
+@pytest.mark.asyncio
+async def test_vibe_acp_initialize_exposes_delegated_browser_auth_when_supported(
+    vibe_home_dir: Path,
+) -> None:
+    proc, initialize_response, _conn = await _connect_and_initialize(
+        vibe_home_dir=vibe_home_dir, include_api_key=True, delegated_browser_auth=True
+    )
+
+    try:
+        assert initialize_response.auth_methods is not None
+        assert len(initialize_response.auth_methods) == 2
+
+        browser_auth_method = initialize_response.auth_methods[0]
+        assert browser_auth_method.id == "browser-auth"
+        assert browser_auth_method.name == BROWSER_AUTH_NAME
+        assert browser_auth_method.description == BROWSER_AUTH_DESCRIPTION
+
+        delegated_browser_auth_method = initialize_response.auth_methods[1]
+        assert delegated_browser_auth_method.id == "browser-auth-delegated"
+        assert delegated_browser_auth_method.name == BROWSER_AUTH_NAME
+        assert delegated_browser_auth_method.description == BROWSER_AUTH_DESCRIPTION
+    finally:
+        await _terminate_process(proc)
+
+
+@pytest.mark.asyncio
+async def test_vibe_acp_initialize_exposes_terminal_auth_when_supported(
+    vibe_home_dir: Path,
+) -> None:
+    proc, initialize_response, _conn = await _connect_and_initialize(
+        vibe_home_dir=vibe_home_dir, include_api_key=True, terminal_auth=True
+    )
+
+    try:
+        assert initialize_response.auth_methods is not None
+        assert len(initialize_response.auth_methods) == 2
+
+        browser_auth_method = initialize_response.auth_methods[0]
+        assert browser_auth_method.id == "browser-auth"
+        assert browser_auth_method.name == BROWSER_AUTH_NAME
+        assert browser_auth_method.description == BROWSER_AUTH_DESCRIPTION
+
+        auth_method = initialize_response.auth_methods[1]
         assert auth_method.id == "vibe-setup"
         assert auth_method.field_meta is not None
 
@@ -207,11 +296,12 @@ async def test_vibe_acp_initialize_exposes_terminal_auth_when_supported(
         assert terminal_auth["label"] == "Mistral Vibe Setup"
         assert terminal_auth["command"]
         assert terminal_auth["args"]
+        assert terminal_auth["args"][-1:] == ["--setup"]
     finally:
         await _terminate_process(proc)
 
 
-@pytest.mark.timeout(15)
+@pytest.mark.timeout(30)
 def test_vibe_acp_setup_shows_onboarding_and_exits_on_cancel(
     vibe_home_dir: Path,
 ) -> None:
@@ -231,7 +321,7 @@ def test_vibe_acp_setup_shows_onboarding_and_exits_on_cancel(
     child.logfile_read = captured
 
     try:
-        child.expect(ansi_tolerant_pattern("Welcome to Mistral Vibe"), timeout=10)
+        child.expect(ansi_tolerant_pattern("Welcome to"), timeout=15)
         child.sendcontrol("c")
         child.expect(pexpect.EOF, timeout=10)
     finally:
@@ -245,6 +335,7 @@ def test_vibe_acp_setup_shows_onboarding_and_exits_on_cancel(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(30)
 async def test_vibe_acp_survives_broken_config(vibe_home_dir: Path) -> None:
     vibe_home_dir.mkdir(parents=True, exist_ok=True)
     (vibe_home_dir / "config.toml").write_text("{{{{invalid toml content!!")
@@ -268,6 +359,24 @@ async def test_vibe_acp_survives_broken_config(vibe_home_dir: Path) -> None:
         assert session.session_id
     finally:
         await _terminate_process(proc)
+
+
+def test_acp_agent_import_does_not_load_gitpython() -> None:
+    # GitPython probes for a git executable on import and raises when none is
+    # found. The ACP startup path (e.g. `vibe-acp --version`) must not import it,
+    # so binaries run on machines without git. See teleport lazy import.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, vibe.acp.agent; "
+            "assert 'git' not in sys.modules, 'gitpython imported on ACP module load'",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.asyncio

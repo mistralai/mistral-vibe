@@ -1,14 +1,26 @@
 from __future__ import annotations
 
-import os
+from typing import TYPE_CHECKING, Any
 
-from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
+if TYPE_CHECKING:
+    from vibe.core.tools.connectors.connector_registry import (
+        ConnectorAuthAction,
+        ConnectorRegistry,
+    )
+    from vibe.core.tools.connectors.counts import compute_connector_counts
 
-CONNECTORS_ENV_VAR = "EXPERIMENTAL_ENABLE_CONNECTORS"
+__all__ = ["ConnectorAuthAction", "ConnectorRegistry", "compute_connector_counts"]
 
 
-def connectors_enabled() -> bool:
-    return os.getenv(CONNECTORS_ENV_VAR) == "1"
+def __getattr__(name: str) -> Any:
+    if name in {"ConnectorAuthAction", "ConnectorRegistry"}:
+        from vibe.core.tools.connectors import connector_registry
 
+        return getattr(connector_registry, name)
 
-__all__ = ["CONNECTORS_ENV_VAR", "ConnectorRegistry", "connectors_enabled"]
+    if name == "compute_connector_counts":
+        from vibe.core.tools.connectors.counts import compute_connector_counts
+
+        return compute_connector_counts
+
+    raise AttributeError(name)

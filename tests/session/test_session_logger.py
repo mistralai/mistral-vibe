@@ -4,14 +4,16 @@ from datetime import UTC, datetime, timedelta
 import json
 import os
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tests.conftest import build_test_vibe_config
 from vibe.core.agents.models import AgentProfile, AgentSafety
-from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.config import SessionLoggingConfig, VibeConfigSchema
+from vibe.core.experiments.models import EvalResponse
 from vibe.core.loop import ScheduledLoop
+from vibe.core.session.session_loader import SessionLoader
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.tools.manager import ToolManager
 from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
@@ -62,9 +64,9 @@ def mock_tool_manager() -> ToolManager:
 
 
 @pytest.fixture
-def mock_vibe_config() -> VibeConfig:
+def mock_vibe_config() -> VibeConfigSchema:
     """Create a mock vibe config for testing."""
-    return build_test_vibe_config(active_model="test-model", models=[], providers=[])
+    return build_test_vibe_config()
 
 
 class TestSessionLoggerInitialization:
@@ -114,16 +116,12 @@ class TestSessionLoggerMetadata:
         self, mock_getuser, mock_subprocess, session_config: SessionLoggingConfig
     ) -> None:
         """Test that session metadata is correctly initialized."""
-        # Mock git commands
-        git_commit_mock = MagicMock()
-        git_commit_mock.returncode = 0
-        git_commit_mock.stdout = "abc123\n"
+        # Mock combined git command
+        git_mock = MagicMock()
+        git_mock.returncode = 0
+        git_mock.stdout = "abc123\nmain\n"
 
-        git_branch_mock = MagicMock()
-        git_branch_mock.returncode = 0
-        git_branch_mock.stdout = "main\n"
-
-        mock_subprocess.side_effect = [git_commit_mock, git_branch_mock]
+        mock_subprocess.return_value = git_mock
         mock_getuser.return_value = "testuser"
 
         session_id = "test-session-123"
@@ -149,7 +147,7 @@ class TestSessionLoggerMetadata:
         self, mock_getuser, mock_subprocess, session_config: SessionLoggingConfig
     ) -> None:
         """Test that session metadata handles git command errors gracefully."""
-        # Mock git commands to fail
+        # Mock combined git command to fail
         mock_subprocess.side_effect = FileNotFoundError("git not found")
         mock_getuser.return_value = "testuser"
 
@@ -207,6 +205,84 @@ class TestSessionLoggerTitleManagement:
 
         assert logger.session_metadata.end_time == "2026-01-01T10:00:00+00:00"
 
+    def test_set_initial_auto_title_applies_when_no_title_set(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+
+        applied = logger.set_initial_auto_title("Pretty title")
+
+        assert applied is True
+        assert logger.session_metadata is not None
+        assert logger.session_metadata.title == "Pretty title"
+        assert logger.session_metadata.title_source == "auto"
+
+    def test_set_initial_auto_title_noop_when_title_already_set(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+        logger.set_title("Manual title")
+
+        applied = logger.set_initial_auto_title("Pretty title")
+
+        assert applied is False
+        assert logger.session_metadata is not None
+        assert logger.session_metadata.title == "Manual title"
+        assert logger.session_metadata.title_source == "manual"
+
+    def test_set_initial_auto_title_noop_when_prior_auto_title_set(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+        logger.set_initial_auto_title("First title")
+
+        applied = logger.set_initial_auto_title("Second title")
+
+        assert applied is False
+        assert logger.session_metadata is not None
+        assert logger.session_metadata.title == "First title"
+
+    def test_set_initial_auto_title_rejects_blank(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+
+        applied = logger.set_initial_auto_title("   ")
+
+        assert applied is False
+        assert logger.session_metadata is not None
+        assert logger.session_metadata.title is None
+
+    def test_needs_initial_auto_title_true_when_no_title(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+
+        assert logger.needs_initial_auto_title() is True
+
+    def test_needs_initial_auto_title_false_after_set_initial_auto_title(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+        logger.set_initial_auto_title("Pretty title")
+
+        assert logger.needs_initial_auto_title() is False
+
+    def test_needs_initial_auto_title_false_after_manual_set_title(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+        logger.set_title("Manual title")
+
+        assert logger.needs_initial_auto_title() is False
+
+    def test_needs_initial_auto_title_true_when_disabled(
+        self, disabled_session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(disabled_session_config, "test-session-123")
+
+        assert logger.needs_initial_auto_title() is True
+
 
 class TestSessionLoggerSaveInteraction:
     @pytest.mark.asyncio
@@ -219,9 +295,7 @@ class TestSessionLoggerSaveInteraction:
         result = await logger.save_interaction(
             messages=[],
             stats=AgentStats(),
-            base_config=build_test_vibe_config(
-                active_model="test", models=[], providers=[]
-            ),
+            base_config=build_test_vibe_config(),
             tool_manager=MagicMock(),
             agent_profile=AgentProfile(
                 name="test",
@@ -238,7 +312,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_success(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -288,7 +362,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_system_prompt_in_metadata(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -337,7 +411,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_with_existing_messages(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -402,7 +476,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_no_new_messages_is_noop(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -459,7 +533,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_no_user_messages(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -506,7 +580,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_long_user_message(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -548,10 +622,51 @@ class TestSessionLoggerSaveInteraction:
             assert metadata["title_source"] == "auto"
 
     @pytest.mark.asyncio
+    async def test_save_interaction_preserves_preset_auto_title(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        session_id = "test-session-123"
+        logger = SessionLogger(session_config, session_id)
+        assert logger.session_metadata is not None
+
+        logger.set_initial_auto_title("Pretty @foo.py title")
+
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(
+                role=Role.user, content="path: file:///abs/foo.py\ncontent: ..."
+            ),
+            LLMMessage(role=Role.assistant, content="Hi there!"),
+        ]
+        stats = AgentStats(
+            steps=1, session_prompt_tokens=10, session_completion_tokens=20
+        )
+
+        await logger.save_interaction(
+            messages=messages,
+            stats=stats,
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        assert logger.session_dir is not None
+        metadata_file = logger.session_dir / "meta.json"
+        with open(metadata_file) as f:
+            metadata = json.load(f)
+
+        assert metadata["title"] == "Pretty @foo.py title"
+        assert metadata["title_source"] == "auto"
+
+    @pytest.mark.asyncio
     async def test_save_interaction_preserves_manual_title(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -595,7 +710,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_throttles_tmp_cleanup(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -610,10 +725,10 @@ class TestSessionLoggerSaveInteraction:
         cleanup_spy = MagicMock()
         with (
             patch.object(
-                SessionLogger, "persist_messages", new_callable=AsyncMock
+                SessionLogger, "_persist_messages_sync"
             ) as persist_messages_mock,
             patch.object(
-                SessionLogger, "persist_metadata", new_callable=AsyncMock
+                SessionLogger, "_persist_metadata_sync"
             ) as persist_metadata_mock,
             patch.object(logger, "cleanup_tmp_files", cleanup_spy),
             patch(
@@ -642,9 +757,271 @@ class TestSessionLoggerSaveInteraction:
                 agent_profile=mock_agent_profile,
             )
 
-        assert persist_messages_mock.await_count == 2
-        assert persist_metadata_mock.await_count == 2
+        assert persist_messages_mock.call_count == 2
+        assert persist_metadata_mock.call_count == 2
         assert cleanup_spy.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_save_interaction_rewrites_log_when_history_shrinks(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "shrink-history")
+        stats = AgentStats(steps=1)
+        full = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="A"),
+            LLMMessage(role=Role.assistant, content="response A"),
+            LLMMessage(role=Role.user, content="B"),
+            LLMMessage(role=Role.assistant, content="response B"),
+        ]
+        await logger.save_interaction(
+            messages=full,
+            stats=stats,
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        await logger.save_interaction(
+            messages=full[:3],
+            stats=stats,
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        assert logger.session_dir is not None
+        with open(logger.session_dir / "messages.jsonl") as f:
+            lines = [json.loads(line) for line in f]
+        assert [m["content"] for m in lines] == ["A", "response A"]
+        with open(logger.session_dir / "meta.json") as f:
+            assert json.load(f)["total_messages"] == 2
+
+    @pytest.mark.asyncio
+    async def test_save_interaction_replaces_tail_after_shrink_and_regrow(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "shrink-regrow")
+        stats = AgentStats(steps=1)
+
+        async def save(messages: list[LLMMessage]) -> None:
+            await logger.save_interaction(
+                messages=messages,
+                stats=stats,
+                base_config=mock_vibe_config,
+                tool_manager=mock_tool_manager,
+                agent_profile=mock_agent_profile,
+            )
+
+        system = LLMMessage(role=Role.system, content="System prompt")
+        first_turn = [
+            system,
+            LLMMessage(role=Role.user, content="A"),
+            LLMMessage(role=Role.assistant, content="response A"),
+        ]
+        await save([
+            *first_turn,
+            LLMMessage(role=Role.user, content="B"),
+            LLMMessage(role=Role.assistant, content="response B"),
+        ])
+        await save(first_turn)
+        await save([
+            *first_turn,
+            LLMMessage(role=Role.user, content="B-bis"),
+            LLMMessage(role=Role.assistant, content="response B-bis"),
+        ])
+
+        assert logger.session_dir is not None
+        loaded, metadata = SessionLoader.load_session(logger.session_dir)
+        assert [m.content for m in loaded] == [
+            "A",
+            "response A",
+            "B-bis",
+            "response B-bis",
+        ]
+        assert metadata["total_messages"] == 4
+
+    @pytest.mark.asyncio
+    async def test_save_interaction_skips_system_only_history_then_reprompt_replaces_it(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "reduced-to-system")
+        stats = AgentStats(steps=1)
+        system = LLMMessage(role=Role.system, content="System prompt")
+
+        async def save(messages: list[LLMMessage]) -> None:
+            await logger.save_interaction(
+                messages=messages,
+                stats=stats,
+                base_config=mock_vibe_config,
+                tool_manager=mock_tool_manager,
+                agent_profile=mock_agent_profile,
+            )
+
+        await save([
+            system,
+            LLMMessage(role=Role.user, content="A"),
+            LLMMessage(role=Role.assistant, content="response A"),
+        ])
+
+        # Reducing the history to only the system prompt is a no-op: the prior
+        # log stays in place (never emptied) so the session remains loadable.
+        await save([system])
+        assert logger.session_dir is not None
+        loaded, metadata = SessionLoader.load_session(logger.session_dir)
+        assert [m.content for m in loaded] == ["A", "response A"]
+        assert metadata["total_messages"] == 2
+
+        # The next real message replaces the stale tail.
+        await save([
+            system,
+            LLMMessage(role=Role.user, content="A-bis"),
+            LLMMessage(role=Role.assistant, content="response A-bis"),
+        ])
+
+        loaded, metadata = SessionLoader.load_session(logger.session_dir)
+        assert [m.content for m in loaded] == ["A-bis", "response A-bis"]
+        assert metadata["total_messages"] == 2
+
+    @pytest.mark.asyncio
+    async def test_save_interaction_rewrites_log_when_last_message_changes_at_same_count(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "same-count-diff-tail")
+        stats = AgentStats(steps=1)
+        system = LLMMessage(role=Role.system, content="System prompt")
+
+        async def save(messages: list[LLMMessage]) -> None:
+            await logger.save_interaction(
+                messages=messages,
+                stats=stats,
+                base_config=mock_vibe_config,
+                tool_manager=mock_tool_manager,
+                agent_profile=mock_agent_profile,
+            )
+
+        await save([
+            system,
+            LLMMessage(role=Role.user, content="A"),
+            LLMMessage(role=Role.assistant, content="response A"),
+        ])
+
+        # Same message count, but the last message content differs: the count
+        # alone would treat this as a no-op, so the fingerprint must catch it.
+        await save([
+            system,
+            LLMMessage(role=Role.user, content="A"),
+            LLMMessage(role=Role.assistant, content="response A (edited)"),
+        ])
+
+        assert logger.session_dir is not None
+        loaded, metadata = SessionLoader.load_session(logger.session_dir)
+        assert [m.content for m in loaded] == ["A", "response A (edited)"]
+        assert metadata["total_messages"] == 2
+
+    @pytest.mark.asyncio
+    async def test_save_interaction_rewrites_log_for_legacy_session_without_fingerprint(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "legacy-no-fingerprint")
+        stats = AgentStats(steps=1)
+        system = LLMMessage(role=Role.system, content="System prompt")
+
+        async def save(messages: list[LLMMessage]) -> None:
+            await logger.save_interaction(
+                messages=messages,
+                stats=stats,
+                base_config=mock_vibe_config,
+                tool_manager=mock_tool_manager,
+                agent_profile=mock_agent_profile,
+            )
+
+        await save([
+            system,
+            LLMMessage(role=Role.user, content="A"),
+            LLMMessage(role=Role.assistant, content="response A"),
+        ])
+
+        # Simulate a session written before fingerprints existed.
+        metadata = json.loads(logger.metadata_filepath.read_text(encoding="utf-8"))
+        del metadata["last_message_fingerprint"]
+        logger.metadata_filepath.write_text(json.dumps(metadata), encoding="utf-8")
+
+        # Same count, edited tail: with no fingerprint the boundary can't be
+        # verified, so the log must be fully rewritten rather than no-op'd.
+        await save([
+            system,
+            LLMMessage(role=Role.user, content="A"),
+            LLMMessage(role=Role.assistant, content="response A (edited)"),
+        ])
+
+        assert logger.session_dir is not None
+        loaded, metadata = SessionLoader.load_session(logger.session_dir)
+        assert [m.content for m in loaded] == ["A", "response A (edited)"]
+        assert metadata["total_messages"] == 2
+
+    @pytest.mark.asyncio
+    async def test_save_interaction_persists_empty_conversation_only_when_allowed(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "rewind-to-top")
+        stats = AgentStats(steps=1)
+        system = LLMMessage(role=Role.system, content="System prompt")
+
+        async def save(
+            messages: list[LLMMessage], *, allow_empty: bool = False
+        ) -> None:
+            await logger.save_interaction(
+                messages=messages,
+                stats=stats,
+                base_config=mock_vibe_config,
+                tool_manager=mock_tool_manager,
+                agent_profile=mock_agent_profile,
+                allow_empty=allow_empty,
+            )
+
+        await save([
+            system,
+            LLMMessage(role=Role.user, content="A"),
+            LLMMessage(role=Role.assistant, content="response A"),
+        ])
+
+        # A system-only save without opt-in keeps the prior log intact.
+        await save([system])
+        assert logger.session_dir is not None
+        loaded, _ = SessionLoader.load_session(logger.session_dir)
+        assert [m.content for m in loaded] == ["A", "response A"]
+
+        # An in-place rewind to the first message opts in: the emptied log is
+        # persisted and loads back as an empty, valid session.
+        await save([system], allow_empty=True)
+        loaded, metadata = SessionLoader.load_session(logger.session_dir)
+        assert loaded == []
+        assert metadata["total_messages"] == 0
 
 
 class TestSessionLoggerResetSession:
@@ -876,7 +1253,7 @@ class TestPersistLoops:
     async def test_writes_into_existing_metadata(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -956,7 +1333,7 @@ class TestPersistLoops:
     async def test_subsequent_save_interaction_preserves_loops(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -1002,3 +1379,153 @@ class TestPersistLoops:
             metadata = json.load(f)
         assert len(metadata["loops"]) == 1
         assert metadata["loops"][0]["id"] == "aabbccdd"
+
+
+class TestPersistExperiments:
+    @pytest.fixture
+    def sample_response(self) -> EvalResponse:
+        return EvalResponse.model_validate({
+            "features": {
+                "vibe_code_cli_test_ab": {
+                    "defaultValue": "cli",
+                    "rules": [
+                        {
+                            "force": "cli_v2",
+                            "tracks": [
+                                {
+                                    "experiment": {"key": "vibe_code_cli_test_ab"},
+                                    "result": {
+                                        "key": "1",
+                                        "variationId": 1,
+                                        "inExperiment": True,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        })
+
+    @pytest.mark.asyncio
+    async def test_writes_field_into_existing_metadata(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+        sample_response: EvalResponse,
+    ) -> None:
+        logger = SessionLogger(session_config, "exp-session")
+        await logger.save_interaction(
+            messages=[
+                LLMMessage(role=Role.system, content="System prompt"),
+                LLMMessage(role=Role.user, content="Hello"),
+            ],
+            stats=AgentStats(steps=1),
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        await logger.persist_experiments(sample_response)
+
+        assert logger.session_dir is not None
+        with open(logger.session_dir / "meta.json") as f:
+            metadata = json.load(f)
+        assert "experiments" in metadata
+        assert (
+            metadata["experiments"]["features"]["vibe_code_cli_test_ab"]["defaultValue"]
+            == "cli"
+        )
+
+    @pytest.mark.asyncio
+    async def test_persists_none_as_null(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "exp-none")
+        await logger.save_interaction(
+            messages=[
+                LLMMessage(role=Role.system, content="x"),
+                LLMMessage(role=Role.user, content="y"),
+            ],
+            stats=AgentStats(steps=1),
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        await logger.persist_experiments(None)
+
+        assert logger.session_dir is not None
+        with open(logger.session_dir / "meta.json") as f:
+            metadata = json.load(f)
+        assert metadata.get("experiments") is None
+
+    @pytest.mark.asyncio
+    async def test_does_not_create_metadata_file_when_missing(
+        self, session_config: SessionLoggingConfig, sample_response: EvalResponse
+    ) -> None:
+        # Sessions without any message must not be persisted at all —
+        # persist_experiments updates only in-memory state when meta.json is
+        # absent, and lets the eventual save_interaction write it.
+        logger = SessionLogger(session_config, "fresh-session")
+        assert logger.session_dir is not None
+        assert not (logger.session_dir / "meta.json").exists()
+
+        await logger.persist_experiments(sample_response)
+
+        assert not (logger.session_dir / "meta.json").exists()
+        assert logger.session_metadata is not None
+        assert logger.session_metadata.experiments == sample_response
+
+    @pytest.mark.asyncio
+    async def test_noop_when_logging_disabled(
+        self,
+        disabled_session_config: SessionLoggingConfig,
+        sample_response: EvalResponse,
+    ) -> None:
+        logger = SessionLogger(disabled_session_config, "ignored")
+        await logger.persist_experiments(sample_response)
+
+    @pytest.mark.asyncio
+    async def test_first_save_interaction_includes_in_memory_experiments(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+        sample_response: EvalResponse,
+    ) -> None:
+        # Real flow: persist_experiments at session start (no meta.json yet,
+        # in-memory only). The first save_interaction must succeed AND
+        # include the experiments snapshot in the eventual meta.json.
+        logger = SessionLogger(session_config, "first-save-after-experiments")
+        await logger.persist_experiments(sample_response)
+
+        assert logger.session_dir is not None
+        assert not (logger.session_dir / "meta.json").exists()
+
+        await logger.save_interaction(
+            messages=[
+                LLMMessage(role=Role.system, content="System prompt"),
+                LLMMessage(role=Role.user, content="Hello"),
+                LLMMessage(role=Role.assistant, content="Hi"),
+            ],
+            stats=AgentStats(steps=1),
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        with open(logger.session_dir / "meta.json") as f:
+            metadata = json.load(f)
+        assert metadata["total_messages"] == 2
+        assert (
+            metadata["experiments"]["features"]["vibe_code_cli_test_ab"]["defaultValue"]
+            == "cli"
+        )

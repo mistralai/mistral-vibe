@@ -24,6 +24,14 @@ def _pin_banner_version(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _pin_alt_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("vibe.cli.commands.ALT_KEY", "Alt")
-    monkeypatch.setattr("vibe.cli.textual_ui.widgets.rewind_app.ALT_KEY", "Alt")
+def _pin_spinner_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop spinners ticking, so a captured frame does not depend on timing.
+
+    Every SpinnerMixin widget advances its frame on a 0.1s interval, so how many
+    ticks land before the screenshot varies with machine load. Widgets still
+    render their first frame; they just stop moving.
+    """
+    monkeypatch.setattr(
+        "vibe.cli.textual_ui.widgets.spinner.SpinnerMixin.start_spinner_timer",
+        lambda self: None,
+    )

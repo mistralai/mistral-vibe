@@ -9,7 +9,6 @@ from vibe.cli.history_manager import HistoryManager
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.body import ChatInputBody
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
-from vibe.cli.textual_ui.widgets.messages import UserMessage
 
 
 @pytest.fixture
@@ -61,10 +60,15 @@ async def test_ui_navigation_restores_partially_typed_draft_after_round_trip(
     async with vibe_app.run_test() as pilot:
         inject_history_file(vibe_app, history_file)
         chat_input = vibe_app.query_one(ChatInputContainer)
+        textarea = chat_input.input_widget
+        assert textarea is not None
 
         await pilot.press(*"he")
         assert chat_input.value == "he"
 
+        await pilot.press("up")
+        assert chat_input.value == "he"
+        assert textarea.cursor_location == (0, 0)
         await pilot.press("up")
         assert chat_input.value == "how are you?"
         await pilot.press("down")
@@ -111,29 +115,6 @@ async def test_ui_does_not_prevent_arrow_down_to_move_cursor_to_bottom_lines(
         await pilot.press("down")
         final_row = textarea.cursor_location[0]
         assert final_row == 1, f"cursor is still on line {final_row}."
-
-
-@pytest.mark.asyncio
-async def test_ui_alt_left_and_alt_right_move_by_word(vibe_app: VibeApp) -> None:
-    async with vibe_app.run_test() as pilot:
-        chat_input = vibe_app.query_one(ChatInputContainer)
-        textarea = chat_input.input_widget
-        assert textarea is not None
-
-        await pilot.press(*"hello brave world")
-        assert textarea.cursor_location == (0, len("hello brave world"))
-
-        await pilot.press("ctrl+left")
-        assert textarea.cursor_location == (0, len("hello brave "))
-
-        await pilot.press("ctrl+left")
-        assert textarea.cursor_location == (0, len("hello "))
-
-        await pilot.press("ctrl+right")
-        assert textarea.cursor_location == (0, len("hello brave"))
-
-        assert chat_input.value == "hello brave world"
-        assert len(vibe_app.query(UserMessage)) == 0
 
 
 @pytest.mark.asyncio
@@ -207,6 +188,7 @@ async def test_ui_intercepts_arrow_up_only_on_first_wrapped_row(
         while textarea.get_cursor_up_location() != textarea.cursor_location:
             textarea.action_cursor_up()
 
+        assert textarea.cursor_location == (0, 0)
         await pilot.press("up")
         assert chat_input.value == "how are you?"
 

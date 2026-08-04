@@ -5,57 +5,63 @@ from textual.containers import Container
 from textual.pilot import Pilot
 
 from tests.snapshots.snap_compare import SnapCompare
+from vibe.app_server.models import QuestionChoice, UserQuestion, UserQuestionRequest
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
-from vibe.core.tools.builtins.ask_user_question import (
-    AskUserQuestionArgs,
-    Choice,
-    Question,
-)
 
 
-def single_question_args() -> AskUserQuestionArgs:
-    return AskUserQuestionArgs(
+def single_question_args() -> UserQuestionRequest:
+    return UserQuestionRequest(
         questions=[
-            Question(
+            UserQuestion(
                 question="Which database should we use for this project?",
                 header="Database",
                 options=[
-                    Choice(label="PostgreSQL", description="Relational database"),
-                    Choice(label="MongoDB", description="Document database"),
-                    Choice(label="Redis", description="In-memory store"),
+                    QuestionChoice(
+                        label="PostgreSQL", description="Relational database"
+                    ),
+                    QuestionChoice(label="MongoDB", description="Document database"),
+                    QuestionChoice(label="Redis", description="In-memory store"),
                 ],
             )
         ]
     )
 
 
-def multi_question_args() -> AskUserQuestionArgs:
-    return AskUserQuestionArgs(
+def multi_question_args() -> UserQuestionRequest:
+    return UserQuestionRequest(
         questions=[
-            Question(
+            UserQuestion(
                 question="Which database?",
                 header="DB",
-                options=[Choice(label="PostgreSQL"), Choice(label="MongoDB")],
+                options=[
+                    QuestionChoice(label="PostgreSQL"),
+                    QuestionChoice(label="MongoDB"),
+                ],
             ),
-            Question(
+            UserQuestion(
                 question="Which framework?",
                 header="Framework",
-                options=[Choice(label="FastAPI"), Choice(label="Django")],
+                options=[
+                    QuestionChoice(label="FastAPI"),
+                    QuestionChoice(label="Django"),
+                ],
             ),
         ]
     )
 
 
-def multi_select_args() -> AskUserQuestionArgs:
-    return AskUserQuestionArgs(
+def multi_select_args() -> UserQuestionRequest:
+    return UserQuestionRequest(
         questions=[
-            Question(
+            UserQuestion(
                 question="Which features do you want to enable?",
                 header="Features",
                 options=[
-                    Choice(label="Authentication", description="User login/logout"),
-                    Choice(label="Caching", description="Redis caching layer"),
-                    Choice(label="Logging", description="Structured logging"),
+                    QuestionChoice(
+                        label="Authentication", description="User login/logout"
+                    ),
+                    QuestionChoice(label="Caching", description="Redis caching layer"),
+                    QuestionChoice(label="Logging", description="Structured logging"),
                 ],
                 multi_select=True,
             )
@@ -66,7 +72,7 @@ def multi_select_args() -> AskUserQuestionArgs:
 class QuestionAppTestApp(App):
     CSS_PATH = "../../vibe/cli/textual_ui/app.tcss"
 
-    def __init__(self, args: AskUserQuestionArgs):
+    def __init__(self, args: UserQuestionRequest):
         super().__init__()
         self.question_args = args
 

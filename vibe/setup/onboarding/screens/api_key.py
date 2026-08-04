@@ -1,81 +1,28 @@
 from __future__ import annotations
 
-import os
 from typing import ClassVar
 
-from dotenv import set_key
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Center, Horizontal, Vertical
+from textual.containers import Center, Vertical
 from textual.events import MouseUp
 from textual.validation import Length
-from textual.widgets import Input, Link, Static
+from textual.widgets import Input, Link
 
 from vibe.cli.clipboard import copy_selection_to_clipboard
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
+from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig, VibeConfig
-from vibe.core.paths import GLOBAL_ENV_FILE
-from vibe.core.telemetry.send import TelemetryClient
-from vibe.core.telemetry.types import EntrypointMetadata
-from vibe.core.types import Backend
+from vibe.core.config import DEFAULT_VIBE_BASE_URL, ProviderConfig
+from vibe.core.telemetry.types import LaunchContext
+from vibe.setup.auth.api_key_persistence import resolve_api_key_provider
 from vibe.setup.onboarding.base import OnboardingScreen
-from vibe.setup.onboarding.context import OnboardingContext
 
-PROVIDER_HELP = {
-    "mistral": ("https://console.mistral.ai/codestral/cli", "Mistral AI Studio")
-}
+MISTRAL_PROVIDER_NAME = "mistral"
+MISTRAL_PROVIDER_HELP_NAME = "Mistral Vibe"
 CONFIG_DOCS_URL = (
     "https://github.com/mistralai/mistral-vibe?tab=readme-ov-file#configuration"
 )
-
-
-def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:
-    GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
-    set_key(GLOBAL_ENV_FILE.path, env_key, api_key)
-
-
-def persist_api_key(
-    provider: ProviderConfig,
-    api_key: str,
-    *,
-    entrypoint_metadata: EntrypointMetadata | None = None,
-) -> str:
-    env_key = provider.api_key_env_var
-    if not env_key:
-        return "env_var_error:<empty>"
-    try:
-        os.environ[env_key] = api_key
-    except ValueError:
-        return f"env_var_error:{env_key}"
-    try:
-        _save_api_key_to_env_file(env_key, api_key)
-    except (OSError, ValueError) as err:
-        return f"save_error:{err}"
-    if provider.backend == Backend.MISTRAL:
-        try:
-            telemetry = TelemetryClient(
-                config_getter=VibeConfig,
-                entrypoint_metadata_getter=lambda: entrypoint_metadata,
-            )
-            telemetry.send_onboarding_api_key_added()
-        except Exception:
-            pass
-    return "completed"
-
-
-def _get_mistral_provider() -> ProviderConfig:
-    return next(
-        provider for provider in DEFAULT_PROVIDERS if provider.name == "mistral"
-    )
-
-
-def _resolve_onboarding_provider(
-    provider: ProviderConfig | None = None,
-) -> ProviderConfig:
-    resolved_provider = provider or OnboardingContext.load().provider
-    if resolved_provider.api_key_env_var:
-        return resolved_provider
-    return _get_mistral_provider()
 
 
 class ApiKeyScreen(OnboardingScreen):
@@ -90,60 +37,62 @@ class ApiKeyScreen(OnboardingScreen):
         self,
         provider: ProviderConfig | None = None,
         *,
-        entrypoint_metadata: EntrypointMetadata | None = None,
+        vibe_base_url: str = DEFAULT_VIBE_BASE_URL,
+        launch_context: LaunchContext | None = None,
     ) -> None:
         super().__init__()
-        self.provider = _resolve_onboarding_provider(provider)
-        self._entrypoint_metadata = entrypoint_metadata
+        self.provider = resolve_api_key_provider(provider)
+        self._vibe_base_url = vibe_base_url
+        self._launch_context = launch_context
 
-    def _compose_provider_link(self, provider_name: str) -> ComposeResult:
-        if self.provider.name not in PROVIDER_HELP:
+    def _compose_provider_link(self) -> ComposeResult:
+        if self.provider.name != MISTRAL_PROVIDER_NAME:
             return
 
-        help_url, help_name = PROVIDER_HELP[self.provider.name]
-        yield NoMarkupStatic(f"Grab your {provider_name} API key from the {help_name}:")
-        yield Center(
-            Horizontal(
-                NoMarkupStatic("→ ", classes="link-chevron"),
-                Link(help_url, url=help_url),
-                classes="link-row",
-            )
-        )
+        help_url = f"{self._vibe_base_url.rstrip('/')}/code/extensions?focus=key"
+        yield Link(help_url, url=help_url, id="api-key-provider-link")
 
     def _compose_config_docs(self) -> ComposeResult:
-        yield Static("[dim]Learn more about Vibe configuration:[/]")
-        yield Horizontal(
-            NoMarkupStatic("→ ", classes="link-chevron"),
-            Link(CONFIG_DOCS_URL, url=CONFIG_DOCS_URL),
-            classes="link-row",
+        yield NoMarkupStatic(
+            "Learn more about Vibe configurations", id="config-docs-label"
         )
+        yield Link(CONFIG_DOCS_URL, url=CONFIG_DOCS_URL, id="config-docs-link")
 
     def compose(self) -> ComposeResult:
         provider_name = self.provider.name.capitalize()
+        help_name = (
+            MISTRAL_PROVIDER_HELP_NAME
+            if self.provider.name == MISTRAL_PROVIDER_NAME
+            else "your provider"
+        )
 
         self.input_widget = Input(
             password=True,
             id="key",
-            placeholder="Paste your API key here",
             validators=[Length(minimum=1, failure_description="No API key provided.")],
         )
+        input_box = Vertical(
+            self.input_widget, id="input-box", classes="onboarding-card"
+        )
+        input_box.border_title = "Paste API key"
 
-        with Vertical(id="api-key-outer"):
-            yield NoMarkupStatic("", classes="spacer")
-            yield Center(NoMarkupStatic("One last thing...", id="api-key-title"))
+        with Vertical(id="api-key-outer", classes="onboarding-content"):
             with Center():
-                with Vertical(id="api-key-content"):
-                    yield from self._compose_provider_link(provider_name)
+                with Vertical(id="api-key-panel", classes="onboarding-panel"):
+                    yield PetitChat(id="api-key-chat", classes="onboarding-chat")
                     yield NoMarkupStatic(
-                        "...and paste it below to finish the setup:", id="paste-hint"
+                        f"Get your {provider_name} API key",
+                        id="api-key-title",
+                        classes="onboarding-heading",
                     )
-                    yield Center(Horizontal(self.input_widget, id="input-box"))
+                    yield NoMarkupStatic(
+                        f"Visit {help_name} to generate or copy your Vibe key",
+                        id="api-key-subtitle",
+                    )
+                    yield from self._compose_provider_link()
+                    yield input_box
                     yield NoMarkupStatic("", id="feedback")
-            yield NoMarkupStatic("", classes="spacer")
-            yield Vertical(
-                Vertical(*self._compose_config_docs(), id="config-docs-group"),
-                id="config-docs-section",
-            )
+                    yield from self._compose_config_docs()
 
     def on_mount(self) -> None:
         self.input_widget.focus()
@@ -159,7 +108,7 @@ class ApiKeyScreen(OnboardingScreen):
         feedback.remove_class("error", "success")
 
         if event.validation_result.is_valid:
-            feedback.update("Press Enter to submit ↵")
+            feedback.update(shortcut_hint(f"Press {shortcut('Enter')} to submit ↵"))
             feedback.add_class("success")
             input_box.add_class("valid")
             return
@@ -174,11 +123,7 @@ class ApiKeyScreen(OnboardingScreen):
             self._save_and_finish(event.value)
 
     def _save_and_finish(self, api_key: str) -> None:
-        self.app.exit(
-            persist_api_key(
-                self.provider, api_key, entrypoint_metadata=self._entrypoint_metadata
-            )
-        )
+        self.app.exit(self.onboarding_app.persist_credentials(api_key))
 
     def on_mouse_up(self, event: MouseUp) -> None:
         copy_selection_to_clipboard(self.app)

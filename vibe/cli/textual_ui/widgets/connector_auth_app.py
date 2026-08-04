@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from enum import StrEnum, auto
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar, Protocol
 import webbrowser
 
+from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -15,13 +16,10 @@ from textual.widgets.option_list import Option
 from textual.worker import Worker
 
 from vibe.cli.clipboard import copy_text_to_clipboard
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint, with_status
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.tools.connectors import ConnectorRegistry
 
-if TYPE_CHECKING:
-    from vibe.core.tools.manager import ToolManager
-
-_HELP = "Backspace Back"
+_HELP = f"{shortcut('Backspace')} Back"
 _OPTION_PADDING = "  "
 
 
@@ -29,6 +27,12 @@ class _AuthOptionId(StrEnum):
     OPEN = auto()
     COPY = auto()
     SHOW = auto()
+
+
+class ConnectorAuthClient(Protocol):
+    async def connector_auth_url(self, name: str) -> str | None: ...
+
+    async def refresh_connector(self, name: str) -> int: ...
 
 
 class ConnectorAuthApp(Container):
@@ -49,16 +53,10 @@ class ConnectorAuthApp(Container):
             self.refreshed = refreshed
             self.connector_name = connector_name
 
-    def __init__(
-        self,
-        connector_name: str,
-        connector_registry: ConnectorRegistry,
-        tool_manager: ToolManager,
-    ) -> None:
+    def __init__(self, connector_name: str, mcp: ConnectorAuthClient) -> None:
         super().__init__(id="connectorauth-app")
         self._connector_name = connector_name
-        self._connector_registry = connector_registry
-        self._tool_manager = tool_manager
+        self._mcp = mcp
         self._auth_url: str | None = None
         self._auth_url_visible = False
         self._status_message: str | None = None
@@ -106,18 +104,10 @@ class ConnectorAuthApp(Container):
     # ── workers ──────────────────────────────────────────────────────
 
     async def _fetch_auth_url(self) -> str | None:
-        return await self._connector_registry.get_auth_url(self._connector_name)
+        return await self._mcp.connector_auth_url(self._connector_name)
 
     async def _refresh_connector(self) -> int:
-        """Refresh connector tools. Returns the number of tools discovered."""
-        from vibe.core.tools.manager import ToolManager
-
-        new_tools = await self._connector_registry.refresh_connector_async(
-            self._connector_name
-        )
-        if isinstance(self._tool_manager, ToolManager):
-            await self._tool_manager.integrate_connectors_async()
-        return len(new_tools)
+        return await self._mcp.refresh_connector(self._connector_name)
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.group == "auth_url" and event.worker.is_finished:
@@ -145,9 +135,9 @@ class ConnectorAuthApp(Container):
             option_list.add_option(Option("", disabled=True))
             option_list.add_option(
                 Option(
-                    Text(
-                        f"{_OPTION_PADDING}Press enter to open auth in your browser",
-                        no_wrap=True,
+                    shortcut_hint(
+                        f"{_OPTION_PADDING}Press {shortcut('Enter')} "
+                        "to open auth in your browser"
                     ),
                     id=_AuthOptionId.OPEN,
                 )
@@ -216,12 +206,12 @@ class ConnectorAuthApp(Container):
         detail = self.query_one("#connectorauth-detail", NoMarkupStatic)
         parts: list[str] = []
         if self._auth_url_visible and self._auth_url:
-            parts.append(self._auth_url)
+            parts.append(escape(self._auth_url))
             parts.append("")
-        parts.append("Once authenticated, press R to refresh")
-        detail.update("\n".join(parts))
+        parts.append(f"Once authenticated, press {shortcut('r')} to refresh")
+        detail.update(shortcut_hint("\n".join(parts)))
 
     def _set_help_text(self, text: str) -> None:
-        if self._status_message:
-            text = f"{self._status_message}  {text}"
-        self.query_one("#connectorauth-help", NoMarkupStatic).update(text)
+        self.query_one("#connectorauth-help", NoMarkupStatic).update(
+            with_status(self._status_message, shortcut_hint(text))
+        )

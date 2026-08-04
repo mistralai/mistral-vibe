@@ -1,6 +1,40 @@
 from __future__ import annotations
 
+from typing import Any
+
 from tests.backend.data import Chunk, JsonResponse, ResultData, Url
+
+
+def mistral_completion(
+    content: str,
+    *,
+    prompt_tokens: int = 100,
+    completion_tokens: int = 50,
+    tool_calls: list[dict[str, Any]] | None = None,
+) -> JsonResponse:
+    return {
+        "id": "cmpl_test",
+        "created": 1234567890,
+        "model": "devstral-latest",
+        "object": "chat.completion",
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls" if tool_calls else "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                },
+            }
+        ],
+    }
+
 
 SIMPLE_CONVERSATION_PARAMS: list[tuple[Url, JsonResponse, ResultData]] = [
     (
@@ -144,6 +178,32 @@ STREAMED_TOOL_CONVERSATION_PARAMS: list[tuple[Url, list[Chunk], list[ResultData]
                 ],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0},
             },
+            {"message": "", "usage": {"prompt_tokens": 100, "completion_tokens": 200}},
+        ],
+    )
+]
+
+
+# GLM models routed through the Mistral provider terminate the stream with a
+# usage-only chunk carrying `choices: []` instead of attaching usage to the
+# final content chunk.
+STREAMED_EMPTY_CHOICES_PARAMS: list[tuple[Url, list[Chunk], list[ResultData]]] = [
+    (
+        "https://api.mistral.ai",
+        [
+            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}',
+            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Some content"},"finish_reason":null}]}',
+            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}]}',
+            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"glm-4.6","choices":[],"usage":{"prompt_tokens":100,"total_tokens":300,"completion_tokens":200}}',
+            rb"data: [DONE]",
+        ],
+        [
+            {"message": "", "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
+            {
+                "message": "Some content",
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+            },
+            {"message": "", "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
             {"message": "", "usage": {"prompt_tokens": 100, "completion_tokens": 200}},
         ],
     )

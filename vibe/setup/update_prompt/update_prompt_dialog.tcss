@@ -1,0 +1,85 @@
+Screen {
+    align: center middle;
+    background: transparent 80%;
+}
+
+#update-dialog {
+    max-width: 70;
+    border: round $border-blurred;
+    background: transparent;
+    height: auto;
+    padding: 1;
+    padding-left: 5;
+    padding-right: 5;
+}
+
+#update-dialog-title {
+    width: 100%;
+    height: auto;
+    text-style: bold;
+    color: $primary;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#update-dialog-version {
+    width: 100%;
+    height: auto;
+    color: $foreground;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#update-options-container {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    margin-bottom: 1;
+}
+
+.update-option {
+    height: auto;
+    width: auto;
+    color: $foreground;
+    margin: 0 3;
+    content-align: center middle;
+}
+
+.update-option--active {
+    color: $foreground;
+    text-style: bold;
+}
+
+.update-option--inactive {
+    color: $foreground;
+}
+
+.update-dialog-help {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    text-align: center;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#update-dialog-spinner {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    align: center middle;
+}
+
+.petit-chat {
+    color: $foreground;
+    width: 12;
+}
+
+#update-dialog-status {
+    width: 100%;
+    height: auto;
+    color: $foreground;
+    text-align: center;
+}

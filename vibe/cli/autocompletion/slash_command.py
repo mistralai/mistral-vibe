@@ -3,7 +3,7 @@ from __future__ import annotations
 from textual import events
 
 from vibe.cli.autocompletion.base import CompletionResult, CompletionView
-from vibe.core.autocompletion.completers import CommandCompleter
+from vibe.cli.autocompletion.completers import CommandCompleter
 
 
 class SlashCommandController:
@@ -90,6 +90,6 @@ class SlashCommandController:
             return False
 
         start, end = replacement_range
-        self._view.replace_completion_range(start, end, alias)
+        self._view.replace_completion_range(start, end, alias, suppress_update=True)
         self.reset()
         return True

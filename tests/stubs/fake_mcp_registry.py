@@ -26,12 +26,14 @@ class FakeMCPRegistry(MCPRegistry):
     def set_tools(
         self, servers: list[MCPServer], tools: dict[str, type[BaseTool]]
     ) -> None:
+        self.sync_active_servers(servers)
         for srv in servers:
             key = self._server_key(srv)
             self._cache[key] = dict(tools)
 
     def get_tools(self, servers: list[MCPServer]) -> dict[str, type[BaseTool]]:
         result: dict[str, type[BaseTool]] = {}
+        self.sync_active_servers(servers)
         for srv in servers:
             key = self._server_key(srv)
             if key not in self._cache:

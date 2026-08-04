@@ -4,32 +4,27 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
+from textual.content import Content
 from textual.widgets import OptionList
 
-from tests.stubs.fake_connector_registry import FakeConnectorRegistry
+from vibe.cli.textual_ui.shortcut_hints import SHORTCUT_STYLE
 from vibe.cli.textual_ui.widgets.connector_auth_app import (
     ConnectorAuthApp,
     _AuthOptionId,
 )
-from vibe.core.tools.connectors.connector_registry import RemoteTool
 
 
-def _make_registry(*, with_disconnected: bool = True) -> FakeConnectorRegistry:
-    connectors: dict[str, list[RemoteTool]] = {
-        "gmail": [RemoteTool(name="search", description="Search emails")]
-    }
-    if with_disconnected:
-        connectors["slack"] = []
-    return FakeConnectorRegistry(connectors=connectors)
+class FakeMCPResource:
+    async def connector_auth_url(self, name: str) -> str | None:
+        return f"https://auth.example.com/{name}"
+
+    async def refresh_connector(self, name: str) -> int:
+        return 1 if name else 0
 
 
-def _make_app(
-    connector_name: str = "slack", registry: FakeConnectorRegistry | None = None
-) -> ConnectorAuthApp:
-    reg = registry or _make_registry()
-    mgr = MagicMock()
+def _make_app(connector_name: str = "slack") -> ConnectorAuthApp:
     return ConnectorAuthApp(
-        connector_name=connector_name, connector_registry=reg, tool_manager=mgr
+        connector_name=connector_name, mcp=cast(Any, FakeMCPResource())
     )
 
 
@@ -167,13 +162,15 @@ class TestAuthActions:
         app._toggle_url()
         assert app._auth_url_visible is True
         text = detail.update.call_args.args[0]
-        assert "https://auth.example.com/oauth" in text
-        assert "Once authenticated" in text
+        assert isinstance(text, Content)
+        assert "https://auth.example.com/oauth" in text.plain
+        assert "Once authenticated" in text.plain
 
         app._toggle_url()
         assert app._auth_url_visible is False
         text = detail.update.call_args.args[0]
-        assert "https://auth.example.com/oauth" not in text
+        assert isinstance(text, Content)
+        assert "https://auth.example.com/oauth" not in text.plain
 
     def test_toggle_url_noop_without_url(self) -> None:
         app = _make_app()
@@ -193,8 +190,10 @@ class TestDetailText:
         app._update_detail_text()
 
         text = detail.update.call_args.args[0]
-        assert "Once authenticated, press R to refresh" in text
-        assert "https://auth.example.com" not in text
+        assert isinstance(text, Content)
+        assert "Once authenticated, press r to refresh" in text.plain
+        assert "https://auth.example.com" not in text.plain
+        assert any(span.style == SHORTCUT_STYLE for span in text.spans)
 
     def test_with_url_visible(self) -> None:
         app = cast(Any, _make_app())
@@ -206,11 +205,13 @@ class TestDetailText:
         app._update_detail_text()
 
         text = detail.update.call_args.args[0]
-        assert "https://auth.example.com/oauth" in text
-        assert "Once authenticated, press R to refresh" in text
+        assert isinstance(text, Content)
+        assert "https://auth.example.com/oauth" in text.plain
+        assert "Once authenticated, press r to refresh" in text.plain
+        assert any(span.style == SHORTCUT_STYLE for span in text.spans)
         # URL should come before the footer
-        url_pos = text.index("https://auth.example.com/oauth")
-        footer_pos = text.index("Once authenticated")
+        url_pos = text.plain.index("https://auth.example.com/oauth")
+        footer_pos = text.plain.index("Once authenticated")
         assert url_pos < footer_pos
 
 

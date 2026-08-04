@@ -3,10 +3,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 from functools import lru_cache
-import os
 from pathlib import Path
-import sys
-from typing import ClassVar, Literal, final
+import shlex
+from typing import ClassVar, final
 
 from pydantic import BaseModel, Field
 from tree_sitter import Language, Node, Parser
@@ -22,6 +21,7 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.io_port import ShellCommandRequest
 from vibe.core.tools.permissions import (
     PermissionContext,
     PermissionScope,
@@ -31,6 +31,9 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import is_path_within_workdir
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows, kill_async_subprocess
+from vibe.core.utils.shell import spawn_shell_command, uses_posix_shell
+from vibe.utils.io import decode_safe
+from vibe.utils.tool_presentation import ToolEffectKind
 
 
 @lru_cache(maxsize=1)
@@ -54,6 +57,13 @@ def _extract_commands(command: str) -> list[str]:
                     and child.text is not None
                 ):
                     parts.append(child.text.decode("utf-8"))
+            # When a command has a heredoc (or other redirect), tree-sitter
+            # wraps it in a redirected_statement and the redirect is a sibling
+            # of the command node, not a child.  Without this check,
+            # `python3 << 'EOF'` is extracted as bare `python3` and
+            # incorrectly blocked by the standalone denylist.
+            if parts and node.parent and node.parent.type == "redirected_statement":
+                parts.append("<redirect>")
             if parts:
                 commands.append(" ".join(parts))
 
@@ -64,110 +74,146 @@ def _extract_commands(command: str) -> list[str]:
     return commands
 
 
-def _get_subprocess_encoding() -> str:
-    if sys.platform == "win32":
-        # Windows console uses OEM code page (e.g., cp850, cp1252)
-        import ctypes
+_READ_ONLY_COMMANDS_WINDOWS = ["dir", "findstr", "more", "type", "ver", "where"]
+_READ_ONLY_COMMANDS_POSIX = [
+    "basename",
+    "cat",
+    "comm",
+    "cut",
+    "date",
+    "diff",
+    "dirname",
+    "du",
+    "file",
+    "find",
+    "fmt",
+    "fold",
+    "grep",
+    "head",
+    "join",
+    "less",
+    "ls",
+    "md5sum",
+    "more",
+    "nl",
+    "od",
+    "paste",
+    "pwd",
+    "readlink",
+    "sha1sum",
+    "sha256sum",
+    "shasum",
+    "sort",
+    "stat",
+    "sum",
+    "tac",
+    "tail",
+    "tr",
+    "uname",
+    "uniq",
+    "wc",
+    "which",
+]
 
-        return f"cp{ctypes.windll.kernel32.GetOEMCP()}"
-    return "utf-8"
 
-
-def _get_shell_executable() -> str | None:
-    if is_windows():
-        return None
-    return os.environ.get("SHELL")
-
-
-def _get_base_env() -> dict[str, str]:
-    base_env = {**os.environ, "CI": "true", "NONINTERACTIVE": "1", "NO_TTY": "1"}
-
-    if is_windows():
-        base_env["GIT_PAGER"] = "more"
-        base_env["PAGER"] = "more"
-    else:
-        base_env["TERM"] = "dumb"
-        base_env["DEBIAN_FRONTEND"] = "noninteractive"
-        base_env["GIT_PAGER"] = "cat"
-        base_env["PAGER"] = "cat"
-        base_env["LESS"] = "-FX"
-        base_env["LC_ALL"] = "en_US.UTF-8"
-
-    return base_env
+def default_read_only_commands() -> list[str]:
+    return list(
+        _READ_ONLY_COMMANDS_POSIX if uses_posix_shell() else _READ_ONLY_COMMANDS_WINDOWS
+    )
 
 
 def _get_default_allowlist() -> list[str]:
     common = ["cd", "echo", "git diff", "git log", "git status", "tree", "whoami"]
-
-    if is_windows():
-        return common + ["dir", "findstr", "more", "type", "ver", "where"]
-    else:
-        return common + [
-            "cat",
-            "file",
-            "find",
-            "head",
-            "ls",
-            "pwd",
-            "stat",
-            "tail",
-            "uname",
-            "wc",
-            "which",
-        ]
+    return common + default_read_only_commands()
 
 
 def _get_default_denylist() -> list[str]:
     common = ["gdb", "pdb", "passwd"]
 
-    if is_windows():
+    if not uses_posix_shell():
         return common + ["cmd /k", "powershell -NoExit", "pwsh -NoExit", "notepad"]
-    else:
-        return common + [
-            "nano",
-            "vim",
-            "vi",
-            "emacs",
-            "bash -i",
-            "sh -i",
-            "zsh -i",
-            "fish -i",
-            "dash -i",
-            "screen",
-            "tmux",
-        ]
+
+    return common + [
+        "nano",
+        "vim",
+        "vi",
+        "emacs",
+        "bash -i",
+        "sh -i",
+        "zsh -i",
+        "fish -i",
+        "dash -i",
+        "screen",
+        "tmux",
+    ]
 
 
 def _get_default_denylist_standalone() -> list[str]:
     common = ["python", "python3", "ipython"]
 
-    if is_windows():
+    if not uses_posix_shell():
         return common + ["cmd", "powershell", "pwsh", "notepad"]
-    else:
-        return common + ["bash", "sh", "nohup", "vi", "vim", "emacs", "nano", "su"]
+
+    return common + ["bash", "sh", "nohup", "vi", "vim", "emacs", "nano", "su"]
 
 
-_PATH_COMMANDS = {
-    "cat",
-    "cd",
-    "chmod",
-    "chown",
-    "cp",
-    "head",
-    "ls",
-    "mkdir",
-    "mv",
-    "rm",
-    "stat",
-    "tail",
-    "touch",
-    "wc",
-}
+_MUTATING_PATH_COMMANDS = {"cd", "chmod", "chown", "cp", "mkdir", "mv", "rm", "touch"}
+
+# Every command whose path arguments must be checked against the workdir
+# boundary. This must stay a superset of the read-only allowlist: any command
+# that can be auto-allowed (see _is_unconditionally_allowed) has to have its
+# paths inspected first, otherwise `grep root /etc/passwd`, `od -c ~/.ssh/id_rsa`
+# and friends would read outside the workdir without ever requiring the
+# OUTSIDE_DIRECTORY permission.
+_PATH_COMMANDS = _MUTATING_PATH_COMMANDS | set(_READ_ONLY_COMMANDS_POSIX)
 
 _FIND_EXECUTION_PREDICATES = {"-exec", "-execdir", "-ok", "-okdir"}
+_MSYS_DRIVE_PATH_PREFIX_LEN = 2
 
 
-def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
+def _split_command_tokens(command: str) -> list[str]:
+    try:
+        if not is_windows():
+            return shlex.split(command)
+        # On Windows, escape="" keeps backslashes literal so paths like
+        # C:\Users\... survive tokenization; POSIX shlex would otherwise consume
+        # them as escape characters. This must stay Windows-only: on POSIX the
+        # backslash is a real escape and dropping it would corrupt path tokens.
+        lexer = shlex.shlex(command, posix=True)
+        lexer.whitespace_split = True
+        lexer.escape = ""
+        return list(lexer)
+    except ValueError:
+        return command.split()
+
+
+def _normalize_bash_path_token(token: str) -> str:
+    if not is_windows():
+        return token
+    if not token.startswith("/"):
+        return token
+    if len(token) < _MSYS_DRIVE_PATH_PREFIX_LEN:
+        return token
+
+    drive = token[1]
+    if not drive.isascii() or not drive.isalpha():
+        return token
+    if len(token) > _MSYS_DRIVE_PATH_PREFIX_LEN and token[
+        _MSYS_DRIVE_PATH_PREFIX_LEN
+    ] not in {"/", "\\"}:
+        return token
+
+    suffix = token[_MSYS_DRIVE_PATH_PREFIX_LEN:].replace("\\", "/")
+    return f"{drive.upper()}:{suffix or '/'}"
+
+
+def _collect_outside_dirs(
+    command_parts: list[str],
+    *,
+    cwd: Path | None = None,
+    project_roots: list[Path] | None = None,
+    scratchpad_dir: Path | None = None,
+) -> set[str]:
     """Collect parent directories referenced outside the workdir.
 
     Iterates file-manipulating commands (see _PATH_COMMANDS) and inspects
@@ -176,10 +222,24 @@ def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
     working directory, adds the parent directory (or the path itself when it is
     a directory) to the result set — suitable for building an OUTSIDE_DIRECTORY
     RequiredPermission.
+
+    Only invoked under POSIX-shell semantics (see resolve_permission), where "/"
+    is a valid path separator — including Git Bash on Windows, whose paths can
+    look like /c/Users/... even though os.sep is "\\" there. Git Bash also
+    accepts backslash-separated Windows paths.
     """
+    resolved_cwd = (cwd or Path.cwd()).resolve()
+
+    def is_within_workdir(path: str) -> bool:
+        if project_roots is None:
+            return is_path_within_workdir(path)
+        return is_path_within_workdir(
+            path, cwd=resolved_cwd, project_roots=project_roots
+        )
+
     dirs: set[str] = set()
     for part in command_parts:
-        tokens = part.split()
+        tokens = _split_command_tokens(part)
         command = tokens[0] if tokens else None
         if not command or command not in _PATH_COMMANDS:
             continue
@@ -192,20 +252,22 @@ def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
                 continue
             # Only consider tokens that look like paths
             if not (
-                token.startswith(os.sep)
+                token.startswith("/")
                 or token.startswith("~")
                 or token.startswith(".")
-                or os.sep in token
+                or "/" in token
+                or "\\" in token
             ):
                 continue
-            if is_path_within_workdir(token):
+            path_token = _normalize_bash_path_token(token)
+            if is_within_workdir(path_token):
                 continue
-            if is_scratchpad_path(token):
+            if is_scratchpad_path(path_token, scratchpad_dir=scratchpad_dir):
                 continue
             # Resolve relative / home-relative paths, then collect parent dir
-            resolved = Path(token).expanduser()
+            resolved = Path(path_token).expanduser()
             if not resolved.is_absolute():
-                resolved = Path.cwd() / resolved
+                resolved = resolved_cwd / resolved
             resolved = resolved.resolve()
             # For a directory target use the dir itself; for a file use its parent
             parent = str(resolved) if resolved.is_dir() else str(resolved.parent)
@@ -244,7 +306,7 @@ class BashToolConfig(BaseToolConfig):
 
 
 class BashArgs(BaseModel):
-    command: str
+    command: str = Field(description="The shell command to execute")
     timeout: int | None = Field(
         default=None, description="Override the default command timeout."
     )
@@ -261,11 +323,18 @@ class Bash(
     BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState],
     ToolUIData[BashArgs, BashResult],
 ):
-    description: ClassVar[str] = "Run a one-off bash command and capture its output."
+    effect_kind = ToolEffectKind.SHELL
+    shell_rollout: ClassVar[str | None] = "legacy"
 
     @classmethod
     def format_call_display(cls, args: BashArgs) -> ToolCallDisplay:
-        return ToolCallDisplay(summary=f"bash: {args.command}")
+        return ToolCallDisplay(
+            summary=f"bash: {args.command}",
+            verb="Running",
+            message=args.command,
+            settled_verb="Ran",
+            settled_message=args.command,
+        )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -274,7 +343,7 @@ class Bash(
                 success=False, message=event.error or event.skip_reason or "No result"
             )
 
-        return ToolResultDisplay(success=True, message=f"Ran {event.result.command}")
+        return ToolResultDisplay(success=True, verb="Ran", message=event.result.command)
 
     @classmethod
     def get_status_text(cls) -> str:
@@ -318,7 +387,7 @@ class Bash(
             return False
         base_command = parts[0]
         if len(parts) == 1:
-            command_name = os.path.basename(base_command)
+            command_name = Path(base_command).name
             if command_name in self.config.denylist_standalone:
                 return True
             if base_command in self.config.denylist_standalone:
@@ -426,7 +495,7 @@ class Bash(
         return required
 
     def resolve_permission(self, args: BashArgs) -> PermissionContext | None:
-        if is_windows():
+        if not uses_posix_shell():
             return None
 
         command_parts = _extract_commands(args.command)
@@ -439,7 +508,12 @@ class Bash(
             and guardrail_permission.permission == ToolPermission.NEVER
         ):
             return guardrail_permission
-        outside_dirs = _collect_outside_dirs(command_parts)
+        outside_dirs = _collect_outside_dirs(
+            command_parts,
+            cwd=self.cwd,
+            project_roots=self.harness_files.project_roots,
+            scratchpad_dir=self.scratchpad_dir,
+        )
         if (
             self._is_unconditionally_allowed(command_parts, outside_dirs)
             and not guardrail_permission
@@ -483,22 +557,42 @@ class Bash(
         timeout = args.timeout or self.config.default_timeout
         max_bytes = self.config.max_output_bytes
 
+        if (
+            ctx is not None
+            and ctx.tool_io is not None
+            and ctx.tool_io.supports_terminal
+            and ctx.session_id is not None
+        ):
+            try:
+                result = await ctx.tool_io.run_shell(
+                    ShellCommandRequest(
+                        session_id=ctx.session_id,
+                        tool_call_id=ctx.tool_call_id,
+                        command=args.command,
+                        cwd=self.cwd,
+                        timeout=timeout,
+                        max_output_bytes=max_bytes,
+                    )
+                )
+            except TimeoutError:
+                raise self._build_timeout_error(args.command, timeout) from None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise ToolError(
+                    f"Error running command {args.command!r}: {exc}"
+                ) from exc
+            yield self._build_result(
+                command=args.command,
+                stdout=result.stdout[:max_bytes],
+                stderr=result.stderr[:max_bytes],
+                returncode=result.returncode,
+            )
+            return
+
         proc = None
         try:
-            # start_new_session is Unix-only, on Windows it's ignored
-            kwargs: dict[Literal["start_new_session"], bool] = (
-                {} if is_windows() else {"start_new_session": True}
-            )
-
-            proc = await asyncio.create_subprocess_shell(
-                args.command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.DEVNULL,
-                env=_get_base_env(),
-                executable=_get_shell_executable(),
-                **kwargs,
-            )
+            proc = await spawn_shell_command(args.command, cwd=self.cwd)
 
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -508,14 +602,13 @@ class Bash(
                 await kill_async_subprocess(proc)
                 raise self._build_timeout_error(args.command, timeout)
 
-            encoding = _get_subprocess_encoding()
             stdout = (
-                stdout_bytes.decode(encoding, errors="replace")[:max_bytes]
+                decode_safe(stdout_bytes, from_subprocess=True).text[:max_bytes]
                 if stdout_bytes
                 else ""
             )
             stderr = (
-                stderr_bytes.decode(encoding, errors="replace")[:max_bytes]
+                decode_safe(stderr_bytes, from_subprocess=True).text[:max_bytes]
                 if stderr_bytes
                 else ""
             )

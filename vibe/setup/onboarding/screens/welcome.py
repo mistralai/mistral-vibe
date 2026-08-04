@@ -8,8 +8,10 @@ from textual.containers import Center, Vertical
 from textual.timer import Timer
 from textual.widgets import Static
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.setup.onboarding.base import OnboardingScreen
+from vibe.setup.onboarding.gradient_text import GRADIENT_COLORS, gradient_markup
 
 WELCOME_PREFIX = "Welcome to "
 WELCOME_HIGHLIGHT = "Mistral Vibe"
@@ -20,27 +22,7 @@ HIGHLIGHT_START = len(WELCOME_PREFIX)
 HIGHLIGHT_END = HIGHLIGHT_START + len(WELCOME_HIGHLIGHT)
 
 BUTTON_TEXT = "Press Enter ↵"
-
-GRADIENT_COLORS = [
-    "#ff6b00",
-    "#ff7b00",
-    "#ff8c00",
-    "#ff9d00",
-    "#ffae00",
-    "#ffbf00",
-    "#ffae00",
-    "#ff9d00",
-    "#ff8c00",
-    "#ff7b00",
-]
-
-
-def _apply_gradient(text: str, offset: int) -> str:
-    result = []
-    for i, char in enumerate(text):
-        color = GRADIENT_COLORS[(i + offset) % len(GRADIENT_COLORS)]
-        result.append(f"[bold {color}]{char}[/]")
-    return "".join(result)
+BUTTON_TEXT_MARKUP = f"Press {shortcut('Enter')} ↵"
 
 
 class WelcomeScreen(OnboardingScreen):
@@ -50,10 +32,11 @@ class WelcomeScreen(OnboardingScreen):
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
-    NEXT_SCREEN = "api_key"
+    NEXT_SCREEN = "theme_selection"
 
-    def __init__(self) -> None:
+    def __init__(self, next_screen: str = "theme_selection") -> None:
         super().__init__()
+        self.NEXT_SCREEN = next_screen
         self._char_index = 0
         self._gradient_offset = 0
         self._typing_done = False
@@ -85,7 +68,7 @@ class WelcomeScreen(OnboardingScreen):
 
         prefix = text[:HIGHLIGHT_START]
         highlight_len = min(length, HIGHLIGHT_END) - HIGHLIGHT_START
-        highlight = _apply_gradient(
+        highlight = gradient_markup(
             WELCOME_HIGHLIGHT[:highlight_len], self._gradient_offset
         )
 
@@ -125,11 +108,14 @@ class WelcomeScreen(OnboardingScreen):
                 self._button_typing_timer.stop()
             return
         self._button_char_index += 1
+        if self._button_char_index >= len(BUTTON_TEXT):
+            self._enter_hint.update(shortcut_hint(BUTTON_TEXT_MARKUP))
+            return
         self._enter_hint.update(BUTTON_TEXT[: self._button_char_index])
 
     def _animate_gradient(self) -> None:
         self._gradient_offset = (self._gradient_offset + 1) % len(GRADIENT_COLORS)
-        self._welcome_text.update(self._render_text(self._char_index))
+        self._welcome_text.update(self._render_text(self._char_index), layout=False)
 
     def action_next(self) -> None:
         if self._typing_done:

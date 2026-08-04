@@ -4,16 +4,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalGroup
 from textual.reactive import reactive
 from textual.widgets import Static
 
 from vibe import __version__
+from vibe.app_server.config import ConfigView
+from vibe.app_server.models import MCPSourceKind, MCPSourceStatus, MCPState
 from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import VibeConfig
-from vibe.core.skills.manager import SkillManager
-from vibe.core.tools.mcp.registry import MCPRegistry
 
 
 def _pluralize(count: int, singular: str) -> str:
@@ -24,9 +23,12 @@ def _pluralize(count: int, singular: str) -> str:
 class BannerState:
     active_model: str = ""
     models_count: int = 0
-    mcp_servers_count: int = 0
-    connectors_count: int = 0
+    mcp_servers_enabled: int = 0
+    mcp_servers_total: int = 0
+    connectors_connected: int = 0
+    connectors_total: int = 0
     skills_count: int = 0
+    hooks_count: int = 0
     plan_description: str | None = None
 
 
@@ -35,25 +37,29 @@ class Banner(Static):
 
     def __init__(
         self,
-        config: VibeConfig,
-        skill_manager: SkillManager,
-        mcp_registry: MCPRegistry,
-        connectors_count: int = 0,
+        config: ConfigView,
+        skills_count: int,
+        mcp: MCPState | None = None,
+        connectors_connected: int = 0,
+        connectors_total: int = 0,
+        hooks_count: int = 0,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.can_focus = False
         self._initial_state = self._build_state(
             config=config,
-            skill_manager=skill_manager,
-            mcp_registry=mcp_registry,
-            connectors_count=connectors_count,
+            skills_count=skills_count,
+            mcp=mcp,
+            connectors_connected=connectors_connected,
+            connectors_total=connectors_total,
+            hooks_count=hooks_count,
             plan_description=None,
         )
         self._animated = not config.disable_welcome_banner_animation
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="banner-container"):
+        with VerticalGroup(id="banner-container"):
             yield PetitChat(animate=self._animated)
 
             with Vertical(id="banner-info"):
@@ -76,11 +82,15 @@ class Banner(Static):
     def watch_state(self) -> None:
         if not self.is_attached:
             return
-        self.query_one("#banner-model", NoMarkupStatic).update(self.state.active_model)
-        self.query_one("#banner-meta-counts", NoMarkupStatic).update(
-            self._format_meta_counts()
-        )
-        self.query_one("#banner-user-plan", NoMarkupStatic).update(self._format_plan())
+        widgets = {widget.id: widget for widget in self.query(NoMarkupStatic)}
+        model = widgets.get("banner-model")
+        counts = widgets.get("banner-meta-counts")
+        plan = widgets.get("banner-user-plan")
+        if model is None or counts is None or plan is None:
+            return
+        model.update(self.state.active_model)
+        counts.update(self._format_meta_counts())
+        plan.update(self._format_plan())
 
     def freeze_animation(self) -> None:
         if self._animated:
@@ -88,43 +98,83 @@ class Banner(Static):
 
     def set_state(
         self,
-        config: VibeConfig,
-        skill_manager: SkillManager,
-        mcp_registry: MCPRegistry,
-        connectors_count: int = 0,
+        config: ConfigView,
+        skills_count: int,
+        mcp: MCPState | None = None,
+        connectors_connected: int = 0,
+        connectors_total: int = 0,
+        hooks_count: int = 0,
         plan_description: str | None = None,
     ) -> None:
         self.state = self._build_state(
-            config, skill_manager, mcp_registry, connectors_count, plan_description
+            config=config,
+            skills_count=skills_count,
+            mcp=mcp,
+            connectors_connected=connectors_connected,
+            connectors_total=connectors_total,
+            hooks_count=hooks_count,
+            plan_description=plan_description,
         )
 
     @staticmethod
     def _build_state(
-        config: VibeConfig,
-        skill_manager: SkillManager,
-        mcp_registry: MCPRegistry,
-        connectors_count: int = 0,
+        config: ConfigView,
+        skills_count: int,
+        mcp: MCPState | None = None,
+        connectors_connected: int = 0,
+        connectors_total: int = 0,
+        hooks_count: int = 0,
         plan_description: str | None = None,
     ) -> BannerState:
-        enabled_servers = [s for s in config.mcp_servers if not s.disabled]
-        mcp_count = mcp_registry.count_loaded(enabled_servers)
-
-        active_model = config.get_active_model()
+        servers = (
+            []
+            if mcp is None
+            else [
+                source for source in mcp.sources if source.kind is MCPSourceKind.SERVER
+            ]
+        )
+        enabled_servers = [
+            source
+            for source in servers
+            if source.status is not MCPSourceStatus.DISABLED
+        ]
+        active_model = config.active_model
         return BannerState(
             active_model=f"{active_model.alias}[{active_model.thinking}]",
             models_count=len(config.models),
-            mcp_servers_count=mcp_count,
-            connectors_count=connectors_count,
-            skills_count=skill_manager.custom_skills_count,
+            mcp_servers_enabled=len(enabled_servers),
+            mcp_servers_total=len(servers),
+            connectors_connected=connectors_connected,
+            connectors_total=connectors_total,
+            skills_count=skills_count,
+            hooks_count=hooks_count,
             plan_description=plan_description,
         )
 
     def _format_meta_counts(self) -> str:
         parts = [_pluralize(self.state.models_count, "model")]
-        if self.state.connectors_count > 0:
-            parts.append(_pluralize(self.state.connectors_count, "connector"))
-        parts.append(_pluralize(self.state.mcp_servers_count, "MCP server"))
+        # Format as x/y for MCP servers and connectors (only when enabled != total)
+        if self.state.connectors_total > 0:
+            if self.state.connectors_connected != self.state.connectors_total:
+                connector_str = (
+                    f"{self.state.connectors_connected}/{self.state.connectors_total} connector"
+                    + ("s" if self.state.connectors_total != 1 else "")
+                )
+            else:
+                connector_str = _pluralize(self.state.connectors_connected, "connector")
+            parts.append(connector_str)
+        # Always show MCP servers count (even if 0/0)
+        if self.state.mcp_servers_enabled != self.state.mcp_servers_total:
+            mcp_str = (
+                f"{self.state.mcp_servers_enabled}/{self.state.mcp_servers_total} MCP server"
+                + ("s" if self.state.mcp_servers_total != 1 else "")
+            )
+        else:
+            mcp_str = _pluralize(self.state.mcp_servers_enabled, "MCP server")
+        parts.append(mcp_str)
         parts.append(_pluralize(self.state.skills_count, "skill"))
+        if self.state.hooks_count > 0:
+            parts.append(_pluralize(self.state.hooks_count, "hook"))
         return " · ".join(parts)
 
     def _format_plan(self) -> str:

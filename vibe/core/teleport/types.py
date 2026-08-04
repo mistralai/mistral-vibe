@@ -1,15 +1,28 @@
 from __future__ import annotations
 
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from vibe.core.telemetry.types import AgentEntrypoint
 from vibe.core.types import BaseEvent
 
-
-class TeleportAuthRequiredEvent(BaseEvent):
-    oauth_url: str
-    message: str | None = None
+TELEPORT_MESSAGE_CONTEXT_MAX_LENGTH = 8_000
 
 
-class TeleportAuthCompleteEvent(BaseEvent):
-    pass
+class TeleportMessageContextSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["teleport"] = "teleport"
+    entrypoint: AgentEntrypoint = "unknown"
+    client_name: str | None = Field(default=None, serialization_alias="clientName")
+
+
+class TeleportMessageContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=TELEPORT_MESSAGE_CONTEXT_MAX_LENGTH)
+    source: TeleportMessageContextSource | None = None
 
 
 class TeleportStartingWorkflowEvent(BaseEvent):
@@ -17,6 +30,10 @@ class TeleportStartingWorkflowEvent(BaseEvent):
 
 
 class TeleportCheckingGitEvent(BaseEvent):
+    pass
+
+
+class TeleportSummarizingContextEvent(BaseEvent):
     pass
 
 
@@ -33,27 +50,16 @@ class TeleportPushingEvent(BaseEvent):
     pass
 
 
-class TeleportWaitingForGitHubEvent(BaseEvent):
-    message: str | None = None
-
-
-class TeleportFetchingUrlEvent(BaseEvent):
-    pass
-
-
 class TeleportCompleteEvent(BaseEvent):
     url: str
 
 
 type TeleportYieldEvent = (
-    TeleportAuthRequiredEvent
-    | TeleportAuthCompleteEvent
-    | TeleportCheckingGitEvent
+    TeleportCheckingGitEvent
+    | TeleportSummarizingContextEvent
     | TeleportPushRequiredEvent
     | TeleportPushingEvent
     | TeleportStartingWorkflowEvent
-    | TeleportWaitingForGitHubEvent
-    | TeleportFetchingUrlEvent
     | TeleportCompleteEvent
 )
 

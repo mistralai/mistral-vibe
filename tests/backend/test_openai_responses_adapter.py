@@ -19,13 +19,13 @@ import respx
 from tests.backend.data import Chunk, JsonResponse, ResultData, Url
 from tests.backend.data.openai_responses import (
     COMMENTARY_CONVERSATION_PARAMS,
-    OPENAI_RESPONSES_TEST_BASE_URL,
     SIMPLE_CONVERSATION_PARAMS,
     STREAMED_COMMENTARY_CONVERSATION_PARAMS,
     STREAMED_SIMPLE_CONVERSATION_PARAMS,
     STREAMED_TOOL_CONVERSATION_PARAMS,
     TOOL_CONVERSATION_PARAMS,
 )
+from tests.constants import OPENAI_BASE_URL, OPENAI_RESPONSES_PATH
 from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.llm.backend.generic import GenericBackend
 from vibe.core.llm.backend.openai_responses import OpenAIResponsesAdapter
@@ -55,7 +55,7 @@ def model():
     return _make_model()
 
 
-def _make_provider(base_url: Url = OPENAI_RESPONSES_TEST_BASE_URL) -> ProviderConfig:
+def _make_provider(base_url: Url = OPENAI_BASE_URL) -> ProviderConfig:
     return ProviderConfig(
         name="openai",
         api_base=f"{base_url}/v1",
@@ -68,7 +68,7 @@ def _make_model() -> ModelConfig:
     return ModelConfig(name="gpt-4o", provider="openai", alias="gpt-4o")
 
 
-def _make_backend(base_url: Url = OPENAI_RESPONSES_TEST_BASE_URL) -> GenericBackend:
+def _make_backend(base_url: Url = OPENAI_BASE_URL) -> GenericBackend:
     return GenericBackend(provider=_make_provider(base_url))
 
 
@@ -139,7 +139,7 @@ class TestPrepareRequest:
             {"role": "user", "content": "Hi"},
         ]
 
-    def test_consecutive_user_messages_are_merged(self, adapter, provider):
+    def test_consecutive_user_messages_are_preserved(self, adapter, provider):
         payload = _prepare(
             adapter,
             provider,
@@ -148,7 +148,10 @@ class TestPrepareRequest:
                 LLMMessage(role=Role.user, content="Again"),
             ],
         )
-        assert payload["input"] == [{"role": "user", "content": "Hi\n\nAgain"}]
+        assert payload["input"] == [
+            {"role": "user", "content": "Hi"},
+            {"role": "user", "content": "Again"},
+        ]
 
     def test_multiple_system_messages_are_preserved(self, adapter, provider):
         payload = _prepare(
@@ -417,6 +420,27 @@ class TestParseNonStreamingResponse:
         assert chunk.message.role == Role.assistant
         assert chunk.usage.prompt_tokens == 10
         assert chunk.usage.completion_tokens == 5
+        assert chunk.usage.cached_tokens == 0
+
+    def test_cached_tokens_parsed_from_input_details(self, adapter, provider):
+        data = {
+            "id": "resp_cached",
+            "object": "response",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "Hi"}],
+                    "role": "assistant",
+                }
+            ],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 5,
+                "input_tokens_details": {"cached_tokens": 64},
+            },
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.usage.cached_tokens == 64
 
     def test_function_call_response(self, adapter, provider):
         data = {
@@ -1226,7 +1250,7 @@ class TestGenericBackendIntegration:
         self, base_url: Url, json_response: JsonResponse, result_data: ResultData
     ):
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/responses").mock(
+            mock_api.post(OPENAI_RESPONSES_PATH).mock(
                 return_value=httpx.Response(status_code=200, json=json_response)
             )
             backend = _make_backend(base_url)
@@ -1258,7 +1282,7 @@ class TestGenericBackendIntegration:
         self, base_url: Url, chunks: list[Chunk], result_data: list[ResultData]
     ):
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/responses").mock(
+            mock_api.post(OPENAI_RESPONSES_PATH).mock(
                 return_value=httpx.Response(
                     status_code=200,
                     stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),
@@ -1286,9 +1310,9 @@ class TestGenericBackendIntegration:
 
     @pytest.mark.asyncio
     async def test_streaming_payload_includes_stream_flag(self):
-        base_url = OPENAI_RESPONSES_TEST_BASE_URL
+        base_url = OPENAI_BASE_URL
         with respx.mock(base_url=base_url) as mock_api:
-            route = mock_api.post("/v1/responses").mock(
+            route = mock_api.post(OPENAI_RESPONSES_PATH).mock(
                 return_value=httpx.Response(
                     status_code=200,
                     stream=httpx.ByteStream(

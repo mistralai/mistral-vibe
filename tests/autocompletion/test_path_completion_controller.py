@@ -6,8 +6,8 @@ import pytest
 from textual import events
 
 from vibe.cli.autocompletion.base import CompletionResult, CompletionView
+from vibe.cli.autocompletion.completers import PathCompleter
 from vibe.cli.autocompletion.path_completion import PathCompletionController
-from vibe.core.autocompletion.completers import PathCompleter
 
 
 class StubView(CompletionView):
@@ -24,7 +24,9 @@ class StubView(CompletionView):
     def clear_completion_suggestions(self) -> None:
         self.clears += 1
 
-    def replace_completion_range(self, start: int, end: int, replacement: str) -> None:
+    def replace_completion_range(
+        self, start: int, end: int, replacement: str, *, suppress_update: bool = False
+    ) -> None:
         self.replacements.append((start, end, replacement))
 
 

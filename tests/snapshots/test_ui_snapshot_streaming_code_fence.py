@@ -35,13 +35,13 @@ class StreamingCodeFenceApp(BaseSnapshotTestApp):
         fake_backend = FakeBackend(
             chunks=[mock_llm_chunk(content=chunk) for chunk in _CHUNKS]
         )
-        super().__init__(config=config)
-        self.agent_loop = build_test_agent_loop(
+        agent_loop = build_test_agent_loop(
             config=config,
             agent_name=self._current_agent_name,
             enable_streaming=True,
             backend=fake_backend,
         )
+        super().__init__(agent_loop=agent_loop)
 
 
 def test_snapshot_streaming_code_fence_preserved(snap_compare: SnapCompare) -> None:

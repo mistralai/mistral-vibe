@@ -1,62 +1,184 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+import asyncio
+from pathlib import Path
+from typing import TYPE_CHECKING, ClassVar, cast
 
-from vibe.core.hooks.models import HookMessageSeverity
+from vibe.app_server.models import (
+    FileImageSource,
+    HookSeverity,
+    ImageAttachment,
+    InlineImageSource,
+)
+from vibe.observability.logging import logger
+from vibe.utils.io import read_safe_async
 
 if TYPE_CHECKING:
     from vibe.cli.textual_ui.app import ChatScroll
 
+
+from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Static
+from textual.content import Content
+from textual.css.query import NoMatches
+from textual.geometry import Size
+from textual.reactive import reactive
+from textual.widget import Widget
+from textual.widgets import Link, Markdown, Static
 from textual.widgets._markdown import MarkdownStream
+from watchfiles import awatch
 
-from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown as Markdown
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
+from vibe.cli.textual_ui.widgets.collapsible import (
+    ClickWithoutDragMixin,
+    OverflowCollapsibleSection,
+    lines_label,
+)
+from vibe.cli.textual_ui.widgets.no_markup_static import (
+    NoMarkupStatic,
+    NonSelectableStatic,
+)
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
-
-
-class NonSelectableStatic(NoMarkupStatic):
-    @property
-    def text_selection(self) -> None:
-        return None
-
-    @text_selection.setter
-    def text_selection(self, value: Any) -> None:
-        pass
-
-    def get_selection(self, selection: Any) -> None:
-        return None
+from vibe.cli.textual_ui.widgets.tool_widgets import _clean_output
 
 
 class ExpandingBorder(NonSelectableStatic):
-    def render(self) -> str:
+    def __init__(self, *, classes: str | None = None) -> None:
+        super().__init__(classes=classes)
+        self._row_colors: dict[int, str] = {}
+
+    def set_row_colors(self, colors: dict[int, str]) -> None:
+        self._row_colors = colors
+        self.refresh()
+
+    # The border is always a single glyph column. Returning a constant avoids the
+    # default measurement, which renders the widget (reading self.size) during
+    # arrange and forces an O(N) compositor map rebuild on every layout pass.
+    def get_content_width(self, container: Size, viewport: Size) -> int:
+        return 1
+
+    def render(self) -> Content | str:
         height = self.size.height
-        return "\n".join(["⎢"] * (height - 1) + ["⎣"])
+        chars = ["⎢"] * (height - 1) + ["⎣"]
+        if not self._row_colors:
+            return "\n".join(chars)
+
+        rendered = Content("")
+        for i, ch in enumerate(chars):
+            if i > 0:
+                rendered += Content("\n")
+            if color := self._row_colors.get(i):
+                rendered += Content.styled(ch, color)
+            else:
+                rendered += Content(ch)
+        return rendered
 
     def on_resize(self) -> None:
         self.refresh()
 
 
+# Mimic a border bottom with this component in order to have dimmed colors in ANSI themes
+# Move back to border when Textual supports dimmed borders or foreground-muted in ANSI themes
+class ExpandingSeparator(NonSelectableStatic):
+    def render(self) -> str:
+        return "─" * max(self.size.width, 1)
+
+    def on_resize(self) -> None:
+        self.refresh()
+
+
+def _attachment_label(attachment: ImageAttachment) -> str:
+    alias_path = Path(attachment.alias).expanduser()
+    if not alias_path.is_absolute():
+        return attachment.alias
+    return _format_display_path(alias_path)
+
+
+def _format_display_path(path: Path) -> str:
+    home = Path.home()
+    try:
+        relative = path.relative_to(home)
+    except ValueError:
+        return str(path)
+    if str(relative) == ".":
+        return "~"
+    return f"~/{relative}"
+
+
+class UserMessageAttachment(Horizontal):
+    def __init__(self, attachment: ImageAttachment) -> None:
+        super().__init__(classes="user-message-attachment-line")
+        self._attachment = attachment
+
+    def compose(self) -> ComposeResult:
+        yield NoMarkupStatic(
+            "└ attached image: ", classes="user-message-attachment-label"
+        )
+        match self._attachment.source:
+            case FileImageSource(path=path):
+                image_path = Path(path)
+                yield Link(
+                    _attachment_label(self._attachment),
+                    url=image_path.as_uri(),
+                    classes="user-message-attachment-link",
+                )
+            case InlineImageSource():
+                # Inline images have no file on disk, so there's nothing to link.
+                yield NoMarkupStatic(
+                    _attachment_label(self._attachment),
+                    classes="user-message-attachment-link",
+                )
+
+
 class UserMessage(Static):
+    PROMPT_CHAR: ClassVar[str] = ">"
+    SHOW_SEPARATOR: ClassVar[bool] = True
+
     def __init__(
-        self, content: str, pending: bool = False, message_index: int | None = None
+        self,
+        content: str,
+        pending: bool = False,
+        history_entry_id: str | None = None,
+        images: list[ImageAttachment] | None = None,
     ) -> None:
         super().__init__()
         self.add_class("user-message")
         self._content = content
         self._pending = pending
-        self.message_index: int | None = message_index
+        self._images = images or []
+        self.history_entry_id = history_entry_id
 
     def get_content(self) -> str:
         return self._content
 
+    @property
+    def pending(self) -> bool:
+        return self._pending
+
     def compose(self) -> ComposeResult:
-        with Horizontal(classes="user-message-container"):
-            yield NoMarkupStatic(self._content, classes="user-message-content")
+        with Vertical(classes="user-message-wrapper"):
+            with Horizontal(classes="user-message-container"):
+                yield NonSelectableStatic(
+                    f"{self.PROMPT_CHAR} ", classes="user-message-prompt"
+                )
+                yield NoMarkupStatic(self._content, classes="user-message-content")
+            if self._images:
+                with Vertical(classes="user-message-attachments"):
+                    for image in self._images:
+                        yield UserMessageAttachment(image)
+            if self.SHOW_SEPARATOR:
+                yield ExpandingSeparator(classes="user-message-separator")
             if self._pending:
                 self.add_class("pending")
+
+    @staticmethod
+    def _attachment_label(attachment: ImageAttachment) -> str:
+        return _attachment_label(attachment)
+
+    @staticmethod
+    def _format_display_path(path: Path) -> str:
+        return _format_display_path(path)
 
     async def set_pending(self, pending: bool) -> None:
         if pending == self._pending:
@@ -69,6 +191,54 @@ class UserMessage(Static):
             return
 
         self.remove_class("pending")
+
+    def set_show_separator(self, show: bool) -> None:
+        self.set_class(not show, "no-separator")
+
+    def set_follows_previous(self, follows: bool) -> None:
+        self.set_class(follows, "follows-user")
+
+
+class QueueHeaderMessage(Static):
+    DEFAULT_LABEL = "» Queued"
+    PAUSED_LABEL = f"» Queued — press {shortcut('Enter')} to send, type to add"
+
+    def __init__(self, *, paused: bool = False) -> None:
+        super().__init__()
+        self.add_class("queue-header-message")
+        self._paused = paused
+        self._label_widget: NoMarkupStatic | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="queue-header-container"):
+            self._label_widget = NoMarkupStatic(
+                shortcut_hint(self._current_label()), classes="queue-header-content"
+            )
+            yield self._label_widget
+            yield ExpandingSeparator(classes="queue-header-separator")
+
+    def set_paused(self, paused: bool) -> None:
+        if paused == self._paused:
+            return
+        self._paused = paused
+        if self._label_widget is not None:
+            self._label_widget.update(shortcut_hint(self._current_label()))
+
+    def _current_label(self) -> str:
+        return self.PAUSED_LABEL if self._paused else self.DEFAULT_LABEL
+
+
+class SlashCommandMessage(UserMessage):
+    PROMPT_CHAR = "/"
+    SHOW_SEPARATOR = False
+
+    def __init__(self, content: str) -> None:
+        super().__init__(content)
+        self.add_class("slash-command-message")
+
+
+class TeleportUserMessage(UserMessage):
+    PROMPT_CHAR = "&"
 
 
 class StreamingMessageBase(Static):
@@ -159,46 +329,60 @@ class AssistantMessage(StreamingMessageBase):
         yield markdown
 
 
-class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
+class ReasoningMessage(ClickWithoutDragMixin, SpinnerMixin, StreamingMessageBase):
     SPINNER_TYPE = SpinnerType.PULSE
     SPINNING_TEXT = "Thinking"
     COMPLETED_TEXT = "Thought"
 
-    def __init__(self, content: str, collapsed: bool = True) -> None:
+    def __init__(
+        self, content: str, collapsed: bool = True, *, completed: bool = False
+    ) -> None:
         super().__init__(content)
         self.add_class("reasoning-message")
         self.collapsed = collapsed
         self._indicator_widget: Static | None = None
-        self._triangle_widget: Static | None = None
+        self._header_widget: Horizontal | None = None
         self.init_spinner()
+        self._is_spinning = not completed
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="reasoning-message-wrapper"):
-            with Horizontal(classes="reasoning-message-header"):
+            self._header_widget = Horizontal(classes="reasoning-message-header")
+            with self._header_widget:
                 self._indicator_widget = NonSelectableStatic(
-                    self._spinner.current_frame(), classes="reasoning-indicator"
+                    self._spinner.current_frame() if self._is_spinning else "■",
+                    classes="reasoning-indicator",
                 )
                 yield self._indicator_widget
                 self._status_text_widget = NoMarkupStatic(
-                    self.SPINNING_TEXT, classes="reasoning-collapsed-text"
+                    self.SPINNING_TEXT if self._is_spinning else self.COMPLETED_TEXT,
+                    classes="reasoning-collapsed-text",
                 )
                 yield self._status_text_widget
-                self._triangle_widget = NonSelectableStatic(
-                    "▶" if self.collapsed else "▼", classes="reasoning-triangle"
-                )
-                yield self._triangle_widget
             markdown = Markdown("", classes="reasoning-message-content")
             markdown.display = not self.collapsed
             self._markdown = markdown
             yield markdown
 
     def on_mount(self) -> None:
-        self.start_spinner_timer()
+        if self._is_spinning:
+            self.start_spinner_timer()
 
     def on_resize(self) -> None:
         self.refresh_spinner()
 
-    async def on_click(self) -> None:
+    def stop_spinning(self, success: bool = True) -> None:
+        super().stop_spinning(success)
+        if self._indicator_widget:
+            self._indicator_widget.remove_class("success", "error")
+            self._indicator_widget.update("⏵" if self.collapsed else "⏷")
+
+    def _is_click_on_toggle(self, event: events.Click) -> bool:
+        return self._is_click_within(event, self._header_widget)
+
+    async def on_click(self, event: events.Click) -> None:
+        if self._click_is_passive(event):
+            return
         await self._toggle_collapsed()
 
     async def _toggle_collapsed(self) -> None:
@@ -212,8 +396,8 @@ class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
             return
 
         self.collapsed = collapsed
-        if self._triangle_widget:
-            self._triangle_widget.update("▶" if collapsed else "▼")
+        if self._indicator_widget and not self._is_spinning:
+            self._indicator_widget.update("⏵" if collapsed else "⏷")
         if self._markdown:
             self._markdown.display = not collapsed
             if not collapsed and self._content:
@@ -239,10 +423,29 @@ class UserCommandMessage(Static):
                 yield Markdown(self._content)
 
 
+VSCODE_EXTENSION_URI = "vscode:extension/mistralai.mistral-vibe-code"
+VSCODE_EXTENSION_LINK_LABEL = "VS Code extension"
+VSCODE_EXTENSION_PROMO_STANDALONE = f"We now have a [{VSCODE_EXTENSION_LINK_LABEL}]({VSCODE_EXTENSION_URI}) with a rich UI. Check it out!"
+VSCODE_EXTENSION_PROMO_WHATS_NEW_SUFFIX = (
+    f"\n\n_Btw, we also have a new [{VSCODE_EXTENSION_LINK_LABEL}]"
+    f"({VSCODE_EXTENSION_URI}). Check it out!_"
+)
+
+
 class WhatsNewMessage(Static):
     def __init__(self, content: str) -> None:
         super().__init__()
         self.add_class("whats-new-message")
+        self._content = content
+
+    def compose(self) -> ComposeResult:
+        yield Markdown(self._content)
+
+
+class VscodeExtensionPromoMessage(Static):
+    def __init__(self, content: str = VSCODE_EXTENSION_PROMO_STANDALONE) -> None:
+        super().__init__()
+        self.add_class("vscode-extension-promo-message")
         self._content = content
 
     def compose(self) -> ComposeResult:
@@ -263,8 +466,9 @@ class InterruptMessage(Static):
             )
 
 
-class BashOutputMessage(SpinnerMixin, Static):
+class BashOutputMessage(ClickWithoutDragMixin, SpinnerMixin, Static):
     SPINNER_TYPE = SpinnerType.PULSE
+    PREVIEW_LINES = 20
 
     def __init__(
         self,
@@ -283,18 +487,65 @@ class BashOutputMessage(SpinnerMixin, Static):
         self._output = output.rstrip("\n")
         self._exit_code = exit_code
         self._pending = pending
+        self._queued = False
         self._output_widget: NoMarkupStatic | None = None
+        self._overflow_widget: NoMarkupStatic | None = None
+        self._section: OverflowCollapsibleSection | None = None
         self._output_container: Horizontal | None = None
         self._prompt_widget: NonSelectableStatic | None = None
         self._indicator_widget: Static | None = None
 
+    QUEUED_PROMPT = "! "
+
+    def _clean_lines(self) -> list[str]:
+        # Sanitize captured output (ANSI escapes, \r redraws, control bytes)
+        # before splitting so it renders terminal-safe and line counts match.
+        return _clean_output(self._output).splitlines()
+
+    def _preview_text(self) -> str:
+        return "\n".join(self._clean_lines()[: self.PREVIEW_LINES])
+
+    def _overflow_text(self) -> str:
+        return "\n".join(self._clean_lines()[self.PREVIEW_LINES :])
+
+    def _overflow_count(self) -> int:
+        return max(0, len(self._clean_lines()) - self.PREVIEW_LINES)
+
+    def _refresh_output_widgets(self) -> None:
+        count = self._overflow_count()
+        if self._output_widget:
+            self._output_widget.update(self._preview_text())
+        if self._overflow_widget:
+            self._overflow_widget.update(self._overflow_text())
+        if self._section:
+            self._section.display = count > 0
+            self._section.set_collapsed_label(lines_label(count, prefix="+"))
+
     def _update_spinner_frame(self) -> None:
-        if not self._is_spinning or not self._prompt_widget:
+        if not self._is_spinning or not self._prompt_widget or self._queued:
             return
-        self._prompt_widget.update(f"{self._spinner.next_frame()} ")
+        # Frames are all the same size, so skip the relayout.
+        self._prompt_widget.update(f"{self._spinner.next_frame()} ", layout=False)
 
     def on_mount(self) -> None:
+        if self._pending and not self._queued:
+            self.start_spinner_timer()
+
+    def set_queued(self, queued: bool) -> None:
+        if queued == self._queued:
+            return
+        self._queued = queued
+        if queued:
+            self.add_class("queued")
+            self.stop_spinning()
+            if self._prompt_widget is not None:
+                self._prompt_widget.update(self.QUEUED_PROMPT)
+            return
+        self.remove_class("queued")
         if self._pending:
+            if self._prompt_widget is not None:
+                self._prompt_widget.update(f"{self._spinner.current_frame()} ")
+            self._is_spinning = True
             self.start_spinner_timer()
 
     def compose(self) -> ComposeResult:
@@ -313,21 +564,42 @@ class BashOutputMessage(SpinnerMixin, Static):
             yield self._prompt_widget
             yield NoMarkupStatic(self._command, classes="bash-command")
         if not self._pending:
+            count = self._overflow_count()
+            self._output_widget = NoMarkupStatic(
+                self._preview_text(), classes="bash-output"
+            )
+            self._overflow_widget = NoMarkupStatic(
+                self._overflow_text(), classes="bash-output"
+            )
+            self._section = OverflowCollapsibleSection(
+                self._overflow_widget, collapsed_label=lines_label(count, prefix="+")
+            )
+            self._section.display = count > 0
             self._output_container = Horizontal(classes="bash-output-container")
             with self._output_container:
                 yield ExpandingBorder(classes="bash-output-border")
-                self._output_widget = NoMarkupStatic(
-                    self._output, classes="bash-output"
-                )
-                yield self._output_widget
+                with Vertical(classes="bash-output-body"):
+                    yield self._output_widget
+                    yield self._section
+
+    async def on_click(self, event: events.Click) -> None:
+        if self._click_is_passive(event):
+            return
+        if self._section and self._overflow_count() > 0:
+            self._section.toggle()
 
     async def _ensure_output_container(self) -> None:
         if self._output_container is not None:
             return
         self._output_widget = NoMarkupStatic("", classes="bash-output")
+        self._overflow_widget = NoMarkupStatic("", classes="bash-output")
+        self._section = OverflowCollapsibleSection(
+            self._overflow_widget, collapsed_label=lines_label(0, prefix="+")
+        )
+        self._section.display = False
         self._output_container = Horizontal(
             ExpandingBorder(classes="bash-output-border"),
-            self._output_widget,
+            Vertical(self._output_widget, self._section, classes="bash-output-body"),
             classes="bash-output-container",
         )
         await self.mount(self._output_container)
@@ -335,8 +607,7 @@ class BashOutputMessage(SpinnerMixin, Static):
     async def append_output(self, text: str) -> None:
         await self._ensure_output_container()
         self._output += text
-        if self._output_widget:
-            self._output_widget.update(self._output.rstrip("\n"))
+        self._refresh_output_widgets()
 
     async def finish(self, exit_code: int, *, interrupted: bool = False) -> None:
         self._exit_code = exit_code
@@ -365,24 +636,31 @@ class BashOutputMessage(SpinnerMixin, Static):
         if not self._output:
             self._output = "(no output)"
         await self._ensure_output_container()
-        if self._output_widget:
-            self._output_widget.update(self._output.rstrip("\n"))
+        self._refresh_output_widgets()
 
 
 class ErrorMessage(Static):
-    def __init__(self, error: str, collapsed: bool = False) -> None:
+    def __init__(
+        self, error: str | Content, collapsed: bool = False, show_border: bool = True
+    ) -> None:
         super().__init__()
         self.add_class("error-message")
         self._error = error
         self.collapsed = collapsed
+        self._show_border = show_border
         self._content_widget: Static | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="error-container"):
-            yield ExpandingBorder(classes="error-border")
-            self._content_widget = NoMarkupStatic(
-                f"Error: {self._error}", classes="error-content"
+            if self._show_border:
+                yield ExpandingBorder(classes="error-border")
+            error = (
+                self._error
+                if isinstance(self._error, Content)
+                else Content(self._error)
             )
+            text = Content("Error: ") + error if self._show_border else error
+            self._content_widget = NoMarkupStatic(text, classes="error-content")
             yield self._content_widget
 
     def set_collapsed(self, collapsed: bool) -> None:
@@ -399,10 +677,10 @@ class HookRunContainer(Vertical):
         self.display = True
 
 
-_HOOK_SEVERITY_ICONS: dict[HookMessageSeverity, str] = {
-    HookMessageSeverity.OK: "✓",
-    HookMessageSeverity.WARNING: "⚠",
-    HookMessageSeverity.ERROR: "✗",
+_HOOK_SEVERITY_ICONS: dict[HookSeverity, str] = {
+    HookSeverity.OK: "✓",
+    HookSeverity.WARNING: "⚠",
+    HookSeverity.ERROR: "✗",
 }
 
 
@@ -411,7 +689,7 @@ class HookSystemMessageLine(Static):
         self,
         hook_name: str,
         content: str,
-        severity: HookMessageSeverity = HookMessageSeverity.WARNING,
+        severity: HookSeverity = HookSeverity.WARNING,
     ) -> None:
         super().__init__()
         self.add_class("hook-system-message")
@@ -422,7 +700,7 @@ class HookSystemMessageLine(Static):
 
     def compose(self) -> ComposeResult:
         icon = _HOOK_SEVERITY_ICONS.get(
-            self._severity, _HOOK_SEVERITY_ICONS[HookMessageSeverity.WARNING]
+            self._severity, _HOOK_SEVERITY_ICONS[HookSeverity.WARNING]
         )
         with Horizontal(classes="hook-system-container"):
             yield NonSelectableStatic(icon, classes="hook-system-icon")
@@ -443,3 +721,60 @@ class WarningMessage(Static):
             if self._show_border:
                 yield ExpandingBorder(classes="warning-border")
             yield NoMarkupStatic(self._message, classes="warning-content")
+
+
+class PlanFileMessage(Widget):
+    content: reactive[str] = reactive("")
+
+    def __init__(self, file_path: Path) -> None:
+        super().__init__()
+        self.add_class("plan-file-message")
+        self._file_path = file_path
+        self._watch_task: asyncio.Task | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="plan-file-wrapper"):
+            yield Markdown(self.content, classes="plan-file-content")
+
+    def watch_content(self, new_content: str) -> None:
+        try:
+            self.query_one(Markdown).update(new_content)
+        except NoMatches:
+            pass
+
+    async def on_mount(self) -> None:
+        self.content = (await read_safe_async(self._file_path)).text
+        self._watch_task = asyncio.create_task(self._watch_file())
+
+    async def _watch_file(self) -> None:
+        try:
+            async for _ in awatch(self._file_path):
+                self.content = (await read_safe_async(self._file_path)).text
+        except (asyncio.CancelledError, FileNotFoundError):
+            pass
+
+    def open_in_editor(self) -> None:
+        from vibe.cli.textual_ui.external_editor import ExternalEditor
+
+        try:
+            self._file_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.app.suspend():
+                ExternalEditor.edit_file(self._file_path)
+        except OSError:
+            logger.warning(
+                "Failed to open plan file in editor: %s", self._file_path, exc_info=True
+            )
+            self.app.notify(
+                f"Could not open plan in editor: {self._file_path}",
+                severity="error",
+                timeout=6,
+            )
+
+    def stop_watching(self) -> None:
+        if self._watch_task is None:
+            return
+
+        if not self._watch_task.done():
+            self._watch_task.cancel()
+
+        self._watch_task = None

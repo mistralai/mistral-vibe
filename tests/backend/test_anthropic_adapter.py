@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from tests.constants import ANTHROPIC_BASE_URL, ANTHROPIC_MESSAGES_PATH
 from vibe.core.config import ProviderConfig
 from vibe.core.llm.backend.anthropic import AnthropicAdapter, AnthropicMapper
 from vibe.core.types import (
@@ -30,7 +31,7 @@ def adapter():
 def provider():
     return ProviderConfig(
         name="anthropic",
-        api_base="https://api.anthropic.com",
+        api_base=ANTHROPIC_BASE_URL,
         api_key_env_var="ANTHROPIC_API_KEY",
         api_style="anthropic",
     )
@@ -73,7 +74,7 @@ class TestMapperPrepareMessages:
         assert content[0] == {"type": "thinking", "thinking": "hmm", "signature": "sig"}
         assert content[1]["type"] == "text"
 
-    def test_assistant_with_reasoning_content(self, mapper):
+    def test_unsigned_reasoning_content_dropped(self, mapper):
         messages = [
             LLMMessage(
                 role=Role.assistant, content="Answer", reasoning_content="thinking..."
@@ -81,7 +82,36 @@ class TestMapperPrepareMessages:
         ]
         _, converted = mapper.prepare_messages(messages)
         content = converted[0]["content"]
-        assert content[0] == {"type": "thinking", "thinking": "thinking..."}
+        assert all(b.get("type") != "thinking" for b in content)
+        assert content == [{"type": "text", "text": "Answer"}]
+
+    def test_unsigned_reasoning_with_tool_calls_keeps_tool_use(self, mapper):
+        messages = [
+            LLMMessage(
+                role=Role.assistant,
+                reasoning_content="unsigned thinking",
+                tool_calls=[
+                    ToolCall(
+                        id="tc_1",
+                        index=0,
+                        function=FunctionCall(name="search", arguments="{}"),
+                    )
+                ],
+            )
+        ]
+        _, converted = mapper.prepare_messages(messages)
+        content = converted[0]["content"]
+        assert all(b.get("type") != "thinking" for b in content)
+        assert [b["type"] for b in content] == ["tool_use"]
+
+    def test_has_thinking_content_ignores_unsigned(self, adapter):
+        messages = [
+            LLMMessage(
+                role=Role.assistant, content="Answer", reasoning_content="thinking..."
+            )
+        ]
+        _, converted = adapter._mapper.prepare_messages(messages)
+        assert adapter._has_thinking_content(converted) is False
 
     def test_assistant_with_tool_calls(self, mapper):
         messages = [
@@ -227,75 +257,7 @@ class TestMapperParseResponse:
         chunk = mapper.parse_response(data)
         assert chunk.usage.prompt_tokens == 18
         assert chunk.usage.completion_tokens == 7
-
-
-class TestMapperStreamingEvents:
-    def test_text_delta(self, mapper):
-        chunk, idx = mapper.parse_streaming_event(
-            "content_block_delta",
-            {"delta": {"type": "text_delta", "text": "hi"}, "index": 0},
-            0,
-        )
-        assert chunk.message.content == "hi"
-
-    def test_thinking_delta(self, mapper):
-        chunk, _ = mapper.parse_streaming_event(
-            "content_block_delta",
-            {"delta": {"type": "thinking_delta", "thinking": "hmm"}, "index": 0},
-            0,
-        )
-        assert chunk.message.reasoning_content == "hmm"
-
-    def test_tool_use_start(self, mapper):
-        chunk, idx = mapper.parse_streaming_event(
-            "content_block_start",
-            {
-                "content_block": {"type": "tool_use", "id": "t1", "name": "search"},
-                "index": 2,
-            },
-            0,
-        )
-        assert chunk.message.tool_calls[0].id == "t1"
-        assert idx == 2
-
-    def test_input_json_delta(self, mapper):
-        chunk, _ = mapper.parse_streaming_event(
-            "content_block_delta",
-            {
-                "delta": {"type": "input_json_delta", "partial_json": '{"q":'},
-                "index": 1,
-            },
-            0,
-        )
-        assert chunk.message.tool_calls[0].function.arguments == '{"q":'
-
-    def test_message_start_usage(self, mapper):
-        chunk, _ = mapper.parse_streaming_event(
-            "message_start",
-            {"message": {"usage": {"input_tokens": 50, "cache_read_input_tokens": 10}}},
-            0,
-        )
-        assert chunk.usage.prompt_tokens == 60
-
-    def test_message_delta_usage(self, mapper):
-        chunk, _ = mapper.parse_streaming_event(
-            "message_delta", {"usage": {"output_tokens": 42}}, 0
-        )
-        assert chunk.usage.completion_tokens == 42
-
-    def test_unknown_event(self, mapper):
-        chunk, idx = mapper.parse_streaming_event("ping", {}, 5)
-        assert chunk is None
-        assert idx == 5
-
-    def test_signature_delta(self, mapper):
-        chunk, _ = mapper.parse_streaming_event(
-            "content_block_delta",
-            {"delta": {"type": "signature_delta", "signature": "sig"}, "index": 0},
-            0,
-        )
-        assert chunk is not None
-        assert chunk.message.reasoning_signature == "sig"
+        assert chunk.usage.cached_tokens == 3
 
 
 class TestAdapterPrepareRequest:
@@ -315,8 +277,8 @@ class TestAdapterPrepareRequest:
         payload = json.loads(req.body)
         assert payload["model"] == "claude-sonnet-4-20250514"
         assert payload["max_tokens"] == 1024
-        assert payload["temperature"] == 0.5
-        assert req.endpoint == "/v1/messages"
+        assert "temperature" not in payload
+        assert req.endpoint == ANTHROPIC_MESSAGES_PATH
         assert req.headers["anthropic-version"] == "2023-06-01"
 
     def test_beta_features(self, adapter, provider):
@@ -392,9 +354,10 @@ class TestAdapterPrepareRequest:
             thinking="medium",
         )
         payload = json.loads(req.body)
-        assert payload["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+        assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert payload["output_config"] == {"effort": "medium"}
         assert payload["max_tokens"] == 1024
-        assert payload["temperature"] == 1
+        assert "temperature" not in payload
 
     def test_system_cached(self, adapter, provider):
         messages = [
@@ -439,40 +402,11 @@ class TestAdapterPrepareRequest:
         assert len(payload["tools"]) == 1
         assert payload["tools"][0]["name"] == "test_tool"
 
-    @pytest.mark.parametrize(
-        "level,expected_budget", [("low", 1024), ("medium", 10_000), ("high", 32_000)]
-    )
-    def test_thinking_levels_budget_model(
-        self, adapter, provider, level, expected_budget
-    ):
+    @pytest.mark.parametrize("level", ["low", "medium", "high", "max"])
+    def test_thinking_levels(self, adapter, provider, level):
         messages = [LLMMessage(role=Role.user, content="Hello")]
         req = adapter.prepare_request(
             model_name="claude-sonnet-4-20250514",
-            messages=messages,
-            temperature=0.5,
-            tools=None,
-            max_tokens=None,
-            tool_choice=None,
-            enable_streaming=False,
-            provider=provider,
-            thinking=level,
-        )
-        payload = json.loads(req.body)
-        assert payload["thinking"] == {
-            "type": "enabled",
-            "budget_tokens": expected_budget,
-        }
-        assert payload["temperature"] == 1
-        assert payload["max_tokens"] == expected_budget + 8192
-
-    @pytest.mark.parametrize(
-        "model_name", ["claude-opus-4-6-20260101", "claude-opus-4-7-20260418"]
-    )
-    @pytest.mark.parametrize("level", ["low", "medium", "high"])
-    def test_thinking_levels_adaptive_model(self, adapter, provider, model_name, level):
-        messages = [LLMMessage(role=Role.user, content="Hello")]
-        req = adapter.prepare_request(
-            model_name=model_name,
             messages=messages,
             temperature=0.5,
             tools=None,
@@ -485,32 +419,10 @@ class TestAdapterPrepareRequest:
         payload = json.loads(req.body)
         assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert payload["output_config"] == {"effort": level}
-        if "opus-4-7" in model_name:
-            assert "temperature" not in payload
-        else:
-            assert payload["temperature"] == 1
+        assert "temperature" not in payload
         assert payload["max_tokens"] == 32_768
 
-    @pytest.mark.parametrize("thinking_level", ["off", "low", "medium", "high"])
-    def test_temperature_omitted_for_deprecated_model(
-        self, adapter, provider, thinking_level
-    ):
-        messages = [LLMMessage(role=Role.user, content="Hello")]
-        req = adapter.prepare_request(
-            model_name="claude-opus-4-7-20260418",
-            messages=messages,
-            temperature=0.5,
-            tools=None,
-            max_tokens=None,
-            tool_choice=None,
-            enable_streaming=False,
-            provider=provider,
-            thinking=thinking_level,
-        )
-        payload = json.loads(req.body)
-        assert "temperature" not in payload
-
-    def test_history_forced_thinking_budget_model(self, adapter, provider):
+    def test_history_forced_thinking(self, adapter, provider):
         messages = [
             LLMMessage(role=Role.user, content="Hello"),
             LLMMessage(
@@ -532,34 +444,9 @@ class TestAdapterPrepareRequest:
             provider=provider,
         )
         payload = json.loads(req.body)
-        assert payload["thinking"] == {"type": "enabled", "budget_tokens": 10_000}
-        assert payload["temperature"] == 1
-        assert payload["max_tokens"] == 18_192
-
-    def test_history_forced_thinking_adaptive_model(self, adapter, provider):
-        messages = [
-            LLMMessage(role=Role.user, content="Hello"),
-            LLMMessage(
-                role=Role.assistant,
-                content="Answer",
-                reasoning_content="thinking...",
-                reasoning_signature="sig",
-            ),
-            LLMMessage(role=Role.user, content="Follow up"),
-        ]
-        req = adapter.prepare_request(
-            model_name="claude-opus-4-6-20260101",
-            messages=messages,
-            temperature=0.5,
-            tools=None,
-            max_tokens=None,
-            tool_choice=None,
-            enable_streaming=False,
-            provider=provider,
-        )
-        payload = json.loads(req.body)
         assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert payload["output_config"] == {"effort": "medium"}
+        assert "temperature" not in payload
         assert payload["max_tokens"] == 32_768
 
 
@@ -572,6 +459,83 @@ class TestAdapterParseResponse:
         chunk = adapter.parse_response(data, provider)
         assert chunk.message.content == "Hello!"
         assert chunk.usage.prompt_tokens == 10
+
+    def test_non_streaming_captures_refusal_stop_reason(self, adapter, provider):
+        data = {
+            "content": [],
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+            "stop_reason": "refusal",
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.stop is not None
+        assert chunk.stop.reason == "refusal"
+
+    def test_streaming_message_delta_captures_refusal_stop_reason(
+        self, adapter, provider
+    ):
+        data = {
+            "type": "message_delta",
+            "delta": {"stop_reason": "refusal", "stop_sequence": None},
+            "usage": {"output_tokens": 7},
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.stop is not None
+        assert chunk.stop.reason == "refusal"
+        assert chunk.usage.completion_tokens == 7
+
+    def test_streaming_message_delta_end_turn_stop_reason(self, adapter, provider):
+        data = {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "usage": {"output_tokens": 3},
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.stop is not None
+        assert chunk.stop.reason == "end_turn"
+
+    def test_non_streaming_captures_refusal_stop_details(self, adapter, provider):
+        data = {
+            "content": [],
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+            "stop_reason": "refusal",
+            "stop_details": {
+                "type": "refusal",
+                "category": "cyber",
+                "explanation": "This request was declined.",
+            },
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.stop is not None
+        assert chunk.stop.category == "cyber"
+        assert chunk.stop.explanation == "This request was declined."
+
+    def test_non_streaming_without_stop_details_is_none(self, adapter, provider):
+        data = {
+            "content": [],
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+            "stop_reason": "end_turn",
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.stop is not None
+        assert chunk.stop.category is None
+        assert chunk.stop.explanation is None
+
+    def test_streaming_message_delta_captures_refusal_stop_details(
+        self, adapter, provider
+    ):
+        data = {
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": "refusal",
+                "stop_sequence": None,
+                "stop_details": {"type": "refusal", "category": "bio"},
+            },
+            "usage": {"output_tokens": 7},
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.stop is not None
+        assert chunk.stop.category == "bio"
+        assert chunk.stop.explanation is None
 
     def test_streaming_text_delta(self, adapter, provider):
         data = {
@@ -586,6 +550,23 @@ class TestAdapterParseResponse:
         data = {"type": "message_start", "message": {"usage": {"input_tokens": 100}}}
         chunk = adapter.parse_response(data, provider)
         assert chunk.usage.prompt_tokens == 100
+        assert chunk.usage.cached_tokens == 0
+
+    def test_streaming_message_start_reports_cache_tokens(self, adapter, provider):
+        data = {
+            "type": "message_start",
+            "message": {
+                "usage": {
+                    "input_tokens": 100,
+                    "cache_read_input_tokens": 60,
+                    "cache_creation_input_tokens": 25,
+                }
+            },
+        }
+        chunk = adapter.parse_response(data, provider)
+        # prompt_tokens folds in cache read + creation; cached_tokens is the read.
+        assert chunk.usage.prompt_tokens == 185
+        assert chunk.usage.cached_tokens == 60
 
     def test_streaming_unknown_returns_empty(self, adapter, provider):
         data = {"type": "ping"}

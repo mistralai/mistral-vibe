@@ -9,7 +9,7 @@ from vibe.core.types import ToolStreamEvent
 
 
 class FakeToolArgs(BaseModel):
-    pass
+    text: str = ""
 
 
 class FakeToolResult(BaseModel):
@@ -32,4 +32,4 @@ class FakeTool(BaseTool[FakeToolArgs, FakeToolResult, BaseToolConfig, FakeToolSt
     ) -> AsyncGenerator[ToolStreamEvent | FakeToolResult, None]:
         if self._exception_to_raise:
             raise self._exception_to_raise
-        yield FakeToolResult()
+        yield FakeToolResult(message=args.text or "fake tool executed")

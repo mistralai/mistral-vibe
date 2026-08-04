@@ -1,0 +1,96 @@
+#config-edit-screen {
+    align: center middle;
+}
+
+#config-edit-content {
+    layout: vertical;
+    width: 82%;
+    max-width: 86;
+    height: auto;
+    max-height: 85%;
+    background: $surface;
+    border: round $primary;
+    border-title-align: left;
+    border-title-color: $primary;
+    border-title-style: bold;
+    padding: 1 2 0 2;
+}
+
+#config-edit-body {
+    width: 100%;
+    height: auto;
+}
+
+#config-edit-main {
+    width: 1fr;
+    height: auto;
+}
+
+#config-edit-side {
+    width: 36;
+    height: auto;
+    margin-left: 1;
+    padding: 0 1;
+    background: $panel;
+    border-left: solid $foreground-muted;
+}
+
+.config-edit-side-header {
+    height: auto;
+    text-style: bold;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim bold;
+    }
+}
+
+.config-edit-inspector {
+    height: auto;
+    margin-top: 1;
+}
+
+.config-edit-target {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+    padding-top: 1;
+    border-top: solid $foreground-muted;
+}
+
+.config-edit-description {
+    height: auto;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#config-edit-options {
+    width: 100%;
+    height: auto;
+    max-height: 14;
+    border: none;
+}
+
+#config-edit-textarea {
+    height: 12;
+    border: solid $foreground-muted;
+}
+
+#config-edit-input {
+    width: 100%;
+}
+
+.config-edit-help {
+    width: 100%;
+    height: 1;
+    margin-top: 1;
+    text-overflow: clip;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
+}

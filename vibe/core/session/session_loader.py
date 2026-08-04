@@ -5,9 +5,9 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
-from vibe.core.session.session_id import shorten_session_id
 from vibe.core.types import LLMMessage, SessionMetadata
-from vibe.core.utils.io import read_safe
+from vibe.utils.io import read_safe
+from vibe.utils.session_id import shorten_session_id
 
 if TYPE_CHECKING:
     from vibe.core.config import SessionLoggingConfig
@@ -20,45 +20,86 @@ MESSAGES_FILENAME = "messages.jsonl"
 class SessionInfo(TypedDict):
     session_id: str
     cwd: str
+    parent_session_id: str | None
     title: str | None
     end_time: str | None
 
 
 class SessionLoader:
     @staticmethod
-    def _is_valid_session(  # noqa: PLR0911
+    def _parse_message_lines(text: str) -> list[dict[str, Any]] | None:
+        lines = text.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+
+        messages: list[dict[str, Any]] = []
+        for line in lines:
+            message = json.loads(line)
+            if not isinstance(message, dict):
+                return None
+            messages.append(message)
+        return messages
+
+    @staticmethod
+    def _same_working_directory(stored: Any, working_directory: Path) -> bool:
+        if not isinstance(stored, str):
+            return False
+        if stored == str(working_directory):
+            return True
+        try:
+            return Path(stored).resolve() == working_directory.resolve()
+        except OSError:
+            return False
+
+    @staticmethod
+    def _read_validated_session(
         session_dir: Path, working_directory: Path | None = None
-    ) -> bool:
-        """Check if a session directory contains valid metadata and messages."""
+    ) -> dict[str, Any] | None:
         metadata_path = session_dir / METADATA_FILENAME
         messages_path = session_dir / MESSAGES_FILENAME
 
         if not metadata_path.is_file() or not messages_path.is_file():
-            return False
+            return None
 
         try:
             metadata = json.loads(read_safe(metadata_path).text)
             if not isinstance(metadata, dict):
-                return False
+                return None
             if working_directory is not None:
                 session_working_directory = (metadata.get("environment") or {}).get(
                     "working_directory"
                 )
-                if session_working_directory != str(working_directory):
-                    return False
+                if not SessionLoader._same_working_directory(
+                    session_working_directory, working_directory
+                ):
+                    return None
 
-            has_messages = False
-            for line in read_safe(messages_path).text.splitlines():
-                has_messages = True
-                message = json.loads(line)
-                if not isinstance(message, dict):
-                    return False
-            if not has_messages:
-                return False
+            messages = SessionLoader._parse_message_lines(read_safe(messages_path).text)
         except (OSError, json.JSONDecodeError):
-            return False
+            return None
 
-        return True
+        if not SessionLoader._log_is_loadable(messages, metadata):
+            return None
+
+        return metadata
+
+    @staticmethod
+    def _log_is_loadable(
+        messages: list[dict[str, Any]] | None, metadata: dict[str, Any]
+    ) -> bool:
+        if messages is None:
+            return False
+        # An empty log is valid only when metadata records an empty session.
+        return bool(messages) or metadata.get("total_messages") == 0
+
+    @staticmethod
+    def _is_valid_session(
+        session_dir: Path, working_directory: Path | None = None
+    ) -> bool:
+        return (
+            SessionLoader._read_validated_session(session_dir, working_directory)
+            is not None
+        )
 
     @staticmethod
     def latest_session(
@@ -105,11 +146,15 @@ class SessionLoader:
 
     @staticmethod
     def find_session_by_id(
-        session_id: str, config: SessionLoggingConfig
+        session_id: str,
+        config: SessionLoggingConfig,
+        working_directory: Path | None = None,
     ) -> Path | None:
         matches = SessionLoader._find_session_dirs_by_short_id(session_id, config)
 
-        return SessionLoader.latest_session(matches)
+        return SessionLoader.latest_session(
+            matches, working_directory=working_directory
+        )
 
     @staticmethod
     def does_session_exist(
@@ -154,13 +199,8 @@ class SessionLoader:
 
         sessions: list[SessionInfo] = []
         for session_dir in session_dirs:
-            if not SessionLoader._is_valid_session(session_dir):
-                continue
-
-            metadata_path = session_dir / METADATA_FILENAME
-            try:
-                metadata = json.loads(read_safe(metadata_path).text)
-            except (OSError, json.JSONDecodeError):
+            metadata = SessionLoader._read_validated_session(session_dir)
+            if metadata is None:
                 continue
 
             session_id = metadata.get("session_id")
@@ -183,10 +223,15 @@ class SessionLoader:
             sessions.append({
                 "session_id": session_id,
                 "cwd": session_cwd,
+                "parent_session_id": metadata.get("parent_session_id"),
                 "title": metadata.get("title"),
                 "end_time": end_time,
             })
 
+        # glob() yields arbitrary filesystem order; callers expect most-recent
+        # first. end_time is normalized UTC ISO, so a lexicographic sort is
+        # chronological; sessions without one sort last.
+        sessions.sort(key=lambda item: item["end_time"] or "", reverse=True)
         return sessions
 
     @staticmethod
@@ -207,9 +252,19 @@ class SessionLoader:
 
     @staticmethod
     def load_session(filepath: Path) -> tuple[list[LLMMessage], dict[str, Any]]:
-        # Load session messages from MESSAGES_FILENAME
-        messages_filepath = filepath / MESSAGES_FILENAME
+        metadata_filepath = filepath / METADATA_FILENAME
+        if metadata_filepath.exists():
+            try:
+                metadata = json.loads(read_safe(metadata_filepath).text)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Session metadata contains invalid JSON (may have been corrupted): "
+                    f"{filepath}\nDetails: {e}"
+                ) from e
+        else:
+            metadata = {}
 
+        messages_filepath = filepath / MESSAGES_FILENAME
         try:
             content = read_safe(messages_filepath).text.split("\n")
             if content and content[-1] == "":
@@ -219,7 +274,8 @@ class SessionLoader:
                 f"Error reading session messages at {filepath}: {e}"
             ) from e
 
-        if not content:
+        # An empty log is valid only when metadata records an empty session.
+        if not content and metadata.get("total_messages") != 0:
             raise ValueError(
                 f"Session messages file is empty (may have been corrupted by interruption): "
                 f"{filepath}"
@@ -236,20 +292,6 @@ class SessionLoader:
         messages = [
             LLMMessage.model_validate(msg) for msg in data if msg["role"] != "system"
         ]
-
-        # Load session metadata from METADATA_FILENAME
-        metadata_filepath = filepath / METADATA_FILENAME
-
-        if metadata_filepath.exists():
-            try:
-                metadata = json.loads(read_safe(metadata_filepath).text)
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"Session metadata contains invalid JSON (may have been corrupted): "
-                    f"{filepath}\nDetails: {e}"
-                ) from e
-        else:
-            metadata = {}
 
         return messages, metadata
 

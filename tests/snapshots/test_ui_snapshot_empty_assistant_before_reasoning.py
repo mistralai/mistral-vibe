@@ -32,13 +32,13 @@ class SnapshotTestAppEmptyAssistantThenReasoning(BaseSnapshotTestApp):
                 mock_llm_chunk(content="The answer is 42."),
             ]
         )
-        super().__init__(config=config)
-        self.agent_loop = build_test_agent_loop(
+        agent_loop = build_test_agent_loop(
             config=config,
             agent_name=self._current_agent_name,
             enable_streaming=True,
             backend=fake_backend,
         )
+        super().__init__(agent_loop=agent_loop)
 
 
 def test_snapshot_empty_assistant_removed_when_reasoning_starts(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, TypedDict
+from typing import ClassVar, TypedDict
 
 from textual import events
 from textual.app import ComposeResult
@@ -9,10 +9,10 @@ from textual.containers import Container, Vertical
 from textual.message import Message
 from textual.widgets import Static
 
+from vibe.app_server.config import ConfigView
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-
-if TYPE_CHECKING:
-    from vibe.core.config import VibeConfig
+from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
 
 
 class SettingDefinition(TypedDict):
@@ -22,7 +22,7 @@ class SettingDefinition(TypedDict):
     options: list[str]
 
 
-class VoiceApp(Container):
+class VoiceApp(VimNavigationMixin, Container):
     can_focus = True
     can_focus_children = False
 
@@ -44,7 +44,7 @@ class VoiceApp(Container):
             super().__init__()
             self.changes = changes
 
-    def __init__(self, config: VibeConfig) -> None:
+    def __init__(self, config: ConfigView) -> None:
         super().__init__(id="voice-app")
         self.config = config
         self.selected_index = 0
@@ -86,7 +86,11 @@ class VoiceApp(Container):
             yield NoMarkupStatic("")
 
             self.help_widget = NoMarkupStatic(
-                "↑↓ navigate  Space/Enter toggle  ESC exit", classes="settings-help"
+                shortcut_hint(
+                    f"{shortcut('↑↓/jk')} navigate  {shortcut('Space/Enter')} toggle  "
+                    f"{shortcut('Esc')} exit"
+                ),
+                classes="settings-help",
             )
             yield self.help_widget
 
@@ -168,6 +172,9 @@ class VoiceApp(Container):
 
     def action_close(self) -> None:
         self.post_message(self.ConfigClosed(changes=self._convert_changes_for_save()))
+
+    def on_key(self, event: events.Key) -> None:
+        self._handle_vim_navigation_key(event)
 
     def on_blur(self, event: events.Blur) -> None:
         self.call_after_refresh(self.focus)

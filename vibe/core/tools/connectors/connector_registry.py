@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from enum import StrEnum
+import hashlib
+import json
+import os
 import re
+import time
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import httpx
-from mistralai.client import Mistral
 
-from vibe.core.logger import logger
+from vibe.core.paths import CONNECTOR_BOOTSTRAP_CACHE_FILE
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -16,22 +20,48 @@ from vibe.core.tools.base import (
     InvokeContext,
     ToolError,
 )
-from vibe.core.tools.mcp.tools import (
-    MCPTool,
-    MCPToolResult,
-    RemoteTool,
-    _OpenArgs,
-    call_tool_http,
-)
+from vibe.core.tools.remote import MCPTool, MCPToolResult, RemoteTool, _OpenArgs
 from vibe.core.tools.ui import ToolResultDisplay
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils import run_sync
-from vibe.core.utils.http import build_ssl_context
+from vibe.observability.logging import logger
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
 
 _BOOTSTRAP_TIMEOUT = 30.0
+_BOOTSTRAP_CACHE_TTL_SECONDS = 10 * 60
+
+
+async def call_tool_http(
+    url: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    headers: dict[str, str] | None = None,
+) -> MCPToolResult:
+    from vibe.core.tools.mcp.tools import call_tool_http as call_mcp_tool_http
+
+    return await call_mcp_tool_http(url, tool_name, arguments, headers=headers)
+
+
+class ConnectorAuthAction(StrEnum):
+    NONE = "none"
+    OAUTH = "oauth"
+    CREDENTIALS_SETUP = "credentials_setup"
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any] | None) -> ConnectorAuthAction:
+        if not payload:
+            return cls.NONE
+        match payload.get("type"):
+            case "oauth":
+                return cls.OAUTH
+            case "credentials_setup":
+                return cls.CREDENTIALS_SETUP
+            case _:
+                return cls.NONE
 
 
 def _normalize_name(name: str) -> str:
@@ -53,6 +83,99 @@ def _connector_tool_to_remote(tool: dict[str, Any]) -> RemoteTool | None:
 
 
 _DEFAULT_BASE_URL = "https://api.mistral.ai"
+
+
+def _bootstrap_cache_key(api_key: str, server_url: str | None) -> str:
+    base_url = server_url or _DEFAULT_BASE_URL
+    return hashlib.sha256(f"{base_url}\0{api_key}".encode()).hexdigest()
+
+
+def _strip_none(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_none(item) for key, item in value.items() if item is not None
+        }
+    if isinstance(value, list):
+        return [_strip_none(item) for item in value]
+    return value
+
+
+def _read_bootstrap_cache_entries() -> dict[str, Any]:
+    try:
+        with CONNECTOR_BOOTSTRAP_CACHE_FILE.path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_bootstrap_cache_entries(entries: dict[str, Any]) -> None:
+    cache_path = CONNECTOR_BOOTSTRAP_CACHE_FILE.path
+    tmp_path = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.tmp")
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(entries, f, separators=(",", ":"))
+        os.replace(tmp_path, cache_path)
+    except (OSError, TypeError):
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.debug(
+            "Failed to write connector bootstrap cache file %s",
+            cache_path,
+            exc_info=True,
+        )
+
+
+def _is_fresh_bootstrap_cache_entry(entry: Any, now: int) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    stored_at = entry.get("stored_at_timestamp")
+    payload = entry.get("payload")
+    if not isinstance(stored_at, int) or not isinstance(payload, dict):
+        return False
+    if stored_at <= now - _BOOTSTRAP_CACHE_TTL_SECONDS:
+        return False
+    return isinstance(payload.get("connectors"), list)
+
+
+def _tool_bootstrap_cache_payload(tool: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "name": tool.get("name"),
+        "description": tool.get("description"),
+        "inputSchema": tool.get("inputSchema"),
+    }
+    return _strip_none(payload)
+
+
+def _connector_bootstrap_cache_payload(connector: dict[str, Any]) -> dict[str, Any]:
+    auth_action = connector.get("auth_action")
+    status = connector.get("status") or {}
+    payload: dict[str, Any] = {
+        "id": connector.get("id"),
+        "name": connector.get("name"),
+        "status": {"is_ready": bool(status.get("is_ready", False))},
+        "tools": [
+            _tool_bootstrap_cache_payload(tool)
+            for tool in connector.get("tools") or []
+            if isinstance(tool, dict)
+        ],
+    }
+    if isinstance(auth_action, dict):
+        payload["auth_action"] = {"type": auth_action.get("type")}
+    return _strip_none(payload)
+
+
+def _bootstrap_cache_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "connectors": [
+            _connector_bootstrap_cache_payload(connector)
+            for connector in payload.get("connectors") or []
+            if isinstance(connector, dict)
+        ]
+    }
 
 
 def _format_http_status_error(
@@ -161,9 +284,7 @@ def create_connector_proxy_tool_class(
         async def run(
             self, args: _OpenArgs, ctx: InvokeContext | None = None
         ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult, None]:
-            url = (
-                f"{self._base_url}/v1/experimental/connectors/{self._connector_id}/mcp"
-            )
+            url = f"{self._base_url}/v1/connectors-gateway/{self._connector_id}/mcp"
             headers = {"Authorization": f"Bearer {self._api_key}"}
             payload = args.model_dump(exclude_none=True)
             try:
@@ -183,8 +304,11 @@ def create_connector_proxy_tool_class(
                     success=False,
                     message=event.error or event.skip_reason or "No result",
                 )
-            message = f"Connector tool {event.result.tool} completed"
-            return ToolResultDisplay(success=event.result.ok, message=message)
+            return ToolResultDisplay(
+                success=event.result.ok,
+                verb="Ran",
+                message=f"connector {event.result.tool}",
+            )
 
         @classmethod
         def get_status_text(cls) -> str:
@@ -233,36 +357,70 @@ class ConnectorRegistry:
     def __init__(self, api_key: str, server_url: str | None = None) -> None:
         self._api_key = api_key
         self._server_url = server_url
+        self._bootstrap_cache_key = _bootstrap_cache_key(api_key, server_url)
         self._cache: dict[str, dict[str, type[BaseTool]]] | None = None
         self._connector_names: list[str] = []
         self._connector_connected: dict[str, bool] = {}
+        self._connector_auth_action: dict[str, ConnectorAuthAction] = {}
         self._alias_to_id: dict[str, str] = {}
         self._discover_lock = asyncio.Lock()
 
-    def get_tools(self) -> dict[str, type[BaseTool]]:
+    def get_tools(self, *, force_refresh: bool = False) -> dict[str, type[BaseTool]]:
         """Return proxy tool classes for all connectors, using cache when possible."""
-        return run_sync(self.get_tools_async())
+        return run_sync(self.get_tools_async(force_refresh=force_refresh))
 
-    async def get_tools_async(self) -> dict[str, type[BaseTool]]:
+    async def get_tools_async(
+        self, *, force_refresh: bool = False
+    ) -> dict[str, type[BaseTool]]:
         """Return proxy tool classes for all connectors, using cache when possible."""
-        if self._cache is not None:
+        if self._cache is not None and not force_refresh:
             result: dict[str, type[BaseTool]] = {}
             for tools in self._cache.values():
                 result.update(tools)
             return result
 
-        return await self._discover_all()
+        return await self._discover_all(force_refresh=force_refresh)
 
     async def _fetch_bootstrap(self) -> dict[str, Any]:
         base_url = self._server_url or _DEFAULT_BASE_URL
         url = f"{base_url}/v1/connectors/bootstrap"
         headers = {"Authorization": f"Bearer {self._api_key}"}
-        async with httpx.AsyncClient(
+        params = {"include_auth_actionable_connectors": "true"}
+        async with VibeAsyncHTTPClient(
             timeout=_BOOTSTRAP_TIMEOUT, verify=build_ssl_context()
         ) as http:
-            response = await http.get(url, headers=headers)
+            response = await http.get(url, headers=headers, params=params)
             response.raise_for_status()
             return response.json()
+
+    def _read_cached_bootstrap(self) -> dict[str, Any] | None:
+        entry = _read_bootstrap_cache_entries().get(self._bootstrap_cache_key)
+        if not isinstance(entry, dict):
+            return None
+
+        stored_at = entry.get("stored_at_timestamp")
+        payload = entry.get("payload")
+        if not isinstance(stored_at, int) or not isinstance(payload, dict):
+            return None
+        if stored_at <= int(time.time()) - _BOOTSTRAP_CACHE_TTL_SECONDS:
+            return None
+        if not isinstance(payload.get("connectors"), list):
+            return None
+        return payload
+
+    def _write_cached_bootstrap(self, payload: dict[str, Any]) -> None:
+        now = int(time.time())
+        entries = _read_bootstrap_cache_entries()
+        entries = {
+            key: entry
+            for key, entry in entries.items()
+            if _is_fresh_bootstrap_cache_entry(entry, now)
+        }
+        entries[self._bootstrap_cache_key] = {
+            "stored_at_timestamp": now,
+            "payload": _bootstrap_cache_payload(payload),
+        }
+        _write_bootstrap_cache_entries(entries)
 
     def _build_tools_for_connector(
         self,
@@ -296,23 +454,29 @@ class ConnectorRegistry:
                 )
         return tools_map
 
-    async def _discover_all(self) -> dict[str, type[BaseTool]]:
+    async def _discover_all(
+        self, *, force_refresh: bool = False
+    ) -> dict[str, type[BaseTool]]:
         async with self._discover_lock:
             # Re-check under lock — another coroutine may have finished
             # discovery while we waited.
-            if self._cache is not None:
+            if self._cache is not None and not force_refresh:
                 result: dict[str, type[BaseTool]] = {}
                 for tools in self._cache.values():
                     result.update(tools)
                 return result
 
+            data = None if force_refresh else self._read_cached_bootstrap()
             try:
-                data = await self._fetch_bootstrap()
+                if data is None:
+                    data = await self._fetch_bootstrap()
+                    self._write_cached_bootstrap(data)
             except Exception:
                 logger.warning("Failed to bootstrap connectors", exc_info=True)
                 self._cache = {}
                 self._connector_names = []
                 self._connector_connected = {}
+                self._connector_auth_action = {}
                 self._alias_to_id = {}
                 return {}
 
@@ -322,10 +486,15 @@ class ConnectorRegistry:
             all_tools: dict[str, type[BaseTool]] = {}
             connector_names: list[str] = []
             connector_connected: dict[str, bool] = {}
+            connector_auth_action: dict[str, ConnectorAuthAction] = {}
 
             for connector_id, alias, connector in unique_connectors:
                 connector_names.append(alias)
                 name = connector.get("name") or connector_id
+                auth_action = ConnectorAuthAction.from_payload(
+                    connector.get("auth_action")
+                )
+                connector_auth_action[alias] = auth_action
 
                 if bootstrap_errors := connector.get("bootstrap_errors"):
                     logger.warning(
@@ -351,6 +520,7 @@ class ConnectorRegistry:
             # lock will see the completed cache.
             self._connector_names = connector_names
             self._connector_connected = connector_connected
+            self._connector_auth_action = connector_auth_action
             self._alias_to_id = {alias: cid for cid, alias, _ in unique_connectors}
             self._cache = cache
 
@@ -368,6 +538,9 @@ class ConnectorRegistry:
     def is_connected(self, name: str) -> bool:
         return self._connector_connected.get(name, False)
 
+    def get_auth_action(self, alias: str) -> ConnectorAuthAction:
+        return self._connector_auth_action.get(alias, ConnectorAuthAction.NONE)
+
     def get_connector_id(self, alias: str) -> str | None:
         """Return the API connector ID for a given alias, or None."""
         return self._alias_to_id.get(alias)
@@ -384,13 +557,22 @@ class ConnectorRegistry:
             return {}
 
         tools_map: dict[str, type[BaseTool]] | None = None
+        fresh_auth_action: ConnectorAuthAction | None = None
+        found = False
+        fetch_ok = False
         try:
             data = await self._fetch_bootstrap()
+            fetch_ok = True
+            self._write_cached_bootstrap(data)
             for connector in data.get("connectors") or []:
                 if str(connector.get("id")) != connector_id:
                     continue
 
+                found = True
                 name = connector.get("name") or connector_id
+                fresh_auth_action = ConnectorAuthAction.from_payload(
+                    connector.get("auth_action")
+                )
                 status = connector.get("status") or {}
                 if not status.get("is_ready", False):
                     break
@@ -408,6 +590,13 @@ class ConnectorRegistry:
         if self._cache is None:
             self._cache = {}
 
+        if fetch_ok and not found:
+            self._drop_connector(alias, connector_id)
+            return {}
+
+        if fresh_auth_action is not None:
+            self._connector_auth_action[alias] = fresh_auth_action
+
         if tools_map is None:
             self._cache.pop(connector_id, None)
             self._connector_connected[alias] = False
@@ -416,6 +605,15 @@ class ConnectorRegistry:
         self._cache[connector_id] = tools_map
         self._connector_connected[alias] = bool(tools_map)
         return tools_map
+
+    def _drop_connector(self, alias: str, connector_id: str) -> None:
+        if self._cache is not None:
+            self._cache.pop(connector_id, None)
+        self._connector_connected.pop(alias, None)
+        self._connector_auth_action.pop(alias, None)
+        self._alias_to_id.pop(alias, None)
+        if alias in self._connector_names:
+            self._connector_names.remove(alias)
 
     async def get_auth_url(self, alias: str) -> str | None:
         """Return the OAuth authorization URL for a connector, or None.
@@ -427,10 +625,12 @@ class ConnectorRegistry:
         if connector_id is None:
             return None
         try:
-            http_client = httpx.AsyncClient(
+            http_client = VibeAsyncHTTPClient(
                 verify=build_ssl_context(), follow_redirects=True
             )
             try:
+                from mistralai.client import Mistral
+
                 sdk_client = Mistral(
                     api_key=self._api_key,
                     server_url=self._server_url,
@@ -451,4 +651,5 @@ class ConnectorRegistry:
         self._cache = None
         self._connector_names = []
         self._connector_connected = {}
+        self._connector_auth_action = {}
         self._alias_to_id = {}

@@ -1,0 +1,1 @@
+Exact string replacement in a file. You must `read_file` first. When editing text from `read_file` output, never include any part of the line-number prefix in `old_string` or `new_string`. If `old_string` is not found or matches multiple locations, provide more context to make it unique, or use `replace_all`. If an edit fails, re-read the file before retrying.

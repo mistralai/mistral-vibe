@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+from configparser import NoOptionError, NoSectionError
 from dataclasses import dataclass
 from pathlib import Path
-
-from git import InvalidGitRepositoryError, Repo
-from git.exc import GitCommandError
-from giturlparse import parse as parse_git_url
+import shutil
+import tempfile
 
 from vibe.core.teleport.errors import (
     ServiceTeleportError,
@@ -13,15 +12,34 @@ from vibe.core.teleport.errors import (
 )
 from vibe.core.utils import AsyncExecutor
 
+try:
+    from git import InvalidGitRepositoryError, NoSuchPathError, Repo
+    from git.exc import GitCommandError
+    from giturlparse import parse as parse_git_url
+except ImportError as e:
+    raise ServiceTeleportError(
+        "Teleport requires git to be installed. Please install git and try again."
+    ) from e
+
+
+@dataclass
+class GitHubRemoteInfo:
+    name: str
+    owner: str
+    repo: str
+
 
 @dataclass
 class GitRepoInfo:
+    remote_name: str
     remote_url: str
     owner: str
     repo: str
     branch: str | None
     commit: str
     diff: str
+    default_branch: str | None = None
+    repo_root: Path | None = None
 
 
 class GitRepository:
@@ -45,6 +63,18 @@ class GitRepository:
         return self._find_github_remote(repo) is not None
 
     async def get_info(self) -> GitRepoInfo:
+        return await self._build_info(include_diff=True)
+
+    async def get_metadata(self) -> GitRepoInfo:
+        """Repo metadata without the (potentially large) working-tree diff.
+
+        Project-link actions only need remote/branch/root info, so they skip the
+        full `git diff` scan `get_info` runs, which would otherwise touch the
+        whole working tree. `diff` is returned as an empty string.
+        """
+        return await self._build_info(include_diff=False)
+
+    async def _build_info(self, *, include_diff: bool) -> GitRepoInfo:
         repo = self._repo_or_raise()
 
         parsed = self._find_github_remote(repo)
@@ -63,17 +93,24 @@ class GitRepository:
         if not commit:
             raise ServiceTeleportNotSupportedError("Could not determine current commit")
 
-        owner, repo_name = parsed
+        owner = parsed.owner
+        repo_name = parsed.repo
         branch = None if repo.head.is_detached else repo.active_branch.name
-        diff = await self._get_diff(repo)
+        default_branch = _remote_ref_branch_name(
+            await self._get_remote_default_branch(repo, parsed.name), parsed.name
+        )
+        diff = await self._get_diff(repo) if include_diff else ""
 
         return GitRepoInfo(
+            remote_name=parsed.name,
             remote_url=self._to_https_url(owner, repo_name),
             owner=owner,
             repo=repo_name,
             branch=branch,
             commit=commit,
             diff=diff,
+            default_branch=default_branch,
+            repo_root=_repo_root_path(repo),
         )
 
     async def fetch(self, remote: str = "origin") -> None:
@@ -133,18 +170,41 @@ class GitRepository:
         if self._repo is None:
             try:
                 self._repo = Repo(self._workdir, search_parent_directories=True)
-            except InvalidGitRepositoryError as e:
+            except (InvalidGitRepositoryError, NoSuchPathError) as e:
+                # NoSuchPathError: the workdir was moved/deleted between the
+                # picker selecting it and this call. Surface it as an ineligible
+                # root (mapped to a clear reject reason) instead of a generic
+                # failure.
                 raise ServiceTeleportNotSupportedError(
                     "Teleport requires a git repository. cd into a project with a .git directory and try again."
                 ) from e
         return self._repo
 
-    def _find_github_remote(self, repo: Repo) -> tuple[str, str] | None:
+    def _find_github_remote(self, repo: Repo) -> GitHubRemoteInfo | None:
         for remote in repo.remotes:
-            for url in remote.urls:
+            for url in self._remote_urls(remote):
                 if parsed := self._parse_github_url(url):
-                    return parsed
+                    owner, repo_name = parsed
+                    return GitHubRemoteInfo(
+                        name=remote.name, owner=owner, repo=repo_name
+                    )
         return None
+
+    @staticmethod
+    def _remote_urls(remote: object) -> list[str]:
+        urls: list[str] = []
+        config_reader = getattr(remote, "config_reader", None)
+        try:
+            raw_url = config_reader.get("url") if config_reader is not None else None
+        except (AttributeError, NoOptionError, NoSectionError, TypeError, ValueError):
+            raw_url = None
+        if isinstance(raw_url, str):
+            urls.append(raw_url)
+
+        for url in getattr(remote, "urls", ()):
+            if isinstance(url, str) and url not in urls:
+                urls.append(url)
+        return urls
 
     async def _fetch(self, repo: Repo, remote: str) -> None:
         try:
@@ -154,13 +214,21 @@ class GitRepository:
 
     async def _get_diff(self, repo: Repo) -> str:
         def get_full_diff() -> str:
-            # Mark untracked files as intent-to-add so they appear in diff
-            repo.git.add("-N", ".")
-            return repo.git.diff("HEAD", binary=True)
+            temporary_dir = Path(tempfile.mkdtemp(prefix="vibe-teleport-index-"))
+            temporary_index = temporary_dir / "index"
+            try:
+                index_path = Path(repo.index.path)
+                if index_path.exists():
+                    shutil.copy2(index_path, temporary_index)
+                with repo.git.custom_environment(GIT_INDEX_FILE=str(temporary_index)):
+                    repo.git.add("-N", ".")
+                    return repo.git.diff("HEAD", binary=True)
+            finally:
+                shutil.rmtree(temporary_dir, ignore_errors=True)
 
         try:
             return await self._executor.run(get_full_diff)
-        except (TimeoutError, GitCommandError):
+        except (TimeoutError, GitCommandError, OSError):
             return ""
 
     async def _branch_contains(self, repo: Repo, commit: str, remote: str) -> bool:
@@ -220,3 +288,19 @@ class GitRepository:
     @staticmethod
     def _to_https_url(owner: str, repo: str) -> str:
         return f"https://github.com/{owner}/{repo}.git"
+
+
+def _remote_ref_branch_name(ref: str | None, remote: str) -> str | None:
+    if ref is None:
+        return None
+    prefix = f"{remote}/"
+    if ref.startswith(prefix):
+        return ref.removeprefix(prefix)
+    return ref
+
+
+def _repo_root_path(repo: Repo) -> Path | None:
+    working_tree_dir = repo.working_tree_dir
+    if not isinstance(working_tree_dir, str):
+        return None
+    return Path(working_tree_dir).resolve()

@@ -5,6 +5,7 @@ from typing import Any
 from acp import (
     Agent as AcpAgent,
     Client,
+    CreateElicitationResponse,
     CreateTerminalResponse,
     KillTerminalResponse,
     ReadTextFileResponse,
@@ -17,6 +18,8 @@ from acp import (
 )
 from acp.schema import (
     AgentMessageChunk,
+    AgentPlanContentUpdate,
+    AgentPlanRemovedUpdate,
     AgentPlanUpdate,
     AgentThoughtChunk,
     AvailableCommandsUpdate,
@@ -38,6 +41,7 @@ class FakeClient(Client):
 
     def __init__(self) -> None:
         self._session_updates = []
+        self.ext_notifications: list[tuple[str, dict[str, Any]]] = []
 
     async def session_update(
         self,
@@ -48,6 +52,8 @@ class FakeClient(Client):
         | ToolCallStart
         | ToolCallProgress
         | AgentPlanUpdate
+        | AgentPlanContentUpdate
+        | AgentPlanRemovedUpdate
         | AvailableCommandsUpdate
         | CurrentModeUpdate
         | SessionInfoUpdate
@@ -61,38 +67,46 @@ class FakeClient(Client):
 
     async def request_permission(
         self,
-        options: list[PermissionOption],
         session_id: str,
         tool_call: ToolCallUpdate,
+        options: list[PermissionOption],
         **kwargs: Any,
     ) -> RequestPermissionResponse:
         raise NotImplementedError()
 
     async def read_text_file(
         self,
-        path: str,
         session_id: str,
-        limit: int | None = None,
+        path: str,
         line: int | None = None,
+        limit: int | None = None,
         **kwargs: Any,
     ) -> ReadTextFileResponse:
         raise NotImplementedError()
 
     async def write_text_file(
-        self, content: str, path: str, session_id: str, **kwargs: Any
+        self, session_id: str, path: str, content: str, **kwargs: Any
     ) -> WriteTextFileResponse | None:
         raise NotImplementedError()
 
     async def create_terminal(
         self,
-        command: str,
         session_id: str,
+        command: str,
         args: list[str] | None = None,
-        cwd: str | None = None,
         env: list[EnvVariable] | None = None,
+        cwd: str | None = None,
         output_byte_limit: int | None = None,
         **kwargs: Any,
     ) -> CreateTerminalResponse:
+        raise NotImplementedError()
+
+    async def create_elicitation(
+        self, message: str, mode: Any, **kwargs: Any
+    ) -> CreateElicitationResponse:
+        raise NotImplementedError()
+
+    async def complete_elicitation(self, elicitation_id: str, **kwargs: Any) -> None:
         raise NotImplementedError()
 
     async def terminal_output(
@@ -119,7 +133,7 @@ class FakeClient(Client):
         raise NotImplementedError()
 
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
-        raise NotImplementedError()
+        self.ext_notifications.append((method, params))
 
     async def close(self) -> None:
         raise NotImplementedError()
