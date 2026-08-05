@@ -86,16 +86,31 @@ from vibe.utils.tool_presentation import ToolCallPresentation
 
 
 def project_config(agent_loop: AgentLoop, *, base: bool = False) -> ConfigView:
-    return project_config_view(agent_loop.base_config if base else agent_loop.config)
+    return project_config_view(
+        agent_loop.base_config if base else agent_loop.config,
+        active_model_pinned=bool(
+            agent_loop.config_orchestrator.persisted_active_model()
+        ),
+    )
 
 
-def project_config_view(config: VibeConfigSchema) -> ConfigView:
+def project_config_view(
+    config: VibeConfigSchema, *, active_model_pinned: bool = False
+) -> ConfigView:
     transcribe_model = config.get_active_transcribe_model()
     tts_model = config.get_active_tts_model()
+    default_model_alias = (
+        config.resolve_default_model_alias()
+        if active_model_pinned
+        else config.get_active_model().alias
+    )
     return ConfigView(
         active_model=_project_model_config(config.get_active_model()),
+        active_model_pinned=active_model_pinned,
+        default_model_alias=default_model_alias,
         theme=config.theme,
         disable_welcome_banner_animation=config.disable_welcome_banner_animation,
+        show_greeting=config.show_greeting,
         autocopy_to_clipboard=config.autocopy_to_clipboard,
         file_watcher_for_autocomplete=config.file_watcher_for_autocomplete,
         ask_confirmation_on_exit=config.ask_confirmation_on_exit,

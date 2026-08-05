@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from textual import events
@@ -50,6 +50,12 @@ def apply_stacked_width(screen: Screen[Any], content: Widget) -> None:
 DEFAULT_ORIGIN = "default"
 OVERRIDES_LAYER = "overrides"
 ENVIRONMENT_LAYER = "environment"
+ADMIN_LAYER = "admin"
+
+
+def is_enforced(view: ConfigFieldWire) -> bool:
+    return view.origin == ADMIN_LAYER
+
 
 NAME_COLUMN_WIDTH = 38
 VALUE_COLUMN_WIDTH = 32
@@ -59,6 +65,8 @@ DOUBLE_CLICK = 2
 CURSOR = "▸ "
 CURSOR_BLANK = "  "
 CURSOR_WIDTH = len(CURSOR)
+
+LOCK_GLYPH = "⚿"
 
 ROW_WIDTH = CURSOR_WIDTH + NAME_COLUMN_WIDTH + COLUMN_GAP + VALUE_COLUMN_WIDTH
 # Text width inside the edit-modal side panel (#config-edit-side): its fixed
@@ -75,7 +83,13 @@ MERGE_THRESHOLD = 5
 _BOOST_FACTOR = 1.25
 
 
-def format_value(value: Any) -> str:
+def format_value(value: Any, labels: Mapping[str, str] | None = None) -> str:
+    if labels is not None and isinstance(value, str) and value in labels:
+        return labels[value]
+    return _format_raw_value(value)
+
+
+def _format_raw_value(value: Any) -> str:
     match value:
         case bool():
             return "True" if value else "False"
@@ -117,6 +131,8 @@ def origin_label(origin: str) -> str:
         return "temporary"
     if origin == ENVIRONMENT_LAYER:
         return "env"
+    if origin == ADMIN_LAYER:
+        return "your administrator"
     if origin.endswith("-toml"):
         return f"{origin[: -len('-toml')]} config"
     return origin
@@ -145,16 +161,29 @@ def section_header_text(label: str, *, first: bool) -> Content:
 
 def row_text(view: ConfigFieldWire, *, selected: bool = False) -> Content:
     name = truncate(view.name, NAME_COLUMN_WIDTH)
-    label = truncate(format_value(view.value), VALUE_COLUMN_WIDTH)
-    return Content.assemble(
-        (CURSOR if selected else CURSOR_BLANK, "$primary bold"),
-        (name, "bold"),
-        " " * (NAME_COLUMN_WIDTH - len(name) + COLUMN_GAP),
-        (label, "$text-muted"),
-    )
+    label = truncate(format_value(view.value, view.value_labels), VALUE_COLUMN_WIDTH)
+    gap = " " * (NAME_COLUMN_WIDTH - len(name) + COLUMN_GAP)
+    if not is_enforced(view):
+        cursor = (CURSOR if selected else CURSOR_BLANK, "$primary bold")
+        return Content.assemble(cursor, (name, "bold"), gap, (label, "$text-muted"))
+
+    # Enforced rows read as disabled: dim italic text with a lock glyph in the
+    # left cursor column. The lock shares the muted font colour so it does not
+    # invite interaction; the selection arrow takes over when the row is active.
+    text_style = "$text-disabled dim"
+    cursor = (CURSOR, "$primary bold") if selected else (f"{LOCK_GLYPH} ", text_style)
+    return Content.assemble(cursor, (f"{name}{gap}{label}", f"{text_style} italic"))
 
 
-def inspector_text(layer_values: list[ConfigLayerValueWire]) -> Content:
+def enforced_legend() -> Content:
+    enforced_legend = f"{LOCK_GLYPH} Settings are managed by your organization"
+    # Match the enforced rows so the sentence reads as the same "managed" state.
+    return Content.styled(enforced_legend, "$text-disabled dim italic")
+
+
+def inspector_text(
+    layer_values: list[ConfigLayerValueWire], labels: Mapping[str, str] | None = None
+) -> Content:
     if not layer_values:
         return Content.styled("default only", "dim")
     width = max(len(origin_label(entry.layer)) for entry in layer_values)
@@ -169,7 +198,7 @@ def inspector_text(layer_values: list[ConfigLayerValueWire]) -> Content:
         parts.append(("▸ " if active else "  ", style))
         parts.append((f"{origin_label(entry.layer):<{width}}", style))
         parts.append(" " * COLUMN_GAP)
-        value = truncate(format_value(entry.value), value_budget)
+        value = truncate(format_value(entry.value, labels), value_budget)
         parts.append((value, "bold" if active else "dim"))
         if index != last:
             parts.append("\n")

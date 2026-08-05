@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import re
 import time
 
 import pexpect
@@ -20,7 +19,6 @@ from tests.e2e.agent_loop_characterization.support import (
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     send_ctrl_c_until_quit_confirmation,
-    strip_ansi,
     wait_for_main_screen,
     wait_for_rendered_text,
 )
@@ -34,20 +32,26 @@ RESUME_RESUMED_TURN_RESPONSE = "Resumed turn saw prior tool history."
 RESUME_TODO_RESULT_TEXT = "Updated 1 todos"
 
 
-def _load_latest_session_messages() -> list[dict[str, object]]:
+def _load_latest_session_messages() -> tuple[str, list[dict[str, object]]] | None:
     session_root = Path(os.environ["VIBE_HOME"]) / "logs" / "session"
     messages_paths = list(session_root.glob("session_*/messages.jsonl"))
     if not messages_paths:
-        return []
+        return None
 
     messages_path = max(messages_paths, key=lambda path: path.stat().st_mtime)
     messages: list[dict[str, object]] = []
     try:
         for line in messages_path.read_text(encoding="utf-8").splitlines():
             messages.append(json.loads(line))
+        metadata = json.loads(
+            messages_path.with_name("meta.json").read_text(encoding="utf-8")
+        )
     except (OSError, json.JSONDecodeError):
-        return []
-    return messages
+        return None
+    session_id = metadata.get("session_id")
+    if not isinstance(session_id, str):
+        return None
+    return session_id, messages
 
 
 def _has_message_content(
@@ -87,10 +91,14 @@ def _wait_for_persisted_resume_history(
     tool_result_text: str,
     final_assistant_text: str,
     timeout: float,
-) -> None:
+) -> str:
     start = time.monotonic()
     while time.monotonic() - start < timeout:
-        messages = _load_latest_session_messages()
+        persisted_session = _load_latest_session_messages()
+        if persisted_session is None:
+            time.sleep(0.05)
+            continue
+        session_id, messages = persisted_session
         if (
             _has_message_content(messages, role="user", expected=user_prompt)
             and _has_assistant_tool_call(messages, call_id=assistant_tool_call_id)
@@ -101,12 +109,15 @@ def _wait_for_persisted_resume_history(
                 messages, role="assistant", expected=final_assistant_text
             )
         ):
-            return
+            return session_id
         time.sleep(0.05)
 
-    persisted_roles = [
-        message.get("role") for message in _load_latest_session_messages()
-    ]
+    persisted_session = _load_latest_session_messages()
+    persisted_roles = (
+        [message.get("role") for message in persisted_session[1]]
+        if persisted_session is not None
+        else []
+    )
     raise AssertionError(
         f"Timed out waiting for persisted resume history. Persisted roles: {persisted_roles}"
     )
@@ -165,7 +176,7 @@ def test_resumed_session_sends_prior_tool_call_and_result_history_to_the_model(
         wait_for_rendered_text(
             child, captured, needle=RESUME_FIRST_TURN_RESPONSE, timeout=10
         )
-        _wait_for_persisted_resume_history(
+        session_id = _wait_for_persisted_resume_history(
             user_prompt=RESUME_INITIAL_PROMPT,
             assistant_tool_call_id=RESUME_TODO_CALL_ID,
             tool_result_text=RESUME_TODO_RESULT_TEXT,
@@ -175,11 +186,6 @@ def test_resumed_session_sends_prior_tool_call_and_result_history_to_the_model(
 
         send_ctrl_c_until_quit_confirmation(child, captured, timeout=5)
         child.expect(pexpect.EOF, timeout=10)
-
-    first_output = strip_ansi(captured.getvalue())
-    resume_match = re.search(r"Or: vibe --resume ([0-9a-f-]+)", first_output)
-    assert resume_match is not None
-    session_id = resume_match.group(1)
 
     with spawned_vibe_process(e2e_workdir, extra_args=["--resume", session_id]) as (
         resumed_child,

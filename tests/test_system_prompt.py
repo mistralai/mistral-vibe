@@ -12,13 +12,33 @@ from vibe.core.scratchpad import init_scratchpad
 from vibe.core.skills.manager import SkillManager
 from vibe.core.system_prompt import get_universal_system_prompt
 from vibe.core.tools import manager as tool_manager_module
-from vibe.core.tools.manager import ShellToolPolicy, ToolManager
+from vibe.core.tools.manager import ToolManager
 
 
 def _hide_standard_git_installs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ProgramFiles", raising=False)
     monkeypatch.delenv("ProgramFiles(x86)", raising=False)
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+
+def test_system_prompt_reports_resolved_model_when_unpinned(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
+    # The unpinned default (active_model == "") must still report the resolved
+    # model alias, not an empty name.
+    config = build_config(
+        include_model_info=True,
+        include_prompt_detail=False,
+        include_commit_signature=False,
+    )
+    assert config.active_model == ""
+    skill_manager = SkillManager(lambda: config)
+    agent_manager = AgentManager(load_orchestrator(config))
+
+    prompt = get_universal_system_prompt(config, skill_manager, agent_manager)
+
+    assert f"Your model name is: `{config.get_active_model().alias}`" in prompt
+    assert "Your model name is: ``" not in prompt
 
 
 def test_get_universal_system_prompt_uses_cmd_rules_without_bash(
@@ -155,10 +175,9 @@ def test_get_universal_system_prompt_uses_powershell_rules_in_treatment(
         include_prompt_detail=True,
         include_model_info=False,
         include_commit_signature=False,
+        managed_shell_tools_enabled=True,
     )
-    tool_manager = ToolManager(
-        lambda: config, shell_policy=ShellToolPolicy(managed_tools_enabled=lambda: True)
-    )
+    tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)
     agent_manager = AgentManager(load_orchestrator(config))
 
@@ -202,10 +221,9 @@ def test_get_universal_system_prompt_uses_git_bash_rules_in_treatment(
         include_prompt_detail=True,
         include_model_info=False,
         include_commit_signature=False,
+        managed_shell_tools_enabled=True,
     )
-    tool_manager = ToolManager(
-        lambda: config, shell_policy=ShellToolPolicy(managed_tools_enabled=lambda: True)
-    )
+    tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)
     agent_manager = AgentManager(load_orchestrator(config))
 

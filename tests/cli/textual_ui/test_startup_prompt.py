@@ -23,6 +23,7 @@ async def test_startup_prompt_waits_for_startup_resume_picker(
 
     monkeypatch.setattr(app, "_refresh_account", AsyncMock())
     monkeypatch.setattr(app, "_check_and_show_whats_new", AsyncMock())
+    monkeypatch.setattr(app, "_show_greeting_message", AsyncMock())
     monkeypatch.setattr(app, "_schedule_update_notification", Mock())
     monkeypatch.setattr(app, "_process_initial_prompt", process_prompt)
 

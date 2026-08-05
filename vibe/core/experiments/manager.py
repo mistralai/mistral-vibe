@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 from vibe.core.experiments.active import DEFAULT_VARIANTS, ExperimentName
 from vibe.core.experiments.client import RemoteEvalClient
@@ -54,13 +55,20 @@ class ExperimentManager:
         )
 
     def get_variant_or_none(self, name: ExperimentName) -> str | None:
-        """Return GrowthBook's resolved value, including feature defaults."""
+        """Return GrowthBook's resolved value as a string, including defaults.
+
+        Object/array valued experiments are serialized to their JSON string form
+        so callers get the real payload instead of falling back to the
+        client-side default.
+        """
         if self._response is not None:
             feature = self._response.features.get(name.value)
             if feature is not None:
                 value = feature.resolved_value()
                 if isinstance(value, str):
                     return value
+                if value is not None:
+                    return json.dumps(value)
         return None
 
     def get_variant(self, name: ExperimentName) -> str:
@@ -104,16 +112,18 @@ class ExperimentManager:
         for rule in feature.rules:
             if isinstance(rule.force, str):
                 return rule.force
+            if rule.force is not None:
+                return json.dumps(rule.force)
         return None
 
     @staticmethod
     def _variant_label(feature: FeatureDefinition, track: TrackData) -> str:
         value = track.result.value
-        if isinstance(value, str):
-            return value
+        if value is not None:
+            return value if isinstance(value, str) else json.dumps(value)
         resolved = feature.resolved_value()
-        if isinstance(resolved, str):
-            return resolved
+        if resolved is not None:
+            return resolved if isinstance(resolved, str) else json.dumps(resolved)
         if track.result.key is not None:
             return track.result.key
         if track.result.variationId is not None:

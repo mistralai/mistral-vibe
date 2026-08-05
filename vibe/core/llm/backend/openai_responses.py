@@ -462,6 +462,7 @@ class OpenAIResponsesAdapter(APIAdapter):
                         input_items.append({
                             "type": "reasoning",
                             "encrypted_content": encrypted_content,
+                            "summary": [],
                         })
                     input_items.append({
                         "role": "assistant",

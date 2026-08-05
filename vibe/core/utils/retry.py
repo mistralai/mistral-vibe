@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from dataclasses import dataclass
+from enum import StrEnum, auto
 import functools
 import logging
 
@@ -17,18 +19,59 @@ _RETRYABLE_REQUEST_ERRORS: tuple[type[httpx.RequestError], ...] = (
     httpx.RemoteProtocolError,
 )
 
-
-type RetryObserver = Callable[[str], Awaitable[None]]
-
-
-def describe_http_status(status_code: int) -> str:
-    return f"HTTP {status_code}"
+_SERVER_ERROR_STATUS_FLOOR = 500
 
 
-def describe_retry_reason(error: Exception) -> str:
-    if isinstance(error, httpx.HTTPStatusError):
-        return describe_http_status(error.response.status_code)
-    return type(error).__name__
+class RetryCategory(StrEnum):
+    RATE_LIMITED = auto()
+    SERVER_ERROR = auto()
+    TIMED_OUT = auto()
+    CONNECTION = auto()
+    UNKNOWN = auto()
+
+    @classmethod
+    def for_http_status(cls, status_code: int) -> RetryCategory:
+        match status_code:
+            case 429:
+                return cls.RATE_LIMITED
+            case 408:
+                return cls.TIMED_OUT
+            case status if status >= _SERVER_ERROR_STATUS_FLOOR:
+                return cls.SERVER_ERROR
+            case _:
+                return cls.UNKNOWN
+
+    @classmethod
+    def for_transport_error(cls, error: Exception) -> RetryCategory:
+        if isinstance(error, httpx.TimeoutException):
+            return cls.TIMED_OUT
+        if isinstance(error, _RETRYABLE_REQUEST_ERRORS):
+            return cls.CONNECTION
+        return cls.UNKNOWN
+
+
+@dataclass(frozen=True, slots=True)
+class RetryReason:
+    """Why a request is being retried: a category clients can render, plus the
+    raw detail for logs and tooltips. Classified here, where the exception is,
+    so no consumer has to parse `detail` back into a category.
+    """
+
+    category: RetryCategory
+    detail: str
+
+    @classmethod
+    def from_http_status(cls, status_code: int) -> RetryReason:
+        return cls(RetryCategory.for_http_status(status_code), f"HTTP {status_code}")
+
+    @classmethod
+    def from_error(cls, error: Exception) -> RetryReason:
+        if isinstance(error, httpx.HTTPStatusError):
+            return cls.from_http_status(error.response.status_code)
+        return cls(RetryCategory.for_transport_error(error), type(error).__name__)
+
+
+type RetryObserver = Callable[[RetryReason], Awaitable[None]]
 
 
 def _is_retryable_http_error(e: Exception) -> bool:
@@ -80,7 +123,7 @@ def async_retry[T, **P](
                             e,
                         )
                         if on_retry is not None:
-                            await on_retry(describe_retry_reason(e))
+                            await on_retry(RetryReason.from_error(e))
                         await asyncio.sleep(current_delay)
                         continue
                     raise e
@@ -145,7 +188,7 @@ def async_generator_retry[T, **P](
                             e,
                         )
                         if on_retry is not None:
-                            await on_retry(describe_retry_reason(e))
+                            await on_retry(RetryReason.from_error(e))
                         await asyncio.sleep(current_delay)
                         continue
                     raise

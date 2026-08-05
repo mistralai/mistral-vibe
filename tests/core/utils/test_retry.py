@@ -6,6 +6,8 @@ import httpx
 import pytest
 
 from vibe.core.utils.retry import (
+    RetryCategory,
+    RetryReason,
     _is_retryable_http_error,
     async_generator_retry,
     async_retry,
@@ -58,6 +60,74 @@ class TestIsRetryableHttpError:
 
     def test_generic_exception_returns_false(self) -> None:
         assert _is_retryable_http_error(RuntimeError("boom")) is False
+
+
+class TestRetryReason:
+    @pytest.mark.parametrize(
+        ("code", "category"),
+        [
+            (429, RetryCategory.RATE_LIMITED),
+            (408, RetryCategory.TIMED_OUT),
+            (500, RetryCategory.SERVER_ERROR),
+            (502, RetryCategory.SERVER_ERROR),
+            (503, RetryCategory.SERVER_ERROR),
+            (504, RetryCategory.SERVER_ERROR),
+            (529, RetryCategory.SERVER_ERROR),
+            (409, RetryCategory.UNKNOWN),
+            (425, RetryCategory.UNKNOWN),
+        ],
+    )
+    def test_classifies_http_status(self, code: int, category: RetryCategory) -> None:
+        assert RetryReason.from_http_status(code) == RetryReason(
+            category, f"HTTP {code}"
+        )
+
+    def test_classifies_an_http_status_error_by_its_response(self) -> None:
+        assert RetryReason.from_error(_make_http_status_error(429)) == RetryReason(
+            RetryCategory.RATE_LIMITED, "HTTP 429"
+        )
+
+    @pytest.mark.parametrize(
+        ("error", "category"),
+        [
+            (
+                httpx.ConnectTimeout("connect timed out", request=_make_request()),
+                RetryCategory.TIMED_OUT,
+            ),
+            (
+                httpx.ReadTimeout("read timed out", request=_make_request()),
+                RetryCategory.TIMED_OUT,
+            ),
+            (
+                httpx.PoolTimeout("pool timed out", request=_make_request()),
+                RetryCategory.TIMED_OUT,
+            ),
+            (
+                httpx.ConnectError("connection refused", request=_make_request()),
+                RetryCategory.CONNECTION,
+            ),
+            (
+                httpx.ReadError("read failed", request=_make_request()),
+                RetryCategory.CONNECTION,
+            ),
+            (
+                httpx.WriteError("write failed", request=_make_request()),
+                RetryCategory.CONNECTION,
+            ),
+            (
+                httpx.RemoteProtocolError("disconnected", request=_make_request()),
+                RetryCategory.CONNECTION,
+            ),
+            (RuntimeError("boom"), RetryCategory.UNKNOWN),
+        ],
+    )
+    def test_classifies_transport_errors(
+        self, error: Exception, category: RetryCategory
+    ) -> None:
+        reason = RetryReason.from_error(error)
+
+        assert reason.category is category
+        assert reason.detail == type(error).__name__
 
 
 class TestAsyncRetry:

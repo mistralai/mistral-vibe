@@ -104,6 +104,28 @@ class AccountView(ProtocolModel):
     teleport_action: AccountAction | None = None
 
 
+class IdentityEntityView(ProtocolModel):
+    id: str
+    name: str
+
+
+class IdentityView(ProtocolModel):
+    id: str
+    email: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    workspace: IdentityEntityView | None = None
+    organization: IdentityEntityView | None = None
+
+    @property
+    def name(self) -> str | None:
+        if self.first_name and self.last_name:
+            return f"{self.first_name} {self.last_name}"
+        if self.first_name:
+            return self.first_name
+        return self.email
+
+
 class FileImageSource(ProtocolModel):
     kind: Literal["file"] = "file"
     path: str
@@ -237,6 +259,14 @@ class PublicTurnStatus(StrEnum):
 
 class PublicTurnStopReason(StrEnum):
     LIMIT = auto()
+
+
+class PublicRetryCategory(StrEnum):
+    RATE_LIMITED = auto()
+    SERVER_ERROR = auto()
+    TIMED_OUT = auto()
+    CONNECTION = auto()
+    UNKNOWN = auto()
 
 
 class TurnErrorCode(StrEnum):

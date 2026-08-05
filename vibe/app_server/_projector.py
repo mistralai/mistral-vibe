@@ -185,6 +185,25 @@ class EventProjector:
             )
         ]
 
+    def replace_subagent(
+        self, tool_call_id: str, old_session_id: str, new_session_id: str
+    ) -> list[ProjectedUpdate]:
+        entry_id, _, detail = self._subagent_effect(tool_call_id)
+        if detail.child_session_id != old_session_id:
+            raise ValueError(f"Subagent effect links another child: {tool_call_id}")
+        return [
+            self._patch(
+                entry_id,
+                [
+                    JsonPatchOperation(
+                        op="replace",
+                        path="/detail/childSessionId",
+                        value=new_session_id,
+                    )
+                ],
+            )
+        ]
+
     def unlink_subagent(
         self, tool_call_id: str, child_session_id: str
     ) -> list[ProjectedUpdate]:

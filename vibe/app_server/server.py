@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
+from pathlib import Path
 from typing import Any, cast
 
 from pydantic import JsonValue, ValidationError
@@ -19,6 +21,7 @@ from vibe.app_server._execution import (
 )
 from vibe.app_server._handler import CoreRequestHandler, RootLifecycle
 from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._identity import IdentityGateway
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._projection import project_history
 from vibe.app_server._resources import ResourceRequestHandler
@@ -85,6 +88,14 @@ from vibe.app_server.transport import JsonRpcTransport
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.session import last_session_pointer
+from vibe.core.worktree import (
+    PreparedWorktree,
+    WorktreeError,
+    list_linked_worktrees,
+    prepare_worktree_session,
+    remove_worktree,
+)
+from vibe.observability.logging import logger
 
 
 class InitializationState(StrEnum):
@@ -117,6 +128,18 @@ class CallbackDelivery:
 class PendingClientRequest:
     response_type: type[ProtocolModel]
     future: asyncio.Future[ProtocolModel]
+
+
+@dataclass(frozen=True, slots=True)
+class LocalWorkspaceResolution:
+    options: SessionOptions
+    prepared_worktree: PreparedWorktree | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OpenedRuntime:
+    agent_loop: AgentLoop
+    workspace_resolution: LocalWorkspaceResolution
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +201,7 @@ class AppServer:
         open_root: OpenRoot,
         transport_kind: TransportKind = "in_process",
         account_gateway: AccountGateway | None = None,
+        identity_gateway: IdentityGateway | None = None,
         runtime_factory: AgentRuntimeFactory | None = None,
         host_handler: HostRequestHandler | None = None,
         stage_root: StageRoot | None = None,
@@ -211,6 +235,7 @@ class AppServer:
         self._closed = False
         self._shutdown_complete = False
         self._account_gateway = account_gateway
+        self._identity_gateway = identity_gateway
         self._runtime_factory = runtime_factory or AgentRuntimeFactory()
         self._stage_root = stage_root
         self._scheduler_enabled = False
@@ -256,7 +281,11 @@ class AppServer:
         execution = SessionExecution()
         history = SessionHistory(project_history(agent_loop))
         resources = ResourceRequestHandler(
-            agent_loop, execution, self._notify, self._account_gateway
+            agent_loop,
+            execution,
+            self._notify,
+            self._account_gateway,
+            self._identity_gateway,
         )
         coordinator = RootSessionCoordinator(
             agent_loop, resources, self._sessions, self._event_watermark, history
@@ -429,11 +458,7 @@ class AppServer:
             self._pending_notifications.clear()
             self._connection_attached = False
             self._attaching = False
-            for pending in self._client_requests.values():
-                if not pending.future.done():
-                    pending.future.set_exception(RuntimeError("App server closed"))
-            self._client_requests.clear()
-            self._abandoned_client_request_ids.clear()
+            self._reject_pending_client_requests(RuntimeError("App server closed"))
             transport = self._transport
             if transport is not None:
                 try:
@@ -461,11 +486,7 @@ class AppServer:
         if self._closed:
             return
         errors = await self._stop_request_tasks(asyncio.current_task())
-        for pending in self._client_requests.values():
-            if not pending.future.done():
-                pending.future.set_exception(RuntimeError("Client disconnected"))
-        self._client_requests.clear()
-        self._abandoned_client_request_ids.clear()
+        self._reject_pending_client_requests(RuntimeError("Client disconnected"))
         self._callback_requests.clear()
         self._pending_notifications.clear()
         self._connection_attached = False
@@ -499,6 +520,13 @@ class AppServer:
     ) -> list[BaseException]:
         tasks = [task for task in self._request_tasks if task is not current]
         return await cancel_tasks(tasks, label="app-server request")
+
+    def _reject_pending_client_requests(self, error: Exception) -> None:
+        for pending in self._client_requests.values():
+            if not pending.future.done():
+                pending.future.set_exception(error)
+        self._client_requests.clear()
+        self._abandoned_client_request_ids.clear()
 
     def _request_finished(self, task: asyncio.Task[None]) -> None:
         self._request_tasks.discard(task)
@@ -629,7 +657,11 @@ class AppServer:
     ) -> DispatchResult:
         if method not in SERVER_METHODS:
             raise method_not_found(method)
-        if method in {"config/schema", "workspace/trust/status"}:
+        if method in {
+            "config/schema",
+            "workspace/trust/status",
+            "workspace/worktrees/list",
+        }:
             return await self._host_handler.dispatch(method, raw_params)
         if method.startswith("projectLinks/"):
             return await self._host_handler.dispatch(method, raw_params)
@@ -709,18 +741,17 @@ class AppServer:
             case "session/start":
                 params = validate_wire(SessionStartParams, raw_params)
                 self._scheduler_enabled = not params.headless
-                state = await self._attach_opened_session(
-                    await self._open_runtime(open_root, params, None),
-                    params.history_limit,
-                )
+                opened = await self._open_runtime(open_root, params, None)
+                state = await self._attach_opened_runtime(opened, params.history_limit)
                 return DispatchResult(
                     SessionStartResponse(state=state), session_attached=True
                 )
             case "session/resume":
                 params = validate_wire(SessionResumeParams, raw_params)
+                _reject_local_workspace_selection(params)
                 self._scheduler_enabled = not params.headless
                 try:
-                    agent_loop = await self._open_runtime(
+                    opened = await self._open_runtime(
                         open_root, params, params.session_id
                     )
                 except RuntimeSessionNotFoundError as exc:
@@ -728,23 +759,24 @@ class AppServer:
                         ProtocolErrorCode.NOT_FOUND,
                         f"Session not found: {params.session_id}",
                     ) from exc
-                state = await self._attach_opened_session(
-                    agent_loop, params.history_limit, resumed=True
+                state = await self._attach_opened_runtime(
+                    opened, params.history_limit, resumed=True
                 )
                 return DispatchResult(
                     SessionResumeResponse(state=state), session_attached=True
                 )
             case "session/continue":
                 params = validate_wire(SessionContinueParams, raw_params)
+                _reject_local_workspace_selection(params)
                 self._scheduler_enabled = not params.headless
                 try:
-                    agent_loop = await self._open_runtime(
+                    opened = await self._open_runtime(
                         open_root, params, None, continue_latest=True
                     )
                 except RuntimeSessionNotFoundError as exc:
                     raise RequestFailure(ProtocolErrorCode.NOT_FOUND, str(exc)) from exc
-                state = await self._attach_opened_session(
-                    agent_loop, params.history_limit, resumed=True
+                state = await self._attach_opened_runtime(
+                    opened, params.history_limit, resumed=True
                 )
                 return DispatchResult(
                     SessionContinueResponse(state=state), session_attached=True
@@ -768,6 +800,7 @@ class AppServer:
                 ).model_dump(mode="json", by_alias=True),
             )
             state = validate_wire(SessionStartResponse, started.response).state
+            self._schedule_admin_config_fetch()
             if not resumed:
                 return state
             return self._root_session.append_checkpoint(
@@ -785,6 +818,30 @@ class AppServer:
                 await close_agent_loop(agent_loop)
             raise
 
+    def _schedule_admin_config_fetch(self) -> None:
+        task = asyncio.create_task(
+            self._fetch_admin_config(), name="vibe-admin-config-fetch"
+        )
+        self._request_tasks.add(task)
+        task.add_done_callback(self._request_finished)
+
+    async def _fetch_admin_config(self) -> None:
+        if self._root is None:
+            return
+        try:
+            changed = await self._resources.apply_admin_config()
+        except Exception as exc:
+            logger.debug("Admin config fetch failed", exc_info=exc)
+            return
+        if changed and self._root is not None:
+            await self._notify(
+                "runtime/updated",
+                RuntimeUpdatedParams(
+                    session_id=self._agent_loop.session_id,
+                    runtime=self._resources.runtime_snapshot(),
+                ),
+            )
+
     async def _open_runtime(
         self,
         open_root: OpenRoot,
@@ -792,19 +849,27 @@ class AppServer:
         session_id: str | None,
         *,
         continue_latest: bool = False,
-    ) -> AgentLoop:
+    ) -> OpenedRuntime:
         options = SessionOptions.model_validate(
             params.model_dump(include=set(SessionOptions.model_fields))
         )
         try:
-            return await open_root(
-                RootOpenRequest(
-                    options=options,
-                    client_info=self._initialized_client_info(),
-                    client_capabilities=self._client_capabilities,
-                    session_id=session_id,
-                    continue_latest=continue_latest,
+            workspace_resolution = await self._resolve_local_workspace(options)
+            try:
+                agent_loop = await open_root(
+                    RootOpenRequest(
+                        options=workspace_resolution.options,
+                        client_info=self._initialized_client_info(),
+                        client_capabilities=self._client_capabilities,
+                        session_id=session_id,
+                        continue_latest=continue_latest,
+                    )
                 )
+            except BaseException:
+                await self._cleanup_local_workspace(workspace_resolution)
+                raise
+            return OpenedRuntime(
+                agent_loop=agent_loop, workspace_resolution=workspace_resolution
             )
         except RuntimeAuthenticationError as exc:
             raise RequestFailure(
@@ -818,6 +883,57 @@ class AppServer:
                 str(exc),
                 data={"kind": "configuration"},
             ) from exc
+        except WorktreeError as exc:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
+
+    async def _resolve_local_workspace(
+        self, options: SessionOptions
+    ) -> LocalWorkspaceResolution:
+        # Stay synchronous without a selection: hopping to a thread here would add
+        # an await point to every session start, letting a pipelined follow-up
+        # request overtake the session attachment.
+        if options.local_workspace_selection is None:
+            return LocalWorkspaceResolution(options=options)
+
+        # Shielded because the worker thread cannot be cancelled: it still creates
+        # the worktree after a cancelled await, so the resolution has to stay
+        # reachable for cleanup.
+        resolve = asyncio.create_task(
+            asyncio.to_thread(resolve_local_workspace_selection, options)
+        )
+        try:
+            return await asyncio.shield(resolve)
+        except asyncio.CancelledError:
+            with suppress(BaseException):
+                await self._cleanup_local_workspace(await resolve)
+            raise
+
+    async def _attach_opened_runtime(
+        self, opened: OpenedRuntime, history_limit: int, *, resumed: bool = False
+    ) -> PublicSessionState:
+        try:
+            return await self._attach_opened_session(
+                opened.agent_loop, history_limit, resumed=resumed
+            )
+        except BaseException:
+            await self._cleanup_local_workspace(opened.workspace_resolution)
+            raise
+
+    async def _cleanup_local_workspace(
+        self, workspace_resolution: LocalWorkspaceResolution
+    ) -> None:
+        worktree = workspace_resolution.prepared_worktree
+        if worktree is None or not worktree.created:
+            return
+        try:
+            await asyncio.to_thread(
+                remove_worktree, worktree, delete_branch=worktree.branch_created
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to clean up worktree after session startup failure",
+                exc_info=exc,
+            )
 
     def _ensure_scheduler(self) -> None:
         if self._scheduler_task is not None and not self._scheduler_task.done():
@@ -1117,6 +1233,61 @@ def _omits_session_id(method: str, raw_params: dict[str, Any]) -> bool:
     dropped. The handler still validates the params it was given.
     """
     return method in _SESSION_OPTIONAL_METHODS and raw_params.get("sessionId") is None
+
+
+def _reject_local_workspace_selection(params: SessionOpenParams) -> None:
+    # The field rides on shared SessionOptions, so resume/continue accept it on
+    # the wire. Resolving it there would mint a worktree and reopen the saved
+    # session under it instead of the workspace it was recorded against.
+    if params.local_workspace_selection is None:
+        return
+    raise RequestFailure(
+        ProtocolErrorCode.INVALID_PARAMS,
+        "localWorkspaceSelection is only supported when starting a session",
+    )
+
+
+def resolve_local_workspace_selection(
+    options: SessionOptions,
+) -> LocalWorkspaceResolution:
+    selection = options.local_workspace_selection
+    if selection is None:
+        return LocalWorkspaceResolution(options=options)
+
+    # Match the runtime default: non-desktop callers may omit cwd, in which case
+    # the app-server process cwd is the local project root.
+    base_cwd = Path(options.cwd or Path.cwd()).expanduser().resolve()
+    if not base_cwd.is_dir():
+        raise WorktreeError(f"Local project path is not a directory: {base_cwd}")
+
+    prepared_worktree: PreparedWorktree | None = None
+    match selection.kind:
+        case "existing":
+            requested = Path(selection.cwd).expanduser().resolve()
+            linked = list_linked_worktrees(base_cwd)
+            if not any(worktree.path == requested for worktree in linked):
+                raise WorktreeError(
+                    f"Worktree is not linked to the local project: {requested}"
+                )
+            cwd = requested
+        case "create":
+            prepared_worktree = prepare_worktree_session(
+                selection.name, base_cwd, branch=selection.branch
+            )
+            cwd = prepared_worktree.path
+        case _:  # Safety net for future local workspace selection variants.
+            raise TypeError(f"Unsupported local workspace selection: {selection!r}")
+
+    return LocalWorkspaceResolution(
+        options=options.model_copy(
+            update={
+                "cwd": str(cwd),
+                "workspace_roots": [str(cwd)],
+                "local_workspace_selection": None,
+            }
+        ),
+        prepared_worktree=prepared_worktree,
+    )
 
 
 def _notification_session_id(params: EventNotificationParams) -> str:

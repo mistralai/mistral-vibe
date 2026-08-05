@@ -16,6 +16,7 @@ from tests.stubs.app_server import create_test_app_server_session
 from tests.stubs.fake_account_gateway import FakeAccountGateway
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
+from tests.stubs.fake_identity_gateway import FakeIdentityGateway
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from tests.stubs.fake_voice_manager import FakeVoiceManager
 from tests.update_notifier.adapters.fake_update_cache_repository import (
@@ -23,6 +24,7 @@ from tests.update_notifier.adapters.fake_update_cache_repository import (
 )
 from tests.update_notifier.adapters.fake_update_gateway import FakeUpdateGateway
 from vibe.app_server._account import WhoAmIResult
+from vibe.app_server._identity import IdentityResult
 from vibe.app_server.models import AccountPlanKind
 from vibe.cli.textual_ui.app import CORE_VERSION, StartupOptions, VibeApp
 from vibe.cli.theme import resolve_auto_theme
@@ -512,6 +514,10 @@ def build_test_vibe_app(
             prompt_switching_to_pro_plan=False,
         )
     )
+    identity_gateway = kwargs.pop("identity_gateway", None)
+    resolved_identity_gateway = identity_gateway or FakeIdentityGateway(
+        IdentityResult(id="user-1", email="user@example.com", first_name="Ada")
+    )
     current_version = kwargs.pop("current_version", None)
     resolved_current_version = (
         CORE_VERSION if current_version is None else current_version
@@ -522,7 +528,9 @@ def build_test_vibe_app(
         app_server
         if app_server is not None
         else lambda: create_test_app_server_session(
-            resolved_agent_loop, account_gateway=resolved_account_gateway
+            resolved_agent_loop,
+            account_gateway=resolved_account_gateway,
+            identity_gateway=resolved_identity_gateway,
         )
     )
     history_file = kwargs.pop("history_file", Path(".vibehistory"))

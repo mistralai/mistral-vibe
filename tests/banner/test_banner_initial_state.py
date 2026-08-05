@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+from textual.app import App, ComposeResult
+
 from tests.stubs.app_config import build_test_app_config
 from vibe.app_server.config import ConfigView, ThinkingLevel
 from vibe.app_server.models import (
@@ -9,6 +12,9 @@ from vibe.app_server.models import (
     MCPState,
 )
 from vibe.cli.textual_ui.widgets.banner.banner import Banner, BannerState, _pluralize
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.spinner import BrailleSpinner
+from vibe.cli.textual_ui.widgets.spinner_text import SpinnerText
 
 
 def _make_config(
@@ -18,7 +24,26 @@ def _make_config(
     model = config.active_model.model_copy(
         update={"name": active_model, "alias": active_model, "thinking": thinking}
     )
-    return config.model_copy(update={"active_model": model, "models": [model]})
+    return config.model_copy(
+        update={
+            "active_model": model,
+            "models": [model],
+            "disable_welcome_banner_animation": True,
+        }
+    )
+
+
+class _BannerHostApp(App[None]):
+    def __init__(self, banner: Banner) -> None:
+        super().__init__()
+        self._banner = banner
+
+    def compose(self) -> ComposeResult:
+        yield self._banner
+
+
+def _banner_model_text(banner: Banner) -> str:
+    return str(banner.query_one("#banner-model", NoMarkupStatic).content)
 
 
 def _mcp_server(name: str, *, disabled: bool = False) -> MCPSourceSummary:
@@ -100,6 +125,46 @@ class TestBannerInitialState:
         assert "connectors" not in result
         assert "1/2 MCP servers" in result
         assert "5 skills" in result
+
+
+class TestBannerModelPending:
+    def test_model_pending_defaults_to_false(self) -> None:
+        banner = Banner(config=_make_config(), skills_count=0)
+
+        assert banner._initial_state.model_pending is False
+
+    def test_model_pending_propagates_to_initial_state(self) -> None:
+        banner = Banner(config=_make_config(), skills_count=0, model_pending=True)
+
+        assert banner._initial_state.model_pending is True
+        # The resolved name is still computed, ready for when the spinner stops.
+        assert banner._initial_state.active_model == "test-model[off]"
+
+    def test_set_state_updates_model_pending(self) -> None:
+        banner = Banner(config=_make_config(), skills_count=0, model_pending=True)
+
+        banner.set_state(config=_make_config(), skills_count=0, model_pending=False)
+
+        assert banner.state.model_pending is False
+
+    @pytest.mark.asyncio
+    async def test_spinner_replaces_model_name_until_resolved(self) -> None:
+        banner = Banner(config=_make_config(), skills_count=0, model_pending=True)
+        app = _BannerHostApp(banner)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+            # While pending, the model slot shows a spinner frame, not a name.
+            pending_text = _banner_model_text(banner)
+            assert pending_text in BrailleSpinner.FRAMES
+            assert "test-model" not in pending_text
+
+            banner.set_state(config=_make_config(), skills_count=0, model_pending=False)
+            await pilot.pause()
+
+            # Once resolved, the real model name is shown and the timer is stopped.
+            assert _banner_model_text(banner) == "test-model[off]"
+            assert banner.query_one("#banner-model", SpinnerText)._timer is None
 
 
 class TestBannerMCPServersCount:

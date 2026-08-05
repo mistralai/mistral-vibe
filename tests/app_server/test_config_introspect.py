@@ -6,6 +6,7 @@ import pytest
 
 from vibe.app_server._config_introspect import (
     DEFAULT_ORIGIN,
+    HIDDEN_SETTINGS,
     POPULAR_SETTINGS,
     build_field_wires,
     classify_annotation,
@@ -21,6 +22,11 @@ from vibe.core.config.vibe_schema import VibeConfigSchema
 def test_popular_settings_are_valid_fields() -> None:
     unknown = POPULAR_SETTINGS - set(VibeConfigSchema.model_fields)
     assert not unknown, f"POPULAR_SETTINGS names not in schema: {sorted(unknown)}"
+
+
+def test_hidden_settings_are_valid_fields() -> None:
+    unknown = HIDDEN_SETTINGS - set(VibeConfigSchema.model_fields)
+    assert not unknown, f"HIDDEN_SETTINGS names not in schema: {sorted(unknown)}"
 
 
 @pytest.mark.parametrize(
@@ -54,7 +60,8 @@ def test_build_field_wires_covers_schema_and_defaults(
     config = make_config()
     by_name = {wire.name: wire for wire in build_field_wires(config, {})}
 
-    assert by_name.keys() == set(type(config).model_fields)
+    assert by_name.keys() == set(type(config).model_fields) - HIDDEN_SETTINGS
+    assert not HIDDEN_SETTINGS & by_name.keys()
     assert by_name["autocopy_to_clipboard"].kind is ConfigFieldKind.BOOL
     assert by_name["otel_redaction"].kind is ConfigFieldKind.ENUM
     assert by_name["models"].kind is ConfigFieldKind.COMPLEX

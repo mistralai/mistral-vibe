@@ -54,8 +54,12 @@ class ProxySettingsView(ProtocolModel):
 
 class ConfigView(ProtocolModel):
     active_model: ModelConfigView
+    # Whether the user has pinned a specific model, vs. the "default" (unpinned)
+    active_model_pinned: bool
+    default_model_alias: str
     theme: str
     disable_welcome_banner_animation: bool
+    show_greeting: bool
     autocopy_to_clipboard: bool
     file_watcher_for_autocomplete: bool
     ask_confirmation_on_exit: bool

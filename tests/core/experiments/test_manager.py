@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -8,7 +9,6 @@ from vibe.core.experiments.active import DEFAULT_VARIANTS, ExperimentName
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager, hash_api_key
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
-from vibe.core.experiments.rollouts import managed_shell_tools_enabled
 
 
 class _StubClient(RemoteEvalClient):
@@ -51,7 +51,6 @@ async def test_get_variant_returns_default_when_uninitialized() -> None:
     manager = ExperimentManager(client=_StubClient(None))
     assert manager.get_variant(ExperimentName.SYSTEM_PROMPT) == "cli"
     assert manager.get_variant(ExperimentName.MANAGED_SHELL_TOOLS) == "legacy"
-    assert managed_shell_tools_enabled(manager) is False
 
 
 @pytest.mark.asyncio
@@ -73,7 +72,6 @@ async def test_managed_shell_tools_remote_variant_enables_rollout() -> None:
     await manager.initialize(_attrs())
 
     assert manager.get_variant(ExperimentName.MANAGED_SHELL_TOOLS) == "managed"
-    assert managed_shell_tools_enabled(manager) is True
 
 
 @pytest.mark.asyncio
@@ -87,6 +85,57 @@ async def test_get_variant_or_none_returns_resolved_value() -> None:
     manager = ExperimentManager(client=_StubClient(response))
     await manager.initialize(_attrs())
     assert manager.get_variant_or_none(ExperimentName.SYSTEM_PROMPT) == "explore"
+
+
+@pytest.mark.asyncio
+async def test_get_variant_serializes_json_object_value() -> None:
+    payload = {
+        "active_model": "target-testing-model-alias",
+        "fallbacks": {"multimodal": "mistral-medium-3.5"},
+    }
+    response = _response({
+        ExperimentName.CLI_MODEL_ROUTING.value: {"defaultValue": payload, "rules": []}
+    })
+    manager = ExperimentManager(client=_StubClient(response))
+    await manager.initialize(_attrs())
+
+    variant = manager.get_variant(ExperimentName.CLI_MODEL_ROUTING)
+    assert json.loads(variant) == payload
+
+
+@pytest.mark.asyncio
+async def test_assignments_serializes_json_object_arm() -> None:
+    payload = {
+        "active_model": "target-testing-model-alias",
+        "fallbacks": {"multimodal": "mistral-medium-3.5"},
+    }
+    response = _response({
+        ExperimentName.CLI_MODEL_ROUTING.value: {
+            "defaultValue": payload,
+            "rules": [
+                {
+                    "tracks": [
+                        {
+                            "experiment": {
+                                "key": ExperimentName.CLI_MODEL_ROUTING.value
+                            },
+                            "result": {
+                                "variationId": 1,
+                                "value": payload,
+                                "inExperiment": True,
+                            },
+                        }
+                    ]
+                }
+            ],
+        }
+    })
+    manager = ExperimentManager(client=_StubClient(response))
+    await manager.initialize(_attrs())
+
+    assignments = manager.assignments()
+    label = assignments[ExperimentName.CLI_MODEL_ROUTING.value]
+    assert json.loads(label) == payload
 
 
 @pytest.mark.asyncio

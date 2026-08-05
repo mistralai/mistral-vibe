@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+# isort: off
+# Capture the process-start monotonic timestamp as early as possible (before
+# any heavier imports below) so the vibe.startup metric measures from true
+# process start. Re-exported for any consumer that needs the same anchor.
+from vibe.cli.process_start import PROCESS_START_MONOTONIC as PROCESS_START_MONOTONIC
+# isort: on
+
 import argparse
 import os
 from pathlib import Path

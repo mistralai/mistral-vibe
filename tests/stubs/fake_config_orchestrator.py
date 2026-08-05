@@ -58,6 +58,11 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
     async def load_persistence_layer(self) -> RawConfig:
         return await UserConfigLayer().load()
 
+    def persisted_active_model(self) -> str:
+        # The verbatim fake has no layer stack, so the held config's value is
+        # exactly what the test declared as the user's pin.
+        return self._config.active_model
+
     def replace_config(self, config: C) -> None:
         self._config = config
 

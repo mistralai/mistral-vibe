@@ -519,6 +519,37 @@ def _mistral_client_mock() -> tuple[MagicMock, MagicMock]:
     return client, hooks
 
 
+class TestBackendFactory:
+    def test_create_backend_passes_retry_budget_to_mistral_backend(self):
+        provider = ProviderConfig(
+            name="test_provider",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="API_KEY",
+            backend=Backend.MISTRAL,
+        )
+
+        backend = create_backend(
+            provider=provider, timeout=7200.0, retry_max_elapsed_time=1234.0
+        )
+
+        assert isinstance(backend, MistralBackend)
+        assert backend._timeout == 7200.0
+        assert backend._retry_config.backoff.max_elapsed_time == 1234000
+
+    def test_create_backend_passes_enable_otel_to_generic_backend(self):
+        provider = ProviderConfig(
+            name="test_provider",
+            api_base="https://api.example.com/v1",
+            api_key_env_var="API_KEY",
+            backend=Backend.GENERIC,
+        )
+
+        backend = create_backend(provider=provider, enable_otel=True)
+
+        assert isinstance(backend, GenericBackend)
+        assert backend._enable_otel is True
+
+
 class TestMistralRetry:
     @staticmethod
     def _create_test_backend(
@@ -578,22 +609,6 @@ class TestMistralRetry:
             timeout=7200.0, retry_max_elapsed_time=1234.0
         )
 
-        assert backend._timeout == 7200.0
-        assert backend._retry_config.backoff.max_elapsed_time == 1234000
-
-    def test_create_backend_passes_retry_budget(self):
-        provider = ProviderConfig(
-            name="test_provider",
-            api_base="https://api.mistral.ai/v1",
-            api_key_env_var="API_KEY",
-            backend=Backend.MISTRAL,
-        )
-
-        backend = create_backend(
-            provider=provider, timeout=7200.0, retry_max_elapsed_time=1234.0
-        )
-
-        assert isinstance(backend, MistralBackend)
         assert backend._timeout == 7200.0
         assert backend._retry_config.backoff.max_elapsed_time == 1234000
 

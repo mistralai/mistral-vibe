@@ -13,6 +13,7 @@ from vibe.app_server.config import ConfigView
 from vibe.app_server.models import MCPSourceKind, MCPSourceStatus, MCPState
 from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.spinner_text import SpinnerText
 
 
 def _pluralize(count: int, singular: str) -> str:
@@ -22,6 +23,7 @@ def _pluralize(count: int, singular: str) -> str:
 @dataclass
 class BannerState:
     active_model: str = ""
+    model_pending: bool = False
     models_count: int = 0
     mcp_servers_enabled: int = 0
     mcp_servers_total: int = 0
@@ -43,6 +45,7 @@ class Banner(Static):
         connectors_connected: int = 0,
         connectors_total: int = 0,
         hooks_count: int = 0,
+        model_pending: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -55,6 +58,7 @@ class Banner(Static):
             connectors_total=connectors_total,
             hooks_count=hooks_count,
             plan_description=None,
+            model_pending=model_pending,
         )
         self._animated = not config.disable_welcome_banner_animation
 
@@ -67,7 +71,7 @@ class Banner(Static):
                     yield NoMarkupStatic("Mistral Vibe", id="banner-brand")
                     yield NoMarkupStatic(" ", classes="banner-spacer")
                     yield NoMarkupStatic(f"v{__version__} · ", classes="banner-meta")
-                    yield NoMarkupStatic("", id="banner-model")
+                    yield SpinnerText(id="banner-model")
                     yield NoMarkupStatic("", id="banner-user-plan")
                 with Horizontal(classes="banner-line"):
                     yield NoMarkupStatic("", id="banner-meta-counts")
@@ -86,9 +90,9 @@ class Banner(Static):
         model = widgets.get("banner-model")
         counts = widgets.get("banner-meta-counts")
         plan = widgets.get("banner-user-plan")
-        if model is None or counts is None or plan is None:
+        if not isinstance(model, SpinnerText) or counts is None or plan is None:
             return
-        model.update(self.state.active_model)
+        model.set_pending(self.state.model_pending, resolved=self.state.active_model)
         counts.update(self._format_meta_counts())
         plan.update(self._format_plan())
 
@@ -105,6 +109,7 @@ class Banner(Static):
         connectors_total: int = 0,
         hooks_count: int = 0,
         plan_description: str | None = None,
+        model_pending: bool = False,
     ) -> None:
         self.state = self._build_state(
             config=config,
@@ -114,6 +119,7 @@ class Banner(Static):
             connectors_total=connectors_total,
             hooks_count=hooks_count,
             plan_description=plan_description,
+            model_pending=model_pending,
         )
 
     @staticmethod
@@ -125,6 +131,7 @@ class Banner(Static):
         connectors_total: int = 0,
         hooks_count: int = 0,
         plan_description: str | None = None,
+        model_pending: bool = False,
     ) -> BannerState:
         servers = (
             []
@@ -141,6 +148,7 @@ class Banner(Static):
         active_model = config.active_model
         return BannerState(
             active_model=f"{active_model.alias}[{active_model.thinking}]",
+            model_pending=model_pending,
             models_count=len(config.models),
             mcp_servers_enabled=len(enabled_servers),
             mcp_servers_total=len(servers),

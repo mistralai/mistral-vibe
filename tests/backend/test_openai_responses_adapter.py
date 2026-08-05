@@ -237,8 +237,8 @@ class TestPrepareRequest:
         )
 
         assert payload["input"] == [
-            {"type": "reasoning", "encrypted_content": "enc:abc"},
-            {"type": "reasoning", "encrypted_content": "enc:def"},
+            {"type": "reasoning", "encrypted_content": "enc:abc", "summary": []},
+            {"type": "reasoning", "encrypted_content": "enc:def", "summary": []},
             {
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": "Answer"}],
@@ -620,6 +620,13 @@ class TestParseNonStreamingResponse:
         assert chunk.message.content == "Done."
         assert chunk.message.reasoning_content == "Need to compare options."
         assert chunk.message.reasoning_state == ["enc:abc"]
+
+        payload = _prepare(adapter, provider, [chunk.message])
+        assert payload["input"][0] == {
+            "type": "reasoning",
+            "encrypted_content": "enc:abc",
+            "summary": [],
+        }
 
     def test_invalid_reasoning_item_schema_raises(self, adapter, provider):
         data = {

@@ -14,7 +14,6 @@ from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.experiments.active import ExperimentName
 from vibe.core.experiments.models import EvalResponse
-from vibe.core.experiments.rollouts import managed_shell_tools_enabled
 
 
 async def _real_orchestrator() -> ConfigOrchestrator[VibeConfigSchema]:
@@ -81,7 +80,10 @@ async def test_derived_runtime_inherits_experiment_state(derived_kind: str) -> N
 
     try:
         assert derived.experiment_manager.export_state() == state
-        assert managed_shell_tools_enabled(derived.experiment_manager) is True
+        assert (
+            derived.experiment_manager.get_variant(ExperimentName.MANAGED_SHELL_TOOLS)
+            == "managed"
+        )
     finally:
         await derived.aclose()
         await agent.aclose()
@@ -112,7 +114,8 @@ async def test_child_hydrates_experiments_before_deferred_initialization(
 
     def start_deferred_init(loop: AgentLoop):
         managed_at_deferred_start.append(
-            managed_shell_tools_enabled(loop.experiment_manager)
+            loop.experiment_manager.get_variant(ExperimentName.MANAGED_SHELL_TOOLS)
+            == "managed"
         )
         return original_start(loop)
 

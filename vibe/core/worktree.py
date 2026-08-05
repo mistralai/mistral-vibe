@@ -4,9 +4,14 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path, PureWindowsPath
+from typing import TYPE_CHECKING
 
-from git import InvalidGitRepositoryError, Repo
-from git.exc import GitCommandError, NoSuchPathError
+# GitPython resolves the git executable at import time and raises when it is
+# missing, so it is only imported at runtime by _git_python(). app-server must
+# boot on machines without git; only worktree operations may require it.
+if TYPE_CHECKING:
+    from git import InvalidGitRepositoryError, Repo
+    from git.exc import GitCommandError, NoSuchPathError
 
 from vibe.core.paths import WORKTREES_DIR
 
@@ -21,6 +26,36 @@ _RESERVED_WORKTREE_NAMES = frozenset(
 
 
 class WorktreeError(Exception): ...
+
+
+class WorktreeNotFoundError(WorktreeError): ...
+
+
+class GitUnavailableError(WorktreeError): ...
+
+
+@dataclass(frozen=True)
+class _GitPython:
+    repo: type[Repo]
+    invalid_git_repository_error: type[InvalidGitRepositoryError]
+    git_command_error: type[GitCommandError]
+    no_such_path_error: type[NoSuchPathError]
+
+
+def _git_python() -> _GitPython:
+    try:
+        from git import InvalidGitRepositoryError, Repo
+        from git.exc import GitCommandError, NoSuchPathError
+    except ImportError as e:
+        raise GitUnavailableError(
+            "Git worktree operations require git to be installed."
+        ) from e
+    return _GitPython(
+        repo=Repo,
+        invalid_git_repository_error=InvalidGitRepositoryError,
+        git_command_error=GitCommandError,
+        no_such_path_error=NoSuchPathError,
+    )
 
 
 @dataclass(frozen=True)
@@ -102,15 +137,20 @@ def prepare_worktree_session(
 
     branch_created = not _branch_exists(repo, branch)
     _create_worktree(repo, target, branch, branch_created=branch_created)
-    return _build_prepared(
-        name,
-        branch,
-        target,
-        relative_base,
-        repo_root,
-        created=True,
-        branch_created=branch_created,
-    )
+    try:
+        return _build_prepared(
+            name,
+            branch,
+            target,
+            relative_base,
+            repo_root,
+            created=True,
+            branch_created=branch_created,
+        )
+    except Exception as e:
+        if note := _cleanup_failed_prepare(repo, target, branch, branch_created):
+            e.add_note(note)
+        raise
 
 
 def list_linked_worktrees(base: Path) -> tuple[LinkedWorktree, ...]:
@@ -144,25 +184,40 @@ def list_linked_worktrees(base: Path) -> tuple[LinkedWorktree, ...]:
 
 
 def _open_repo(base: Path) -> Repo:
+    git = _git_python()
     try:
-        return Repo(base, search_parent_directories=True)
-    except (InvalidGitRepositoryError, NoSuchPathError) as e:
-        raise WorktreeError("--worktree requires a git repository.") from e
+        return git.repo(base, search_parent_directories=True)
+    except (git.invalid_git_repository_error, git.no_such_path_error) as e:
+        raise WorktreeNotFoundError("Path is not inside a git repository.") from e
 
 
 def _create_worktree(
     repo: Repo, target: Path, branch: str, *, branch_created: bool
 ) -> None:
+    git = _git_python()
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         if branch_created:
             repo.git.worktree("add", "-b", branch, str(target))
         else:
             repo.git.worktree("add", str(target), branch)
-    except GitCommandError as e:
+    except git.git_command_error as e:
         raise WorktreeError(
             f"Failed to create worktree {target.name!r} for branch {branch!r}: {e}"
         ) from e
+
+
+def _cleanup_failed_prepare(
+    repo: Repo, target: Path, branch: str, branch_created: bool
+) -> str | None:
+    git = _git_python()
+    try:
+        repo.git.worktree("remove", "--force", str(target))
+        if branch_created:
+            repo.git.branch("-D", branch)
+    except git.git_command_error as e:
+        return f"Failed to clean up worktree {target.name!r} after prepare failure: {e}"
+    return None
 
 
 def _build_prepared(
@@ -184,10 +239,25 @@ def _build_prepared(
         root=target,
         path=_target_cwd(target, relative_base),
         repo_root=repo_root,
-        base_commit=Repo(target).head.commit.hexsha,
+        base_commit=_base_commit(target),
         created=created,
         branch_created=branch_created,
     )
+
+
+def _base_commit(target: Path) -> str:
+    git = _git_python()
+    try:
+        return git.repo(target).head.commit.hexsha
+    except (
+        git.invalid_git_repository_error,
+        git.no_such_path_error,
+        git.git_command_error,
+        ValueError,
+    ) as e:
+        raise WorktreeError(
+            f"Failed to inspect worktree HEAD for {target.name!r}: {e}"
+        ) from e
 
 
 def inspect_worktree_for_cleanup(worktree: PreparedWorktree) -> WorktreeCleanupState:
@@ -196,15 +266,16 @@ def inspect_worktree_for_cleanup(worktree: PreparedWorktree) -> WorktreeCleanupS
     Commit counts intentionally use the worktree's current HEAD instead of the
     named branch so detached-HEAD commits still block cleanup.
     """
+    git = _git_python()
     try:
-        repo = Repo(worktree.root)
+        repo = git.repo(worktree.root)
         status_lines = repo.git.status(
             "--porcelain", "--untracked-files=all"
         ).splitlines()
         new_commit_count = int(
             repo.git.rev_list("--count", f"{worktree.base_commit}..HEAD").strip()
         )
-    except (InvalidGitRepositoryError, GitCommandError, ValueError) as e:
+    except (git.invalid_git_repository_error, git.git_command_error, ValueError) as e:
         raise WorktreeError(f"Failed to inspect worktree {worktree.name!r}: {e}") from e
 
     return WorktreeCleanupState(
@@ -215,13 +286,14 @@ def inspect_worktree_for_cleanup(worktree: PreparedWorktree) -> WorktreeCleanupS
 
 
 def remove_worktree(worktree: PreparedWorktree, *, delete_branch: bool = True) -> None:
+    git = _git_python()
     _leave_worktree_if_current_directory(worktree)
     try:
-        repo = Repo(worktree.repo_root)
+        repo = git.repo(worktree.repo_root)
         repo.git.worktree("remove", "--force", str(worktree.root))
         if delete_branch:
             repo.git.branch("-D", worktree.branch)
-    except (InvalidGitRepositoryError, GitCommandError) as e:
+    except (git.invalid_git_repository_error, git.git_command_error) as e:
         raise WorktreeError(f"Failed to remove worktree {worktree.name!r}: {e}") from e
 
 
@@ -245,16 +317,18 @@ def _is_portable_worktree_name(name: str) -> bool:
 
 
 def _validate_branch(repo: Repo, branch: str) -> None:
+    git = _git_python()
     try:
         repo.git.check_ref_format("--branch", branch)
-    except (GitCommandError, ValueError) as e:
+    except (git.git_command_error, ValueError) as e:
         raise WorktreeError(f"Invalid worktree branch {branch!r}.") from e
 
 
 def _branch_exists(repo: Repo, branch: str) -> bool:
+    git = _git_python()
     try:
         repo.git.show_ref("--verify", "--quiet", f"refs/heads/{branch}")
-    except GitCommandError as e:
+    except git.git_command_error as e:
         if e.status == 1:
             return False
         raise WorktreeError(f"Failed to inspect worktree branch {branch!r}: {e}") from e
@@ -297,6 +371,7 @@ def _relative_base(repo: Repo, base: Path) -> Path:
 def _validate_existing_worktree(
     target: Path, expected_branch: str, expected_common_git_dir: Path
 ) -> None:
+    git = _git_python()
     if _has_linked_path_component(target):
         raise WorktreeError(
             f"Path {target} contains a symbolic link or junction, "
@@ -306,8 +381,8 @@ def _validate_existing_worktree(
         raise WorktreeError(f"Path {target} already exists but is not a git worktree.")
 
     try:
-        existing_repo = Repo(target)
-    except InvalidGitRepositoryError as e:
+        existing_repo = git.repo(target)
+    except git.invalid_git_repository_error as e:
         raise WorktreeError(
             f"Path {target} already exists but is not a git worktree."
         ) from e
@@ -316,7 +391,7 @@ def _validate_existing_worktree(
         rev_parse_parts = existing_repo.git.rev_parse(
             "--git-common-dir", "--abbrev-ref", "HEAD"
         ).splitlines()
-    except GitCommandError as e:
+    except git.git_command_error as e:
         raise WorktreeError(f"Failed to inspect worktree {target}: {e}") from e
     if len(rev_parse_parts) != _WORKTREE_REV_PARSE_PARTS:
         raise WorktreeError(
@@ -387,15 +462,16 @@ class _WorktreeRecord:
 
 
 def _worktree_records(repo: Repo) -> tuple[_WorktreeRecord, ...]:
+    git = _git_python()
     try:
         output = _worktree_list_porcelain(repo, null_terminated=True)
         return _parse_worktree_records(output, separator="\0")
-    except GitCommandError as e:
+    except git.git_command_error as e:
         if e.status != _GIT_USAGE_ERROR_STATUS:
             raise WorktreeError(f"Failed to list git worktrees: {e}") from e
     try:
         output = _worktree_list_porcelain(repo, null_terminated=False)
-    except GitCommandError as e:
+    except git.git_command_error as e:
         raise WorktreeError(f"Failed to list git worktrees: {e}") from e
     return _parse_worktree_records(output, separator="\n")
 

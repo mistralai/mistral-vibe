@@ -8,9 +8,17 @@ import time
 import pytest
 
 from vibe.core.config import SessionLoggingConfig
+from vibe.core.session.session_index import clear_session_index_registry
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.types import LLMMessage, Role, SessionMetadata, ToolCall
 from vibe.utils.io import read_safe
+
+
+@pytest.fixture(autouse=True)
+def _clear_session_index_registry():
+    clear_session_index_registry()
+    yield
+    clear_session_index_registry()
 
 
 @pytest.fixture
@@ -1054,6 +1062,30 @@ class TestSessionLoaderGetFirstUserMessage:
 
         assert result == "First user message"
 
+    def test_returns_first_user_message_from_list_content(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        folder = session_dir / "test_20230101_000000_000000_listcont"
+        folder.mkdir(parents=True)
+        (folder / "messages.jsonl").write_text(
+            json.dumps({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "block one"},
+                    {"type": "text", "text": "block two"},
+                ],
+            })
+            + "\n"
+        )
+        (folder / "meta.json").write_text(
+            json.dumps({"session_id": "listcont", "total_messages": 1})
+        )
+
+        result = SessionLoader.get_first_user_message("listcont", session_config)
+
+        assert result == "block one block two"
+
     def test_returns_fallback_for_missing_session(
         self, session_config: SessionLoggingConfig
     ) -> None:
@@ -1123,18 +1155,12 @@ class TestSessionLoaderGetFirstUserMessage:
 
         assert result == "(empty message)"
 
-    def test_handles_invalid_session_as_not_found(
+    def test_handles_invalid_session_as_corrupted(
         self, session_config: SessionLoggingConfig
     ) -> None:
-        """Test that invalid sessions (bad JSON) are treated as not found.
-
-        Note: Sessions with invalid JSON are filtered out by _is_valid_session
-        during find_session_by_id, so they return 'not found' rather than
-        'corrupted'. This is the expected behavior.
-        """
         session_dir = Path(session_config.save_dir)
 
-        # Create a session with invalid JSON - will fail validation
+        # Create a session with invalid JSON in the transcript.
         session_folder = session_dir / "test_20230101_120000_corrupt0"
         session_folder.mkdir()
         (session_folder / "messages.jsonl").write_text("{invalid json}")
@@ -1142,8 +1168,9 @@ class TestSessionLoaderGetFirstUserMessage:
 
         result = SessionLoader.get_first_user_message("corrupt0", session_config)
 
-        # Invalid sessions are filtered by _is_valid_session, so not found
-        assert result == "(session not found)"
+        # get_first_user_message streams the transcript and reports corruption
+        # directly instead of silently treating it as missing.
+        assert result == "(corrupted session)"
 
     def test_skips_non_user_messages(
         self, session_config: SessionLoggingConfig, create_test_session
@@ -1161,6 +1188,55 @@ class TestSessionLoaderGetFirstUserMessage:
 
         # Should return "User question", not "Assistant response"
         assert result == "User question"
+
+
+class TestSessionListingStaysCheap:
+    def test_list_sessions_does_not_parse_transcripts(
+        self,
+        session_config: SessionLoggingConfig,
+        create_test_session_with_cwd,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        create_test_session_with_cwd(session_dir, "aaaaaaaa", "/home/user/project")
+        create_test_session_with_cwd(session_dir, "bbbbbbbb", "/home/user/project")
+
+        def fail(*_args, **_kwargs):
+            raise AssertionError("listing must not parse full transcripts")
+
+        monkeypatch.setattr(SessionLoader, "_read_validated_session", fail)
+        monkeypatch.setattr(SessionLoader, "load_session", fail)
+
+        result = SessionLoader.list_sessions(session_config)
+        assert len(result) == 2
+
+    def test_first_user_message_does_not_validate_all_messages(
+        self,
+        session_config: SessionLoggingConfig,
+        create_test_session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        create_test_session(
+            session_dir,
+            "preview0",
+            messages=[
+                LLMMessage(role=Role.system, content="System prompt"),
+                LLMMessage(role=Role.user, content="Preview me"),
+                LLMMessage(role=Role.assistant, content="Later"),
+            ],
+        )
+
+        def fail(*_args, **_kwargs):
+            raise AssertionError("preview must not Pydantic-validate messages")
+
+        monkeypatch.setattr(LLMMessage, "model_validate", staticmethod(fail))
+        monkeypatch.setattr(SessionLoader, "load_session", fail)
+
+        assert (
+            SessionLoader.get_first_user_message("preview0", session_config)
+            == "Preview me"
+        )
 
 
 class TestSessionLoaderUTF8Encoding:

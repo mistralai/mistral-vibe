@@ -16,7 +16,8 @@ from vibe.cli.textual_ui.screens.config import ConfigScreen
 from vibe.cli.textual_ui.screens.config.edit import _TargetedEditScreen
 from vibe.cli.textual_ui.widgets.theme_picker import sorted_theme_names
 from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import VibeConfigSchema, build_default_orchestrator
+from vibe.core.config import ModelConfig, VibeConfigSchema, build_default_orchestrator
+from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.models import OtelRedactionMode
 from vibe.core.config.orchestrator import ConfigOrchestrator
 
@@ -158,6 +159,45 @@ async def test_config_screen_toggles_bool_and_persists() -> None:
         assert agent_loop.config_orchestrator.config.autocopy_to_clipboard is True
 
 
+async def _orchestrator_with_enforced_theme(
+    theme: str,
+) -> ConfigOrchestrator[VibeConfigSchema]:
+    orchestrator = await build_default_orchestrator()
+    admin = next(
+        layer for layer in orchestrator.layers if isinstance(layer, AdminConfigLayer)
+    )
+    admin.load_managed_toml(f'theme = "{theme}"\n')
+    await orchestrator.reload()
+    return orchestrator
+
+
+@pytest.mark.asyncio
+async def test_config_screen_enforced_field_blocks_edit() -> None:
+    orchestrator = await _orchestrator_with_enforced_theme("textual-dark")
+    assert orchestrator.config.theme == "textual-dark"
+
+    app, _ = _app(orchestrator=orchestrator)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.2)
+        await app._show_config()
+        await pilot.pause(0.2)
+        for char in "theme":
+            await pilot.press(char)
+        await pilot.pause(0.1)
+
+        screen = app.screen
+        assert isinstance(screen, ConfigScreen)
+        highlighted = screen._view_by_name(screen._highlighted_name() or "")
+        assert highlighted is not None and highlighted.name == "theme"
+
+        # Enter must not open the edit modal for an enforced field.
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, ConfigScreen)
+
+    assert orchestrator.config.theme == "textual-dark"
+
+
 @pytest.mark.asyncio
 async def test_config_screen_single_click_selects_without_editing() -> None:
     app, agent_loop = _app(build_test_vibe_config(autocopy_to_clipboard=False))
@@ -232,6 +272,61 @@ async def test_config_screen_active_model_uses_choice_picker() -> None:
         assert isinstance(app.screen, ConfigScreen)
         assert orchestrator.config.active_model != original
         assert orchestrator.config.active_model in models
+
+
+@pytest.mark.asyncio
+async def test_config_screen_active_model_offers_default_option() -> None:
+    from textual.widgets import OptionList
+
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="alpha"),
+        ModelConfig(name="model-b", provider="mistral", alias="beta"),
+    ]
+    app, _ = _app(build_test_vibe_config(models=models, active_model="alpha"))
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_config()
+        await pilot.pause(0.2)
+
+        for char in "active_model":
+            await pilot.press(char)
+        await pilot.pause(0.1)
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        option_list = app.screen.query_one(OptionList)
+        # A leading "Default" option precedes the two configured models.
+        assert option_list.option_count == 3
+        assert str(option_list.get_option_at_index(0).prompt).startswith(
+            "default (currently "
+        )
+
+
+@pytest.mark.asyncio
+async def test_config_screen_select_default_unpins_active_model() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="alpha"),
+        ModelConfig(name="model-b", provider="mistral", alias="beta"),
+    ]
+    app, agent_loop = _app(build_test_vibe_config(models=models, active_model="alpha"))
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_config()
+        await pilot.pause(0.2)
+
+        for char in "active_model":
+            await pilot.press(char)
+        await pilot.pause(0.1)
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        # Current model "alpha" is preselected (index 1); move up to Default.
+        await pilot.press("up")
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert isinstance(app.screen, ConfigScreen)
+        assert agent_loop.config_orchestrator.config.active_model == ""
 
 
 @pytest.mark.asyncio

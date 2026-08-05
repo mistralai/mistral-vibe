@@ -42,7 +42,7 @@ from vibe.core.config.harness_files import (
 )
 from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.experiments import ExperimentManager, managed_shell_tools_enabled
+from vibe.core.experiments import ExperimentManager
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.models import EvalResponse
 from vibe.core.experiments.session import (
@@ -52,6 +52,7 @@ from vibe.core.experiments.session import (
 from vibe.core.hooks.config import load_hooks_from_fs
 from vibe.core.hooks.manager import HooksManager
 from vibe.core.hooks.models import HookConfigResult, HookEvent
+from vibe.core.identity_cache import IdentityCache
 from vibe.core.llm.backend.factory import create_backend
 from vibe.core.llm.exceptions import BackendError
 from vibe.core.llm.format import (
@@ -122,7 +123,7 @@ from vibe.core.tools.builtins.skill import (
     skill_content_marker,
 )
 from vibe.core.tools.io_port import ToolIOPort
-from vibe.core.tools.manager import NoSuchToolError, ShellToolPolicy, ToolManager
+from vibe.core.tools.manager import NoSuchToolError, ToolManager
 from vibe.core.tools.permissions import (
     ApprovedRule,
     PermissionContext,
@@ -177,6 +178,7 @@ from vibe.core.utils import (
     VIBE_STOP_EVENT_TAG,
     CancellationReason,
     RetryObserver,
+    RetryReason,
     get_user_cancellation_message,
     is_user_cancellation_event,
 )
@@ -246,7 +248,7 @@ class AgentRuntimePolicy:
     permission_store: PermissionStore
     cache_store: CacheStore
     force_bypass_tool_permissions: bool
-    local_managed_shell_tools_enabled: bool
+    local_managed_shell_runtime_enabled: bool
 
 
 class _SwappableConfigSource:
@@ -414,7 +416,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         mcp_registry: MCPRegistry | None = None,
         cache_store: CacheStore | None = None,
         force_bypass_tool_permissions: bool = False,
-        local_managed_shell_tools_enabled: bool = True,
+        local_managed_shell_runtime_enabled: bool = True,
         experiment_state: EvalResponse | None = None,
         parent_session_id: str | None = None,
         cwd: Path | None = None,
@@ -428,8 +430,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         )
         self._config_orchestrator = config_orchestrator
         self._force_bypass_tool_permissions = force_bypass_tool_permissions
-        self._local_managed_shell_tools_enabled = local_managed_shell_tools_enabled
+        self._local_managed_shell_runtime_enabled = local_managed_shell_runtime_enabled
         self._headless = headless
+        self._is_subagent = is_subagent
         self.cache_store = cache_store or InMemoryCacheStore()
 
         self._defer_heavy_init = defer_heavy_init
@@ -441,6 +444,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._reload_generation: int = 0
         self._pending_new_session_telemetry: bool = False
         self._ready_telemetry_pending: bool = defer_heavy_init
+        self._last_init_duration_ms: int | None = None
 
         self._permission_store = permission_store or PermissionStore()
         self.session_id = session_id or generate_session_id()
@@ -475,18 +479,18 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         )
         if experiment_state is not None:
             self.experiment_manager.hydrate(experiment_state)
+        # Session-scoped identity cache: experiment init fetches ``/users/me`` for
+        # the GrowthBook ``organizationId`` attribute, and the app's identity
+        # refresh needs the same data. Caching successes here lets the refresh
+        # reuse the experiment fetch instead of issuing a second round-trip.
+        self.identity_cache = IdentityCache()
         self.tool_manager = ToolManager(
             lambda: self.config,
             mcp_registry=self.mcp_registry,
             connector_registry=self.connector_registry,
             defer_mcp=True,
             permission_getter=self._permission_store.get_tool_permission,
-            shell_policy=ShellToolPolicy(
-                managed_tools_enabled=lambda: managed_shell_tools_enabled(
-                    self.experiment_manager
-                ),
-                local_managed_tools_enabled=self._local_managed_shell_tools_enabled,
-            ),
+            local_managed_shell_runtime_enabled=self._local_managed_shell_runtime_enabled,
             cwd=self.cwd,
             harness_files=self.harness_files,
             scratchpad_dir=self.scratchpad_dir,
@@ -658,6 +662,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if self._ready_telemetry_pending:
             self._ready_telemetry_pending = False
             duration = int((time.monotonic() - self._init_start_time) * 1000)
+            self._last_init_duration_ms = duration
             self.emit_ready_telemetry(duration)
         if self._pending_new_session_telemetry:
             self._pending_new_session_telemetry = False
@@ -705,7 +710,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             permission_store=self._permission_store,
             cache_store=self.cache_store,
             force_bypass_tool_permissions=self._force_bypass_tool_permissions,
-            local_managed_shell_tools_enabled=self._local_managed_shell_tools_enabled,
+            local_managed_shell_runtime_enabled=self._local_managed_shell_runtime_enabled,
         )
 
     async def record_child_session(
@@ -749,6 +754,44 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             metadata.child_sessions.remove(link)
             raise
         return link
+
+    async def replace_child_session(
+        self, old_session_id: str, child: AgentLoop, tool_call_id: str
+    ) -> ChildSessionLink:
+        parent_dir = self.session_logger.session_dir
+        child_dir = child.session_logger.session_dir
+        replacement = ChildSessionLink(
+            session_id=child.session_id,
+            tool_call_id=tool_call_id,
+            agent=child.agent_profile.name,
+            relative_path=(
+                str(child_dir.relative_to(parent_dir))
+                if parent_dir is not None and child_dir is not None
+                else None
+            ),
+        )
+        metadata = self.session_logger.session_metadata
+        if metadata is None:
+            return replacement
+        index = next(
+            (
+                index
+                for index, link in enumerate(metadata.child_sessions)
+                if link.session_id == old_session_id
+                and link.tool_call_id == tool_call_id
+            ),
+            None,
+        )
+        if index is None:
+            raise RuntimeError(f"Child session link not found: {old_session_id}")
+        previous = metadata.child_sessions[index]
+        metadata.child_sessions[index] = replacement
+        try:
+            await self.session_logger.persist_child_sessions()
+        except BaseException:
+            metadata.child_sessions[index] = previous
+            raise
+        return replacement
 
     async def forget_child_session(
         self, child_session_id: str, tool_call_id: str
@@ -856,6 +899,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             manager=self.experiment_manager,
             session_logger=self.session_logger,
             launch_context=self.launch_context,
+            resolve_identity=self.identity_cache.resolve,
         )
         if updated:
             with contextlib.suppress(Exception):
@@ -890,6 +934,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     def emit_ready_telemetry(self, init_duration_ms: int) -> None:
         self.telemetry_client.send_ready(init_duration_ms=init_duration_ms)
+
+    @property
+    def init_duration_ms(self) -> int | None:
+        return self._last_init_duration_ms
 
     def emit_session_closed_telemetry(self) -> None:
         self.telemetry_client.send_session_closed()
@@ -1007,7 +1055,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def _turn(self) -> _ActiveTurn:
         return self._active_turn or _NO_TURN
 
-    async def notice_retry(self, reason: str) -> None:
+    async def notice_retry(self, reason: RetryReason) -> None:
         if (sink := self._turn.retry_sink) is not None:
             await sink(reason)
 
@@ -2307,7 +2355,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.telemetry_client.send_tool_call_finished(
             tool_call=tool_call,
             agent_profile_name=self.agent_profile.name,
-            model=self.config.active_model,
+            model=self.config.get_active_model().alias,
             status=status,
             decision=decision,
             result=result,
@@ -2619,7 +2667,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.emit_session_closed_telemetry()
         suffix = extract_suffix(self.session_id)
         self.session_id = generate_session_id(suffix=suffix)
-        parent_session_id = old_session_id if keep_parent else None
+        parent_session_id = (
+            self.parent_session_id
+            if keep_parent and self._is_subagent
+            else old_session_id
+            if keep_parent
+            else None
+        )
         self.parent_session_id = parent_session_id
         self.session_logger.reset_session(
             self.session_id, parent_session_id=parent_session_id
@@ -2783,12 +2837,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             mcp_registry=self.mcp_registry,
             connector_registry=self.connector_registry,
             permission_getter=self._permission_store.get_tool_permission,
-            shell_policy=ShellToolPolicy(
-                managed_tools_enabled=lambda: managed_shell_tools_enabled(
-                    self.experiment_manager
-                ),
-                local_managed_tools_enabled=self._local_managed_shell_tools_enabled,
-            ),
+            local_managed_shell_runtime_enabled=self._local_managed_shell_runtime_enabled,
             cwd=self.cwd,
             harness_files=self.harness_files,
             scratchpad_dir=self.scratchpad_dir,

@@ -370,6 +370,7 @@ async def test_stdio_session_start_applies_the_serialized_session_options() -> N
     assert options.model_dump(by_alias=False) == {
         "cwd": "/workspace",
         "workspace_roots": ["/other"],
+        "local_workspace_selection": None,
         "agent": "plan",
         "auto_approve": True,
         "enabled_tools": ["read_file"],

@@ -23,12 +23,17 @@ if TYPE_CHECKING:
     from opentelemetry import trace
 
     from vibe.core.config import ProviderConfig, VibeConfigSchema
+    from vibe.core.llm.exceptions import BackendError
 
 from vibe.observability.logging import logger
 
 VIBE_TRACER_NAME = "mistral_vibe"
 VIBE_AGENT_NAME = "mistral-vibe"
 MISTRAL_OTEL_PATH = "/telemetry"
+VIBE_PROVIDER_API_STYLE = "vibe.provider.api_style"
+VIBE_REQUEST_CALL_TYPE = "vibe.request.call_type"
+VIBE_REQUEST_MESSAGE_ID = "vibe.request.message_id"
+VIBE_REQUEST_STREAMING = "vibe.request.streaming"
 
 
 def build_otel_span_exporter_config(
@@ -114,9 +119,40 @@ def _get_tracer() -> trace.Tracer:
     return trace.get_tracer(VIBE_TRACER_NAME, __version__)
 
 
+def _backend_error_from(exc: BaseException) -> BackendError | None:
+    from vibe.core.llm.exceptions import BackendError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, BackendError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _exception_status(
+    exc: Exception, *, record_unhandled_exception: bool
+) -> tuple[str, bool]:
+    if backend_error := _backend_error_from(exc):
+        status = (
+            str(backend_error.status) if backend_error.status is not None else "N/A"
+        )
+        return (
+            f"BackendError(provider={backend_error.provider}, status={status})",
+            False,
+        )
+
+    if not record_unhandled_exception:
+        return f"{type(exc).__name__} raised during model call.", False
+
+    return str(exc), True
+
+
 @asynccontextmanager
 async def _safe_span(
-    name: str, attributes: dict[str, Any]
+    name: str, attributes: dict[str, Any], *, record_unhandled_exception: bool = True
 ) -> AsyncGenerator[trace.Span]:
     from opentelemetry import trace
     from opentelemetry.trace import StatusCode
@@ -140,8 +176,12 @@ async def _safe_span(
     finally:
         try:
             if isinstance(exc_info, Exception):
-                span.set_status(StatusCode.ERROR, str(exc_info))
-                span.record_exception(exc_info)
+                description, should_record_exception = _exception_status(
+                    exc_info, record_unhandled_exception=record_unhandled_exception
+                )
+                span.set_status(StatusCode.ERROR, description)
+                if should_record_exception:
+                    span.record_exception(exc_info)
             elif exc_info is None:
                 span.set_status(StatusCode.OK)
         except Exception:
@@ -203,6 +243,191 @@ async def tool_span(
 
     async with _safe_span(f"execute_tool {tool_name}", attributes) as span:
         yield span
+
+
+def _provider_attribute_value(provider_name: str | None) -> str:
+    from opentelemetry.semconv._incubating.attributes import gen_ai_attributes
+
+    provider_name = provider_name or ""
+    normalized_name = provider_name.strip().lower().replace("-", "_")
+    known_values = {value.value for value in gen_ai_attributes.GenAiProviderNameValues}
+
+    aliases = {
+        "mistral": gen_ai_attributes.GenAiProviderNameValues.MISTRAL_AI.value,
+        "mistral_ai": gen_ai_attributes.GenAiProviderNameValues.MISTRAL_AI.value,
+        "google_vertex": gen_ai_attributes.GenAiProviderNameValues.GCP_VERTEX_AI.value,
+        "vertex": gen_ai_attributes.GenAiProviderNameValues.GCP_VERTEX_AI.value,
+        "google": gen_ai_attributes.GenAiProviderNameValues.GCP_GEN_AI.value,
+        "azure_openai": gen_ai_attributes.GenAiProviderNameValues.AZURE_AI_OPENAI.value,
+        "bedrock": gen_ai_attributes.GenAiProviderNameValues.AWS_BEDROCK.value,
+        "xai": gen_ai_attributes.GenAiProviderNameValues.X_AI.value,
+    }
+
+    if normalized_name in aliases:
+        return aliases[normalized_name]
+    if normalized_name in known_values:
+        return normalized_name
+    return normalized_name or "unknown"
+
+
+@asynccontextmanager
+async def model_call_span(
+    *,
+    provider_name: str,
+    provider_api_style: str,
+    model: str,
+    streaming: bool,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    metadata: dict[str, str] | None = None,
+    http_method: str = "POST",
+    http_url: str | None = None,
+) -> AsyncGenerator[trace.Span]:
+    from opentelemetry import baggage
+    from opentelemetry.semconv._incubating.attributes import (
+        gen_ai_attributes,
+        http_attributes,
+    )
+
+    attributes: dict[str, Any] = {
+        gen_ai_attributes.GEN_AI_OPERATION_NAME: gen_ai_attributes.GenAiOperationNameValues.CHAT.value,
+        gen_ai_attributes.GEN_AI_PROVIDER_NAME: _provider_attribute_value(
+            provider_name
+        ),
+        gen_ai_attributes.GEN_AI_REQUEST_MODEL: model,
+        VIBE_PROVIDER_API_STYLE: provider_api_style,
+        VIBE_REQUEST_STREAMING: streaming,
+    }
+    if temperature is not None:
+        attributes[gen_ai_attributes.GEN_AI_REQUEST_TEMPERATURE] = temperature
+    if max_tokens is not None:
+        attributes[gen_ai_attributes.GEN_AI_REQUEST_MAX_TOKENS] = max_tokens
+    if http_url:
+        attributes[http_attributes.HTTP_REQUEST_METHOD] = http_method
+        attributes[http_attributes.HTTP_URL] = http_url
+
+    metadata = metadata or {}
+    conversation_id = baggage.get_baggage(gen_ai_attributes.GEN_AI_CONVERSATION_ID)
+    if conversation_id is None:
+        conversation_id = metadata.get("session_id")
+    if conversation_id:
+        attributes[gen_ai_attributes.GEN_AI_CONVERSATION_ID] = str(conversation_id)
+
+    if call_type := metadata.get("call_type"):
+        attributes[VIBE_REQUEST_CALL_TYPE] = call_type
+    if message_id := metadata.get("message_id"):
+        attributes[VIBE_REQUEST_MESSAGE_ID] = message_id
+
+    async with _safe_span(
+        f"chat {model}", attributes, record_unhandled_exception=False
+    ) as span:
+        yield span
+
+
+def set_model_call_http_status(span: trace.Span | None, status_code: int) -> None:
+    if span is None:
+        return
+
+    from opentelemetry.semconv._incubating.attributes import http_attributes
+
+    try:
+        span.set_attribute(http_attributes.HTTP_RESPONSE_STATUS_CODE, status_code)
+    except Exception:
+        pass
+
+
+def set_model_call_usage(
+    span: trace.Span | None, *, prompt_tokens: int, completion_tokens: int
+) -> None:
+    if span is None:
+        return
+
+    from opentelemetry.semconv._incubating.attributes import gen_ai_attributes
+
+    try:
+        span.set_attribute(gen_ai_attributes.GEN_AI_USAGE_INPUT_TOKENS, prompt_tokens)
+        span.set_attribute(
+            gen_ai_attributes.GEN_AI_USAGE_OUTPUT_TOKENS, completion_tokens
+        )
+    except Exception:
+        pass
+
+
+def _string_attribute(value: Any) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _response_finish_reasons(response_data: dict[str, Any]) -> list[str]:
+    choices = response_data.get("choices")
+    finish_reasons: list[str] = []
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            if reason := _string_attribute(choice.get("finish_reason")):
+                finish_reasons.append(reason)
+
+    for source in (
+        response_data,
+        response_data.get("delta"),
+        response_data.get("response"),
+    ):
+        if not isinstance(source, dict):
+            continue
+        if reason := _string_attribute(
+            source.get("finish_reason") or source.get("stop_reason")
+        ):
+            finish_reasons.append(reason)
+
+    return finish_reasons
+
+
+def _response_metadata_sources(response_data: dict[str, Any]) -> list[dict[str, Any]]:
+    sources = [response_data]
+    for key in ("message", "response"):
+        if isinstance(source := response_data.get(key), dict):
+            sources.append(source)
+    return sources
+
+
+def set_model_call_response_metadata(
+    span: trace.Span | None, response_data: dict[str, Any]
+) -> None:
+    if span is None:
+        return
+
+    from opentelemetry.semconv._incubating.attributes import gen_ai_attributes
+
+    attributes: dict[str, str | list[str]] = {}
+    sources = _response_metadata_sources(response_data)
+    if response_model := next(
+        (
+            model
+            for source in sources
+            if (model := _string_attribute(source.get("model")))
+        ),
+        None,
+    ):
+        attributes[gen_ai_attributes.GEN_AI_RESPONSE_MODEL] = response_model
+    if response_id := next(
+        (
+            response_id
+            for source in sources
+            if (response_id := _string_attribute(source.get("id")))
+        ),
+        None,
+    ):
+        attributes[gen_ai_attributes.GEN_AI_RESPONSE_ID] = response_id
+    if finish_reasons := _response_finish_reasons(response_data):
+        attributes[gen_ai_attributes.GEN_AI_RESPONSE_FINISH_REASONS] = finish_reasons
+
+    try:
+        for key, value in attributes.items():
+            span.set_attribute(key, value)
+    except Exception:
+        pass
 
 
 @asynccontextmanager

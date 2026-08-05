@@ -121,15 +121,23 @@ from `~/.vibe/prompts/`, and finally from the built-in bundled prompts.
 
 ```toml
 # Model selection
-active_model = "mistral-medium-3.5"  # Model alias to use (see [[models]])
+active_model = "mistral-medium-3.5"  # Model alias to pin; omit or set "" to follow the server-routed default
 
 # UI preferences
 theme = "auto"  # Follow terminal background, then OS light/dark preference
 disable_welcome_banner_animation = false
-autocopy_to_clipboard = true
+autocopy_to_clipboard = true  # Enable automatic copying of selected text to clipboard
 file_watcher_for_autocomplete = false
 ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
+show_greeting = true  # Show "Hello {name}" greeting below the banner at startup (Mistral providers, once per 24h)
+```
 
+### Copy and Text Selection
+
+- **Copy shortcuts**: `Ctrl+Y` and `Ctrl+Shift+C` both copy the current selection to the clipboard. When autocopy is enabled (default), releasing the mouse over a selection also copies automatically. Each successful copy flashes a brief inline "Copied to clipboard" notice.
+- **Multi-click selection**: Double-click selects a word, triple-click selects the current paragraph; dragging extends the selection at the same granularity.
+
+```toml
 # Behavior
 bypass_tool_permissions = false    # Skip tool approval prompts
 system_prompt_id = "cli"          # System prompt: "cli", "lean", or custom .md filename
@@ -227,11 +235,10 @@ permission = "ask"
 shell = "powershell.exe"
 ```
 
-The rollout assignment is server-managed and is not a `config.toml` option.
-
-The built-in shell surface is controlled by the `vibe_cli_managed_shell_tools`
-experiment. The default variant keeps the legacy one-shot `bash` tool, including
-its existing Windows behavior. The managed variant exposes OS-native shell tools:
+The built-in shell surface is controlled by the `managed_shell_tools_enabled` config
+field and the `vibe_cli_managed_shell_tools` GrowthBook experiment. The default variant
+keeps the legacy one-shot `bash` tool, including its existing Windows behavior.
+The managed variant exposes OS-native shell tools:
 POSIX systems, including WSL where Vibe runs as Linux, get managed `bash`,
 `bash_output`, `bash_stdin`, `bash_sessions`, and `bash_log_file`; native Windows
 gets `git_bash`, `git_bash_output`, `git_bash_stdin`, `git_bash_sessions`, and
@@ -668,8 +675,8 @@ There are two kinds of agents:
 
 ### Subagents
 
-- **explore**: Read-only codebase exploration subagent (grep + read only).
-  Spawned by the model, not selectable by the user.
+- **explore**: Read-only codebase exploration subagent with grep, file reading,
+  and skill loading. Spawned by the model, not selectable by the user.
 
 Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 
@@ -690,6 +697,7 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
   are passed to the model for the continuation. Relevant error messages also
   hint at this command.
 - `/status` - Display agent statistics
+- `/whoami` - Display the Mistral signed-in user, workspace, and plan
 - `/voice` - Configure voice settings
 - `/mcp` - Display MCP servers and connector status; pass a server or connector
   name to list its tools or open its auth panel when authentication is required

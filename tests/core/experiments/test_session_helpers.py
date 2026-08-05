@@ -12,7 +12,15 @@ from vibe.core.experiments.session import (
     hydrate_experiments_from_session,
     initialize_experiments,
 )
+from vibe.core.identity import IdentityResult
 from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
+
+
+@pytest.fixture(autouse=True)
+def _stub_fetch_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.fetch_identity", AsyncMock(return_value=None)
+    )
 
 
 class _StubClient(RemoteEvalClient):
@@ -204,6 +212,73 @@ async def test_initialize_uses_provided_terminal_emulator(
     assert result is True
     assert client.attributes is not None
     assert client.attributes.terminal_emulator is TerminalEmulator.VSCODE
+
+
+@pytest.mark.asyncio
+async def test_initialize_includes_organization_id_from_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.fetch_identity",
+        AsyncMock(
+            return_value=IdentityResult.model_validate({
+                "id": "user-1",
+                "organization": {"id": "org-123", "name": "Acme"},
+            })
+        ),
+    )
+    session_logger = MagicMock()
+    session_logger.persist_experiments = AsyncMock()
+    response = EvalResponse.model_validate({
+        "features": {"vibe_cli_system_prompt": {"defaultValue": "cli"}}
+    })
+    client = _StubClient(response)
+    manager = ExperimentManager(client=client)
+
+    result = await initialize_experiments(
+        config=_make_config(),
+        manager=manager,
+        session_logger=session_logger,
+        launch_context=None,
+    )
+
+    assert result is True
+    assert client.attributes is not None
+    assert client.attributes.organizationId == "org-123"
+
+
+@pytest.mark.asyncio
+async def test_initialize_omits_organization_id_when_identity_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fail-open: identity fetch returns None (stubbed by the autouse fixture),
+    # so experiment init still succeeds with organization_id absent.
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    session_logger = MagicMock()
+    session_logger.persist_experiments = AsyncMock()
+    response = EvalResponse.model_validate({
+        "features": {"vibe_cli_system_prompt": {"defaultValue": "cli"}}
+    })
+    client = _StubClient(response)
+    manager = ExperimentManager(client=client)
+
+    result = await initialize_experiments(
+        config=_make_config(),
+        manager=manager,
+        session_logger=session_logger,
+        launch_context=None,
+    )
+
+    assert result is True
+    assert client.attributes is not None
+    assert client.attributes.organizationId is None
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ from typing import Any, cast
 from tests.mock.utils import mock_llm_chunk
 from vibe.core.llm.exceptions import BackendError, PayloadSummary
 from vibe.core.types import LLMChunk, LLMMessage, Role
-from vibe.core.utils import RetryObserver
+from vibe.core.utils import RetryObserver, RetryReason
 
 
 class FakeBackend:
@@ -98,7 +98,7 @@ class FakeBackend:
         if self.on_retry is None:
             return
         for _ in range(self._retries_before_response):
-            await self.on_retry("HTTP 429")
+            await self.on_retry(RetryReason.from_http_status(429))
 
     async def complete(
         self,

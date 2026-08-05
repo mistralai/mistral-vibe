@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.24.0] - 2026-08-05
+
+### Added
+
+- Admin config layer for shared/enforced config that applies over user config
+- "Default" (unpinned) model option in `/model` and `/config` to track the recommended model without pinning a specific alias
+- Server-side default model routing via experiment, never overriding explicit pins
+- LLM retries surfaced in ACP/VS Code conversations via `_session/retrying` notification
+- Explore subagent can load skills
+- Local sessions start in the selected worktree
+- User and project config layers compose; trusted project config overlays user config instead of replacing it
+- Startup duration telemetry (`vibe.startup`)
+
+### Changed
+
+- Experiment variants routed through the config schema; TOML/env/overrides now take precedence over GrowthBook assignments
+- Autocopy: keyboard copy shortcuts give feedback, double/triple-click drag improved, and `autocopy_to_clipboard` documented
+
+### Fixed
+
+- Drag-and-drop of files into the terminal when unfocused (iTerm2, Ghostty)
+- Subagent session handoff after compaction
+- Stale `devstral-small` thinking setting migrated to off
+- Noisy non-Vibe events dropped from Sentry
+- ACP returns `max_turn_requests` stop reason instead of erroring on turn limit
+- `/resume` listing speed no longer scales with total session count (persistent index)
+
+
 ## [2.23.3] - 2026-08-03
 
 ### Added
@@ -35,7 +63,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - Unreachable chat mode
-
 
 ## [2.23.2] - 2026-07-30
 

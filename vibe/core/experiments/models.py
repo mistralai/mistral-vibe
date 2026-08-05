@@ -26,6 +26,7 @@ class ExperimentAttributes(BaseModel):
     os: Literal["darwin", "linux", "windows"] | str
     terminal_emulator: TerminalEmulator | None = None
     custom_system_prompt: bool = False
+    organizationId: str | None = None
 
 
 class TrackedExperiment(BaseModel):

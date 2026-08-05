@@ -8,6 +8,17 @@ import pytest
 from vibe.core.config import MissingAPIKeyError, ModelConfig, ProviderConfig
 from vibe.core.config.vibe_schema import VibeConfigSchema
 
+_ROUTED_TEST_ALIAS = "target-testing-model-alias"
+_ROUTED_TEST_MODEL = ModelConfig(
+    name="target-testing-model-name",
+    provider="mistral",
+    alias=_ROUTED_TEST_ALIAS,
+    input_price=0.0,
+    output_price=0.0,
+    supports_images=False,
+)
+_ROUTED_TEST_MODEL_JSON = _ROUTED_TEST_MODEL.model_dump_json()
+
 
 @pytest.mark.asyncio
 async def test_full_toml_to_vibe_config_schema(tmp_path: Path) -> None:
@@ -74,6 +85,163 @@ def test_unknown_active_model_falls_back_to_first(
     assert (
         "Active model 'does-not-exist' is not in your configured models" in caplog.text
     )
+
+
+def test_active_model_defaults_to_unpinned_sentinel() -> None:
+    config = VibeConfigSchema()
+
+    # The empty string is the "unpinned/default" sentinel; it is preserved (not
+    # rewritten to a concrete alias) so the routing experiment can target it.
+    assert config.active_model == ""
+
+
+def test_unpinned_active_model_resolves_to_default_model() -> None:
+    from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
+
+    config = VibeConfigSchema()
+
+    assert config.get_active_model().alias == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+
+
+def test_unpinned_active_model_falls_back_to_first_configured_model(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+    with caplog.at_level("WARNING"):
+        config = VibeConfigSchema.model_validate({"active_model": "", "models": models})
+
+    assert config.active_model == ""
+    assert config.get_active_model().alias == "a"
+    assert config.resolve_default_model_alias() == "a"
+    assert "is not in your configured models" not in caplog.text
+
+
+def test_routed_default_model_resolves_when_unpinned() -> None:
+    config = VibeConfigSchema.model_validate({
+        "routed_default_model": _ROUTED_TEST_ALIAS,
+        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
+    })
+
+    assert config.active_model == ""
+    assert config.resolve_default_model_alias() == _ROUTED_TEST_ALIAS
+    assert config.get_active_model().alias == _ROUTED_TEST_ALIAS
+
+
+def test_routed_default_model_ignored_when_pinned() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+    config = VibeConfigSchema.model_validate({
+        "active_model": "a",
+        "routed_default_model": "b",
+        "models": models,
+    })
+
+    # An explicit pin always wins; the routed default only fills the unpinned case.
+    assert config.active_model == "a"
+    assert config.get_active_model().alias == "a"
+
+
+def test_unknown_routed_default_model_falls_back_to_default() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+    config = VibeConfigSchema.model_validate({
+        "active_model": "",
+        "routed_default_model": "does-not-exist",
+        "models": models,
+    })
+
+    # A routed alias that names no configured model is ignored, not raised.
+    assert config.resolve_default_model_alias() == "a"
+    assert config.get_active_model().alias == "a"
+
+
+def test_gated_model_absent_from_defaults() -> None:
+    config = VibeConfigSchema()
+
+    assert _ROUTED_TEST_ALIAS not in config.models
+
+
+def test_routed_model_config_is_injected() -> None:
+    config = VibeConfigSchema.model_validate({
+        "routed_default_model": _ROUTED_TEST_ALIAS,
+        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
+    })
+
+    assert config.models.get(_ROUTED_TEST_ALIAS) == _ROUTED_TEST_MODEL
+
+
+def test_routed_model_not_injected_without_config() -> None:
+    from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
+
+    config = VibeConfigSchema(routed_default_model=_ROUTED_TEST_ALIAS)
+
+    assert _ROUTED_TEST_ALIAS not in config.models
+    assert config.get_active_model().alias == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+
+
+def test_routed_model_not_injected_on_alias_mismatch() -> None:
+    mismatched = ModelConfig(
+        name="x", provider="mistral", alias="other-alias"
+    ).model_dump_json()
+    config = VibeConfigSchema.model_validate({
+        "routed_default_model": _ROUTED_TEST_ALIAS,
+        "routed_model_config": mismatched,
+    })
+
+    assert _ROUTED_TEST_ALIAS not in config.models
+    assert "other-alias" not in config.models
+
+
+def test_malformed_routed_model_config_string_fails_open() -> None:
+    from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
+
+    config = VibeConfigSchema.model_validate({
+        "routed_default_model": _ROUTED_TEST_ALIAS,
+        "routed_model_config": "not-json",
+    })
+
+    assert config.routed_model_config is None
+    assert _ROUTED_TEST_ALIAS not in config.models
+    assert config.get_active_model().alias == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+
+
+def test_gated_model_not_injected_without_routing() -> None:
+    config = VibeConfigSchema.model_validate({"active_model": ""})
+
+    assert _ROUTED_TEST_ALIAS not in config.models
+
+
+def test_gated_model_not_injected_when_pinned() -> None:
+    config = VibeConfigSchema.model_validate({
+        "active_model": "devstral-small",
+        "routed_default_model": _ROUTED_TEST_ALIAS,
+        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
+    })
+
+    assert config.active_model == "devstral-small"
+    assert config.get_active_model().alias == "devstral-small"
+    assert _ROUTED_TEST_ALIAS not in config.models
+
+
+def test_user_model_entry_wins_over_routed_injection() -> None:
+    # A user-defined model for the routed alias is never overwritten by injection.
+    user_model = ModelConfig(
+        name="my-own-model", provider="mistral", alias=_ROUTED_TEST_ALIAS
+    )
+    config = VibeConfigSchema.model_validate({
+        "routed_default_model": _ROUTED_TEST_ALIAS,
+        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
+        "models": [user_model],
+    })
+
+    assert config.models[_ROUTED_TEST_ALIAS].name == "my-own-model"
 
 
 def test_known_active_model_is_not_overridden(caplog: pytest.LogCaptureFixture) -> None:

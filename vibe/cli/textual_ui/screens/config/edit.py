@@ -50,7 +50,8 @@ class _TargetedEditScreen(ModalScreen[EditResult | None]):
         with Vertical(id="config-edit-side"):
             yield NoMarkupStatic("WHERE IT'S SET", classes="config-edit-side-header")
             yield NoMarkupStatic(
-                inspector_text(self._layer_values), classes="config-edit-inspector"
+                inspector_text(self._layer_values, self._view.value_labels),
+                classes="config-edit-inspector",
             )
 
     def _compose_save_bar(self) -> ComposeResult:
@@ -98,7 +99,9 @@ class _ChoiceEditScreen(_TargetedEditScreen):
                         )
                     yield NavigableOptionList(
                         *[
-                            Option(choice, id=choice)
+                            Option(
+                                self._view.value_labels.get(choice, choice), id=choice
+                            )
                             for choice in self._view.enum_choices
                         ],
                         id="config-edit-options",

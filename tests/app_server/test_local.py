@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
+from git import Repo
 import pytest
 import tomli_w
 
@@ -12,6 +15,7 @@ from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from vibe.app_server import _runtime as runtime
+import vibe.app_server._host as host_module
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._model import validate_wire
 from vibe.app_server._projection import project_config, project_config_view
@@ -20,9 +24,13 @@ from vibe.app_server.protocol import (
     AppServerResponseError,
     ClientCapabilities,
     ClientInfo,
+    ConfigFieldsReadParams,
+    ConfigFieldsReadResponse,
     ConfigReadParams,
     ConfigReadResponse,
     ConfigSchemaReadParams,
+    CreateLocalWorkspaceSelection,
+    ExistingLocalWorkspaceSelection,
     HistoryListParams,
     ProtocolErrorCode,
     SessionDeleteParams,
@@ -34,8 +42,11 @@ from vibe.app_server.protocol import (
     SessionTitleUpdateParams,
     SessionTitleUpdateResponse,
     WorkspaceTrustStatusParams,
+    WorkspaceWorktreeListParams,
+    WorkspaceWorktreeListResponse,
 )
-from vibe.app_server.server import AppServer
+import vibe.app_server.server as server_module
+from vibe.app_server.server import AppServer, resolve_local_workspace_selection
 from vibe.app_server.session import AppServerSession
 from vibe.app_server.transport import memory_transport_pair
 from vibe.core.agent_loop import AgentLoop
@@ -46,6 +57,11 @@ from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.hooks.config import HookConfigResult
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.trusted_folders import trusted_folders_manager
+from vibe.core.worktree import (
+    GitUnavailableError,
+    list_linked_worktrees,
+    prepare_worktree_session,
+)
 from vibe.utils.terminal import TerminalEmulator
 
 
@@ -56,6 +72,294 @@ class ClosingBackend(FakeBackend):
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self.closed = True
+
+
+def _init_repo(root: Path) -> Repo:
+    repo = Repo.init(root, initial_branch="main")
+    repo.config_writer().set_value("user", "name", "Tester").release()
+    repo.config_writer().set_value("user", "email", "t@example.com").release()
+    (root / "file.txt").write_text("hello\n")
+    repo.index.add(["file.txt"])
+    repo.index.commit("initial")
+    return repo
+
+
+def test_session_start_worktree_create_selection_resolves_cwd(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+
+    resolution = resolve_local_workspace_selection(
+        SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            local_workspace_selection=CreateLocalWorkspaceSelection(
+                branch="feat/app-server-worktree", name="app-server-worktree"
+            ),
+        )
+    )
+
+    options = resolution.options
+    assert options.local_workspace_selection is None
+    assert options.cwd is not None
+    assert options.workspace_roots == [options.cwd]
+    assert Repo(options.cwd).active_branch.name == "feat/app-server-worktree"
+    assert resolution.prepared_worktree is not None
+    assert resolution.prepared_worktree.created is True
+
+
+def test_session_start_worktree_existing_selection_resolves_cwd(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    worktree = prepare_worktree_session(
+        "existing-worktree", tmp_path, branch="feat/existing-worktree"
+    )
+
+    resolution = resolve_local_workspace_selection(
+        SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            local_workspace_selection=ExistingLocalWorkspaceSelection(
+                cwd=str(worktree.path)
+            ),
+        )
+    )
+
+    options = resolution.options
+    assert options.local_workspace_selection is None
+    assert options.cwd == str(worktree.path)
+    assert options.workspace_roots == [str(worktree.path)]
+    assert resolution.prepared_worktree is None
+
+
+@pytest.mark.asyncio
+async def test_session_start_rejects_existing_selection_outside_linked_worktrees(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+    unlinked = tmp_path / "unlinked"
+    unlinked.mkdir()
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        del request
+        raise AssertionError("runtime must not open for an unlinked worktree")
+
+    client_transport, server_transport = memory_transport_pair()
+    server = AppServer(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+
+    try:
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await AppServerSession.start(
+                client,
+                client_info=ClientInfo(name="unlinked-worktree-client", version="1"),
+                capabilities=ClientCapabilities(),
+                session_options=SessionOptions(
+                    cwd=str(tmp_path),
+                    local_workspace_selection=ExistingLocalWorkspaceSelection(
+                        cwd=str(unlinked)
+                    ),
+                ),
+            )
+    finally:
+        await client.close()
+
+    assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert "not linked to the local project" in exc_info.value.error.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "extra_params"),
+    [("session/resume", {"sessionId": "saved-session"}), ("session/continue", {})],
+)
+async def test_worktree_selection_is_rejected_outside_session_start(
+    tmp_path: Path, method: str, extra_params: dict[str, str]
+) -> None:
+    repo = _init_repo(tmp_path)
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        del request
+        raise AssertionError(f"{method} must not open a runtime")
+
+    client_transport, server_transport = memory_transport_pair()
+    server = AppServer(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(ClientInfo(name="selection-guard-client", version="1"))
+    await client.notify("initialized")
+
+    try:
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await client.request(
+                method,
+                {
+                    "cwd": str(tmp_path),
+                    "localWorkspaceSelection": {
+                        "kind": "create",
+                        "branch": "feat/rejected-selection",
+                        "name": "rejected-selection",
+                    },
+                    **extra_params,
+                },
+            )
+    finally:
+        await client.close()
+
+    assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert "only supported when starting a session" in exc_info.value.error.message
+    assert list_linked_worktrees(tmp_path) == ()
+    assert "feat/rejected-selection" not in [head.name for head in repo.heads]
+
+
+@pytest.mark.asyncio
+async def test_session_start_cleans_created_worktree_when_runtime_open_fails(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        assert request.options.cwd is not None
+        assert request.options.cwd != str(tmp_path)
+        raise runtime.RuntimeConfigurationError("startup failed")
+
+    client_transport, server_transport = memory_transport_pair()
+    server = AppServer(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+
+    try:
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await AppServerSession.start(
+                client,
+                client_info=ClientInfo(name="worktree-cleanup-client", version="1"),
+                capabilities=ClientCapabilities(),
+                session_options=SessionOptions(
+                    cwd=str(tmp_path),
+                    local_workspace_selection=CreateLocalWorkspaceSelection(
+                        branch="feat/startup-fails", name="startup-fails"
+                    ),
+                ),
+            )
+    finally:
+        await client.close()
+
+    assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert list_linked_worktrees(tmp_path) == ()
+    assert "feat/startup-fails" not in [head.name for head in repo.heads]
+
+
+@pytest.mark.asyncio
+async def test_session_start_cleans_created_worktree_when_cancelled_mid_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    real_resolve = server_module.resolve_local_workspace_selection
+
+    def slow_resolve(options: SessionOptions) -> Any:
+        started.set()
+        release.wait(5)
+        try:
+            return real_resolve(options)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(
+        server_module, "resolve_local_workspace_selection", slow_resolve
+    )
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        raise AssertionError("runtime should not open after cancellation")
+
+    _, server_transport = memory_transport_pair()
+    server = AppServer(server_transport, open_root=open_root)
+    server._client_info = ClientInfo(name="cancel-client", version="1")
+
+    task = asyncio.create_task(
+        server._open_runtime(
+            open_root,
+            SessionStartParams(
+                cwd=str(tmp_path),
+                local_workspace_selection=CreateLocalWorkspaceSelection(
+                    branch="feat/cancelled", name="cancelled"
+                ),
+            ),
+            None,
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await asyncio.to_thread(finished.wait, 5)
+
+    assert list_linked_worktrees(tmp_path) == ()
+    assert "feat/cancelled" not in [head.name for head in repo.heads]
+
+
+@pytest.mark.asyncio
+async def test_passive_host_lists_linked_worktrees(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    worktree = prepare_worktree_session(
+        "host-listed", tmp_path, branch="feat/host-listed"
+    )
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/worktrees/list",
+        WorkspaceWorktreeListParams(cwd=str(tmp_path)).model_dump(
+            mode="json", by_alias=True
+        ),
+    )
+
+    response = cast(WorkspaceWorktreeListResponse, result.response)
+    assert response.model_dump(mode="json", by_alias=True)["worktrees"] == [
+        {
+            "name": worktree.name,
+            "branch": worktree.branch,
+            "cwd": str(worktree.path),
+            "root": str(worktree.root),
+            "repoRoot": str(worktree.repo_root),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_passive_host_lists_no_worktrees_without_git(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _init_repo(tmp_path)
+    prepare_worktree_session("gitless", tmp_path, branch="feat/gitless")
+
+    def missing_git(_base: Path) -> tuple[object, ...]:
+        raise GitUnavailableError("Git worktree operations require git.")
+
+    monkeypatch.setattr(host_module, "list_linked_worktrees", missing_git)
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/worktrees/list",
+        WorkspaceWorktreeListParams(cwd=str(tmp_path)).model_dump(
+            mode="json", by_alias=True
+        ),
+    )
+
+    response = cast(WorkspaceWorktreeListResponse, result.response)
+    assert response.model_dump(mode="json", by_alias=True) == {"worktrees": []}
+
+
+@pytest.mark.asyncio
+async def test_passive_host_lists_no_worktrees_for_non_git_root(tmp_path: Path) -> None:
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/worktrees/list",
+        WorkspaceWorktreeListParams(cwd=str(tmp_path)).model_dump(
+            mode="json", by_alias=True
+        ),
+    )
+
+    response = cast(WorkspaceWorktreeListResponse, result.response)
+    assert response.model_dump(mode="json", by_alias=True) == {"worktrees": []}
 
 
 @pytest.mark.asyncio
@@ -265,13 +569,15 @@ async def test_harness_process_configures_globals_once_and_shares_cache(
     config = build_test_vibe_config()
     configure_calls: list[VibeConfigSchema] = []
     cache_stores: list[object] = []
-    local_managed_shell_policies: list[bool] = []
+    overrides_data: list[dict[str, Any] | None] = []
+    local_managed_shell_runtime_policies: list[bool] = []
     sentinel = cast(AgentLoop, object())
 
     async def load_config(
         data: dict[str, Any] | None = None, *, harness_files: HarnessFilesManager
     ) -> ConfigOrchestrator[VibeConfigSchema]:
-        del data, harness_files
+        del harness_files
+        overrides_data.append(data)
         layer = OverridesLayer(data=config.model_dump(mode="json"))
         return await ConfigOrchestrator.create(
             schema=VibeConfigSchema,
@@ -289,7 +595,9 @@ async def test_harness_process_configures_globals_once_and_shares_cache(
 
     def build_agent_loop(config_orchestrator: object, **kwargs: Any) -> AgentLoop:
         cache_stores.append(kwargs["cache_store"])
-        local_managed_shell_policies.append(kwargs["local_managed_shell_tools_enabled"])
+        local_managed_shell_runtime_policies.append(
+            kwargs["local_managed_shell_runtime_enabled"]
+        )
         return sentinel
 
     monkeypatch.setattr(runtime, "AgentLoop", build_agent_loop)
@@ -302,7 +610,9 @@ async def test_harness_process_configures_globals_once_and_shares_cache(
 
     assert len(configure_calls) == 1
     assert cache_stores == [process.cache_store, process.cache_store]
-    assert local_managed_shell_policies == [False, True]
+    assert local_managed_shell_runtime_policies == [False, True]
+    assert overrides_data[0] == {}
+    assert overrides_data[1] == {}
 
 
 @pytest.mark.asyncio
@@ -470,7 +780,9 @@ async def test_config_read_serves_the_catalogue_with_and_without_a_session(
             await client.request("config/read", ConfigReadParams(cwd=str(workspace))),
         )
         assert opened == []
-        assert passive.config == project_config_view(host_config)
+        assert passive.config == project_config_view(
+            host_config, active_model_pinned=bool(host_config.active_model)
+        )
         assert passive.base_config == passive.config
         assert passive.stripped_history_images == 0
         assert [model.alias for model in passive.config.models] == ["medium", "small"]
@@ -510,6 +822,38 @@ async def test_config_read_serves_the_catalogue_with_and_without_a_session(
         assert exc_info.value.error.code is ProtocolErrorCode.NOT_FOUND
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_config_fields_read_hides_internal_settings() -> None:
+    root = build_test_agent_loop(
+        config=build_test_vibe_config(managed_shell_tools_enabled=True)
+    )
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        return root
+
+    client_transport, server_transport = memory_transport_pair()
+    server = AppServer(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(ClientInfo(name="config-fields-client", version="1"))
+    await client.notify("initialized")
+
+    try:
+        await client.request("session/start", SessionStartParams(cwd=str(Path.cwd())))
+        response = validate_wire(
+            ConfigFieldsReadResponse,
+            await client.request(
+                "config/fields/read", ConfigFieldsReadParams(session_id=root.session_id)
+            ),
+        )
+    finally:
+        await client.close()
+
+    names = {field.name for field in response.fields}
+    assert "default_agent" in names
+    assert "managed_shell_tools_enabled" not in names
+    assert "tools" not in names
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from enum import StrEnum, auto
 import errno
 import platform
@@ -49,8 +49,46 @@ _FILTERED_EXCEPTION_NAMES: frozenset[str] = frozenset({
     "RealtimeTranscriptionException"
 })
 
-# Benign log-message prefixes to drop (e.g. asyncio GC'ing a pending task on teardown).
-_FILTERED_LOG_PREFIXES: tuple[str, ...] = ("Task was destroyed but it is pending!",)
+# Mistral-owned host: BackendError against it stays reported (it flags real
+# API/inference faults). Errors from other endpoints are dropped — they are
+# usually the user's own provider config and can carry user data.
+_MISTRAL_ENDPOINT_HOST = "api.mistral.ai"
+
+
+def _is_third_party_backend_error(exc: BaseException) -> bool:
+    if type(exc).__name__ != "BackendError":
+        return False
+    endpoint = getattr(exc, "endpoint", "")
+    if not isinstance(endpoint, str):
+        return False
+    return _MISTRAL_ENDPOINT_HOST not in endpoint
+
+
+def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    """Walk cause/context so a filtered exception wrapped by another is still caught."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+# Benign log-message prefixes to drop before reporting.
+_FILTERED_LOG_PREFIXES: tuple[str, ...] = (
+    # asyncio GC'ing a pending task on teardown.
+    "Task was destroyed but it is pending!",
+    # MCP streamable-http client logging an external server fault (e.g. 502), not a Vibe bug.
+    "Error in post_writer",
+    # MCP streamable-http client logging a non-SSE response from a misbehaving server.
+    "Unexpected content type",
+)
+
+# Benign exception messages to drop; substring match against str(exc).
+_FILTERED_EXCEPTION_MESSAGES: tuple[str, ...] = (
+    # Textual writer thread racing terminal teardown, writing to a closed stream.
+    "I/O operation on closed file",
+)
 _PATH_RE = re.compile(
     r"(?<![\w\\/])(?:[A-Za-z]:[\\/]|~?[\\/])"
     r"(?:[^\s\"'`\\/]+(?:[ ]+[^\s\"'`\\/]+)*[\\/])+"
@@ -77,16 +115,35 @@ def scrub_paths(value: Any) -> Any:
             return value
 
 
+def _is_benign_oserror(exc: OSError) -> bool:
+    # EIO on stdio when the terminal/pty is already gone.
+    if exc.errno == errno.EIO and exc.filename is None:
+        return True
+    # Environmental filesystem faults, not Vibe bugs: disk full / permission denied.
+    return exc.errno in {errno.ENOSPC, errno.EACCES}
+
+
 def _is_benign_exception(exc: BaseException) -> bool:
     if isinstance(exc, _FILTERED_EXCEPTIONS):
         return True
-    if type(exc).__name__ in _FILTERED_EXCEPTION_NAMES:
+    # Walk the cause/context chain: filtered types are often wrapped (e.g. a
+    # BackendError re-raised as a generic RuntimeError).
+    if any(
+        type(e).__name__ in _FILTERED_EXCEPTION_NAMES
+        or _is_third_party_backend_error(e)
+        for e in _exception_chain(exc)
+    ):
         return True
     # Clean exits (sys.exit(0) / sys.exit(None)) propagating through asyncio tasks.
     if isinstance(exc, SystemExit) and exc.code in {0, None}:
         return True
-    # EIO on stdio when the terminal/pty is already gone.
-    if isinstance(exc, OSError) and exc.errno == errno.EIO and exc.filename is None:
+    if isinstance(exc, OSError) and _is_benign_oserror(exc):
+        return True
+    if any(
+        msg in str(e)
+        for e in _exception_chain(exc)
+        for msg in _FILTERED_EXCEPTION_MESSAGES
+    ):
         return True
     return False
 

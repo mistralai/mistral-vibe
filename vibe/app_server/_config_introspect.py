@@ -19,6 +19,15 @@ from vibe.core.config.patch import escape_json_pointer_token
 
 DEFAULT_ORIGIN = "default"
 
+# Internal fields populated at runtime (not by the user) that should never be
+# rendered in the settings UI.
+HIDDEN_SETTINGS: frozenset[str] = frozenset({
+    "managed_shell_tools_enabled",
+    "routed_default_model",
+    "routed_model_config",
+    "tools",
+})
+
 POPULAR_SETTINGS: frozenset[str] = frozenset({
     "active_model",
     "theme",
@@ -98,6 +107,8 @@ def build_field_wires(
     json_values = config.model_dump(mode="json")
     wires: list[ConfigFieldWire] = []
     for name, info in type(config).model_fields.items():
+        if name in HIDDEN_SETTINGS:
+            continue
         kind, choices = classify_annotation(info.annotation)
         values = list(layer_values.get(name, []))
         if not info.is_required() and not any(

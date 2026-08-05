@@ -101,6 +101,7 @@ from vibe.cli.narrator_manager.narrator_manager_port import (
     NarratorState,
 )
 from vibe.cli.plan_offer.presentation import plan_offer_cta, plan_title
+from vibe.cli.process_start import PROCESS_START_MONOTONIC
 from vibe.cli.terminal_detect import Terminal, detect_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.mcp_commands import (
@@ -148,6 +149,7 @@ from vibe.cli.textual_ui.widgets.messages import (
     VSCODE_EXTENSION_PROMO_WHATS_NEW_SUFFIX,
     AssistantMessage,
     ErrorMessage,
+    GreetingMessage,
     InterruptMessage,
     PlanFileMessage,
     ReasoningMessage,
@@ -224,6 +226,7 @@ from vibe.cli.vscode_extension_promo import (
 )
 from vibe.observability.logging import logger
 from vibe.observability.sentry import capture_sentry_exception
+from vibe.utils.cache_store import FileSystemCacheStore
 from vibe.utils.data_retention import DATA_RETENTION_MESSAGE
 from vibe.utils.paths import is_dangerous_directory
 from vibe.utils.repository import repo_url_label
@@ -473,6 +476,9 @@ def _split_app_server_source(
 _REJECT_HINT_BUSY = "wait for the current job to finish."
 _REJECT_HINT_PAUSED = "clear the queue first or remove this input."
 
+# Greeting interval in seconds (default: 24 hours)
+_GREETING_INTERVAL_SECONDS = 24 * 60 * 60
+
 
 class VibeApp(App):  # noqa: PLR0904
     ENABLE_COMMAND_PALETTE = False
@@ -497,6 +503,10 @@ class VibeApp(App):  # noqa: PLR0904
         ),
         Binding("ctrl+backslash", "toggle_debug_console", "Debug Console", show=False),
     ]
+
+    _greeting_message: GreetingMessage | None = None
+    _tui_displayed_monotonic: float | None = None
+    _startup_telemetry_sent: bool = False
 
     def get_driver_class(self) -> type[Driver]:
         """Patch the platform driver to strip malformed mouse reports from input."""
@@ -661,6 +671,20 @@ class VibeApp(App):  # noqa: PLR0904
     def _active_model_or_none(self) -> ModelConfigView | None:
         return self.config.active_model
 
+    def _model_pending(self) -> bool:
+        """Whether the banner should spin instead of naming the default model.
+
+        Only unpinned ("Default") users are affected: the routing experiment can
+        change their default model once it resolves, so we avoid flashing the
+        pre-experiment default until background init (which awaits experiments)
+        completes. A pinned model is known up front and never spins.
+        """
+        return (
+            not self._fatal_init_error
+            and not self.app_server.resources.runtime.ready
+            and not self.config.active_model_pinned
+        )
+
     def _agent_job_active(self) -> bool:
         if self._app_server is not None and self._app_server.turn_active:
             return True
@@ -761,6 +785,7 @@ class VibeApp(App):  # noqa: PLR0904
                 connectors_connected=connectors.connected,
                 connectors_total=connectors.total,
                 hooks_count=self.app_server.resources.runtime.hooks_count,
+                model_pending=self._model_pending(),
             )
             yield self._banner
             yield VerticalGroup(id="messages")
@@ -846,6 +871,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.call_after_refresh(self._start_post_ready_startup)
         self.call_after_refresh(self._refresh_banner)
+        self.call_after_refresh(self._record_tui_displayed)
         self._show_config_issues()
 
         self.run_worker(self._watch_init_completion(), exclusive=False)
@@ -866,13 +892,19 @@ class VibeApp(App):  # noqa: PLR0904
     def _start_post_ready_startup(self) -> None:
         self.run_worker(self._complete_post_ready_startup(), exclusive=False)
 
+    def _record_tui_displayed(self) -> None:
+        if self._tui_displayed_monotonic is None:
+            self._tui_displayed_monotonic = time.monotonic()
+
     async def _complete_post_ready_startup(self) -> None:
         try:
-            await self._refresh_account()
+            await asyncio.gather(self._refresh_account(), self._refresh_identity())
         finally:
             self._startup_command_availability_ready.set()
         await self._check_and_show_whats_new()
+        await self._show_greeting_message()
         self._schedule_update_notification()
+        self._refresh_banner()
         if self._show_resume_picker:
             return
         self._process_startup_prompt()
@@ -907,6 +939,10 @@ class VibeApp(App):  # noqa: PLR0904
                 await self._ensure_loading_widget("Initializing", show_hint=False)
                 init_widget = self._loading_widget
             await self.app_server.resources.runtime.wait_until_ready()
+            try:
+                self._send_startup_telemetry_once()
+            except Exception:
+                logger.exception("Failed to send startup telemetry")
             self._show_mcp_discovery_failures()
             await self._show_mcp_auth_required_notice()
         except Exception as e:
@@ -931,6 +967,28 @@ class VibeApp(App):  # noqa: PLR0904
                 self.query_one(_get_mcp_app_class()).refresh_index()
             except Exception:
                 pass
+
+    def _send_startup_telemetry_once(self) -> None:
+        if self._startup_telemetry_sent:
+            return
+
+        self._startup_telemetry_sent = True
+        start = PROCESS_START_MONOTONIC
+        now: float = time.monotonic()
+        tui = self._tui_displayed_monotonic
+        session_init_ms = self.app_server.resources.runtime.session_init_duration_ms
+        self.app_server.resources.telemetry.record(
+            "vibe.startup",
+            {
+                "first_frame_duration_ms": (
+                    int((tui - start) * 1000) if tui is not None and start else None
+                ),
+                "agent_ready_duration_ms": (
+                    int((now - start) * 1000) if start else None
+                ),
+                "session_init_duration_ms": session_init_ms,
+            },
+        )
 
     def _show_mcp_discovery_failures(self) -> None:
         for server_name, error in sorted(
@@ -1286,6 +1344,15 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_model_picker_app_model_selected(
         self, message: ModelPickerApp.ModelSelected
     ) -> None:
+        if await self._is_active_model_enforced():
+            self.notify(
+                "'active_model' is enforced by your administrator. "
+                "Contact your admin to change it.",
+                severity="warning",
+                markup=False,
+            )
+            await self._switch_to_input_app()
+            return
         await self.app_server.resources.config.update({"active_model": message.alias})
         await self._reload_config()
         await self._switch_to_input_app()
@@ -2600,6 +2667,50 @@ class VibeApp(App):  # noqa: PLR0904
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
 
+    async def _show_whoami(self, **kwargs: Any) -> None:
+        loading = LoadingWidget(status="Loading", show_hint=False)
+        await self._loading_area.mount(loading)
+        try:
+            identity, account = await asyncio.gather(
+                self.app_server.resources.identity.read(),
+                self.app_server.resources.account.read(),
+                return_exceptions=True,
+            )
+        finally:
+            if loading.parent:
+                await loading.remove()
+        if isinstance(identity, BaseException):
+            logger.warning(
+                "Identity check failed (%s).",
+                type(identity).__name__,
+                exc_info=identity,
+            )
+            identity = None
+        if isinstance(account, BaseException):
+            logger.warning(
+                "Account check failed (%s).", type(account).__name__, exc_info=account
+            )
+            account = None
+        if identity is None:
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    "## Who am I\n\nNo identity information is available for the active model."
+                )
+            )
+            return
+        lines = ["## Who am I", ""]
+        if identity.name and identity.name != identity.email:
+            lines.append(f"- **Name**: {identity.name}")
+        if identity.email:
+            lines.append(f"- **Email**: {identity.email}")
+        if identity.workspace:
+            lines.append(f"- **Workspace**: {identity.workspace.name}")
+        if identity.organization:
+            lines.append(f"- **Organization**: {identity.organization.name}")
+        if plan := plan_title(account):
+            lines.append(f"- **Plan**: {plan}")
+        await self._mount_and_scroll(UserCommandMessage("\n".join(lines)))
+
     async def _show_config(self, **kwargs: Any) -> None:
         """Open the full-screen, searchable settings browser."""
         from vibe.cli.textual_ui.screens.config import ConfigScreen
@@ -2787,6 +2898,27 @@ class VibeApp(App):  # noqa: PLR0904
             UserCommandMessage(f"Resumed session `{session_id[:8]}`")
         )
 
+    async def _apply_config_to_ui(self) -> None:
+        await self._apply_theme(self.config.theme)
+        await self._refresh_account()
+        self._narrator_manager.sync()
+        self.run_worker(self._refresh_identity(), exclusive=False)
+        self._sync_greeting_message()
+
+        if self._banner:
+            connectors = self.app_server.resources.runtime.connectors
+            self._banner.set_state(
+                self.app_server.resources.config.base,
+                self.app_server.resources.runtime.custom_skills_count,
+                mcp=self.app_server.resources.runtime.mcp,
+                connectors_connected=connectors.connected,
+                connectors_total=connectors.total,
+                hooks_count=self.app_server.resources.runtime.hooks_count,
+                plan_description=plan_title(self.app_server.resources.account.current),
+                model_pending=self._model_pending(),
+            )
+        self._show_config_issues()
+
     async def _reload_config(self, **kwargs: Any) -> None:
         try:
             self._reset_ui_state()
@@ -2794,23 +2926,7 @@ class VibeApp(App):  # noqa: PLR0904
             stripped_count = await self.app_server.resources.config.reload(
                 reload_runtime=True
             )
-            await self._refresh_account()
-            self._narrator_manager.sync()
-
-            if self._banner:
-                connectors = self.app_server.resources.runtime.connectors
-                self._banner.set_state(
-                    self.app_server.resources.config.base,
-                    self.app_server.resources.runtime.custom_skills_count,
-                    mcp=self.app_server.resources.runtime.mcp,
-                    connectors_connected=connectors.connected,
-                    connectors_total=connectors.total,
-                    hooks_count=self.app_server.resources.runtime.hooks_count,
-                    plan_description=plan_title(
-                        self.app_server.resources.account.current
-                    ),
-                )
-            self._show_config_issues()
+            await self._apply_config_to_ui()
             await self._mount_and_scroll(
                 UserCommandMessage(
                     "Configuration reloaded (includes agent instructions and skills)."
@@ -3098,6 +3214,13 @@ class VibeApp(App):  # noqa: PLR0904
         await self._mount_and_scroll(UserCommandMessage("Voice settings opened..."))
         await self._switch_from_input(VoiceApp(self.config))
 
+    async def _is_active_model_enforced(self) -> bool:
+        from vibe.cli.textual_ui.screens.config._common import ADMIN_LAYER
+
+        response = await self.app_server.resources.config.read_fields()
+        field = next((f for f in response.fields if f.name == "active_model"), None)
+        return field is not None and field.origin == ADMIN_LAYER
+
     async def _switch_to_model_picker_app(self) -> None:
         if self._current_bottom_app == BottomApp.ModelPicker:
             return
@@ -3105,7 +3228,12 @@ class VibeApp(App):  # noqa: PLR0904
         model_aliases = [model.alias for model in self.config.models]
         current_model = self.config.active_model.alias
         await self._switch_from_input(
-            ModelPickerApp(model_aliases=model_aliases, current_model=current_model)
+            ModelPickerApp(
+                model_aliases=model_aliases,
+                current_model=current_model,
+                is_pinned=self.config.active_model_pinned,
+                default_alias=self.config.default_model_alias,
+            )
         )
 
     async def _switch_to_thinking_picker_app(self) -> None:
@@ -3713,6 +3841,38 @@ class VibeApp(App):  # noqa: PLR0904
         self._refresh_profile_widgets()
         self._refresh_banner()
 
+    async def _should_show_greeting(self) -> bool:
+        if self._whats_new_message:
+            return False
+        if not self.config.show_greeting:
+            return False
+        try:
+            cache = FileSystemCacheStore()
+            greeting_data = await asyncio.to_thread(cache.read_section, "greeting")
+            last_shown = greeting_data.get("last_shown_at")
+            if last_shown is None:
+                return True
+            now = time.time()
+            return now - last_shown > _GREETING_INTERVAL_SECONDS
+        except Exception:
+            return True  # Fail open
+
+    async def _mark_greeting_shown(self) -> None:
+        """Mark that greeting was shown with current timestamp."""
+        try:
+            cache = FileSystemCacheStore()
+            await asyncio.to_thread(
+                cache.write_section, "greeting", {"last_shown_at": int(time.time())}
+            )
+        except Exception:
+            pass
+
+    def _username(self) -> str | None:
+        identity = self.app_server.resources.identity.current
+        if identity is None or not identity.first_name:
+            return None
+        return identity.first_name
+
     def _refresh_banner(self) -> None:
         if self._banner:
             connectors = self.app_server.resources.runtime.connectors
@@ -3724,6 +3884,7 @@ class VibeApp(App):  # noqa: PLR0904
                 connectors_total=connectors.total,
                 hooks_count=self.app_server.resources.runtime.hooks_count,
                 plan_description=plan_title(self.app_server.resources.account.current),
+                model_pending=self._model_pending(),
             )
 
     def _update_profile_widgets(self, profile: AgentSummary) -> None:
@@ -3943,6 +4104,29 @@ class VibeApp(App):  # noqa: PLR0904
             await self._maybe_show_vscode_extension_promo()
         await mark_version_as_seen(self._current_version, self._update_cache_repository)
 
+    async def _show_greeting_message(self) -> None:
+        if not await self._should_show_greeting():
+            return
+        username = self._username()
+        if username is None:
+            return
+        greeting_message = GreetingMessage(username)
+        chat = self._chat_widget
+        # Mount after banner so it appears below banner and scrolls up with messages
+        await chat.mount(greeting_message, after=self._banner)
+        self._greeting_message = greeting_message
+        await self._mark_greeting_shown()
+
+    def _sync_greeting_message(self) -> None:
+        # Config edit can turn show_greeting off mid-session: tear down an
+        # already-mounted greeting so the change takes effect immediately.
+        if self.config.show_greeting or self._greeting_message is None:
+            return
+        greeting = self._greeting_message
+        self._greeting_message = None
+        if greeting.parent:
+            greeting.remove()
+
     async def _maybe_show_vscode_extension_promo(self) -> None:
         if not self._show_vscode_extension_promo:
             return
@@ -3963,6 +4147,16 @@ class VibeApp(App):  # noqa: PLR0904
             )
         finally:
             self._refresh_command_registry()
+            self._refresh_banner()
+
+    async def _refresh_identity(self) -> None:
+        try:
+            await self.app_server.resources.identity.read()
+        except Exception as exc:
+            logger.warning(
+                "Identity check failed (%s).", type(exc).__name__, exc_info=exc
+            )
+        finally:
             self._refresh_banner()
 
     async def _mount_and_scroll(

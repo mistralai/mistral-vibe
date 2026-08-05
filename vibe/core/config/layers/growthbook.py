@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import json
 from typing import Final
 
 from vibe.core.config.fingerprint import create_dict_fingerprint
@@ -9,7 +10,7 @@ from vibe.core.config.types import EMPTY_CONFIG_SNAPSHOT, LayerConfigSnapshot
 from vibe.core.experiments.active import ExperimentName
 from vibe.core.prompts import load_system_prompt
 
-type GrowthbookConfigMapper = Callable[[str], str | None]
+type GrowthbookConfigMapper = Callable[[str], str | bool | None]
 
 
 def _map_system_prompt_variant(variant: str) -> str | None:
@@ -20,9 +21,45 @@ def _map_system_prompt_variant(variant: str) -> str | None:
     return variant
 
 
+def _map_default_routing_model(variant: str) -> str | None:
+    try:
+        payload = json.loads(variant)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    active_model = payload.get("active_model")
+    return active_model if isinstance(active_model, str) and active_model else None
+
+
+def _map_routed_model_config(variant: str) -> str | None:
+    try:
+        payload = json.loads(variant)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    model_config = payload.get("model_config")
+    if not isinstance(model_config, dict):
+        return None
+    return json.dumps(model_config)
+
+
 GROWTHBOOK_CONFIG_MAPPINGS: Final[
-    dict[ExperimentName, tuple[str, GrowthbookConfigMapper]]
-] = {ExperimentName.SYSTEM_PROMPT: ("system_prompt_id", _map_system_prompt_variant)}
+    dict[ExperimentName, tuple[tuple[str, GrowthbookConfigMapper], ...]]
+] = {
+    ExperimentName.SYSTEM_PROMPT: (("system_prompt_id", _map_system_prompt_variant),),
+    ExperimentName.CLI_MODEL_ROUTING: (
+        ("routed_default_model", _map_default_routing_model),
+        ("routed_model_config", _map_routed_model_config),
+    ),
+    ExperimentName.MANAGED_SHELL_TOOLS: (
+        (
+            "managed_shell_tools_enabled",
+            lambda variant: True if variant == "managed" else None,
+        ),
+    ),
+}
 
 
 class GrowthbookLayer(ConfigLayer[RawConfig]):
@@ -43,17 +80,15 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
         if not self._variants:
             return EMPTY_CONFIG_SNAPSHOT
 
-        data: dict[str, str] = {}
-        for experiment_name, (
-            config_field,
-            map_variant,
-        ) in GROWTHBOOK_CONFIG_MAPPINGS.items():
+        data: dict[str, str | bool] = {}
+        for experiment_name, field_mappers in GROWTHBOOK_CONFIG_MAPPINGS.items():
             variant = self._variants.get(experiment_name.value)
             if variant is None:
                 continue
-            mapped_value = map_variant(variant)
-            if mapped_value is not None:
-                data[config_field] = mapped_value
+            for config_field, map_variant in field_mappers:
+                mapped_value = map_variant(variant)
+                if mapped_value is not None:
+                    data[config_field] = mapped_value
 
         if not data:
             return EMPTY_CONFIG_SNAPSHOT

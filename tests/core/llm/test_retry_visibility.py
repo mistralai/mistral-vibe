@@ -10,6 +10,7 @@ from vibe.core.config import ProviderConfig
 from vibe.core.llm.backend.generic import GenericBackend
 from vibe.core.llm.backend.mistral import MistralBackend
 from vibe.core.types import LLMMessage, Role
+from vibe.core.utils import RetryCategory, RetryReason
 
 _COMPLETION = {
     "id": "cmpl-test",
@@ -29,10 +30,18 @@ _COMPLETION = {
 
 class Recorder:
     def __init__(self) -> None:
-        self.reasons: list[str] = []
+        self.reasons: list[RetryReason] = []
 
-    async def __call__(self, reason: str) -> None:
+    async def __call__(self, reason: RetryReason) -> None:
         self.reasons.append(reason)
+
+    @property
+    def categories(self) -> list[RetryCategory]:
+        return [reason.category for reason in self.reasons]
+
+    @property
+    def details(self) -> list[str]:
+        return [reason.detail for reason in self.reasons]
 
 
 def _responder(failures: list[Any]) -> Any:
@@ -121,7 +130,11 @@ async def test_mistral_reports_retryable_status_before_the_backoff(
         await _complete(backend)
 
     assert handler.calls["n"] == 3
-    assert recorder.reasons == ["HTTP 429", "HTTP 503"]
+    assert recorder.details == ["HTTP 429", "HTTP 503"]
+    assert recorder.categories == [
+        RetryCategory.RATE_LIMITED,
+        RetryCategory.SERVER_ERROR,
+    ]
 
 
 @pytest.mark.asyncio
@@ -138,7 +151,8 @@ async def test_mistral_reports_connection_errors(
         await _complete(backend)
 
     assert handler.calls["n"] == 2
-    assert recorder.reasons == ["ReadError"]
+    assert recorder.details == ["ReadError"]
+    assert recorder.categories == [RetryCategory.CONNECTION]
 
 
 @pytest.mark.asyncio
@@ -208,7 +222,11 @@ async def test_generic_backend_reports_retries_the_same_way() -> None:
         await _complete(backend)
 
     assert handler.calls["n"] == 3
-    assert recorder.reasons == ["HTTP 429", "HTTP 503"]
+    assert recorder.details == ["HTTP 429", "HTTP 503"]
+    assert recorder.categories == [
+        RetryCategory.RATE_LIMITED,
+        RetryCategory.SERVER_ERROR,
+    ]
 
 
 def _vibe_client(transport: httpx.MockTransport) -> Any:

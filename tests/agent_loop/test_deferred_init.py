@@ -546,6 +546,34 @@ class TestWaitUntilReadyJoinsExperiments:
         emit_new_session.assert_not_called()
 
 
+class TestInitDurationMsProperty:
+    @pytest.mark.asyncio
+    async def test_is_none_before_wait_until_ready_on_deferred_path(self) -> None:
+        loop = _build_uninitiated_loop()
+
+        assert loop.init_duration_ms is None
+
+    @pytest.mark.asyncio
+    async def test_is_populated_after_wait_until_ready_on_deferred_path(self) -> None:
+        loop = build_test_agent_loop(defer_heavy_init=True)
+
+        assert loop.init_duration_ms is None
+        await loop.wait_until_ready()
+
+        duration = loop.init_duration_ms
+        assert duration is not None
+        assert isinstance(duration, int)
+        assert duration >= 0
+
+    @pytest.mark.asyncio
+    async def test_stays_none_on_non_deferred_path(self) -> None:
+        loop = build_test_agent_loop(defer_heavy_init=False)
+
+        await loop.wait_until_ready()
+
+        assert loop.init_duration_ms is None
+
+
 class TestACloseCancelsExperimentsTask:
     @pytest.mark.asyncio
     async def test_cancels_in_flight_task(self) -> None:

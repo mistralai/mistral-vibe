@@ -15,11 +15,11 @@ from vibe.core.utils.concurrency import (
 from vibe.core.utils.matching import name_matches
 from vibe.core.utils.merge import MergeConflictError, MergeStrategy
 from vibe.core.utils.retry import (
+    RetryCategory,
     RetryObserver,
+    RetryReason,
     async_generator_retry,
     async_retry,
-    describe_http_status,
-    describe_retry_reason,
 )
 from vibe.core.utils.sse import iter_sse_lines
 from vibe.core.utils.tags import (
@@ -56,15 +56,15 @@ __all__ = [
     "ConversationLimitException",
     "MergeConflictError",
     "MergeStrategy",
+    "RetryCategory",
     "RetryObserver",
+    "RetryReason",
     "TaggedText",
     "WindowsShell",
     "WindowsShellKind",
     "async_generator_retry",
     "async_retry",
     "compact_complete_display",
-    "describe_http_status",
-    "describe_retry_reason",
     "get_platform_display_name",
     "get_platform_id",
     "get_platform_version",

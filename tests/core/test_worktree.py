@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
-from typing import Any
+from typing import Any, cast
 
 from git import Repo
 from git.exc import GitCommandError
@@ -79,6 +79,39 @@ def test_prepare_does_not_require_worktree_listing(
     worktree = prepare_worktree_session("feature", tmp_path)
 
     assert worktree.root.is_dir()
+
+
+def test_prepare_cleans_created_worktree_when_metadata_build_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+
+    def fail_build_prepared(*_args: Any, **_kwargs: Any) -> object:
+        raise RuntimeError("metadata failed")
+
+    monkeypatch.setattr(worktree_module, "_build_prepared", fail_build_prepared)
+
+    with pytest.raises(RuntimeError, match="metadata failed"):
+        prepare_worktree_session("feature", tmp_path, branch="feat/feature")
+
+    assert list_linked_worktrees(tmp_path) == ()
+    assert "feat/feature" not in (head.name for head in repo.heads)
+
+
+def test_build_prepared_wraps_invalid_head_metadata(tmp_path: Path) -> None:
+    target = tmp_path / "worktree"
+    target.mkdir()
+
+    with pytest.raises(WorktreeError, match="Failed to inspect worktree HEAD"):
+        worktree_module._build_prepared(
+            "worktree",
+            "feat/worktree",
+            target,
+            Path("."),
+            tmp_path,
+            created=True,
+            branch_created=True,
+        )
 
 
 def test_lists_worktree_when_null_output_is_unsupported(
@@ -353,7 +386,7 @@ def test_existing_worktree_with_malformed_rev_parse_output_raises_worktree_error
 ) -> None:
     _init_repo(tmp_path)
     worktree = prepare_worktree_session("feature", tmp_path)
-    original_repo = worktree_module.Repo
+    original_git = worktree_module._git_python()
 
     class FakeGit:
         def rev_parse(self, *_args: object) -> str:
@@ -362,19 +395,28 @@ def test_existing_worktree_with_malformed_rev_parse_output_raises_worktree_error
     class FakeRepo:
         git = FakeGit()
 
-    def repo_factory(path: Path, *args: Any, **kwargs: Any) -> object:
+    def repo_factory(path: Path, *args: Any, **kwargs: Any) -> Repo:
         if path == worktree.root:
-            return FakeRepo()
-        return original_repo(path, *args, **kwargs)
+            return cast(Repo, FakeRepo())
+        return original_git.repo(path, *args, **kwargs)
 
-    monkeypatch.setattr(worktree_module, "Repo", repo_factory)
+    monkeypatch.setattr(
+        worktree_module,
+        "_git_python",
+        lambda: worktree_module._GitPython(
+            repo=cast(type[Repo], repo_factory),
+            invalid_git_repository_error=original_git.invalid_git_repository_error,
+            git_command_error=original_git.git_command_error,
+            no_such_path_error=original_git.no_such_path_error,
+        ),
+    )
 
     with pytest.raises(WorktreeError, match="expected git rev-parse to return 2 lines"):
         prepare_worktree_session("feature", tmp_path)
 
 
 def test_missing_base_raises_worktree_error(tmp_path: Path) -> None:
-    with pytest.raises(WorktreeError, match="requires a git repository"):
+    with pytest.raises(WorktreeError, match="not inside a git repository"):
         list_linked_worktrees(tmp_path / "missing")
 
 

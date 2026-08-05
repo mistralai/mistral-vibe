@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
 import hashlib
 import importlib.util
 import inspect
@@ -78,12 +77,6 @@ class NoSuchToolError(Exception):
     """Exception raised when a tool is not found."""
 
 
-@dataclass(frozen=True, slots=True)
-class ShellToolPolicy:
-    managed_tools_enabled: Callable[[], bool] | None = None
-    local_managed_tools_enabled: bool = True
-
-
 class ToolManager:
     """Manages tool discovery and instantiation for an Agent.
 
@@ -99,7 +92,7 @@ class ToolManager:
         *,
         defer_mcp: bool = False,
         permission_getter: Callable[[str], ToolPermission | None] | None = None,
-        shell_policy: ShellToolPolicy | None = None,
+        local_managed_shell_runtime_enabled: bool = True,
         cwd: Path | None = None,
         harness_files: HarnessFilesManager | None = None,
         scratchpad_dir: Path | None = None,
@@ -111,7 +104,7 @@ class ToolManager:
         self._scratchpad_dir = scratchpad_dir
         self.terminal_runtime = terminal_runtime or TerminalRuntime()
         self._permission_getter = permission_getter
-        self._shell_policy = shell_policy or ShellToolPolicy()
+        self._local_managed_shell_runtime_enabled = local_managed_shell_runtime_enabled
         self._mcp_registry = mcp_registry
         self._connector_registry = connector_registry
         self._instances: dict[str, BaseTool] = {}
@@ -332,7 +325,7 @@ class ToolManager:
     def _is_tool_available(self, cls: type[BaseTool]) -> bool:
         if (
             cls.local_managed_shell_only
-            and not self._shell_policy.local_managed_tools_enabled
+            and not self._local_managed_shell_runtime_enabled
         ):
             return False
         if not self._is_enabled_for_shell_rollout(cls):
@@ -346,22 +339,14 @@ class ToolManager:
             return cls.is_available(self._config)
         return cls.is_available()
 
-    def _managed_shell_tools_enabled(self) -> bool:
-        if self._shell_policy.managed_tools_enabled is None:
-            return False
-        try:
-            return self._shell_policy.managed_tools_enabled()
-        except Exception:
-            return False
-
     def _is_enabled_for_shell_rollout(self, cls: type[BaseTool]) -> bool:
         match cls.shell_rollout:
             case None:
                 return True
             case "managed":
-                return self._managed_shell_tools_enabled()
+                return self._config.managed_shell_tools_enabled
             case "legacy":
-                if not self._managed_shell_tools_enabled():
+                if not self._config.managed_shell_tools_enabled:
                     return True
                 if not is_windows():
                     return True

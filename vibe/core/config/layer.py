@@ -381,6 +381,11 @@ class ConfigLayer[S: BaseModel](ABC):
         """Cached opaque fingerprint token for this layer. ``None`` if unresolved."""
         return self._state.fingerprint
 
+    @property
+    def cached_data(self) -> S | None:
+        """Last loaded sparse data, if any. Reads the cache without I/O."""
+        return self._state.data
+
     async def apply(
         self,
         patch: ConfigPatch,

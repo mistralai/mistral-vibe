@@ -105,12 +105,61 @@ def scaffold_changelog(new_version: str) -> None:
     changelog_path.write_text(updated_content)
 
 
-def scaffold_whats_new() -> None:
+def scaffold_whats_new(new_version: str) -> None:
+    """Prepare vibe/whats_new.md header for the new version.
+
+    Every release within the same minor series (2.23.0 + 2.23.1 + 2.23.2 + ...)
+    accumulates: existing bullets are preserved and only the header is bumped. A fresh
+    minor or major (patch == 0) resets the file to just the header.
+    """
     whats_new_path = Path("vibe/whats_new.md")
     if not whats_new_path.exists():
         raise FileNotFoundError("whats_new.md not found in current directory")
 
-    whats_new_path.write_text("")
+    new_header = f"# What's new in v{new_version}\n"
+    _, _, patch = parse_version(new_version)
+    if patch == 0:
+        whats_new_path.write_text(new_header)
+        return
+
+    content = whats_new_path.read_text()
+    if not content:
+        whats_new_path.write_text(new_header)
+        return
+
+    header_re = r"^# What's new in v[\d.]+(?=\r?$)"
+    if not re.search(header_re, content, flags=re.MULTILINE):
+        raise ValueError("whats_new.md header not found")
+    updated_content = re.sub(
+        header_re,
+        f"# What's new in v{new_version}",
+        content,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if updated_content != content:
+        whats_new_path.write_text(updated_content)
+
+
+def finalize_whats_new() -> None:
+    """Empty whats_new.md when it is header-only.
+
+    The scaffold writes the header up front so the fill step (manual or autofill)
+    can assume it is set. After filling, a header-only file means nothing noteworthy
+    shipped: empty it so no "What's new" notification is shown to users.
+    """
+    whats_new_path = Path("vibe/whats_new.md")
+    if not whats_new_path.exists():
+        return
+
+    content = whats_new_path.read_text()
+    if not content.strip():
+        return
+
+    header_re = r"^# What's new in v[\d.]+(?=\r?$)"
+    body = re.sub(header_re, "", content, count=1, flags=re.MULTILINE).strip()
+    if not body:
+        whats_new_path.write_text("")
 
 
 def fill_release_notes(current_version: str, new_version: str, autofill: bool) -> None:
@@ -119,6 +168,20 @@ def fill_release_notes(current_version: str, new_version: str, autofill: bool) -
         return
 
     print("Filling CHANGELOG.md and vibe/whats_new.md...")
+    _, _, patch = parse_version(new_version)
+    if patch == 0:
+        whats_new_guidance = (
+            "This is a fresh minor or major release: the scaffold step reset the file to just the header. "
+            f"Append new qualifying bullets for changes since {current_version}. "
+            "If nothing qualifies, leave the file header-only — a header-only file is emptied automatically so no notification is shown."
+        )
+    else:
+        whats_new_guidance = (
+            "This is a patch release in an existing minor series: the file already holds accumulated bullets from prior patches. "
+            f"ONLY append new qualifying bullets for changes since {current_version}. "
+            "Do NOT rewrite, reorder, or remove existing bullets. If nothing new qualifies, append nothing and leave existing content intact."
+        )
+
     prompt = f"""Fill both CHANGELOG.md and vibe/whats_new.md for version {new_version} in a single pass, reusing the same git history context for both files.
 
 Step 1 — Gather context (do this once):
@@ -131,17 +194,18 @@ Step 2 — Fill CHANGELOG.md:
 - Remove any subsection that has no bullets (leave no empty ### Added / ### Changed / etc).
 
 Step 3 — Fill vibe/whats_new.md (reuse the same context, do NOT re-inspect git):
-- This file is an in-app announcement shown to users on upgrade. It is NOT a changelog. Its only purpose is to advertise a handful of notable new things. Most releases warrant 0-3 bullets. If nothing is genuinely noteworthy to an end user, leave the file empty.
+- In-app announcement shown to users on upgrade. NOT a changelog. Advertise a handful of notable new things. Most releases warrant 0-3 bullets.
 - Inclusion criteria (a bullet must meet ALL):
   * Visible in the CLI/UI: a new command, key binding, screen, flag, or behavior the user will actually notice.
   * Net-new capability or a meaningful UX improvement (not a tweak, polish, or fix unless it unblocks a real workflow).
   * Worth interrupting the user to tell them about.
 - Hard exclusions (never include, even if user-facing): bug fixes, small UI polish, copy changes, refactors, performance tweaks, dependency bumps, internal/API-only changes, config plumbing, telemetry, logging, build/CI, tests, docs.
-- Be ruthless. When in doubt, leave it out. Prefer an empty file over a weak bullet. Do NOT pad the list to look substantial.
-- Format (only if there is at least one qualifying item):
-  * First line: "# What's new in v{new_version}" (no other headings).
-  * Then up to 3 bullets, one line each: "- **Feature**: short summary" (e.g. "- **Interactive resume**: Added a /resume command to choose which session to resume").
-  * Do not copy or paraphrase the full changelog."""
+- Be ruthless. When in doubt, leave it out. Do NOT pad the list to look substantial.
+- Format:
+  * First line: "# What's new in v{new_version}" (no other headings). The header is already set by the scaffold step.
+  * Then a concise bullet list, one line each: "- **Feature**: short summary" (e.g. "- **Interactive resume**: Added a /resume command to choose which session to resume").
+  * Do not copy or paraphrase the full changelog.
+- {whats_new_guidance}"""
     try:
         result = subprocess.run(
             ["vibe", "-p", prompt, "--auto-approve"],
@@ -189,9 +253,13 @@ Examples:
         current_version = get_current_version()
         print(f"Current version: {current_version}")
 
-        # Calculate new version
+        # New version
         new_version = bump_version(current_version, args.bump_type)
         print(f"New version: {new_version}\n")
+
+        # Scaffold whats_new.md before mutating version files so a malformed
+        # header aborts the bump without leaving the tree half-updated.
+        scaffold_whats_new(new_version=new_version)
 
         # Update pyproject.toml
         update_hard_values_files(
@@ -219,10 +287,10 @@ Examples:
 
         print()
         scaffold_changelog(new_version=new_version)
-        scaffold_whats_new()
         fill_release_notes(
             current_version=current_version, new_version=new_version, autofill=autofill
         )
+        finalize_whats_new()
         print()
 
         subprocess.run(["uv", "lock"], check=True)

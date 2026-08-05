@@ -2,8 +2,17 @@ from __future__ import annotations
 
 from pydantic import JsonValue
 
-from vibe.app_server.protocol import ConfigFieldKind, ConfigFieldWire
-from vibe.cli.textual_ui.screens.config._common import filter_field_views, format_value
+from vibe.app_server.protocol import (
+    ConfigFieldKind,
+    ConfigFieldWire,
+    ConfigLayerValueWire,
+)
+from vibe.cli.textual_ui.screens.config._common import (
+    filter_field_views,
+    format_value,
+    is_enforced,
+    origin_label,
+)
 
 
 def _view(
@@ -12,9 +21,15 @@ def _view(
     *,
     kind: ConfigFieldKind = ConfigFieldKind.STR,
     value: JsonValue = "",
+    layer_values: list[ConfigLayerValueWire] | None = None,
 ) -> ConfigFieldWire:
     return ConfigFieldWire(
-        name=name, kind=kind, description=description, value=value, path=f"/{name}"
+        name=name,
+        kind=kind,
+        description=description,
+        value=value,
+        path=f"/{name}",
+        layer_values=layer_values or [],
     )
 
 
@@ -64,6 +79,45 @@ def test_filter_field_views_ranks_name_match_above_description() -> None:
     ]
     # "color" hits color_depth by name and theme by description; name wins.
     assert [v.name for v in filter_field_views(views, "color")][0] == "color_depth"
+
+
+def test_is_enforced_true_when_admin_is_top_layer() -> None:
+    view = _view(
+        "theme",
+        layer_values=[
+            ConfigLayerValueWire(layer="admin", value="dark"),
+            ConfigLayerValueWire(layer="user-toml", value="light"),
+        ],
+    )
+    assert is_enforced(view) is True
+
+
+def test_is_enforced_false_when_admin_is_shadowed_or_absent() -> None:
+    shadowed = _view(
+        "theme",
+        layer_values=[
+            ConfigLayerValueWire(layer="overrides", value="dark"),
+            ConfigLayerValueWire(layer="admin", value="light"),
+        ],
+    )
+    plain = _view("theme", layer_values=[ConfigLayerValueWire(layer="default")])
+    assert is_enforced(shadowed) is False
+    assert is_enforced(plain) is False
+
+
+def test_origin_label_admin() -> None:
+    assert origin_label("admin") == "your administrator"
+
+
+def test_format_value_uses_labels_when_provided() -> None:
+    labels = {"": "default (currently target-testing-model-alias)"}
+    assert format_value("", labels) == "default (currently target-testing-model-alias)"
+    # Unlabelled values fall through to the normal formatting.
+    assert (
+        format_value("target-testing-model-alias", labels)
+        == "target-testing-model-alias"
+    )
+    assert format_value("", None) == '""'
 
 
 def test_format_value_renders_kinds() -> None:

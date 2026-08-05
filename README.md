@@ -154,7 +154,7 @@ The `task` tool allows the agent to delegate work to subagents:
 > task(task="Analyze the project structure and architecture", agent="explore")
 ```
 
-Create custom subagents by adding `agent_type = "subagent"` to your agent configuration. Vibe comes with a built-in subagent called `explore`, a read-only subagent for codebase exploration used internally for delegation.
+Create custom subagents by adding `agent_type = "subagent"` to your agent configuration. Vibe comes with a built-in subagent called `explore`, a read-only subagent for codebase exploration and skill loading used internally for delegation.
 
 ### Interactive User Questions
 
@@ -239,6 +239,11 @@ Simply run `vibe` to enter the interactive chat loop.
 - **Debug Console**: Press `Ctrl+\` to toggle the debug console.
 - **Agent Selection**: Press `Shift+Tab` to cycle through agents (default, plan, ...).
 - **Exit**: Type `/exit`, `exit`, `quit`, `:q`, or `:quit` in the input box, or press `Ctrl+C` / `Ctrl+D` twice within ~1 second. Set `ask_confirmation_on_exit = false` (or toggle it in `/config`) to make `Ctrl+D` quit on the first press; `Ctrl+C` always requires confirmation.
+
+### Copying & Text Selection
+
+- **Copy**: Use `Ctrl+Y` or `Ctrl+Shift+C` to copy the current selection to clipboard. With autocopy enabled (default via `autocopy_to_clipboard = true`), mouse selection automatically copies on release and shows a brief confirmation.
+- **Multi-click selection**: Double-click selects a word, triple-click selects the paragraph. Dragging extends the selection at the same granularity.
 
 You can start Vibe with a prompt using the following command:
 
@@ -537,9 +542,10 @@ Note: This implies that you have set up a redteam prompt named `~/.vibe/prompts/
 
 ### Tool Management
 
-The built-in shell surface is controlled by the `vibe_cli_managed_shell_tools`
-experiment. The default variant keeps the legacy one-shot `bash` tool, including
-its existing Windows behavior. The managed variant exposes OS-native shell tools:
+The built-in shell surface is controlled by the `managed_shell_tools_enabled` config
+field and the `vibe_cli_managed_shell_tools` GrowthBook experiment. The default variant
+keeps the legacy one-shot `bash` tool, including its existing Windows behavior.
+The managed variant exposes OS-native shell tools:
 POSIX systems, including WSL where Vibe runs as Linux, get managed `bash`,
 `bash_output`, `bash_stdin`, `bash_sessions`, and `bash_log_file`; native Windows
 gets `git_bash`, `git_bash_output`, `git_bash_stdin`, `git_bash_sessions`, and

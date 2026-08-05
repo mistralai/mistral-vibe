@@ -81,7 +81,7 @@ ask_confirmation_on_exit = true
     assert orchestrator.config.default_agent == "auto-approve"
     assert orchestrator.config.context_warnings is True
     assert orchestrator.config.ask_confirmation_on_exit is False
-    assert orchestrator.config.displayed_workdir == ""
+    assert orchestrator.config.displayed_workdir == "user-only"
 
     result = await orchestrator.set_field("/displayed_workdir", "patched")
 
@@ -509,7 +509,9 @@ async def test_build_default_orchestrator_migrates_agent_profiles_from_config_pa
         f'agent_paths = ["{agents_dir.as_posix()}"]\n', encoding="utf-8"
     )
 
-    await build_default_orchestrator()
+    orchestrator = await build_default_orchestrator()
+    # Agent profile migration runs at AgentManager construction, not orchestrator build.
+    AgentManager(orchestrator)
 
     with agent_file.open("rb") as file:
         persisted = tomllib.load(file)

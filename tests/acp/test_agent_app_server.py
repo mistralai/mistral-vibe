@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import socket
 import time
 from unittest.mock import AsyncMock
 
@@ -12,6 +13,7 @@ from acp import (
     ReadTextFileResponse,
     RequestPermissionResponse,
 )
+from acp.agent.connection import AgentSideConnection
 from acp.schema import (
     AgentMessageChunk,
     AgentThoughtChunk,
@@ -34,7 +36,7 @@ from tests.mock.utils import mock_llm_chunk
 from tests.stubs.app_server import start_test_app_server
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
-from vibe.acp.agent import VibeAcpAgent
+from vibe.acp.agent import RETRYING_EXT_METHOD, VibeAcpAgent
 from vibe.app_server.local import LocalHarnessOptions
 from vibe.app_server.models import PublicError, PublicTurnStatus, TurnErrorCode
 from vibe.app_server.session import AppServerSession, AppServerTurnError
@@ -292,16 +294,15 @@ async def test_retries_are_forwarded_as_an_ext_notification_not_a_session_update
             prompt=[TextContentBlock(type="text", text="Hello")],
         )
 
-        assert client.ext_notifications == [
-            (
-                "session/retrying",
-                {"sessionId": created.session_id, "reason": "HTTP 429"},
-            ),
-            (
-                "session/retrying",
-                {"sessionId": created.session_id, "reason": "HTTP 429"},
-            ),
-        ]
+        retry_notification = (
+            "session/retrying",
+            {
+                "sessionId": created.session_id,
+                "category": "rate_limited",
+                "detail": "HTTP 429",
+            },
+        )
+        assert client.ext_notifications == [retry_notification, retry_notification]
         texts = [
             update.content.text
             for notification in client._session_updates
@@ -312,6 +313,38 @@ async def test_retries_are_forwarded_as_an_ext_notification_not_a_session_update
         assert len(client.ext_notifications) == 2
     finally:
         await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_notification_reaches_the_wire_underscore_prefixed() -> None:
+    """`ext_notification` prefixes extension methods, so callers pass the bare name.
+
+    The VS Code client subscribes to the prefixed `_session/retrying`; passing the
+    prefix here too would emit `__session/retrying` and the retry would never
+    reach the extension. FakeClient records the call argument, not the wire, so
+    only this test covers the gap.
+    """
+    peer_socket, agent_socket = socket.socketpair()
+    peer_reader, peer_writer = await asyncio.open_connection(sock=peer_socket)
+    agent_reader, agent_writer = await asyncio.open_connection(sock=agent_socket)
+    connection = AgentSideConnection(
+        lambda _client: VibeAcpAgent(), agent_writer, agent_reader, listening=False
+    )
+    try:
+        await connection.ext_notification(
+            RETRYING_EXT_METHOD,
+            {
+                "sessionId": "session-1",
+                "category": "rate_limited",
+                "detail": "HTTP 429",
+            },
+        )
+        line = await asyncio.wait_for(peer_reader.readline(), timeout=5)
+
+        assert json.loads(line)["method"] == "_session/retrying"
+    finally:
+        agent_writer.close()
+        peer_writer.close()
 
 
 def test_acp_runtime_adapter_has_no_direct_core_dependency() -> None:
@@ -356,6 +389,23 @@ async def test_response_too_long_returns_max_tokens_stop_reason(
         )
 
         assert response.stop_reason == "max_tokens"
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_conversation_limit_returns_max_turn_requests_stop_reason() -> None:
+    agent, _ = _agent(FakeBackend())
+    try:
+        created = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+        await agent.set_config_option("max_turns", created.session_id, "0")
+
+        response = await agent.prompt(
+            session_id=created.session_id,
+            prompt=[TextContentBlock(type="text", text="Do the task")],
+        )
+
+        assert response.stop_reason == "max_turn_requests"
     finally:
         await agent.close()
 

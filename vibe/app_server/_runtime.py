@@ -43,6 +43,7 @@ from vibe.core.hooks.models import HookConfigResult
 from vibe.core.paths import WORKTREES_DIR
 from vibe.core.session import last_session_pointer
 from vibe.core.session.session_id import extract_suffix, generate_session_id
+from vibe.core.session.session_index import warm_session_index
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.tools.permissions import PermissionStore
@@ -153,8 +154,8 @@ class _AgentLoopBlueprint:
             permission_store=self.policy.permission_store,
             cache_store=self.policy.cache_store,
             force_bypass_tool_permissions=self.policy.force_bypass_tool_permissions,
-            local_managed_shell_tools_enabled=(
-                self.policy.local_managed_shell_tools_enabled
+            local_managed_shell_runtime_enabled=(
+                self.policy.local_managed_shell_runtime_enabled
             ),
             experiment_state=self.experiment_state,
             parent_session_id=self.parent_session_id,
@@ -208,7 +209,7 @@ class _RootRuntimeBlueprint:
             permission_store=PermissionStore(),
             cache_store=self.cache_store,
             force_bypass_tool_permissions=self.options.auto_approve,
-            local_managed_shell_tools_enabled=(
+            local_managed_shell_runtime_enabled=(
                 "terminal" not in self.client_capabilities.client_tools
             ),
         )
@@ -536,6 +537,7 @@ class HarnessProcess:
             if self._configured:
                 return
             setup_tracing(config)
+            warm_session_index(config.session_logging)
             self._configured = True
 
 

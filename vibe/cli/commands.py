@@ -122,6 +122,11 @@ class CommandRegistry:
                 description="Display agent statistics",
                 handler="_show_status",
             ),
+            "whoami": Command(
+                aliases=frozenset(["/whoami"]),
+                description="Display the Mistral signed-in user, workspace, and plan",
+                handler="_show_whoami",
+            ),
             "teleport": Command(
                 aliases=frozenset(["/teleport"]),
                 description="Teleport session to Vibe Code Web",

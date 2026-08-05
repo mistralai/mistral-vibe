@@ -7,18 +7,22 @@ import pytest
 from tests.conftest import build_test_vibe_config
 from vibe.core.tools import manager as tool_manager_module
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
-from vibe.core.tools.manager import NoSuchToolError, ShellToolPolicy, ToolManager
+from vibe.core.tools.manager import NoSuchToolError, ToolManager
 
 
 def _manager(
-    vibe_config, *, managed_shell: bool = False, local_managed_shell: bool = True
+    vibe_config,
+    *,
+    managed_shell: bool = False,
+    local_managed_shell_runtime: bool = True,
 ) -> ToolManager:
+    if managed_shell:
+        vibe_config = vibe_config.model_copy(
+            update={"managed_shell_tools_enabled": True}
+        )
     return ToolManager(
         lambda: vibe_config,
-        shell_policy=ShellToolPolicy(
-            managed_tools_enabled=lambda: managed_shell,
-            local_managed_tools_enabled=local_managed_shell,
-        ),
+        local_managed_shell_runtime_enabled=local_managed_shell_runtime,
     )
 
 
@@ -80,7 +84,9 @@ def test_managed_posix_uses_client_bash_when_local_managed_shell_is_disabled(
     vibe_config = build_test_vibe_config(
         system_prompt_id="tests", include_project_context=False
     )
-    manager = _manager(vibe_config, managed_shell=True, local_managed_shell=False)
+    manager = _manager(
+        vibe_config, managed_shell=True, local_managed_shell_runtime=False
+    )
     tools = manager.available_tools
 
     assert tools["bash"].__name__ == "Bash"
@@ -91,21 +97,21 @@ def test_managed_posix_uses_client_bash_when_local_managed_shell_is_disabled(
 
 
 def test_get_rebuilds_instance_when_bash_variant_switches():
-    state = {"managed": False}
+    base = build_test_vibe_config(
+        system_prompt_id="tests", include_project_context=False
+    )
+    holder = {"managed": False}
 
     def config_getter():
-        return build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False
-        )
+        if holder["managed"]:
+            return base.model_copy(update={"managed_shell_tools_enabled": True})
+        return base
 
-    manager = ToolManager(
-        config_getter,
-        shell_policy=ShellToolPolicy(managed_tools_enabled=lambda: state["managed"]),
-    )
+    manager = ToolManager(config_getter)
     legacy = manager.get("bash")
     assert type(legacy).__name__ == "Bash"
 
-    state["managed"] = True
+    holder["managed"] = True
     experimental = manager.get("bash")
     assert type(experimental).__name__ == "ExperimentalBash"
     assert experimental is not legacy
@@ -255,7 +261,9 @@ def test_native_windows_uses_client_git_bash_when_local_managed_shell_is_disable
     vibe_config = build_test_vibe_config(
         system_prompt_id="tests", include_project_context=False
     )
-    manager = _manager(vibe_config, managed_shell=True, local_managed_shell=False)
+    manager = _manager(
+        vibe_config, managed_shell=True, local_managed_shell_runtime=False
+    )
     tools = manager.available_tools
 
     assert tools["git_bash"].__name__ == "GitBash"
@@ -355,7 +363,9 @@ def test_native_windows_uses_client_powershell_when_local_managed_shell_is_disab
     vibe_config = build_test_vibe_config(
         system_prompt_id="tests", include_project_context=False
     )
-    manager = _manager(vibe_config, managed_shell=True, local_managed_shell=False)
+    manager = _manager(
+        vibe_config, managed_shell=True, local_managed_shell_runtime=False
+    )
     tools = manager.available_tools
 
     assert tools["powershell"].__name__ == "WindowsShell"

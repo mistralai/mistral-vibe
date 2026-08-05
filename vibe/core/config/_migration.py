@@ -62,6 +62,7 @@ def migrate_config(data: dict[str, Any]) -> bool:
     changed |= _migrate_bash_allowlist(data)
     changed |= _migrate_bash_read_only(data)
     changed |= _migrate_model_renames(data)
+    changed |= _migrate_devstral_small_thinking(data)
     changed |= _migrate_renamed_tools(data)
     return changed
 
@@ -146,6 +147,32 @@ def _migrate_model_renames(data: dict[str, Any]) -> bool:
         data["active_model"] = "mistral-medium-3.5"
         changed = True
 
+    return changed
+
+
+def _migrate_devstral_small_thinking(data: dict[str, Any]) -> bool:
+    """Force devstral-small to thinking='off'; it has no reasoning support.
+
+    Stale configs that carried a non-'off' thinking level made the backend send
+    a ``reasoning_effort`` the model rejects with an API error.
+    """
+    models = data.get("models", [])
+    if isinstance(models, dict):
+        model_entries = models.values()
+    elif isinstance(models, list):
+        model_entries = models
+    else:
+        return False
+
+    changed = False
+    for model in model_entries:
+        if not isinstance(model, dict):
+            continue
+        if model.get("name") == "devstral-small-latest" and (
+            model.get("thinking") != "off"
+        ):
+            model["thinking"] = "off"
+            changed = True
     return changed
 
 

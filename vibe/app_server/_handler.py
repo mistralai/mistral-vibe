@@ -231,6 +231,7 @@ class CoreRequestHandler:
                 result = self._review.dispatch(method, raw_params)
             case (
                 "account"
+                | "identity"
                 | "runtime"
                 | "config"
                 | "agents"
@@ -796,7 +797,9 @@ class CoreRequestHandler:
     ) -> SessionReadyWaitResponse:
         self._require_session(params.session_id)
         await self._agent_loop.wait_until_ready()
-        return SessionReadyWaitResponse()
+        return SessionReadyWaitResponse(
+            init_duration_ms=self._agent_loop.init_duration_ms
+        )
 
     async def _agent_switch(self, params: AgentSwitchParams) -> RuntimeMutationResponse:
         active = self._execution.active

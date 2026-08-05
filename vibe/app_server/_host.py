@@ -55,11 +55,15 @@ from vibe.app_server.protocol import (
     SessionReadResponse,
     SessionTitleUpdateParams,
     SessionTitleUpdateResponse,
+    WorkspaceLinkedWorktree,
     WorkspaceTrustDecisionParams,
     WorkspaceTrustStatusParams,
+    WorkspaceWorktreeListParams,
+    WorkspaceWorktreeListResponse,
 )
 from vibe.core.config import VibeConfigSchema, build_default_orchestrator
 from vibe.core.config.harness_files import HarnessFilesManager
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.session.resume_sessions import list_local_resume_sessions
 from vibe.core.session.saved_sessions import (
     delete_saved_session,
@@ -67,6 +71,13 @@ from vibe.core.session.saved_sessions import (
 )
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.types import LLMMessage, SessionMetadata
+from vibe.core.worktree import (
+    GitUnavailableError,
+    WorktreeError,
+    WorktreeNotFoundError,
+    list_linked_worktrees,
+)
+from vibe.observability.logging import logger
 
 _HOST_METHODS = frozenset({
     "config/read",
@@ -87,6 +98,7 @@ _HOST_METHODS = frozenset({
     "session/title/update",
     "workspace/trust/decision",
     "workspace/trust/status",
+    "workspace/worktrees/list",
 })
 
 
@@ -102,6 +114,8 @@ class HostRequestHandler:
         try:
             response = await self._dispatch(method, raw_params)
         except WorkspaceTrustError as exc:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
+        except WorktreeError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
         except ProjectLinksAuthError as exc:
             raise RequestFailure(ProtocolErrorCode.UNAUTHORIZED, str(exc)) from exc
@@ -164,26 +178,8 @@ class HostRequestHandler:
                 params = validate_wire(HistoryListParams, raw_params)
                 config = await self._load_config(None)
                 response = await asyncio.to_thread(self._list_history, params, config)
-            case "workspace/trust/status":
-                params = validate_wire(WorkspaceTrustStatusParams, raw_params)
-                response = await asyncio.to_thread(
-                    read_workspace_trust,
-                    self._cwd(params.cwd),
-                    self._harness_files.trust_store,
-                )
-            case "workspace/trust/decision":
-                params = validate_wire(WorkspaceTrustDecisionParams, raw_params)
-                if params.session_id is not None:
-                    raise RequestFailure(
-                        ProtocolErrorCode.NOT_FOUND,
-                        f"Session not found: {params.session_id}",
-                    )
-                response = await asyncio.to_thread(
-                    decide_workspace_trust,
-                    self._cwd(params.cwd),
-                    params.decision,
-                    self._harness_files.trust_store,
-                )
+            case _ if method.startswith("workspace/"):
+                response = await self._dispatch_workspace(method, raw_params)
             case _ if method.startswith("projectLinks/"):
                 response = await self._dispatch_project_links(method, raw_params)
             case _:
@@ -195,7 +191,11 @@ class HostRequestHandler:
             raise RequestFailure(
                 ProtocolErrorCode.NOT_FOUND, f"Session not found: {params.session_id}"
             )
-        view = project_config_view(await self._load_config(params.cwd))
+        orchestrator = await self._load_orchestrator(params.cwd)
+        view = project_config_view(
+            orchestrator.config,
+            active_model_pinned=bool(orchestrator.persisted_active_model()),
+        )
         return ConfigReadResponse(config=view, base_config=view)
 
     async def _dispatch_project_links(
@@ -262,6 +262,39 @@ class HostRequestHandler:
                 raise method_not_found(method)
         return response
 
+    async def _dispatch_workspace(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> ProtocolModel:
+        match method:
+            case "workspace/trust/status":
+                params = validate_wire(WorkspaceTrustStatusParams, raw_params)
+                response: ProtocolModel = await asyncio.to_thread(
+                    read_workspace_trust,
+                    self._cwd(params.cwd),
+                    self._harness_files.trust_store,
+                )
+            case "workspace/trust/decision":
+                params = validate_wire(WorkspaceTrustDecisionParams, raw_params)
+                if params.session_id is not None:
+                    raise RequestFailure(
+                        ProtocolErrorCode.NOT_FOUND,
+                        f"Session not found: {params.session_id}",
+                    )
+                response = await asyncio.to_thread(
+                    decide_workspace_trust,
+                    self._cwd(params.cwd),
+                    params.decision,
+                    self._harness_files.trust_store,
+                )
+            case "workspace/worktrees/list":
+                params = validate_wire(WorkspaceWorktreeListParams, raw_params)
+                response = await asyncio.to_thread(
+                    worktree_list_response, self._cwd(params.cwd)
+                )
+            case _:
+                raise method_not_found(method)
+        return response
+
     def _read_session(
         self, params: SessionReadParams, config: VibeConfigSchema
     ) -> SessionReadResponse:
@@ -302,11 +335,15 @@ class HostRequestHandler:
         return messages, SessionMetadata.model_validate(raw_metadata)
 
     async def _load_config(self, cwd: str | None) -> VibeConfigSchema:
+        return (await self._load_orchestrator(cwd)).config
+
+    async def _load_orchestrator(
+        self, cwd: str | None
+    ) -> ConfigOrchestrator[VibeConfigSchema]:
         session_files = self._harness_files.for_session(self._cwd(cwd))
-        orchestrator = await build_default_orchestrator(
+        return await build_default_orchestrator(
             harness_files=session_files, require_api_key=False
         )
-        return orchestrator.config
 
     @staticmethod
     def _cwd(value: str | None) -> Path:
@@ -343,3 +380,29 @@ def project_session_list(
             for session in sessions
         ]
     })
+
+
+def worktree_list_response(cwd: Path) -> WorkspaceWorktreeListResponse:
+    try:
+        worktrees = list_linked_worktrees(cwd)
+    except WorktreeNotFoundError:
+        logger.debug("Skipping worktree listing for non-git path=%s", cwd)
+        worktrees = ()
+    except GitUnavailableError:
+        # app-server is expected to run without git; a host that cannot list
+        # worktrees simply has none, so callers should not see invalid_params.
+        logger.debug("Skipping worktree listing without git cwd=%s", cwd)
+        worktrees = ()
+
+    return WorkspaceWorktreeListResponse(
+        worktrees=[
+            WorkspaceLinkedWorktree(
+                name=worktree.name,
+                branch=worktree.branch,
+                cwd=str(worktree.path),
+                root=str(worktree.root),
+                repo_root=str(worktree.repo_root),
+            )
+            for worktree in worktrees
+        ]
+    )

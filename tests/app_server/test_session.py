@@ -74,6 +74,7 @@ from vibe.app_server.protocol import (
     SessionReadParams,
     SessionReadResponse,
     SessionReadyWaitParams,
+    SessionReadyWaitResponse,
     SessionResumeParams,
     SessionStartParams,
     SessionUpdatedParams,
@@ -1627,6 +1628,44 @@ async def test_connection_shutdown_cancels_blocked_request_without_drain_delay()
     with pytest.raises(AppServerConnectionClosed):
         await request
     await session.close()
+
+
+@pytest.mark.asyncio
+async def test_ready_wait_response_carries_init_duration_ms() -> None:
+    agent_loop = build_test_agent_loop(defer_heavy_init=True)
+    client = start_test_app_server(agent_loop)
+    session = await attach_test_app_server_session(client)
+    try:
+        raw = await client.request(
+            "session/ready/wait", SessionReadyWaitParams(session_id=session.session_id)
+        )
+        response = validate_wire(SessionReadyWaitResponse, raw)
+
+        assert response.init_duration_ms is not None
+        assert isinstance(response.init_duration_ms, int)
+        assert response.init_duration_ms >= 0
+        assert response.init_duration_ms == agent_loop.init_duration_ms
+    finally:
+        await session.close()
+        await client.close()
+        await agent_loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runtime_resource_exposes_init_duration_ms() -> None:
+    agent_loop = build_test_agent_loop(defer_heavy_init=True)
+    session = await create_test_app_server_session(agent_loop)
+    try:
+        assert session.resources.runtime.session_init_duration_ms is None
+
+        await session.resources.runtime.wait_until_ready()
+
+        assert session.resources.runtime.session_init_duration_ms is not None
+        assert isinstance(session.resources.runtime.session_init_duration_ms, int)
+        assert session.resources.runtime.session_init_duration_ms >= 0
+    finally:
+        await session.close()
+        await agent_loop.aclose()
 
 
 @pytest.mark.asyncio

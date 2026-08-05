@@ -43,6 +43,7 @@ from vibe.app_server.models import (
     ConnectorCounts,
     ContentBlock,
     DebugLogPage,
+    IdentityView,
     JsonPatchOperation,
     MCPState,
     MentionStats,
@@ -51,6 +52,7 @@ from vibe.app_server.models import (
     PublicError,
     PublicHistoryEntry,
     PublicHistoryPage,
+    PublicRetryCategory,
     PublicSessionState,
     PublicTurn,
     SavedSessionSummary,
@@ -99,6 +101,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "feedback/record",
     "feedback/shouldShow",
     "history/list",
+    "identity/read",
     "loops/clear",
     "loops/create",
     "loops/delete",
@@ -167,6 +170,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "workspace/prompt/prepare",
     "workspace/trust/decision",
     "workspace/trust/status",
+    "workspace/worktrees/list",
 )
 
 
@@ -195,9 +199,27 @@ type SessionMCPServer = Annotated[
 ]
 
 
+class ExistingLocalWorkspaceSelection(ProtocolModel):
+    kind: Literal["existing"] = "existing"
+    cwd: str = Field(min_length=1)
+
+
+class CreateLocalWorkspaceSelection(ProtocolModel):
+    kind: Literal["create"] = "create"
+    branch: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+
+
+type LocalWorkspaceSelection = Annotated[
+    ExistingLocalWorkspaceSelection | CreateLocalWorkspaceSelection,
+    Field(discriminator="kind"),
+]
+
+
 class SessionOptions(ProtocolModel):
     cwd: str | None = None
     workspace_roots: list[str] = Field(default_factory=list)
+    local_workspace_selection: LocalWorkspaceSelection | None = None
     agent: str | None = None
     auto_approve: bool = False
     enabled_tools: list[str] | None = None
@@ -315,6 +337,7 @@ class SessionReadyReadResponse(ProtocolModel):
 
 class SessionReadyWaitResponse(ProtocolModel):
     ready: bool = True
+    init_duration_ms: int | None = None
 
 
 class AccountReadParams(ProtocolModel):
@@ -323,6 +346,14 @@ class AccountReadParams(ProtocolModel):
 
 class AccountReadResponse(ProtocolModel):
     account: AccountView
+
+
+class IdentityReadParams(ProtocolModel):
+    session_id: str
+
+
+class IdentityReadResponse(ProtocolModel):
+    identity: IdentityView | None = None
 
 
 class SessionRewindReadParams(ProtocolModel):
@@ -503,7 +534,8 @@ class RuntimeUpdatedParams(ProtocolModel):
 
 class TurnRetryingParams(ProtocolModel):
     session_id: str
-    reason: str
+    category: PublicRetryCategory
+    detail: str
 
 
 class ServerWarningParams(ProtocolModel):
@@ -541,6 +573,9 @@ class ConfigFieldWire(ProtocolModel):
     path: str
     popular: bool = False
     enum_choices: list[str] = Field(default_factory=list)
+    # Display labels for specific raw values, e.g. {"": "default (currently …)"}.
+    # Used for the value column and choice picker; the stored value is unchanged.
+    value_labels: dict[str, str] = Field(default_factory=dict)
     layer_values: list[ConfigLayerValueWire] = Field(default_factory=list)
 
     @property
@@ -854,6 +889,22 @@ class WorkspaceTrustStatusParams(ProtocolModel):
 class WorkspaceTrustStatusResponse(ProtocolModel):
     status: WorkspaceTrustStatus
     details: WorkspaceTrustDetails | None = None
+
+
+class WorkspaceWorktreeListParams(ProtocolModel):
+    cwd: str = Field(min_length=1)
+
+
+class WorkspaceLinkedWorktree(ProtocolModel):
+    name: str
+    branch: str
+    cwd: str
+    root: str
+    repo_root: str
+
+
+class WorkspaceWorktreeListResponse(ProtocolModel):
+    worktrees: list[WorkspaceLinkedWorktree]
 
 
 class WorkspaceTrustDecisionParams(ProtocolModel):

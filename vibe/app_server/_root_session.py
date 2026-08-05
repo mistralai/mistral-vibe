@@ -36,6 +36,19 @@ class EventWatermark(Protocol):
     def __call__(self, session_id: str) -> int: ...
 
 
+class SessionCoordinator(Protocol):
+    async def handoff_active_turn(
+        self,
+        old_session_id: str,
+        *,
+        current_history: list[PublicHistoryEntry],
+        callbacks: list[PublicCallbackEntry],
+        active_turn: PublicTurn,
+        last_turn: PublicTurn | None = None,
+        history_limit: int = 200,
+    ) -> SessionHandoff: ...
+
+
 @dataclass(frozen=True, slots=True)
 class SessionHandoff:
     old_session_id: str
@@ -119,7 +132,7 @@ class RootSessionCoordinator:
             update={"event_id": self._event_watermark(state.session.id)}
         )
 
-    def handoff_active_turn(
+    async def handoff_active_turn(
         self,
         old_session_id: str,
         *,

@@ -12,6 +12,7 @@ from pydantic import (
     BeforeValidator,
     Field,
     PrivateAttr,
+    ValidationError,
     ValidationInfo,
     model_validator,
 )
@@ -137,6 +138,11 @@ DEFAULT_MODELS = [
     ),
 ]
 
+# Sentinel ``active_model`` value meaning "not pinned": the config resolves it to
+# the default model (see ``get_active_model``). Kept distinct from pinning the
+# alias that happens to be the current default, which is a deliberate choice.
+UNPINNED_ACTIVE_MODEL = ""
+
 DEFAULT_TRANSCRIBE_PROVIDERS = [
     TranscribeProviderConfig(
         name="mistral",
@@ -216,6 +222,13 @@ def _normalize_tool_configs(v: Any) -> dict[str, dict[str, Any]]:
     return {name: cfg if isinstance(cfg, dict) else {} for name, cfg in v.items()}
 
 
+def _coerce_routed_model_config(v: str) -> ModelConfig | None:
+    try:
+        return ModelConfig.model_validate_json(v)
+    except ValidationError:
+        return None
+
+
 class VibeConfigSchema(ConfigSchema):
     _validation_warnings: list[str] = PrivateAttr(default_factory=list)
 
@@ -224,7 +237,16 @@ class VibeConfigSchema(ConfigSchema):
         return tuple(self._validation_warnings)
 
     # Models
-    active_model: Annotated[str, WithReplaceMerge()] = DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    active_model: Annotated[str, WithReplaceMerge()] = UNPINNED_ACTIVE_MODEL
+    # Experiment-routed default model alias, populated at runtime by the
+    # GrowthBook layer. It only takes effect when ``active_model`` is unpinned.
+    routed_default_model: Annotated[str, WithReplaceMerge()] = ""
+    # Full definition of ``routed_default_model``, also supplied at runtime by the GrowthBook layer.
+    routed_model_config: Annotated[
+        ModelConfig | None,
+        WithReplaceMerge(),
+        BeforeValidator(_coerce_routed_model_config),
+    ] = None
     providers: Annotated[list[ProviderConfig], WithUnionMerge(merge_key="name")] = (
         Field(default_factory=lambda: list(DEFAULT_PROVIDERS))
     )
@@ -402,6 +424,10 @@ class VibeConfigSchema(ConfigSchema):
         default_factory=list
     )
     disable_welcome_banner_animation: Annotated[bool, WithReplaceMerge()] = False
+    show_greeting: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        description="Show greeting at startup (Mistral providers only, once per 24h).",
+    )
     autocopy_to_clipboard: Annotated[bool, WithReplaceMerge()] = True
     file_watcher_for_autocomplete: Annotated[bool, WithReplaceMerge()] = False
     ask_confirmation_on_exit: Annotated[bool, WithReplaceMerge()] = True
@@ -414,6 +440,7 @@ class VibeConfigSchema(ConfigSchema):
     raise_on_compaction_failure: Annotated[bool, WithReplaceMerge()] = False
     enable_telemetry: Annotated[bool, WithReplaceMerge()] = True
     system_prompt_id: Annotated[str, WithReplaceMerge()] = SystemPrompt.CLI
+    managed_shell_tools_enabled: Annotated[bool, WithReplaceMerge()] = False
     compaction_prompt_id: Annotated[str, WithReplaceMerge()] = UtilityPrompt.COMPACT
     include_commit_signature: Annotated[bool, WithReplaceMerge()] = True
     include_model_info: Annotated[bool, WithReplaceMerge()] = True
@@ -443,8 +470,16 @@ class VibeConfigSchema(ConfigSchema):
         default_factory=ExperimentsConfig
     )
 
+    def resolve_default_model_alias(self) -> str:
+        if self.routed_default_model and self.routed_default_model in self.models:
+            return self.routed_default_model
+        if DEFAULT_ACTIVE_MODEL_CONFIG.alias in self.models:
+            return DEFAULT_ACTIVE_MODEL_CONFIG.alias
+        return next(iter(self.models))
+
     def get_active_model(self) -> ModelConfig:
-        if model := self.models.get(self.active_model):
+        alias = self.active_model or self.resolve_default_model_alias()
+        if model := self.models.get(alias):
             return model
         raise ValueError(
             f"Active model '{self.active_model}' not found in configuration."
@@ -566,6 +601,22 @@ class VibeConfigSchema(ConfigSchema):
         )
 
     @model_validator(mode="after")
+    def _inject_routed_model(self) -> VibeConfigSchema:
+        # Only inject for unpinned users
+        if self.active_model:
+            return self
+        alias = self.routed_default_model
+        model = self.routed_model_config
+        if (
+            alias
+            and model is not None
+            and model.alias == alias
+            and alias not in self.models
+        ):
+            object.__setattr__(self, "models", {**self.models, alias: model})
+        return self
+
+    @model_validator(mode="after")
     def _apply_global_auto_compact_threshold(self) -> VibeConfigSchema:
         models = {
             alias: (
@@ -582,7 +633,9 @@ class VibeConfigSchema(ConfigSchema):
 
     @model_validator(mode="after")
     def _apply_active_model_fallback(self) -> VibeConfigSchema:
-        if self.active_model not in self.models:
+        # The empty string is the "unpinned/default" sentinel: it is always valid
+        # and resolves to a configured model at read time (get_active_model).
+        if self.active_model and self.active_model not in self.models:
             unknown = self.active_model
             fallback = next(iter(self.models))
             logger.warning(

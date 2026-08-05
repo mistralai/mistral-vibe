@@ -13,6 +13,7 @@ from vibe.app_server.models import (
     ConfigIssue,
     ConnectorCounts,
     DebugLogPage,
+    IdentityView,
     MCPState,
     SessionLogSummary,
     SkillSummary,
@@ -44,6 +45,8 @@ from vibe.app_server.protocol import (
     DiagnosticsLogsReadParams,
     DiagnosticsLogsReadResponse,
     EmptyResponse,
+    IdentityReadParams,
+    IdentityReadResponse,
     Notification,
     ProtocolError,
     ProtocolErrorCode,
@@ -255,6 +258,31 @@ class AccountResource:
         return response.account
 
 
+class IdentityResource:
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+        self._current: IdentityView | None = None
+
+    @property
+    def current(self) -> IdentityView | None:
+        return self._current
+
+    async def read(self) -> IdentityView | None:
+        self._current = None
+        client = await self._connection.connect()
+        response = validate_wire(
+            IdentityReadResponse,
+            await client.request(
+                "identity/read", IdentityReadParams(session_id=self._state.session_id)
+            ),
+        )
+        self._current = response.identity
+        return response.identity
+
+
 class AgentResource:
     def __init__(
         self, connection: AppServerResourceConnection, state: ClientSessionState
@@ -318,6 +346,11 @@ class RuntimeResource:
     ) -> None:
         self._connection = connection
         self._state = state
+        self._session_last_init_duration_ms: int | None = None
+
+    @property
+    def session_init_duration_ms(self) -> int | None:
+        return self._session_last_init_duration_ms
 
     @property
     def skills(self) -> list[SkillSummary]:
@@ -384,7 +417,7 @@ class RuntimeResource:
 
     async def wait_until_ready(self) -> None:
         client = await self._connection.connect()
-        validate_wire(
+        response = validate_wire(
             SessionReadyWaitResponse,
             await client.request(
                 "session/ready/wait",
@@ -392,6 +425,7 @@ class RuntimeResource:
             ),
         )
         self._state.ready = True
+        self._session_last_init_duration_ms = response.init_duration_ms
         await self.refresh()
 
     async def refresh(self) -> None:

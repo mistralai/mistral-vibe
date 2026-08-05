@@ -52,13 +52,19 @@ from vibe.core.vibe_code_project import (
 REPO_URL = "https://github.com/mistralai/mistral-vibe.git"
 
 
-def test_app_server_import_does_not_require_git_executable(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "module",
+    ["vibe.app_server._host", "vibe.app_server._vibe_code", "vibe.app_server.server"],
+)
+def test_app_server_import_does_not_require_git_executable(
+    tmp_path: Path, module: str
+) -> None:
     env = os.environ.copy()
     env["GIT_PYTHON_GIT_EXECUTABLE"] = str(tmp_path / "missing-git")
     env["GIT_PYTHON_REFRESH"] = "raise"
 
     result = subprocess.run(
-        [sys.executable, "-c", "import vibe.app_server._vibe_code"],
+        [sys.executable, "-c", f"import {module}"],
         capture_output=True,
         env=env,
         text=True,

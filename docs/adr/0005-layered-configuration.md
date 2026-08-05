@@ -18,25 +18,43 @@ object.
 The effective order is:
 
 1. `DefaultConfigLayer`, materialized from `VibeConfigSchema` defaults;
-2. one selected TOML layer: trusted project config or user config;
-3. `GrowthbookLayer`, materialized from remote or hydrated experiment assignments;
+2. `GrowthbookLayer`, materialized from remote or hydrated experiment assignments;
+3. the user TOML layer (`~/.vibe/config.toml`) when the `"user"` source is
+   enabled, followed by the project TOML layer (a discovered trusted
+   `.vibe/config.toml`) when the `"project"` source is enabled;
 4. `VIBE_*` environment values;
 5. session/runtime overrides; and
 6. the active agent profile overlay, currently applied by `AgentManager` after
    the orchestrator result.
 
-The selected TOML layer is also the default persistence target:
+The user and project TOML layers are installed together so a trusted project
+config inherits unspecified values from the user config; per-field merge
+strategies (`REPLACE` / `UNION` / `CONCAT` / `SHALLOW` / `DEEP`) decide how
+overlapping fields combine, with the project layer taking priority. An untrusted
+or absent project layer is skipped from the merge by the builder while the user
+layer still contributes.
 
-- a discovered and trusted project `.vibe/config.toml` is selected;
-- otherwise `~/.vibe/config.toml` is selected when user config is enabled;
-- project-only composition may create the project file; and
-- composition without a persistent source uses an ephemeral override layer.
+The default write target is selected from the installed layers:
 
-User and project TOML are not currently installed together. A selected project
-file does not inherit unspecified values from the user file. The default layer
-is active; discovered and agent-profile layer classes exist but are not yet
-part of the default orchestrator stack. Code must follow the live stack rather
-than assume those layers are active.
+- a discovered and trusted project layer is the default write target;
+- project-only composition uses the project layer, creating
+  `.vibe/config.toml` on first write when absent;
+- otherwise `~/.vibe/config.toml` is selected when the user source is enabled;
+- composition without a persistent source uses the runtime override layer.
+
+An untrusted project layer loads empty and is skipped by the merge builder.
+When the user source is enabled, implicit writes fall back to the user layer.
+A user or project TOML value overrides the corresponding GrowthBook assignment.
+
+The default layer is active; discovered and agent-profile layer classes exist
+but are not yet part of the default orchestrator stack. Code must follow the
+live stack rather than assume those layers are active.
+
+A/B test assignments that affect runtime behavior are configuration inputs.
+They must be mapped into config fields by `GrowthbookLayer`, then consumed from
+the effective `VibeConfigSchema`. Runtime code must not branch directly on
+`ExperimentManager` variants for behavior that can be represented as config,
+otherwise TOML, environment, and session override precedence is bypassed.
 
 Session options such as enabled tools, disabled tools, and ephemeral MCP
 servers are override-layer values. Forks and child sessions receive independent
@@ -126,6 +144,9 @@ becoming competing sources of truth.
   validation, and merge metadata.
 - Preserve deterministic layer ordering and keep session overrides separate
   from persisted defaults.
+- Route A/B-tested runtime behavior through `GrowthbookLayer` config mappings;
+  do not read `ExperimentManager` directly when a config field can represent
+  the behavior.
 - Mutate attached-session config through app-server resources or server-owned
   orchestrator calls, never from Textual.
 - Return canonical server state after a mutation; clients replace their cache

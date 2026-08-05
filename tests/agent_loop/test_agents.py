@@ -82,6 +82,14 @@ class TestAgentProfile:
     def test_explore_is_subagent(self) -> None:
         assert BUILTIN_AGENTS[BuiltinAgentName.EXPLORE].agent_type == AgentType.SUBAGENT
 
+    def test_explore_tool_manager_exposes_read_only_and_skill_tools(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        profile = BUILTIN_AGENTS[BuiltinAgentName.EXPLORE]
+        manager = ToolManager(lambda: profile.apply_to_config(make_config()))
+
+        assert set(manager.available_tools) == {"grep", "read_file", "skill"}
+
     def test_agents(self) -> None:
         agents = [
             name

@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from vibe.app_server._account import AccountGateway
+from vibe.app_server._identity import IdentityGateway
 from vibe.app_server._projector import EventProjector
 from vibe.app_server._runtime import AgentRuntimeFactory, RootOpenRequest
 from vibe.app_server.client import AppServerClient
@@ -90,11 +91,17 @@ class CoreEventProjection:
 
 
 def start_test_app_server(
-    agent_loop: AgentLoop, *, account_gateway: AccountGateway | None = None
+    agent_loop: AgentLoop,
+    *,
+    account_gateway: AccountGateway | None = None,
+    identity_gateway: IdentityGateway | None = None,
 ) -> AppServerClient:
     client_transport, server_transport = memory_transport_pair()
     server = build_test_app_server(
-        agent_loop, server_transport, account_gateway=account_gateway
+        agent_loop,
+        server_transport,
+        account_gateway=account_gateway,
+        identity_gateway=identity_gateway,
     )
     return AppServerClient(client_transport, run_peer=server.serve)
 
@@ -104,6 +111,7 @@ def build_test_app_server(
     transport: JsonRpcTransport,
     *,
     account_gateway: AccountGateway | None = None,
+    identity_gateway: IdentityGateway | None = None,
 ) -> AppServer:
     runtime_factory = AgentRuntimeFactory()
 
@@ -122,14 +130,22 @@ def build_test_app_server(
         open_root=open_root,
         runtime_factory=runtime_factory,
         account_gateway=account_gateway,
+        identity_gateway=identity_gateway,
     )
 
 
 async def create_test_app_server_session(
-    agent_loop: AgentLoop, *, account_gateway: AccountGateway | None = None
+    agent_loop: AgentLoop,
+    *,
+    account_gateway: AccountGateway | None = None,
+    identity_gateway: IdentityGateway | None = None,
 ) -> AppServerSession:
     return await attach_test_app_server_session(
-        start_test_app_server(agent_loop, account_gateway=account_gateway)
+        start_test_app_server(
+            agent_loop,
+            account_gateway=account_gateway,
+            identity_gateway=identity_gateway,
+        )
     )
 
 

@@ -371,7 +371,7 @@ def get_universal_system_prompt(
         sections.append(_add_commit_signature())
 
     if config.include_model_info:
-        sections.append(f"Your model name is: `{config.active_model}`")
+        sections.append(f"Your model name is: `{config.get_active_model().alias}`")
 
     if config.include_prompt_detail:
         sections.append(_get_tool_aware_os_system_prompt(tool_manager))

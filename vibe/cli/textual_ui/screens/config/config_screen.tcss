@@ -49,6 +49,19 @@
     color: $foreground;
 }
 
+.config-screen-legend {
+    display: none;
+    height: 1;
+    margin-bottom: 1;
+    text-align: center;
+    color: $text-disabled;
+    text-style: italic;
+
+    &:ansi {
+        text-style: dim italic;
+    }
+}
+
 .config-screen-help {
     height: auto;
     margin-top: 1;

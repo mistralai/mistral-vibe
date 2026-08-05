@@ -17,6 +17,7 @@ from vibe.app_server.protocol import (
     ConfigPatchResponse,
 )
 from vibe.app_server.resources import ConfigResource
+from vibe.cli.textual_ui.constants import UNPINNED_ACTIVE_MODEL
 from vibe.cli.textual_ui.screens.config._common import (
     ADVANCED_HEADER,
     CONFIG_SCREEN_ID,
@@ -24,7 +25,9 @@ from vibe.cli.textual_ui.screens.config._common import (
     MERGE_THRESHOLD,
     POPULAR_HEADER,
     ConfigOptionList,
+    enforced_legend,
     filter_field_views,
+    is_enforced,
     origin_label,
     row_text,
     search_text,
@@ -66,6 +69,9 @@ class ConfigScreen(ModalScreen[bool]):
                 id="config-screen-search",
                 classes="config-screen-search",
             )
+            yield NoMarkupStatic(
+                "", id="config-screen-legend", classes="config-screen-legend"
+            )
             with Horizontal(id="config-screen-options-wrap"):
                 yield ConfigOptionList(
                     on_query_changed=self._filter, id="config-screen-options"
@@ -106,9 +112,16 @@ class ConfigScreen(ModalScreen[bool]):
         }
         if (field_choices := choices.get(view.name)) is None:
             return view
-        return view.model_copy(
-            update={"kind": ConfigFieldKind.ENUM, "enum_choices": field_choices}
-        )
+        update: dict[str, object] = {
+            "kind": ConfigFieldKind.ENUM,
+            "enum_choices": field_choices,
+        }
+        if view.name == "active_model":
+            update["enum_choices"] = [UNPINNED_ACTIVE_MODEL, *field_choices]
+            update["value_labels"] = {
+                UNPINNED_ACTIVE_MODEL: f"default (currently {config.default_model_alias})"
+            }
+        return view.model_copy(update=update)
 
     def _sections(self) -> list[tuple[str | None, list[ConfigFieldWire]]]:
         popular = [v for v in self._views if v.popular]
@@ -137,6 +150,7 @@ class ConfigScreen(ModalScreen[bool]):
         previous = self._highlighted_name() if preserve_highlight else None
         sections = self._sections()
         self._filtered = [view for _, views in sections for view in views]
+        self._refresh_legend()
         options: list[Option] = []
         self._rendered_ids = []
         first_header = True
@@ -202,8 +216,18 @@ class ConfigScreen(ModalScreen[bool]):
     def _view_by_name(self, name: str) -> ConfigFieldWire | None:
         return next((v for v in self._views if v.name == name), None)
 
+    def _refresh_legend(self) -> None:
+        enforced = any(is_enforced(view) for view in self._filtered)
+        legend = self.query_one("#config-screen-legend", NoMarkupStatic)
+        legend.display = enforced
+        legend.update(enforced_legend() if enforced else "")
+
     @work
     async def _edit(self, view: ConfigFieldWire) -> None:
+        # Enforced fields are read-only; the persistent legend already explains
+        # this, so no notification is raised here.
+        if is_enforced(view):
+            return
         result = await prompt_field_value(self.app, view, self._targets)
         if result is not None:
             value, target = result
@@ -224,6 +248,8 @@ class ConfigScreen(ModalScreen[bool]):
 
     @work
     async def _reset(self, view: ConfigFieldWire) -> None:
+        if is_enforced(view):
+            return
         layer_values = [
             entry for entry in view.layer_values if entry.layer != DEFAULT_ORIGIN
         ]

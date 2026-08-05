@@ -641,6 +641,41 @@ deprecated_setting = true
 
 
 @pytest.mark.asyncio
+async def test_persisted_active_model_reads_the_pinned_value(
+    tmp_working_directory: Path,
+) -> None:
+    toml_path = tmp_working_directory / "config.toml"
+    toml_path.write_text(
+        'active_model = "target-testing-model-alias"\n', encoding="utf-8"
+    )
+    user_layer = UserConfigLayer(path=toml_path)
+    orch = await ConfigOrchestrator.create(
+        schema=ToolSchema,
+        layers=[user_layer],
+        default_layer_resolver=lambda: user_layer,
+    )
+
+    assert orch.persisted_active_model() == "target-testing-model-alias"
+
+
+@pytest.mark.asyncio
+async def test_persisted_active_model_empty_when_not_pinned(
+    tmp_working_directory: Path,
+) -> None:
+    toml_path = tmp_working_directory / "config.toml"
+    # No active_model key persisted: the user is on the unpinned default.
+    toml_path.write_text("tools = {}\n", encoding="utf-8")
+    user_layer = UserConfigLayer(path=toml_path)
+    orch = await ConfigOrchestrator.create(
+        schema=ToolSchema,
+        layers=[user_layer],
+        default_layer_resolver=lambda: user_layer,
+    )
+
+    assert orch.persisted_active_model() == ""
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_creates_user_file_when_it_is_missing(
     tmp_working_directory: Path,
 ) -> None:

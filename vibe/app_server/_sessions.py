@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 
 from vibe.app_server._execution import SessionExecution
 from vibe.app_server._model import ProtocolModel
-from vibe.app_server._projection import project_history
+from vibe.app_server._projection import project_history, project_session_log
+from vibe.app_server._root_session import SessionHandoff, rebind_history
 from vibe.app_server._runtime import AgentRuntimeFactory, close_agent_loop
 from vibe.app_server._session_history import SessionHistory
 from vibe.app_server._state import build_public_state
@@ -19,6 +20,7 @@ from vibe.app_server.models import (
     PublicCallbackEntry,
     PublicHistoryEntry,
     PublicSessionState,
+    PublicTurn,
     PublicTurnStatus,
     TextContentBlock,
 )
@@ -81,6 +83,7 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
         self._runtime_factory = runtime_factory or AgentRuntimeFactory()
         self._root: SessionRuntime | None = None
         self._children: dict[str, SessionRuntime] = {}
+        self._child_links: dict[str, tuple[SessionRuntime, str]] = {}
 
     def bind_root(self, runtime: SessionRuntime) -> None:
         if self._root is not None:
@@ -104,6 +107,57 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
         for runtime in self._children.values():
             if runtime.agent_loop.parent_session_id == old_session_id:
                 runtime.agent_loop.parent_session_id = new_session_id
+
+    async def handoff_active_turn(
+        self,
+        old_session_id: str,
+        *,
+        current_history: list[PublicHistoryEntry],
+        callbacks: list[PublicCallbackEntry],
+        active_turn: PublicTurn,
+        last_turn: PublicTurn | None = None,
+        history_limit: int = 200,
+    ) -> SessionHandoff:
+        runtime = self._require_child(old_session_id)
+        new_session_id = runtime.agent_loop.session_id
+        if old_session_id == new_session_id:
+            raise RuntimeError("Session handoff did not change the session ID")
+        if new_session_id in self._children:
+            raise RuntimeError(f"Child session is already registered: {new_session_id}")
+        parent, tool_call_id = self._child_links[old_session_id]
+
+        await parent.agent_loop.replace_child_session(
+            old_session_id, runtime.agent_loop, tool_call_id
+        )
+        self._children.pop(old_session_id)
+        self._children[new_session_id] = runtime
+        self._child_links.pop(old_session_id)
+        self._child_links[new_session_id] = (parent, tool_call_id)
+        runtime.history.replace(rebind_history(runtime.history.base, new_session_id))
+        for child in self._children.values():
+            if child.agent_loop.parent_session_id == old_session_id:
+                child.agent_loop.parent_session_id = new_session_id
+        await parent.turns.replace_subagent(
+            tool_call_id, old_session_id, new_session_id
+        )
+        state = build_public_state(
+            runtime.agent_loop,
+            history=runtime.history.base,
+            current_history=current_history,
+            callbacks=callbacks,
+            active_turn=active_turn,
+            last_turn=last_turn,
+            history_limit=history_limit,
+        )
+        state = state.model_copy(
+            update={"event_id": self._event_watermark(new_session_id)}
+        )
+        return SessionHandoff(
+            old_session_id=old_session_id,
+            new_session_id=new_session_id,
+            state=state,
+            session_log=project_session_log(runtime.agent_loop),
+        )
 
     def public_state(self, session_id: str, history_limit: int) -> PublicSessionState:
         runtime = self._require_child(session_id)
@@ -181,6 +235,12 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
                     await self._discard_child(child)
                 continue
             self._children[child.session_id] = runtime
+            parent_runtime = self._root
+            if parent_runtime is None:
+                await runtime.close()
+                self._children.pop(child.session_id, None)
+                raise RuntimeError("Cannot restore a child without a root runtime")
+            self._child_links[child.session_id] = (parent_runtime, link.tool_call_id)
 
     async def close(self) -> None:
         await self._close_children()
@@ -199,6 +259,7 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
 
         runtime = self._build_child_runtime(child, event_sink=consume_event)
         self._children[child.session_id] = runtime
+        self._child_links[child.session_id] = (parent, ctx.tool_call_id)
         link_recorded = False
         projection_started = False
         try:
@@ -209,6 +270,7 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
             await parent.turns.link_subagent(ctx.tool_call_id, child.session_id)
         except BaseException:
             self._children.pop(child.session_id, None)
+            self._child_links.pop(child.session_id, None)
             if projection_started:
                 with suppress(Exception):
                     await parent.turns.unlink_subagent(
@@ -278,6 +340,7 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
             self,
             self._tool_io,
             event_sink,
+            self,
         )
         return SessionRuntime(
             child, turns, execution, SessionHistory(base_history or [])
@@ -303,6 +366,7 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
     async def _close_children(self) -> None:
         children = list(self._children.values())
         self._children.clear()
+        self._child_links.clear()
         errors: list[BaseException] = []
         for runtime in children:
             try:

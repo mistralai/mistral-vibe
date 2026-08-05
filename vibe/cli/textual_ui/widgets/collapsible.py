@@ -80,6 +80,9 @@ class ClickWithoutDragMixin:
             return True
         return press is not None and press != (event.screen_x, event.screen_y)
 
+    def clear_selection_state_for_click(self) -> None:
+        self._had_selection_at_press = False
+
 
 class CollapsibleSection(ClickWithoutDragMixin, Vertical):
     """Shared fold/click machinery for a disclosable body.

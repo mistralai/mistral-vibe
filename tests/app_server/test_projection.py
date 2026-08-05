@@ -152,6 +152,42 @@ def test_snapshot_session_cost_never_negative_when_cached_exceeds_prompt() -> No
     assert snapshot.session_cost == pytest.approx(0.01)
 
 
+def test_config_view_flags_pinned_active_model() -> None:
+    from vibe.core.config import ModelConfig
+
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="alpha"),
+        ModelConfig(name="model-b", provider="mistral", alias="beta"),
+    ]
+    agent_loop = build_test_agent_loop(
+        config=build_test_vibe_config(models=models, active_model="beta")
+    )
+
+    config = project_config(agent_loop)
+
+    assert config.active_model_pinned is True
+    assert config.active_model.alias == "beta"
+
+
+def test_config_view_reports_unpinned_default_model() -> None:
+    from vibe.core.config import ModelConfig
+
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="alpha"),
+        ModelConfig(name="model-b", provider="mistral", alias="beta"),
+    ]
+    agent_loop = build_test_agent_loop(
+        config=build_test_vibe_config(models=models, active_model="")
+    )
+
+    config = project_config(agent_loop)
+
+    assert config.active_model_pinned is False
+    # The unpinned state resolves to the first configured model for display.
+    assert config.default_model_alias == "alpha"
+    assert config.active_model.alias == "alpha"
+
+
 @pytest.mark.asyncio
 async def test_session_log_is_persisted_only_after_it_is_saved(tmp_path: Path) -> None:
     agent_loop = build_test_agent_loop(

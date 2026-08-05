@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
+from contextlib import AbstractAsyncContextManager, nullcontext
 import json
 import types
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
@@ -18,6 +19,12 @@ from vibe.core.llm.backend.base import (
 from vibe.core.llm.backend.openai_responses import OpenAIResponsesAdapter
 from vibe.core.llm.backend.reasoning_adapter import ReasoningAdapter
 from vibe.core.llm.exceptions import BackendErrorBuilder
+from vibe.core.tracing import (
+    model_call_span,
+    set_model_call_http_status,
+    set_model_call_response_metadata,
+    set_model_call_usage,
+)
 from vibe.core.types import (
     AvailableTool,
     LLMChunk,
@@ -32,6 +39,8 @@ from vibe.utils.api_keys import resolve_api_key
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 if TYPE_CHECKING:
+    from opentelemetry import trace
+
     from vibe.core.config import ModelConfig, ProviderConfig
 
 
@@ -187,6 +196,18 @@ _ADAPTERS: dict[str, APIAdapter] = {
 }
 
 
+def _reports_usage(response_data: dict[str, Any]) -> bool:
+    if isinstance(response_data.get("usage"), dict):
+        return True
+
+    message = response_data.get("message")
+    if isinstance(message, dict) and isinstance(message.get("usage"), dict):
+        return True
+
+    response = response_data.get("response")
+    return isinstance(response, dict) and isinstance(response.get("usage"), dict)
+
+
 def _get_adapter(api_style: str) -> APIAdapter:
     """Load the adapter for the given API style."""
     if api_style == "openai-responses":
@@ -209,6 +230,7 @@ class GenericBackend:
         provider: ProviderConfig,
         timeout: float = 720.0,
         on_retry: RetryObserver | None = None,
+        enable_otel: bool = False,
     ) -> None:
         """Initialize the backend.
 
@@ -224,6 +246,7 @@ class GenericBackend:
         self._make_streaming_request = async_generator_retry(
             tries=3, on_retry=on_retry
         )(self._send_streaming_request)
+        self._enable_otel = enable_otel
 
     async def __aenter__(self) -> GenericBackend:
         if self._client is None:
@@ -291,33 +314,58 @@ class GenericBackend:
         base = req.base_url or self._provider.api_base
         url = f"{base}{req.endpoint}"
 
-        try:
-            res_data, _ = await self._make_request(url, req.body, headers)
-            return adapter.parse_response(res_data, self._provider)
+        async with self._model_call_span(
+            model=model,
+            api_style=api_style,
+            streaming=False,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            metadata=metadata,
+            url=url,
+        ) as span:
 
-        except httpx.HTTPStatusError as e:
-            raise BackendErrorBuilder.build_http_error(
-                provider=self._provider.name,
-                endpoint=url,
-                error=e,
-                response=e.response,
-                model=model.name,
-                messages=messages,
-                temperature=temperature,
-                has_tools=bool(tools),
-                tool_choice=tool_choice,
-            ) from e
-        except httpx.RequestError as e:
-            raise BackendErrorBuilder.build_request_error(
-                provider=self._provider.name,
-                endpoint=url,
-                error=e,
-                model=model.name,
-                messages=messages,
-                temperature=temperature,
-                has_tools=bool(tools),
-                tool_choice=tool_choice,
-            ) from e
+            def record_response_status(status_code: int) -> None:
+                set_model_call_http_status(span, status_code)
+
+            try:
+                response = await self._make_request(
+                    url, req.body, headers, on_response_status=record_response_status
+                )
+            except httpx.HTTPStatusError as e:
+                set_model_call_http_status(span, e.response.status_code)
+                raise BackendErrorBuilder.build_http_error(
+                    provider=self._provider.name,
+                    endpoint=url,
+                    error=e,
+                    response=e.response,
+                    model=model.name,
+                    messages=messages,
+                    temperature=temperature,
+                    has_tools=bool(tools),
+                    tool_choice=tool_choice,
+                ) from e
+            except httpx.RequestError as e:
+                raise BackendErrorBuilder.build_request_error(
+                    provider=self._provider.name,
+                    endpoint=url,
+                    error=e,
+                    model=model.name,
+                    messages=messages,
+                    temperature=temperature,
+                    has_tools=bool(tools),
+                    tool_choice=tool_choice,
+                ) from e
+
+            set_model_call_http_status(span, response.status_code)
+            set_model_call_response_metadata(span, response.data)
+            chunk = adapter.parse_response(response.data, self._provider)
+            if chunk.usage is not None and _reports_usage(response.data):
+                set_model_call_usage(
+                    span,
+                    prompt_tokens=chunk.usage.prompt_tokens,
+                    completion_tokens=chunk.usage.completion_tokens,
+                )
+            return chunk
 
     async def complete_streaming(
         self,
@@ -356,52 +404,117 @@ class GenericBackend:
         base = req.base_url or self._provider.api_base
         url = f"{base}{req.endpoint}"
 
-        try:
-            async for res_data in self._make_streaming_request(url, req.body, headers):
-                yield adapter.parse_response(res_data, self._provider)
+        async with self._model_call_span(
+            model=model,
+            api_style=api_style,
+            streaming=True,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            metadata=metadata,
+            url=url,
+        ) as span:
+            usage = LLMUsage()
+            has_usage = False
 
-        except httpx.HTTPStatusError as e:
-            raise BackendErrorBuilder.build_http_error(
-                provider=self._provider.name,
-                endpoint=url,
-                error=e,
-                response=e.response,
-                model=model.name,
-                messages=messages,
-                temperature=temperature,
-                has_tools=bool(tools),
-                tool_choice=tool_choice,
-            ) from e
-        except httpx.RequestError as e:
-            raise BackendErrorBuilder.build_request_error(
-                provider=self._provider.name,
-                endpoint=url,
-                error=e,
-                model=model.name,
-                messages=messages,
-                temperature=temperature,
-                has_tools=bool(tools),
-                tool_choice=tool_choice,
-            ) from e
+            def record_response_status(status_code: int) -> None:
+                set_model_call_http_status(span, status_code)
+
+            try:
+                async for stream_chunk in self._make_streaming_request(
+                    url, req.body, headers, on_response_status=record_response_status
+                ):
+                    set_model_call_response_metadata(span, stream_chunk.data)
+                    chunk = adapter.parse_response(stream_chunk.data, self._provider)
+                    if chunk.usage is not None and _reports_usage(stream_chunk.data):
+                        has_usage = True
+                        usage += chunk.usage
+                    yield chunk
+            except httpx.HTTPStatusError as e:
+                set_model_call_http_status(span, e.response.status_code)
+                raise BackendErrorBuilder.build_http_error(
+                    provider=self._provider.name,
+                    endpoint=url,
+                    error=e,
+                    response=e.response,
+                    model=model.name,
+                    messages=messages,
+                    temperature=temperature,
+                    has_tools=bool(tools),
+                    tool_choice=tool_choice,
+                ) from e
+            except httpx.RequestError as e:
+                raise BackendErrorBuilder.build_request_error(
+                    provider=self._provider.name,
+                    endpoint=url,
+                    error=e,
+                    model=model.name,
+                    messages=messages,
+                    temperature=temperature,
+                    has_tools=bool(tools),
+                    tool_choice=tool_choice,
+                ) from e
+            if has_usage:
+                set_model_call_usage(
+                    span,
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                )
 
     class HTTPResponse(NamedTuple):
         data: dict[str, Any]
-        headers: dict[str, str]
+        status_code: int
+
+    class HTTPStreamChunk(NamedTuple):
+        data: dict[str, Any]
+
+    def _model_call_span(
+        self,
+        *,
+        model: ModelConfig,
+        api_style: str,
+        streaming: bool,
+        temperature: float | None,
+        max_tokens: int | None,
+        metadata: dict[str, str] | None,
+        url: str,
+    ) -> AbstractAsyncContextManager[trace.Span | None]:
+        if not self._enable_otel:
+            return nullcontext(None)
+
+        return model_call_span(
+            provider_name=self._provider.name,
+            provider_api_style=api_style,
+            model=model.name,
+            streaming=streaming,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            metadata=metadata,
+            http_url=url,
+        )
 
     async def _send_request(
-        self, url: str, data: bytes, headers: dict[str, str]
+        self,
+        url: str,
+        data: bytes,
+        headers: dict[str, str],
+        on_response_status: Callable[[int], None] | None = None,
     ) -> HTTPResponse:
         client = self._get_client()
         response = await client.post(url, content=data, headers=headers)
         response.raise_for_status()
+        if on_response_status is not None:
+            on_response_status(response.status_code)
 
-        response_headers = dict(response.headers.items())
         response_body = response.json()
-        return self.HTTPResponse(response_body, response_headers)
+        return self.HTTPResponse(response_body, response.status_code)
 
     async def _send_streaming_request(
-        self, url: str, data: bytes, headers: dict[str, str]
-    ) -> AsyncGenerator[dict[str, Any]]:
+        self,
+        url: str,
+        data: bytes,
+        headers: dict[str, str],
+        on_response_status: Callable[[int], None] | None = None,
+    ) -> AsyncGenerator[HTTPStreamChunk]:
         client = self._get_client()
         async with client.stream(
             method="POST", url=url, content=data, headers=headers
@@ -409,6 +522,8 @@ class GenericBackend:
             if not response.is_success:
                 await response.aread()
             response.raise_for_status()
+            if on_response_status is not None:
+                on_response_status(response.status_code)
             async for line in iter_sse_lines(response):
                 if line.strip() == "":
                     continue
@@ -420,7 +535,7 @@ class GenericBackend:
                 if f"{DELIM_CHAR} " not in line:
                     raise ValueError(
                         f"Stream chunk improperly formatted. "
-                        f"Expected `key{DELIM_CHAR} value`, received `{line}`"
+                        f"Expected `key{DELIM_CHAR} value`."
                     )
                 delim_index = line.find(DELIM_CHAR)
                 key = line[0:delim_index]
@@ -431,7 +546,11 @@ class GenericBackend:
                     continue
                 if value.strip() == "[DONE]":
                     return
-                yield json.loads(value.strip())
+                try:
+                    chunk_data = json.loads(value.strip())
+                except json.JSONDecodeError:
+                    raise ValueError("Stream chunk contains malformed JSON.") from None
+                yield self.HTTPStreamChunk(data=chunk_data)
 
     async def close(self) -> None:
         if self._owns_client and self._client:

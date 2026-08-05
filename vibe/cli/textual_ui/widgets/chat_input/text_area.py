@@ -6,6 +6,7 @@ import time
 from typing import Any, ClassVar, Literal
 
 from textual import events
+from textual._context import NoActiveAppError
 from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import TextArea
@@ -32,8 +33,10 @@ from vibe.cli.voice_manager.voice_manager_port import (
 InputMode = Literal["!", "/", ">", "&"]
 
 _WORD = re.compile(r"\w+")
+_TRAILING_WORD = re.compile(r"\w+$")
 _DOUBLE_CLICK = 2
 _TRIPLE_CLICK = 3
+_DEFAULT_CLICK_CHAIN_TIME_THRESHOLD = 0.5
 
 FEEDBACK_RATING_KEYS: dict[str, str] = {"1": "good", "2": "fine", "3": "bad"}
 FEEDBACK_SNOOZE_KEY = "0"
@@ -134,6 +137,13 @@ class ChatTextArea(TextArea):
         self._app_has_focus: bool = True
         self._voice_manager = voice_manager
         self._last_keystroke_time: float = 0.0
+        self._click_chain: int = 0
+        self._chain_consumed: bool = False
+        self._last_down_time: float | None = None
+        self._last_down_location: Location | None = None
+        self._drag_chain: int = 0
+        self._drag_anchor: Location | None = None
+        self._dragged: bool = False
 
     def on_blur(self, event: events.Blur) -> None:
         # set_reactive avoids the selection watcher, which would call
@@ -151,18 +161,160 @@ class ChatTextArea(TextArea):
 
     def on_click(self, event: events.Click) -> None:
         self._mark_cursor_moved_if_needed()
-        if event.chain == _DOUBLE_CLICK:
-            self._select_word_at(self.get_target_document_location(event))
-        elif event.chain == _TRIPLE_CLICK:
-            self.select_line(self.get_target_document_location(event)[0])
 
     def _select_word_at(self, location: Location) -> None:
-        row, column = location
-        for match in _WORD.finditer(self.document[row]):
-            start, end = match.span()
-            if start <= column < end:
-                self.selection = Selection((row, start), (row, end))
-                return
+        boundary = self._word_boundary_around(location)
+        if boundary is not None:
+            self._set_selection(Selection(boundary[0], boundary[1]))
+
+    def _set_selection(self, selection: Selection) -> None:
+        # set_reactive avoids the selection watcher, which would call
+        # app.clear_selection() and wipe an in-progress selection.
+        self.set_reactive(TextArea.selection, selection)
+        self.refresh()
+
+    async def _on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button != 1:
+            return
+        event.prevent_default()
+        target = self.get_target_document_location(event)
+        self._set_selection(Selection.cursor(target))
+        self._selecting = True
+        self.capture_mouse()
+        self._pause_blink(visible=False)
+        self.history.checkpoint()
+
+        self._dragged = False
+        self._update_click_chain(target, event.time)
+        self._drag_chain = self._click_chain
+        if self._click_chain >= _TRIPLE_CLICK:
+            self._drag_anchor = target
+            row = max(0, min(target[0], self.document.line_count - 1))
+            self._set_selection(Selection((row, 0), (row, len(self.document[row]))))
+        elif self._click_chain == _DOUBLE_CLICK:
+            self._drag_anchor = target
+            self._select_word_at(target)
+        else:
+            self._drag_anchor = None
+
+    async def _on_mouse_move(self, event: events.MouseMove) -> None:
+        event.prevent_default()
+        if (
+            self._selecting
+            and self._drag_anchor is not None
+            and self._drag_chain in {_DOUBLE_CLICK, _TRIPLE_CLICK}
+        ):
+            self._expand_drag_selection(event)
+        else:
+            await super()._on_mouse_move(event)
+
+    async def _on_mouse_up(self, event: events.MouseUp) -> None:
+        await super()._on_mouse_up(event)
+        if self._dragged:
+            self._click_chain = 0
+            self._chain_consumed = False
+            self._last_down_time = None
+            self._last_down_location = None
+        self._drag_chain = 0
+        self._drag_anchor = None
+        self._dragged = False
+
+    def _update_click_chain(self, target: Location, now: float) -> None:
+        try:
+            threshold = self.app.CLICK_CHAIN_TIME_THRESHOLD
+        except NoActiveAppError:
+            threshold = _DEFAULT_CLICK_CHAIN_TIME_THRESHOLD
+        within = (
+            self._last_down_location == target
+            and self._last_down_time is not None
+            and now - self._last_down_time <= threshold
+        )
+        if not within:
+            self._click_chain = 1
+            self._chain_consumed = False
+        elif self._chain_consumed:
+            # Wrap the chain back to a fresh single click so the cycle
+            # (char -> word -> paragraph) loops instead of sticking on CHAR.
+            self._click_chain = 1
+            self._chain_consumed = False
+        else:
+            self._click_chain += 1
+        if self._click_chain >= _TRIPLE_CLICK:
+            self._chain_consumed = True
+        self._last_down_time = now
+        self._last_down_location = target
+
+    def _expand_drag_selection(self, event: events.MouseMove) -> None:
+        anchor = self._drag_anchor
+        if anchor is None:
+            return
+        target = self.get_target_document_location(event)
+        if self._drag_chain >= _TRIPLE_CLICK:
+            start, end = self._snap_paragraph_drag(anchor, target)
+        else:
+            start, end = self._snap_word_drag(anchor, target)
+        new_selection = Selection(start, end)
+        changed = self.selection != new_selection
+        self._set_selection(new_selection)
+        if changed:
+            self._dragged = True
+
+    def _snap_word_drag(
+        self, anchor: Location, current: Location
+    ) -> tuple[Location, Location]:
+        if anchor <= current:
+            start_loc, end_loc = anchor, current
+        else:
+            start_loc, end_loc = current, anchor
+        return self._word_start_at(start_loc), self._word_end_at(end_loc)
+
+    def _snap_paragraph_drag(
+        self, anchor: Location, current: Location
+    ) -> tuple[Location, Location]:
+        if anchor <= current:
+            start_row, end_row = anchor[0], current[0]
+        else:
+            start_row, end_row = current[0], anchor[0]
+        return self._paragraph_start_at((start_row, 0)), self._paragraph_end_at((
+            end_row,
+            0,
+        ))
+
+    def _word_boundary_around(
+        self, location: Location
+    ) -> tuple[Location, Location] | None:
+        row, col = location
+        if not 0 <= row < self.document.line_count:
+            return None
+        line = self.document[row]
+        col = max(0, min(col, len(line)))
+        left = _TRAILING_WORD.search(line[:col])
+        right = _WORD.match(line[col:])
+        left_len = len(left.group()) if left else 0
+        right_len = len(right.group()) if right else 0
+        if not left_len and not right_len:
+            return None
+        return (row, col - left_len), (row, col + right_len)
+
+    def _word_start_at(self, location: Location) -> Location:
+        boundary = self._word_boundary_around(location)
+        return boundary[0] if boundary is not None else location
+
+    def _word_end_at(self, location: Location) -> Location:
+        boundary = self._word_boundary_around(location)
+        return boundary[1] if boundary is not None else location
+
+    def _paragraph_start_at(self, location: Location) -> Location:
+        row = location[0]
+        if not 0 <= row < self.document.line_count:
+            return location
+        return (row, 0)
+
+    def _paragraph_end_at(self, location: Location) -> Location:
+        row = location[0]
+        if not 0 <= row < self.document.line_count:
+            return location
+        return (row, len(self.document[row]))
 
     async def _on_paste(self, event: events.Paste) -> None:
         # Best-effort: terminals that emit bracketed paste sequences will

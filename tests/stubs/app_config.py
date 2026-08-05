@@ -21,11 +21,14 @@ def build_test_app_config(
         active_model=ModelConfigView(
             name="test-model", alias="test-model", thinking="off", supports_images=False
         ),
+        active_model_pinned=True,
+        default_model_alias="test-model",
         theme="textual-dark",
         disable_welcome_banner_animation=False,
         autocopy_to_clipboard=True,
         file_watcher_for_autocomplete=False,
         ask_confirmation_on_exit=True,
+        show_greeting=True,
         voice_mode_enabled=voice_mode_enabled,
         narrator_enabled=narrator_enabled,
         show_thinking_nodes=show_thinking_nodes,

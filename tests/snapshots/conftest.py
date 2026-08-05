@@ -35,3 +35,7 @@ def _pin_spinner_frames(monkeypatch: pytest.MonkeyPatch) -> None:
         "vibe.cli.textual_ui.widgets.spinner.SpinnerMixin.start_spinner_timer",
         lambda self: None,
     )
+    monkeypatch.setattr(
+        "vibe.cli.textual_ui.widgets.spinner_text.SpinnerText._advance",
+        lambda self: None,
+    )

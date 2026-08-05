@@ -15,7 +15,6 @@ if TYPE_CHECKING:
         TrackedExperiment,
         TrackedExperimentResult,
     )
-    from vibe.core.experiments.rollouts import managed_shell_tools_enabled
 
 __all__ = [
     "DEFAULT_VARIANTS",
@@ -30,7 +29,6 @@ __all__ = [
     "TrackedExperiment",
     "TrackedExperimentResult",
     "hash_api_key",
-    "managed_shell_tools_enabled",
 ]
 
 _LAZY_MODULES = {
@@ -46,7 +44,6 @@ _LAZY_MODULES = {
     "TrackedExperimentResult": "vibe.core.experiments.models",
     "DEFAULT_VARIANTS": "vibe.core.experiments.active",
     "ExperimentName": "vibe.core.experiments.active",
-    "managed_shell_tools_enabled": "vibe.core.experiments.rollouts",
 }
 
 

@@ -18,7 +18,7 @@ from vibe.app_server._execution import (
 from vibe.app_server._model import ProtocolModel
 from vibe.app_server._projection import project_agents, project_stats
 from vibe.app_server._projector import EventProjector, ProjectedUpdate
-from vibe.app_server._root_session import RootSessionCoordinator, rebind_history
+from vibe.app_server._root_session import SessionCoordinator, rebind_history
 from vibe.app_server._state import session_preview
 from vibe.app_server._utils import decode_input, now_ms, public_error
 from vibe.app_server.models import (
@@ -33,6 +33,7 @@ from vibe.app_server.models import (
     PublicError,
     PublicHistoryEntry,
     PublicMessageSource,
+    PublicRetryCategory,
     PublicTurn,
     PublicTurnStatus,
     PublicTurnStopReason,
@@ -75,6 +76,7 @@ from vibe.core.types import (
     UserInputRequestEvent,
     UserMessageEvent,
 )
+from vibe.core.utils.retry import RetryCategory, RetryReason
 from vibe.core.utils.tags import CancellationReason, get_user_cancellation_message
 from vibe.user_content import UserResource
 
@@ -114,6 +116,20 @@ class CallbackRecord:
     resolution_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
+def _public_retry_category(category: RetryCategory) -> PublicRetryCategory:
+    match category:
+        case RetryCategory.RATE_LIMITED:
+            return PublicRetryCategory.RATE_LIMITED
+        case RetryCategory.SERVER_ERROR:
+            return PublicRetryCategory.SERVER_ERROR
+        case RetryCategory.TIMED_OUT:
+            return PublicRetryCategory.TIMED_OUT
+        case RetryCategory.CONNECTION:
+            return PublicRetryCategory.CONNECTION
+        case RetryCategory.UNKNOWN:
+            return PublicRetryCategory.UNKNOWN
+
+
 class TurnController:
     def __init__(
         self,
@@ -124,7 +140,7 @@ class TurnController:
         subagent_runner: SubagentRunnerPort,
         tool_io: ToolIOPort | None = None,
         event_sink: CoreEventSink | None = None,
-        session_coordinator: RootSessionCoordinator | None = None,
+        session_coordinator: SessionCoordinator | None = None,
     ) -> None:
         self._agent_loop = agent_loop
         self._notify = notify
@@ -228,6 +244,17 @@ class TurnController:
         if projector is None:
             raise RuntimeError("Cannot link a child session without an active turn")
         for update in projector.link_subagent(tool_call_id, child_session_id):
+            await self._emit_projected(update)
+
+    async def replace_subagent(
+        self, tool_call_id: str, old_session_id: str, new_session_id: str
+    ) -> None:
+        projector = self._projector
+        if projector is None:
+            raise RuntimeError("Cannot replace a child session without an active turn")
+        for update in projector.replace_subagent(
+            tool_call_id, old_session_id, new_session_id
+        ):
             await self._emit_projected(update)
 
     async def unlink_subagent(self, tool_call_id: str, child_session_id: str) -> None:
@@ -655,7 +682,7 @@ class TurnController:
         self._history = rebind_history(self._history, new_session_id)
         projector.rebind_session(new_session_id)
         turn.session_id = new_session_id
-        handoff = coordinator.handoff_active_turn(
+        handoff = await coordinator.handoff_active_turn(
             old_session_id,
             current_history=self.history,
             callbacks=self.callbacks,
@@ -695,10 +722,14 @@ class TurnController:
     async def _emit_projected(self, update: ProjectedUpdate) -> None:
         await self._notify(update.method, update.params)
 
-    async def _emit_retrying(self, reason: str) -> None:
+    async def _emit_retrying(self, reason: RetryReason) -> None:
         await self._notify(
             "turn/retrying",
-            TurnRetryingParams(session_id=self._agent_loop.session_id, reason=reason),
+            TurnRetryingParams(
+                session_id=self._agent_loop.session_id,
+                category=_public_retry_category(reason.category),
+                detail=reason.detail,
+            ),
         )
 
     async def _emit_stats(self) -> None:

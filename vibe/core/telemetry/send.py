@@ -10,6 +10,7 @@ import httpx
 
 from vibe import __version__
 from vibe.core.config import ProviderConfig, VibeConfigSchema
+from vibe.core.config.admin_config import AdminConfigOutcome
 from vibe.core.llm.format import ResolvedToolCall
 from vibe.core.telemetry.build_metadata import build_base_metadata
 from vibe.core.telemetry.types import (
@@ -343,6 +344,20 @@ class TelemetryClient:
 
     def send_session_closed(self) -> None:
         self.send_telemetry_event("vibe.session_closed", {})
+
+    def send_admin_config_applied(
+        self,
+        *,
+        outcome: AdminConfigOutcome,
+        enforced_keys: list[str] | None = None,
+        error: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {"outcome": outcome.value}
+        if enforced_keys is not None:
+            payload["nb_enforced_fields"] = len(enforced_keys)
+        if error is not None:
+            payload["has_error"] = True
+        self.send_telemetry_event("vibe.admin_config_applied", payload)
 
     def send_onboarding_api_key_added(self, *, custom_domain: bool = False) -> None:
         self.send_telemetry_event(

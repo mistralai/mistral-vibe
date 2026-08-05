@@ -51,4 +51,6 @@ def create_backend(
             enable_otel=enable_otel,
             on_retry=on_retry,
         )
-    return factory(provider=provider, timeout=timeout, on_retry=on_retry)
+    return factory(
+        provider=provider, timeout=timeout, enable_otel=enable_otel, on_retry=on_retry
+    )

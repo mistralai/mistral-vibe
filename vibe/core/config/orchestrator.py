@@ -118,6 +118,13 @@ class ConfigOrchestrator[S: ConfigSchema]:
     async def load_persistence_layer(self) -> RawConfig:
         return await self._default_layer_resolver().load()
 
+    def persisted_active_model(self) -> str:
+        data = self._default_layer_resolver().cached_data
+        if data is None:
+            return ""
+        value = getattr(data, "active_model", "")
+        return value if isinstance(value, str) else ""
+
     async def reload(self) -> None:
         """Force-reload all layers and atomically replace the config snapshot."""
         self._config = await self._builder.build(force_load=True)

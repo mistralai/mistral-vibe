@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 import contextlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from vibe import __version__
 from vibe.core.experiments.manager import ExperimentManager, hash_api_key
 from vibe.core.experiments.models import ExperimentAttributes
+from vibe.core.identity import IdentityResult, fetch_identity
 from vibe.core.telemetry.send import get_mistral_provider_and_api_key
 from vibe.core.utils import get_platform_id
+from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
     from vibe.core.session.session_logger import SessionLogger
     from vibe.core.telemetry.types import LaunchContext
+
+EXPERIMENT_IDENTITY_TIMEOUT_S: Final = 4.0
+
+IdentityResolver = Callable[..., Awaitable[IdentityResult | None]]
 
 
 async def initialize_experiments(
@@ -21,14 +28,31 @@ async def initialize_experiments(
     manager: ExperimentManager,
     session_logger: SessionLogger,
     launch_context: LaunchContext | None,
+    resolve_identity: IdentityResolver | None = None,
 ) -> bool:
     if not config.enable_telemetry or not config.experiments.enable:
         return False
     provider_and_key = get_mistral_provider_and_api_key(config)
     if provider_and_key is None:
         return False
-    _, api_key = provider_and_key
-    attributes = _build_attributes(config, api_key, launch_context)
+    provider, api_key = provider_and_key
+    resolve = resolve_identity or fetch_identity
+    identity = await resolve(
+        base_url=provider.api_base,
+        api_key=api_key,
+        timeout=EXPERIMENT_IDENTITY_TIMEOUT_S,
+    )
+    organization_id = (
+        identity.organization.id if identity and identity.organization else None
+    )
+    logger.debug(
+        "GrowthBook experiment attributes: identity_fetched=%s organization_id=%s",
+        identity is not None,
+        organization_id,
+    )
+    attributes = _build_attributes(
+        config, api_key, launch_context, organization_id=organization_id
+    )
     await manager.initialize(attributes)
     state = manager.export_state()
     if state is None:
@@ -57,7 +81,11 @@ async def hydrate_experiments_from_session(
 
 
 def _build_attributes(
-    config: VibeConfigSchema, api_key: str, launch_context: LaunchContext | None
+    config: VibeConfigSchema,
+    api_key: str,
+    launch_context: LaunchContext | None,
+    *,
+    organization_id: str | None = None,
 ) -> ExperimentAttributes:
     from vibe.core.config import VibeConfigSchema
 
@@ -76,4 +104,5 @@ def _build_attributes(
         os=get_platform_id(),
         terminal_emulator=terminal_emulator,
         custom_system_prompt=config.system_prompt_id != default_prompt_id,
+        organizationId=organization_id,
     )

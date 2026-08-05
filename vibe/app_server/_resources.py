@@ -8,12 +8,14 @@ from pydantic import JsonValue
 
 from vibe.app_server._account import AccountController, AccountGateway
 from vibe.app_server._config_introspect import (
+    HIDDEN_SETTINGS,
     POPULAR_SETTINGS,
     build_field_wires,
     collect_layer_values,
 )
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._execution import SessionExecution
+from vibe.app_server._identity import IdentityController, IdentityGateway
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._narration import NarrationService
 from vibe.app_server._projection import (
@@ -29,7 +31,7 @@ from vibe.app_server._projection import (
     project_tools,
 )
 from vibe.app_server.config import ProxySettingsView
-from vibe.app_server.models import AccountView, MCPState, ScheduledLoop
+from vibe.app_server.models import AccountView, IdentityView, MCPState, ScheduledLoop
 from vibe.app_server.protocol import (
     AccountReadParams,
     AccountReadResponse,
@@ -63,6 +65,8 @@ from vibe.app_server.protocol import (
     FeedbackRecordParams,
     FeedbackShouldShowParams,
     FeedbackShouldShowResponse,
+    IdentityReadParams,
+    IdentityReadResponse,
     LoopsClearParams,
     LoopsClearResponse,
     LoopsCreateParams,
@@ -96,6 +100,12 @@ from vibe.app_server.protocol import (
     ToolsListResponse,
 )
 from vibe.core.agent_loop import AgentLoop
+from vibe.core.config.admin_config import (
+    AdminConfigApplyResult,
+    AdminConfigOutcome,
+    fetch_managed_config,
+)
+from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.mcp_servers import MCPServerAddError, persist_oauth_mcp_server
 from vibe.core.config.orchestrator import ConfigPatchValidationError
@@ -123,6 +133,14 @@ from vibe.core.proxy_setup import (
 )
 from vibe.core.tools.mcp_settings import persist_mcp_toggle
 from vibe.core.types import Role, ScheduledLoop as CoreScheduledLoop
+from vibe.observability.logging import logger
+from vibe.utils.api_keys import resolve_api_key
+
+_ADMIN_FETCH_FAILURES = frozenset({
+    AdminConfigOutcome.FETCH_FAILED,
+    AdminConfigOutcome.PARSE_FAILED,
+    AdminConfigOutcome.APPLY_FAILED,
+})
 
 
 class ResourceRequestHandler:
@@ -132,11 +150,13 @@ class ResourceRequestHandler:
         execution: SessionExecution,
         notify: Callable[[str, ProtocolModel], Awaitable[None]],
         account_gateway: AccountGateway | None = None,
+        identity_gateway: IdentityGateway | None = None,
     ) -> None:
         self._agent_loop = agent_loop
         self._execution = execution
         self._notify = notify
         self._account = AccountController(agent_loop, account_gateway)
+        self._identity = IdentityController(agent_loop, identity_gateway)
         self._loops = LoopManager(agent_loop.session_logger)
         self._logs = LogReader()
         self._narration = NarrationService(agent_loop)
@@ -150,6 +170,8 @@ class ResourceRequestHandler:
                 result = self._dispatch_runtime(method, raw_params)
             case "account":
                 result = await self._dispatch_account(method, raw_params)
+            case "identity":
+                result = await self._dispatch_identity(method, raw_params)
             case "config":
                 result = await self._dispatch_config(method, raw_params)
             case "agents":
@@ -200,6 +222,9 @@ class ResourceRequestHandler:
     async def read_account(self) -> AccountView:
         return await self._account.read()
 
+    async def read_identity(self) -> IdentityView | None:
+        return await self._identity.read()
+
     def due_loop(self) -> CoreScheduledLoop | None:
         return self._loops.due()
 
@@ -243,6 +268,15 @@ class ResourceRequestHandler:
         params = validate_wire(AccountReadParams, raw_params)
         self._require_session(params.session_id)
         return DispatchResult(AccountReadResponse(account=await self.read_account()))
+
+    async def _dispatch_identity(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult:
+        if method != "identity/read":
+            raise method_not_found(method)
+        params = validate_wire(IdentityReadParams, raw_params)
+        self._require_session(params.session_id)
+        return DispatchResult(IdentityReadResponse(identity=await self.read_identity()))
 
     async def _dispatch_config(
         self, method: str, raw_params: dict[str, Any]
@@ -552,6 +586,11 @@ class ResourceRequestHandler:
     ) -> ConfigMutationResponse:
         self._execution.require_idle()
         self._require_session(params.session_id)
+        # Best-effort: an admin-fetch failure must never break the user's reload.
+        try:
+            self._report_admin_config_outcome(await self._refresh_admin_layer())
+        except Exception as exc:
+            logger.debug("Admin config refresh failed on reload", exc_info=exc)
         if params.reload_runtime:
             self._clear_mcp_discovery_errors()
             await self._agent_loop.config_orchestrator.reload()
@@ -559,6 +598,112 @@ class ResourceRequestHandler:
         else:
             await self._agent_loop.refresh_config()
         return self._config_mutation_response()
+
+    async def apply_admin_config(self) -> bool:
+        """Pull org-enforced config and merge it as the highest-priority layer.
+
+        Runs only when a Mistral API key is in use. Any failure is silent: the
+        admin layer stays empty and has no impact on the client. Returns whether
+        the effective config changed, so the caller can push a runtime update.
+        """
+        result = await self._refresh_admin_layer()
+        if not result.applied:
+            self._report_admin_config_outcome(result)
+            return False
+        try:
+            await self._agent_loop.refresh_config()
+        except Exception as exc:
+            logger.warning("Failed to apply admin-managed config", exc_info=exc)
+            self._agent_loop.telemetry_client.send_admin_config_applied(
+                outcome=AdminConfigOutcome.APPLY_FAILED, error=str(exc)
+            )
+            return False
+        self._report_admin_config_outcome(result)
+        return True
+
+    def _report_admin_config_outcome(self, result: AdminConfigApplyResult) -> None:
+        """Emit telemetry and warning logs for an admin-config refresh outcome.
+
+        Shared by both refresh paths so ``/reload`` reports the same as startup.
+        Silent outcomes (no API key, disabled) emit nothing.
+        """
+        telemetry = self._agent_loop.telemetry_client
+        if result.applied:
+            telemetry.send_admin_config_applied(
+                outcome=AdminConfigOutcome.APPLIED, enforced_keys=result.enforced_keys
+            )
+            return
+        if result.outcome in _ADMIN_FETCH_FAILURES:
+            logger.warning(
+                "Admin-managed config not applied outcome=%s error=%s",
+                result.outcome.value,
+                result.error,
+            )
+            telemetry.send_admin_config_applied(
+                outcome=result.outcome, error=result.error
+            )
+
+    async def _refresh_admin_layer(self) -> AdminConfigApplyResult:
+        """Fetch org-enforced config, validate it, and load it into the layer.
+
+        Parseable TOML that fails merged-config validation is rolled back so it
+        never stays in the live layer; otherwise it would re-break every later
+        ``reload`` and config edit for the session. On success the merged config
+        is already refreshed. Returns the outcome for the caller to report.
+        """
+        config = self._agent_loop.config
+        provider = config.get_mistral_provider()
+        api_key = resolve_api_key(provider.api_key_env_var) if provider else None
+        if not api_key:
+            return AdminConfigApplyResult(AdminConfigOutcome.NO_API_KEY)
+
+        fetched = await fetch_managed_config(config.vibe_base_url, api_key)
+        if fetched.error is not None:
+            return AdminConfigApplyResult(
+                AdminConfigOutcome.FETCH_FAILED, error=fetched.error
+            )
+        managed = fetched.config
+        if managed is None or not managed.is_enabled or managed.toml is None:
+            return AdminConfigApplyResult(AdminConfigOutcome.DISABLED)
+
+        try:
+            layer = self._agent_loop.config_orchestrator.get_layer(
+                AdminConfigLayer.NAME
+            )
+        except KeyError:
+            layer = None
+        if not isinstance(layer, AdminConfigLayer):
+            return AdminConfigApplyResult(
+                AdminConfigOutcome.APPLY_FAILED, error="admin layer unavailable"
+            )
+        return await self._load_admin_layer(layer, managed.toml)
+
+    async def _load_admin_layer(
+        self, layer: AdminConfigLayer, toml_text: str
+    ) -> AdminConfigApplyResult:
+        orchestrator = self._agent_loop.config_orchestrator
+        previous = layer.snapshot()
+        try:
+            layer.load_managed_toml(toml_text)
+        except Exception as exc:
+            logger.warning("Failed to load admin-managed config", exc_info=exc)
+            return AdminConfigApplyResult(
+                AdminConfigOutcome.PARSE_FAILED, error=str(exc)
+            )
+
+        try:
+            await orchestrator.reload()
+        except Exception as exc:
+            layer.restore(previous)
+            await orchestrator.reload()
+            logger.warning("Admin-managed config failed validation", exc_info=exc)
+            return AdminConfigApplyResult(
+                AdminConfigOutcome.APPLY_FAILED, error=str(exc)
+            )
+
+        return AdminConfigApplyResult(
+            AdminConfigOutcome.APPLIED, enforced_keys=layer.enforced_keys
+        )
 
     async def _config_thinking_write(
         self, params: ConfigThinkingWriteParams
@@ -621,7 +766,7 @@ class ResourceRequestHandler:
             for wire in build_field_wires(
                 config, layer_values, popular=POPULAR_SETTINGS
             )
-            if wire.name != "tools"
+            if wire.name not in HIDDEN_SETTINGS
         ]
         return ConfigFieldsReadResponse(fields=fields, targets=self._config_targets())
 

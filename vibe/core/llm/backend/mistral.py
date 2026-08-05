@@ -51,7 +51,7 @@ from vibe.core.types import (
     StrToolChoice,
     ToolCall,
 )
-from vibe.core.utils import RetryObserver, describe_http_status, describe_retry_reason
+from vibe.core.utils import RetryObserver, RetryReason
 from vibe.utils.api_keys import resolve_api_key
 from vibe.utils.http import (
     VibeAsyncHTTPClient,
@@ -304,7 +304,7 @@ class MistralBackend:
 
     async def _on_response(self, response: httpx.Response) -> None:
         if response.status_code in _RETRYABLE_STATUS_CODES:
-            await self._notice_retry(describe_http_status(response.status_code))
+            await self._notice_retry(RetryReason.from_http_status(response.status_code))
 
     def _report_error(self, error: Exception) -> None:
         # On a worker thread inside basesdk's except block: raising would
@@ -313,14 +313,16 @@ class MistralBackend:
             return
         try:
             future = asyncio.run_coroutine_threadsafe(
-                self._notice_retry(describe_retry_reason(error)), self._loop
+                self._notice_retry(RetryReason.from_error(error)), self._loop
             )
         except RuntimeError:  # loop already closed
             return
         future.add_done_callback(_log_delivery_failure)
 
-    async def _notice_retry(self, reason: str) -> None:
-        logger.warning("Retrying request reason=%s", reason)
+    async def _notice_retry(self, reason: RetryReason) -> None:
+        logger.warning(
+            "Retrying request category=%s detail=%s", reason.category, reason.detail
+        )
         if self._on_retry is not None:
             await self._on_retry(reason)
 

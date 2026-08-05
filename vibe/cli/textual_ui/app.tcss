@@ -1521,6 +1521,12 @@ NarratorStatus {
     margin-top: 1;
 }
 
+.greeting-message {
+    margin-bottom: 1;
+    margin-top: 1;
+    color: $foreground;
+}
+
 .vscode-extension-promo-message {
     border-left: heavy $mistral_orange;
     margin-bottom: 1;

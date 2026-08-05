@@ -70,7 +70,6 @@ from vibe.acp.commands import AcpCommandController, AcpCommandRegistry
 from vibe.acp.content import project_prompt
 from vibe.acp.exceptions import (
     ConfigurationError,
-    ConversationLimitError,
     InternalError,
     InvalidRequestError,
     NotImplementedMethodError,
@@ -130,7 +129,7 @@ from vibe.app_server.models import (
     ApprovalDecision,
     ApprovalDecisionType,
     PublicCallbackEntry,
-    PublicMessageEntry,
+    PublicRetryCategory,
     PublicTurnStatus,
     PublicTurnStopReason,
     TurnErrorCode,
@@ -218,6 +217,20 @@ class TelemetryNotification(BaseModel):
     event: str
     properties: dict[str, Any] = Field(default_factory=dict)
     session_id: str = Field(alias="sessionId")
+
+
+# Bare name: `Client.ext_notification` prepends the `_` that ACP requires on
+# extension methods, so the wire method is `_session/retrying` -- which is what
+# the VS Code client subscribes to (see acp-session-retrying.ts). Adding the
+# prefix here would emit `__session/retrying` and the retry would never arrive.
+RETRYING_EXT_METHOD = "session/retrying"
+
+
+class SessionRetryingNotification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str = Field(serialization_alias="sessionId")
+    category: PublicRetryCategory
+    detail: str
 
 
 class VibeAcpAgent(AcpAgent):
@@ -520,8 +533,13 @@ class VibeAcpAgent(AcpAgent):
             self._send_usage_update(session)
 
     async def _send_retrying(self, session: AcpSession, event: TurnRetrying) -> None:
+        notification = SessionRetryingNotification(
+            session_id=session.id,
+            category=event.params.category,
+            detail=event.params.detail,
+        )
         await self.client.ext_notification(
-            "session/retrying", {"sessionId": session.id, "reason": event.params.reason}
+            RETRYING_EXT_METHOD, notification.model_dump(mode="json", by_alias=True)
         )
 
     @override
@@ -592,8 +610,8 @@ class VibeAcpAgent(AcpAgent):
         if turn is not None and turn.status is PublicTurnStatus.INTERRUPTED:
             return PromptResponse(stop_reason="cancelled", usage=self._usage(session))
         if turn is not None and turn.stop_reason is PublicTurnStopReason.LIMIT:
-            raise ConversationLimitError(
-                self._last_assistant_text(session) or "Conversation limit reached"
+            return PromptResponse(
+                stop_reason="max_turn_requests", usage=self._usage(session)
             )
         show_feedback = await session.app_server.resources.feedback.should_show(
             pending_user_messages=1
@@ -1244,19 +1262,6 @@ class VibeAcpAgent(AcpAgent):
                 session
                 for session in self.sessions.values()
                 if session.app_server.session_id == session_id
-            ),
-            None,
-        )
-
-    @staticmethod
-    def _last_assistant_text(session: AcpSession) -> str | None:
-        return next(
-            (
-                entry.text
-                for entry in reversed(session.app_server.history)
-                if isinstance(entry, PublicMessageEntry)
-                and entry.role == "assistant"
-                and entry.text
             ),
             None,
         )
