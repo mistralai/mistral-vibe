@@ -79,7 +79,7 @@ def _plan_overrides() -> dict[str, Any]:
 
 DEFAULT = AgentProfile(
     BuiltinAgentName.DEFAULT,
-    "Default",
+    "Ask",
     "Requires approval for tool executions",
     AgentSafety.NEUTRAL,
     overrides={"disabled_tools": ["exit_plan_mode"]},
