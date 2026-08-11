@@ -295,7 +295,7 @@ class TestSessionLoggerSaveInteraction:
         result = await logger.save_interaction(
             messages=[],
             stats=AgentStats(),
-            base_config=build_test_vibe_config(),
+            config=build_test_vibe_config(),
             tool_manager=MagicMock(),
             agent_profile=AgentProfile(
                 name="test",
@@ -335,7 +335,7 @@ class TestSessionLoggerSaveInteraction:
         await logger.save_interaction(
             messages=messages,
             stats=stats,
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -383,7 +383,7 @@ class TestSessionLoggerSaveInteraction:
         await logger.save_interaction(
             messages=messages,
             stats=stats,
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -433,7 +433,7 @@ class TestSessionLoggerSaveInteraction:
         await logger.save_interaction(
             messages=initial_messages,
             stats=stats,
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -452,7 +452,7 @@ class TestSessionLoggerSaveInteraction:
         await logger.save_interaction(
             messages=all_messages,
             stats=updated_stats,
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -496,7 +496,7 @@ class TestSessionLoggerSaveInteraction:
         await logger.save_interaction(
             messages=messages,
             stats=stats,
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -514,7 +514,7 @@ class TestSessionLoggerSaveInteraction:
         await logger.save_interaction(
             messages=messages,
             stats=stats,
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -554,7 +554,7 @@ class TestSessionLoggerSaveInteraction:
         await logger.save_interaction(
             messages=messages,
             stats=stats,
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -603,7 +603,7 @@ class TestSessionLoggerSaveInteraction:
         await logger.save_interaction(
             messages=messages,
             stats=stats,
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -649,7 +649,7 @@ class TestSessionLoggerSaveInteraction:
         await logger.save_interaction(
             messages=messages,
             stats=stats,
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -688,7 +688,7 @@ class TestSessionLoggerSaveInteraction:
         await logger.save_interaction(
             messages=messages,
             stats=stats,
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -745,14 +745,14 @@ class TestSessionLoggerSaveInteraction:
             await logger.save_interaction(
                 messages=messages,
                 stats=AgentStats(steps=1),
-                base_config=mock_vibe_config,
+                config=mock_vibe_config,
                 tool_manager=mock_tool_manager,
                 agent_profile=mock_agent_profile,
             )
             await logger.save_interaction(
                 messages=messages,
                 stats=AgentStats(steps=2),
-                base_config=mock_vibe_config,
+                config=mock_vibe_config,
                 tool_manager=mock_tool_manager,
                 agent_profile=mock_agent_profile,
             )
@@ -781,7 +781,7 @@ class TestSessionLoggerSaveInteraction:
         await logger.save_interaction(
             messages=full,
             stats=stats,
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -789,7 +789,7 @@ class TestSessionLoggerSaveInteraction:
         await logger.save_interaction(
             messages=full[:3],
             stats=stats,
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -816,7 +816,7 @@ class TestSessionLoggerSaveInteraction:
             await logger.save_interaction(
                 messages=messages,
                 stats=stats,
-                base_config=mock_vibe_config,
+                config=mock_vibe_config,
                 tool_manager=mock_tool_manager,
                 agent_profile=mock_agent_profile,
             )
@@ -865,7 +865,7 @@ class TestSessionLoggerSaveInteraction:
             await logger.save_interaction(
                 messages=messages,
                 stats=stats,
-                base_config=mock_vibe_config,
+                config=mock_vibe_config,
                 tool_manager=mock_tool_manager,
                 agent_profile=mock_agent_profile,
             )
@@ -911,7 +911,7 @@ class TestSessionLoggerSaveInteraction:
             await logger.save_interaction(
                 messages=messages,
                 stats=stats,
-                base_config=mock_vibe_config,
+                config=mock_vibe_config,
                 tool_manager=mock_tool_manager,
                 agent_profile=mock_agent_profile,
             )
@@ -951,7 +951,7 @@ class TestSessionLoggerSaveInteraction:
             await logger.save_interaction(
                 messages=messages,
                 stats=stats,
-                base_config=mock_vibe_config,
+                config=mock_vibe_config,
                 tool_manager=mock_tool_manager,
                 agent_profile=mock_agent_profile,
             )
@@ -998,7 +998,7 @@ class TestSessionLoggerSaveInteraction:
             await logger.save_interaction(
                 messages=messages,
                 stats=stats,
-                base_config=mock_vibe_config,
+                config=mock_vibe_config,
                 tool_manager=mock_tool_manager,
                 agent_profile=mock_agent_profile,
                 allow_empty=allow_empty,
@@ -1265,7 +1265,7 @@ class TestPersistLoops:
                 LLMMessage(role=Role.assistant, content="Hi there!"),
             ],
             stats=AgentStats(steps=1),
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -1346,7 +1346,7 @@ class TestPersistLoops:
         await logger.save_interaction(
             messages=messages,
             stats=AgentStats(steps=1),
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -1369,7 +1369,7 @@ class TestPersistLoops:
         await logger.save_interaction(
             messages=more_messages,
             stats=AgentStats(steps=2),
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -1423,7 +1423,7 @@ class TestPersistExperiments:
                 LLMMessage(role=Role.user, content="Hello"),
             ],
             stats=AgentStats(steps=1),
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -1454,7 +1454,7 @@ class TestPersistExperiments:
                 LLMMessage(role=Role.user, content="y"),
             ],
             stats=AgentStats(steps=1),
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )
@@ -1517,7 +1517,7 @@ class TestPersistExperiments:
                 LLMMessage(role=Role.assistant, content="Hi"),
             ],
             stats=AgentStats(steps=1),
-            base_config=mock_vibe_config,
+            config=mock_vibe_config,
             tool_manager=mock_tool_manager,
             agent_profile=mock_agent_profile,
         )

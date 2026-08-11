@@ -11,6 +11,7 @@ from vibe.core.config.harness_files import (
 )
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.layers.admin import AdminConfigLayer
+from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.config.layers.default import DefaultConfigLayer
 from vibe.core.config.layers.environment import EnvironmentLayer
 from vibe.core.config.layers.growthbook import GrowthbookLayer
@@ -32,7 +33,10 @@ async def build_default_orchestrator(
 
     Priority order (lowest to highest): schema defaults, GrowthBook experiments,
     user TOML, project TOML, VIBE_* env vars, runtime overrides, agent profile
-    overrides. Both the user and project TOML layers are installed together when
+    overrides, enforced admin config. The agent-profile slot ships empty and is
+    filled in place by AgentManager; the admin layer stays on top so an enforced
+    org config shadows every layer below it. Both the user and project TOML
+    layers are installed together when
     their sources are enabled, so a trusted project config inherits unspecified
     values from the user config and both TOML layers override GrowthBook
     assignments. The default persistence target is the project layer when one is
@@ -49,7 +53,7 @@ async def build_default_orchestrator(
         ProjectConfigLayer(
             path=manager.cwd or Path.cwd(), trust_store=manager.trust_store
         )
-        if "project" in manager.sources
+        if manager.project_source_enabled
         else None
     )
     override_layer = OverridesLayer(data=data or {})
@@ -69,9 +73,9 @@ async def build_default_orchestrator(
         *([project_layer] if project_layer is not None else []),
         EnvironmentLayer(schema=VibeConfigSchema),
         override_layer,
-        # AgentProfileLayer(),
-        # Highest priority: org-enforced config populated at runtime. It shadows
-        # every layer above, which is the enforcement mechanism.
+        # Empty slot filled in place by AgentManager when a profile is selected
+        AgentProfileLayer(),
+        # Highest priority: org-enforced config populated at runtime.
         AdminConfigLayer(),
     ]
 

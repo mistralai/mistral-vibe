@@ -1,3 +1,6 @@
+The shell tool is named `git_bash` — there is no `bash` tool, and calling `bash` fails.
+Commands use POSIX/Git Bash syntax (not cmd.exe).
+
 Use `git_bash` to run Git Bash commands on native Windows when commands may run
 for a while, need ongoing input, or should remain inspectable after the first
 tool call.

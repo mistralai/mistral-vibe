@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
-from vibe.core.agents._migration import migrate_agent_profile_files
 from vibe.core.agents.diagnostics import excluded_agent_message
 from vibe.core.agents.models import (
     BUILTIN_AGENTS,
@@ -11,12 +9,12 @@ from vibe.core.agents.models import (
     AgentType,
     BuiltinAgentName,
 )
+from vibe.core.agents.registry import AgentRegistry, apply_profile_overrides
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
     get_harness_files_manager,
 )
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.paths import dedup_paths
 from vibe.core.utils import name_matches
 from vibe.observability.logging import logger
 
@@ -28,30 +26,27 @@ class AgentManager:
     def __init__(
         self,
         orchestrator: ConfigOrchestrator[VibeConfigSchema],
-        initial_agent: str = BuiltinAgentName.DEFAULT,
+        initial_agent: str = BuiltinAgentName.ACCEPT_EDITS,
         allow_subagent: bool = False,
         harness_files: HarnessFilesManager | None = None,
     ) -> None:
         self._orchestrator = orchestrator
-        self._harness_files = harness_files or get_harness_files_manager()
-        self._search_paths = self._compute_search_paths(self._config)
-        self._migrate_agent_profiles()
-        self._discovered: dict[str, AgentProfile] = self._discover_agents()
+        self._registry = AgentRegistry(
+            orchestrator, harness_files or get_harness_files_manager()
+        )
 
         if custom_names := [n for n in self._discovered if n not in BUILTIN_AGENTS]:
             logger.info(
                 "Discovered custom agents %s in %s",
                 " ".join(custom_names),
-                " ".join(str(p) for p in self._search_paths),
+                " ".join(str(p) for p in self._registry.search_paths),
             )
 
         profile = self.available_agents.get(initial_agent)
         if profile is None:
             if initial_agent in self._discovered:
                 raise ValueError(
-                    excluded_agent_message(
-                        initial_agent, self._config, self._discovered
-                    )
+                    excluded_agent_message(initial_agent, self.config, self._discovered)
                 )
             raise ValueError(f"Agent '{initial_agent}' not found.")
         if not allow_subagent and profile.agent_type != AgentType.AGENT:
@@ -61,10 +56,14 @@ class AgentManager:
                 f" with --agent."
             )
         self.active_profile = profile
-        self._cached_config: VibeConfigSchema | None = None
+        self._install_profile(profile)
 
     @property
-    def _config(self) -> VibeConfigSchema:
+    def _discovered(self) -> dict[str, AgentProfile]:
+        return self._registry.discovered
+
+    @property
+    def config(self) -> VibeConfigSchema:
         return self._orchestrator.config
 
     @property
@@ -76,81 +75,31 @@ class AgentManager:
         }
 
     def _is_agent_available(self, name: str, profile: AgentProfile) -> bool:
-        if profile.install_required and name not in self._config.installed_agents:
+        if profile.install_required and name not in self.config.installed_agents:
             return False
-        if enabled := self._config.enabled_agents:
+        if enabled := self.config.enabled_agents:
             return name_matches(name, enabled)
-        return not name_matches(name, self._config.disabled_agents)
-
-    @property
-    def config(self) -> VibeConfigSchema:
-        if self._cached_config is None:
-            self._cached_config = self.active_profile.apply_to_config(
-                self._orchestrator.config
-            )
-        return self._cached_config
+        return not name_matches(name, self.config.disabled_agents)
 
     def switch_profile(self, name: str) -> None:
         self.active_profile = self.get_agent(name)
-        self._cached_config = None
+        self._install_profile(self.active_profile)
 
     def preview_config(self, name: str) -> VibeConfigSchema:
-        return self.get_agent(name).apply_to_config(self._config)
+        candidate = self._orchestrator.copy()
+        apply_profile_overrides(candidate, self.get_agent(name).overrides)
+        return candidate.config
 
-    def invalidate_config(self) -> None:
-        self._cached_config = None
-
-    def _compute_search_paths(self, config: VibeConfigSchema) -> list[Path]:
-        mgr = self._harness_files
-        return dedup_paths([
-            *(p for p in config.agent_paths if p.is_dir()),
-            *mgr.project_agents_dirs,
-            *mgr.user_agents_dirs,
-        ])
-
-    def _discover_agents(self) -> dict[str, AgentProfile]:
-        agents: dict[str, AgentProfile] = dict(BUILTIN_AGENTS)
-
-        for base in self._search_paths:
-            if not base.is_dir():
-                continue
-            for agent_file in base.glob("*.toml"):
-                if not agent_file.is_file():
-                    continue
-                if (agent := self._try_load_agent(agent_file)) is not None:
-                    if agent.name in BUILTIN_AGENTS:
-                        logger.info(
-                            "Custom agent '%s' overrides builtin agent", agent.name
-                        )
-                    elif agent.name in agents:
-                        logger.debug(
-                            "Skipping duplicate agent '%s' at %s",
-                            agent.name,
-                            agent_file,
-                        )
-                        continue
-                    agents[agent.name] = agent
-
-        return agents
-
-    def _try_load_agent(self, agent_file: Path) -> AgentProfile | None:
-        try:
-            agent = AgentProfile.from_toml(agent_file)
-            agent.apply_to_config(self._config)
-            return agent
-        except Exception as e:
-            logger.warning("Failed to load agent at %s: %s", agent_file, e)
-            return None
-
-    def _migrate_agent_profiles(self) -> None:
-        try:
-            migrate_agent_profile_files(self._search_paths)
-        except Exception as exc:
-            logger.warning("Failed to migrate agent profiles", exc_info=exc)
+    def _install_profile(self, profile: AgentProfile) -> None:
+        apply_profile_overrides(self._orchestrator, profile.overrides)
 
     def get_agent(self, name: str) -> AgentProfile:
         if agent := self.available_agents.get(name):
             return agent
+        if name in self._discovered:
+            raise ValueError(
+                excluded_agent_message(name, self.config, self._discovered)
+            )
         raise ValueError(f"Agent '{name}' not found")
 
     def get_subagents(self) -> list[AgentProfile]:
@@ -162,7 +111,7 @@ class AgentManager:
 
     def get_agent_order(self) -> list[str]:
         builtin_order: list[str] = [
-            BuiltinAgentName.DEFAULT,
+            BuiltinAgentName.ASK,
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
             BuiltinAgentName.AUTO_APPROVE,

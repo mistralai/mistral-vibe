@@ -194,6 +194,38 @@ async def test_get_layer_returns_named_layer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_insert_layer_takes_effect_after_reload() -> None:
+    base = FakeLayer(name="base", data={"value": "base"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[base], default_layer_resolver=lambda: base
+    )
+    assert orch.config.value == "base"
+
+    orch.insert_layer(FakeLayer(name="top", data={"value": "top"}), 1)
+    await orch.reload()
+
+    assert orch.config.value == "top"
+    assert [layer.name for layer in orch.layers] == ["base", "top"]
+
+
+@pytest.mark.asyncio
+async def test_remove_layer_takes_effect_after_reload() -> None:
+    base = FakeLayer(name="base", data={"value": "base"})
+    top = FakeLayer(name="top", data={"value": "top"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[base, top], default_layer_resolver=lambda: base
+    )
+    assert orch.config.value == "top"
+
+    removed = orch.remove_layer(1)
+    await orch.reload()
+
+    assert removed is top
+    assert orch.config.value == "base"
+    assert [layer.name for layer in orch.layers] == ["base"]
+
+
+@pytest.mark.asyncio
 async def test_get_layer_unknown_raises() -> None:
     orch = await ConfigOrchestrator.create(
         schema=SimpleSchema, layers=[], default_layer_resolver=unused_default_layer

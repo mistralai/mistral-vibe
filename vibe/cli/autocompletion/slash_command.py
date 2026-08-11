@@ -16,11 +16,15 @@ class SlashCommandController:
     def can_handle(self, text: str, cursor_index: int) -> bool:
         return text.startswith("/")
 
+    def is_showing(self) -> bool:
+        return bool(self._suggestions)
+
     def reset(self) -> None:
-        if self._suggestions:
-            self._suggestions.clear()
-            self._selected_index = 0
-            self._view.clear_completion_suggestions()
+        if not self._suggestions:
+            return
+        self._suggestions.clear()
+        self._selected_index = 0
+        self._view.clear_completion_suggestions()
 
     def on_text_changed(self, text: str, cursor_index: int) -> None:
         if cursor_index < 0 or cursor_index > len(text):
@@ -32,14 +36,18 @@ class SlashCommandController:
             return
 
         suggestions = self._completer.get_completion_items(text, cursor_index)
-        if suggestions:
-            self._suggestions = suggestions
-            self._selected_index = 0
-            self._view.render_completion_suggestions(
-                self._suggestions, self._selected_index
-            )
-        else:
+        if not suggestions:
             self.reset()
+            return
+
+        # Keep the highlighted item across re-renders that don't change the list
+        # (e.g. a caret move), so navigating with Up/Down survives cursor moves.
+        if suggestions != self._suggestions:
+            self._selected_index = 0
+        self._suggestions = suggestions
+        self._view.render_completion_suggestions(
+            self._suggestions, self._selected_index
+        )
 
     def on_key(
         self, event: events.Key, text: str, cursor_index: int

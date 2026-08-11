@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.24.0"
+version = "2.24.1"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -38,7 +38,7 @@ dependencies = [
     "charset-normalizer==3.4.7",
     "click==8.3.3 ; sys_platform != 'emscripten'",
     "colorama==0.4.6 ; sys_platform == 'win32'",
-    "cryptography==48.0.1",
+    "cryptography==50.0.0",
     "eval-type-backport==0.3.1",
     "gitdb==4.0.12",
     "gitpython==3.1.57",
@@ -162,6 +162,7 @@ url = "https://pypi.org/simple"
 dev = [
     "cryptography>=48.0.0",
     "debugpy>=1.8.21",
+    "pre-commit-uv>=4.3.0",
     "pre-commit>=4.2.0",
     "pyinstrument>=5.1.2",
     "pyright>=1.1.403",

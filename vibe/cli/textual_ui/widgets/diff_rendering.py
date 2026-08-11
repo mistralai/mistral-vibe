@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable, Sequence
 import difflib
 from pathlib import Path
@@ -21,7 +22,7 @@ from textual.style import Style
 from textual.visual import Visual, visualize
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.utils.io import read_safe_async
+from vibe.utils.io import read_safe
 from vibe.utils.text import line_contexts
 
 _HUNK_HEADER_RE = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -66,11 +67,19 @@ def language_for_path(file_path: str) -> str:
 async def edit_diff_inputs(
     file_path: str, old_string: str, new_string: str, *, replace_all: bool
 ) -> list[DiffOccurrence]:
+    return await asyncio.to_thread(
+        _edit_diff_inputs, file_path, old_string, new_string, replace_all=replace_all
+    )
+
+
+def _edit_diff_inputs(
+    file_path: str, old_string: str, new_string: str, *, replace_all: bool
+) -> list[DiffOccurrence]:
     """One whole-line diff occurrence per match, from a single pre-edit read."""
     path = Path(file_path)
     if not path.is_file():
         return [DiffOccurrence(None, old_string, new_string)]
-    content = (await read_safe_async(path)).text
+    content = read_safe(path).text
     contexts = line_contexts(content, old_string)
     if not replace_all:
         contexts = contexts[:1]
@@ -167,15 +176,31 @@ class DiffView(NoMarkupStatic):
         self._lines = lines
         self._ansi = ansi
         self._dark = dark
+        self._gutter_width = 0
+        self._visuals: list[Visual] = []
+        super().__init__(classes="diff-view")
+        self.set_render_data(lines, ansi=ansi, dark=dark)
+
+    def set_render_data(
+        self, lines: list[_DiffLine], *, ansi: bool, dark: bool
+    ) -> None:
+        self._lines = lines
+        self._ansi = ansi
+        self._dark = dark
         # Uniform within a single render (all rows numbered, or none); gap rows
         # carry width 0 and empty bodies, so max() yields the real gutter width.
         self._gutter_width = max((line.gutter_width for line in lines), default=0)
         # One visual per line so each row can be rendered over its own background;
         # the joined Content on the base Static still drives auto width/height.
         self._visuals = [visualize(self, line.content, markup=False) for line in lines]
-        super().__init__(
-            Content("\n").join(line.content for line in lines), classes="diff-view"
-        )
+        self.update(Content("\n").join(line.content for line in lines))
+
+    def set_render_mode(self, *, ansi: bool, dark: bool) -> None:
+        if (self._ansi, self._dark) == (ansi, dark):
+            return
+        self._ansi = ansi
+        self._dark = dark
+        self.refresh()
 
     def _band_color(self, y: int) -> Color | None:
         """Blend the added/removed tint over the backdrop, or None for plain rows."""
@@ -191,7 +216,7 @@ class DiffView(NoMarkupStatic):
         """Render row y over its own band, applying selection and per-row offsets."""
         width = self.size.width
         if not width or y >= len(self._lines):
-            return Strip.blank(width)
+            return Strip.blank(width, self.visual_style.rich_style)
         # Paint the real backdrop so auto-contrast foregrounds resolve as before.
         background = self._band_color(y) or self.background_colors[0]
         base = Style(background=background, foreground=self.visual_style.foreground)
@@ -200,7 +225,7 @@ class DiffView(NoMarkupStatic):
         strips = Visual.to_strips(
             self, self._row_visual(y), width, 1, base, pad=True, apply_selection=False
         )
-        strip = strips[0] if strips else Strip.blank(width)
+        strip = strips[0] if strips else Strip.blank(width, base.rich_style)
         return strip.apply_offsets(0, y)
 
     def _row_visual(self, y: int) -> Visual:
@@ -238,6 +263,14 @@ class DiffView(NoMarkupStatic):
     @property
     def border_row_colors(self) -> dict[int, str]:
         return diff_border_colors(self._lines)
+
+
+async def render_edit_diff_async(
+    occurrences: Sequence[DiffOccurrence], language: str, *, ansi: bool, dark: bool
+) -> list[_DiffLine]:
+    return await asyncio.to_thread(
+        render_edit_diff, occurrences, language, ansi=ansi, dark=dark
+    )
 
 
 def render_edit_diff(

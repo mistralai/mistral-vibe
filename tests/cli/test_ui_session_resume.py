@@ -18,6 +18,7 @@ from tests.update_notifier.adapters.fake_update_cache_repository import (
 from tests.update_notifier.adapters.fake_update_gateway import FakeUpdateGateway
 from vibe.app_server._account import WhoAmIResult
 from vibe.app_server.models import AccountPlanKind, CompletedEffectState
+from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
     UserMessage,
@@ -146,6 +147,37 @@ async def test_ui_displays_multiple_user_assistant_turns(
         assert len(assistant_messages) == 2
         assert assistant_messages[0]._content == "First answer"
         assert assistant_messages[1]._content == "Second answer"
+
+
+@pytest.mark.asyncio
+async def test_ui_displays_compaction_checkpoint_when_resuming_session(
+    vibe_config: VibeConfigSchema,
+) -> None:
+    agent_loop = build_test_agent_loop(config=vibe_config)
+    agent_loop.messages.extend([
+        LLMMessage(role=Role.user, content="Before compaction"),
+        LLMMessage(
+            role=Role.user,
+            content="Compacted context",
+            injected=True,
+            context_boundary="compaction",
+        ),
+        LLMMessage(role=Role.assistant, content="After compaction"),
+    ])
+    app = build_test_vibe_app(agent_loop=agent_loop)
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+
+        assert [message._content for message in app.query(UserMessage)] == [
+            "Before compaction"
+        ]
+        assert [message._content for message in app.query(AssistantMessage)] == [
+            "After compaction"
+        ]
+        assert [message.get_content() for message in app.query(CompactMessage)] == [
+            "Compaction completed."
+        ]
 
 
 @pytest.mark.asyncio

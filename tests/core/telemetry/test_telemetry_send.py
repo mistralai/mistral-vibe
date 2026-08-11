@@ -228,7 +228,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=decision,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
         )
 
@@ -240,7 +240,7 @@ class TestTelemetryClient:
         assert properties["status"] == "success"
         assert properties["decision"] == "execute"
         assert properties["approval_type"] == "always"
-        assert properties["agent_profile_name"] == "default"
+        assert properties["agent_profile_name"] == "ask"
         assert properties["model"] == "mistral-large"
         assert properties["nb_files_created"] == 0
         assert properties["nb_files_modified"] == 0
@@ -259,7 +259,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             message_id="msg-123",
         )
@@ -277,7 +277,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={},
         )
@@ -299,7 +299,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={},
         )
@@ -319,7 +319,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={},
         )
@@ -341,7 +341,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={},
         )
@@ -359,7 +359,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="failure",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={},
         )
@@ -378,7 +378,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={"background": False},
         )
@@ -396,7 +396,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={"background": True},
         )
@@ -414,7 +414,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={"background": True},
         )
@@ -432,7 +432,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="failure",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
         )
 
@@ -449,7 +449,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={"background": True},
         )
@@ -472,7 +472,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={"returncode": 0},
         )
@@ -490,7 +490,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="skipped",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
         )
 

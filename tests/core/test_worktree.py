@@ -13,6 +13,7 @@ from vibe.core.worktree import (
     WorktreeError,
     inspect_worktree_for_cleanup,
     list_linked_worktrees,
+    prepare_auto_worktree_session,
     prepare_worktree,
     prepare_worktree_session,
     remove_worktree,
@@ -27,6 +28,26 @@ def _init_repo(root: Path, *, separate_git_dir: Path | None = None) -> Repo:
     repo.index.add(["file.txt"])
     repo.index.commit("initial")
     return repo
+
+
+def _commit_off_head(repo: Repo, message: str) -> Any:
+    """Commit on a side branch and rewind, leaving it unreachable from HEAD."""
+    original = repo.active_branch
+    side = repo.create_head("side")
+    repo.head.reference = side
+    (Path(repo.working_dir) / "side.txt").write_text(f"{message}\n")
+    repo.index.add(["side.txt"])
+    commit = repo.index.commit(message)
+    repo.head.reference = original
+    repo.head.reset(index=True, working_tree=True)
+    repo.delete_head(side, force=True)
+    return commit
+
+
+def _managed_worktree_root(repo: Repo) -> Path:
+    common_git_dir = worktree_module._common_git_dir(repo)
+    repo_root = worktree_module._primary_worktree_root(repo, common_git_dir)
+    return worktree_module._worktree_root(repo_root, common_git_dir)
 
 
 def test_creates_named_worktree_for_separate_branch(tmp_path: Path) -> None:
@@ -465,3 +486,275 @@ def test_create_error_identifies_worktree_and_branch(tmp_path: Path) -> None:
         match="Failed to create worktree 'second' for branch 'feat/shared'",
     ):
         prepare_worktree_session("second", tmp_path, branch="feat/shared")
+
+
+def test_auto_worktree_derives_name_and_branch_from_prompt(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+
+    worktree = prepare_auto_worktree_session(tmp_path, prompt="Fix the login bug")
+
+    assert worktree.name == "fix-the-login-bug"
+    assert worktree.branch == "vibe/fix-the-login-bug"
+    assert worktree.created is True
+    assert worktree.branch_created is True
+    assert Repo(worktree.root).active_branch.name == "vibe/fix-the-login-bug"
+    assert "vibe/fix-the-login-bug" in (head.name for head in repo.heads)
+
+
+def test_auto_worktree_prefers_a_suggested_name_over_the_prompt(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+
+    worktree = prepare_auto_worktree_session(
+        tmp_path, prompt="Fix the login bug", suggested_name="repair-oauth-redirect"
+    )
+
+    assert worktree.name == "repair-oauth-redirect"
+    assert worktree.branch == "vibe/repair-oauth-redirect"
+
+
+# A model answers in prose however firmly the prompt asks for a slug, so its
+# reply goes through the same slugifier as the raw prompt rather than a
+# looser check that would let an unusable path segment reach git.
+@pytest.mark.parametrize(
+    ("suggested", "expected"),
+    [
+        ("Fix The Login Bug!", "fix-the-login-bug"),
+        ("`fix-login-bug`", "fix-login-bug"),
+        ("fix login bug\n", "fix-login-bug"),
+    ],
+)
+def test_auto_worktree_sanitises_a_suggested_name(
+    tmp_path: Path, suggested: str, expected: str
+) -> None:
+    _init_repo(tmp_path)
+
+    worktree = prepare_auto_worktree_session(tmp_path, suggested_name=suggested)
+
+    assert worktree.name == expected
+
+
+@pytest.mark.parametrize("suggested", ["", "   ", "!!!", "🙂", "nul"])
+def test_auto_worktree_falls_back_when_a_suggestion_is_unusable(
+    tmp_path: Path, suggested: str
+) -> None:
+    _init_repo(tmp_path)
+
+    worktree = prepare_auto_worktree_session(
+        tmp_path, prompt="Fix the login bug", suggested_name=suggested
+    )
+
+    assert worktree.name == "fix-the-login-bug"
+
+
+def test_auto_worktree_still_dedupes_a_suggested_name(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+
+    first = prepare_auto_worktree_session(tmp_path, suggested_name="repair-oauth")
+    second = prepare_auto_worktree_session(tmp_path, suggested_name="repair-oauth")
+
+    assert first.name == "repair-oauth"
+    assert second.name == "repair-oauth-2"
+    assert first.root != second.root
+
+
+def test_auto_worktree_uses_random_slug_without_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo(tmp_path)
+    monkeypatch.setattr(worktree_module, "create_slug", lambda: "brave-quiet-otter")
+
+    worktree = prepare_auto_worktree_session(tmp_path)
+
+    assert worktree.name == "brave-quiet-otter"
+    assert worktree.branch == "vibe/brave-quiet-otter"
+
+
+@pytest.mark.parametrize("prompt", ["", "   ", "!!!", "作業ツリー", "🙂"])
+def test_auto_worktree_uses_random_slug_for_unsluggable_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: str
+) -> None:
+    _init_repo(tmp_path)
+    monkeypatch.setattr(worktree_module, "create_slug", lambda: "brave-quiet-otter")
+
+    assert prepare_auto_worktree_session(tmp_path, prompt=prompt).name == (
+        "brave-quiet-otter"
+    )
+
+
+@pytest.mark.parametrize("prompt", ["nul", "COM1", "aux."])
+def test_auto_worktree_uses_random_slug_for_reserved_device_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: str
+) -> None:
+    _init_repo(tmp_path)
+    monkeypatch.setattr(worktree_module, "create_slug", lambda: "brave-quiet-otter")
+
+    assert prepare_auto_worktree_session(tmp_path, prompt=prompt).name == (
+        "brave-quiet-otter"
+    )
+
+
+def test_auto_worktree_suffixes_when_the_name_is_taken(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+
+    first = prepare_auto_worktree_session(tmp_path, prompt="Fix the login bug")
+    second = prepare_auto_worktree_session(tmp_path, prompt="Fix the login bug")
+
+    assert first.name == "fix-the-login-bug"
+    assert second.name == "fix-the-login-bug-2"
+    assert first.root != second.root
+    branches = {head.name for head in repo.heads}
+    assert {"vibe/fix-the-login-bug", "vibe/fix-the-login-bug-2"} <= branches
+
+
+def test_auto_worktree_does_not_reuse_an_existing_worktree(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    existing = prepare_worktree_session(
+        "fix-the-login-bug", tmp_path, branch="vibe/fix-the-login-bug"
+    )
+
+    auto = prepare_auto_worktree_session(tmp_path, prompt="Fix the login bug")
+
+    assert auto.root != existing.root
+    assert auto.created is True
+
+
+def test_auto_worktree_skips_a_name_taken_by_a_bare_directory(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    (_managed_worktree_root(repo) / "fix-the-login-bug").mkdir(parents=True)
+
+    worktree = prepare_auto_worktree_session(tmp_path, prompt="Fix the login bug")
+
+    assert worktree.name == "fix-the-login-bug-2"
+
+
+def test_auto_worktree_skips_a_name_whose_branch_already_exists(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    repo.create_head("vibe/fix-the-login-bug")
+
+    worktree = prepare_auto_worktree_session(tmp_path, prompt="Fix the login bug")
+
+    assert worktree.name == "fix-the-login-bug-2"
+
+
+def test_auto_worktree_removes_its_claim_when_creation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+
+    def fail_create(*_args: Any, **_kwargs: Any) -> None:
+        raise WorktreeError("create failed")
+
+    monkeypatch.setattr(worktree_module, "_create_worktree", fail_create)
+
+    with pytest.raises(WorktreeError, match="create failed"):
+        prepare_auto_worktree_session(tmp_path, prompt="Fix the login bug")
+
+    assert not (_managed_worktree_root(repo) / "fix-the-login-bug").exists()
+
+
+def test_auto_worktree_removes_the_branch_git_left_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    claim = worktree_module._claim_auto_worktree
+
+    def claim_then_lose_the_directory(
+        *args: Any, **kwargs: Any
+    ) -> tuple[str, str, Path]:
+        name, branch, target = claim(*args, **kwargs)
+        (target / "squatter").touch()
+        return name, branch, target
+
+    monkeypatch.setattr(
+        worktree_module, "_claim_auto_worktree", claim_then_lose_the_directory
+    )
+
+    with pytest.raises(WorktreeError, match="Failed to create worktree"):
+        prepare_auto_worktree_session(tmp_path, prompt="Fix the login bug")
+
+    # git creates the branch before it validates the path, so the add fails
+    # with the branch already made. Leaving it would burn this name for good.
+    assert "vibe/fix-the-login-bug" not in {head.name for head in repo.heads}
+
+
+def test_auto_worktree_keeps_a_branch_it_did_not_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    unmerged = _commit_off_head(repo, "someone else's work")
+
+    def lose_the_branch_race(*_args: Any, **_kwargs: Any) -> None:
+        # Whoever won created it between _branch_exists and the add, so the add
+        # fails on a branch this call does not own.
+        repo.create_head("vibe/fix-the-login-bug", commit=unmerged)
+        raise WorktreeError("a branch named 'vibe/fix-the-login-bug' already exists")
+
+    monkeypatch.setattr(worktree_module, "_create_worktree", lose_the_branch_race)
+
+    with pytest.raises(WorktreeError, match="already exists"):
+        prepare_auto_worktree_session(tmp_path, prompt="Fix the login bug")
+
+    head = repo.heads["vibe/fix-the-login-bug"]
+    assert head.commit == unmerged
+
+
+def test_auto_worktree_does_not_retry_after_a_git_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo(tmp_path)
+    calls = 0
+
+    def fail_create(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal calls
+        calls += 1
+        raise WorktreeError("disk full")
+
+    monkeypatch.setattr(worktree_module, "_create_worktree", fail_create)
+
+    with pytest.raises(WorktreeError, match="disk full"):
+        prepare_auto_worktree_session(tmp_path, prompt="Fix the login bug")
+
+    assert calls == 1
+
+
+def test_auto_worktree_raises_when_every_candidate_is_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    monkeypatch.setattr(worktree_module, "_MAX_AUTO_WORKTREE_ATTEMPTS", 2)
+    managed_root = _managed_worktree_root(repo)
+    (managed_root / "fix-the-login-bug").mkdir(parents=True)
+    (managed_root / "fix-the-login-bug-2").mkdir(parents=True)
+
+    with pytest.raises(WorktreeError, match="Unable to find an unused worktree name"):
+        prepare_auto_worktree_session(tmp_path, prompt="Fix the login bug")
+
+
+def test_auto_worktree_cleans_created_worktree_when_metadata_build_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+
+    def fail_build_prepared(*_args: Any, **_kwargs: Any) -> object:
+        raise RuntimeError("metadata failed")
+
+    monkeypatch.setattr(worktree_module, "_build_prepared", fail_build_prepared)
+
+    with pytest.raises(RuntimeError, match="metadata failed"):
+        prepare_auto_worktree_session(tmp_path, prompt="Fix the login bug")
+
+    assert list_linked_worktrees(tmp_path) == ()
+    assert "vibe/fix-the-login-bug" not in (head.name for head in repo.heads)
+
+
+def test_auto_worktree_preserves_source_subdirectory(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    package = tmp_path / "packages" / "app"
+    package.mkdir(parents=True)
+    (package / "main.py").write_text("print('hi')\n")
+    repo.index.add(["packages/app/main.py"])
+    repo.index.commit("add package")
+
+    worktree = prepare_auto_worktree_session(package, prompt="Fix the login bug")
+
+    assert worktree.path == worktree.root / "packages" / "app"

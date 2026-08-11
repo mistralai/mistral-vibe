@@ -20,3 +20,13 @@ class CompletionView(Protocol):
     def replace_completion_range(
         self, start: int, end: int, replacement: str, *, suppress_update: bool = False
     ) -> None: ...
+
+
+class InlineSuggestionView(Protocol):
+    def show_inline_suggestion(self, suggestion: str) -> None: ...
+
+    def clear_inline_suggestion(self) -> None: ...
+
+    def replace_completion_range(
+        self, start: int, end: int, replacement: str, *, suppress_update: bool = False
+    ) -> None: ...

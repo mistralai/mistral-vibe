@@ -30,18 +30,15 @@ from vibe.app_server.protocol import (
     ConfigFieldsReadParams,
     ConfigFieldsReadResponse,
     ConfigMutationResponse,
-    ConfigPatchOpWire,
-    ConfigPatchParams,
-    ConfigPatchResponse,
     ConfigProxyReadParams,
     ConfigProxyReadResponse,
     ConfigProxyWriteParams,
-    ConfigReadParams,
-    ConfigReadResponse,
     ConfigReloadParams,
     ConfigSchemaReadParams,
     ConfigSchemaReadResponse,
-    ConfigThinkingWriteParams,
+    ConfigWriteOpWire,
+    ConfigWriteParams,
+    ConfigWriteResponse,
     DiagnosticsLogsReadParams,
     DiagnosticsLogsReadResponse,
     EmptyResponse,
@@ -60,6 +57,10 @@ from vibe.app_server.protocol import (
 )
 
 
+def _escape_json_pointer_token(value: str) -> str:
+    return value.replace("~", "~0").replace("/", "~1")
+
+
 class ConfigResource:
     def __init__(
         self, connection: AppServerResourceConnection, state: ClientSessionState
@@ -71,10 +72,6 @@ class ConfigResource:
     @property
     def current(self) -> ConfigView:
         return self._state.config
-
-    @property
-    def base(self) -> ConfigView:
-        return self._state.base_config
 
     def subscribe(self, callback: Callable[[ConfigView], None]) -> Callable[[], None]:
         self._subscribers.append(callback)
@@ -96,18 +93,6 @@ class ConfigResource:
         self._state.apply_runtime(snapshot)
         self.publish_change(previous)
 
-    async def read(self) -> None:
-        client = await self._connection.connect()
-        response = validate_wire(
-            ConfigReadResponse,
-            await client.request(
-                "config/read", ConfigReadParams(session_id=self._state.session_id)
-            ),
-        )
-        previous = self.current
-        self._state.apply_config(response)
-        self.publish_change(previous)
-
     async def read_schema(self) -> ConfigSchemaReadResponse:
         client = await self._connection.connect()
         return validate_wire(
@@ -125,16 +110,19 @@ class ConfigResource:
             ),
         )
 
-    async def patch(
-        self, ops: list[ConfigPatchOpWire], *, reason: str
-    ) -> ConfigPatchResponse:
+    async def write(
+        self, ops: list[ConfigWriteOpWire], *, reason: str, reload_runtime: bool = False
+    ) -> ConfigWriteResponse:
         client = await self._connection.connect()
         response = validate_wire(
-            ConfigPatchResponse,
+            ConfigWriteResponse,
             await client.request(
-                "config/patch",
-                ConfigPatchParams(
-                    session_id=self._state.session_id, ops=ops, reason=reason
+                "config/write",
+                ConfigWriteParams(
+                    session_id=self._state.session_id,
+                    ops=ops,
+                    reason=reason,
+                    reload_runtime=reload_runtime,
                 ),
             ),
         )
@@ -146,25 +134,15 @@ class ConfigResource:
         self, changes: Mapping[str, object], *, reload_runtime: bool = False
     ) -> None:
         ops = [
-            ConfigPatchOpWire.model_validate({
+            ConfigWriteOpWire.model_validate({
                 "op": "set",
                 "path": f"/{key}",
                 "value": value,
             })
             for key, value in changes.items()
         ]
-        client = await self._connection.connect()
-        response = validate_wire(
-            ConfigPatchResponse,
-            await client.request(
-                "config/patch",
-                ConfigPatchParams(
-                    session_id=self._state.session_id,
-                    ops=ops,
-                    reason="app-server config update",
-                    reload_runtime=reload_runtime,
-                ),
-            ),
+        response = await self.write(
+            ops, reason="app-server config update", reload_runtime=reload_runtime
         )
         if response.rejected:
             raise AppServerResponseError(
@@ -180,20 +158,35 @@ class ConfigResource:
                     message="; ".join(response.failures),
                 )
             )
-        self._apply_runtime(response.runtime)
 
     async def set_thinking(self, level: ThinkingLevel) -> None:
-        client = await self._connection.connect()
-        response = validate_wire(
-            ConfigMutationResponse,
-            await client.request(
-                "config/thinking/write",
-                ConfigThinkingWriteParams(
-                    session_id=self._state.session_id, level=level
-                ),
-            ),
+        response = await self.write(
+            [
+                ConfigWriteOpWire(
+                    op="set",
+                    path=(
+                        f"/models/{_escape_json_pointer_token(self.current.active_model.alias)}"
+                        "/thinking"
+                    ),
+                    value=level,
+                )
+            ],
+            reason="app-server thinking update",
         )
-        self._apply_runtime(response.runtime)
+        if response.rejected:
+            raise AppServerResponseError(
+                ProtocolError(
+                    code=ProtocolErrorCode.INVALID_PARAMS,
+                    message="Invalid configuration edit",
+                )
+            )
+        if response.failures:
+            raise AppServerResponseError(
+                ProtocolError(
+                    code=ProtocolErrorCode.INTERNAL_ERROR,
+                    message="; ".join(response.failures),
+                )
+            )
 
     async def reload(self, *, reload_runtime: bool = True) -> int:
         client = await self._connection.connect()

@@ -13,8 +13,8 @@ from textual.widgets.option_list import Option, OptionDoesNotExist
 from vibe.app_server.protocol import (
     ConfigFieldKind,
     ConfigFieldWire,
-    ConfigPatchOpWire,
-    ConfigPatchResponse,
+    ConfigWriteOpWire,
+    ConfigWriteResponse,
 )
 from vibe.app_server.resources import ConfigResource
 from vibe.cli.textual_ui.constants import UNPINNED_ACTIVE_MODEL
@@ -234,7 +234,7 @@ class ConfigScreen(ModalScreen[bool]):
             await self._write(
                 view,
                 [
-                    ConfigPatchOpWire(
+                    ConfigWriteOpWire(
                         op="set", path=view.path, value=value, target_layer=target
                     )
                 ],
@@ -272,14 +272,14 @@ class ConfigScreen(ModalScreen[bool]):
             return
         await self._write(
             view,
-            [ConfigPatchOpWire(op="remove", path=view.path, target_layer=top)],
+            [ConfigWriteOpWire(op="remove", path=view.path, target_layer=top)],
             reason="config screen reset",
         )
 
     async def _write(
-        self, view: ConfigFieldWire, ops: list[ConfigPatchOpWire], *, reason: str
+        self, view: ConfigFieldWire, ops: list[ConfigWriteOpWire], *, reason: str
     ) -> None:
-        response: ConfigPatchResponse = await self._config.patch(ops, reason=reason)
+        response: ConfigWriteResponse = await self._config.write(ops, reason=reason)
         if response.rejected:
             self.notify(
                 f"'{view.name}' rejected this value.", severity="error", markup=False

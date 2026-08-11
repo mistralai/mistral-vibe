@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from jsonpatch import apply_patch as json_apply_patch
 from jsonpointer import JsonPointer
 
 from vibe.core.config import RawConfig, VibeConfigSchema
+from vibe.core.config.builder import ConfigBuilder
 from vibe.core.config.event_bus import EventBus
 from vibe.core.config.layer import ConfigLayer
 from vibe.core.config.layers.default import DefaultConfigLayer
@@ -14,6 +16,7 @@ from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator, _changed_keys_between
 from vibe.core.config.patch import PatchOp, ensure_parent_paths
 from vibe.core.config.types import ConfigChangeEvent, ConflictStrategy
+from vibe.core.utils.concurrency import run_sync
 
 
 class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
@@ -24,14 +27,50 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
     are mirrored through a real default-plus-user layer stack so sparse writes
     have production merge semantics; writes targeting the in-memory overrides
     layer stay session-local.
+
+    The verbatim config is treated as the base layer; additional in-memory
+    layers (e.g. the agent-profile layer) may be inserted and are folded onto it
+    by ``rebuild`` using production merge semantics.
     """
 
     def __init__(self, config: C) -> None:
+        self._base_config = config
         self._config = config
+        self._extra_layers: list[ConfigLayer[RawConfig]] = []
         self._bus = EventBus()
 
     def copy(self) -> FakeConfigOrchestrator[C]:
-        return FakeConfigOrchestrator(self._config.model_copy(deep=True))
+        clone = FakeConfigOrchestrator(self._base_config.model_copy(deep=True))
+        clone._extra_layers = [copy.deepcopy(layer) for layer in self._extra_layers]
+        clone.rebuild()
+        return clone
+
+    @property
+    def layers(self) -> tuple[ConfigLayer[RawConfig], ...]:
+        return tuple(self._extra_layers)
+
+    def insert_layer(self, layer: ConfigLayer[RawConfig], index: int) -> None:
+        self._extra_layers.insert(index, layer)
+
+    def remove_layer(self, index: int) -> ConfigLayer[RawConfig]:
+        return self._extra_layers.pop(index)
+
+    def rebuild(self) -> None:
+        builder = ConfigBuilder(type(self._base_config))
+        builder.add_layer(
+            OverridesLayer(
+                data=self._base_config.model_dump(mode="json"), name="fake-base"
+            )
+        )
+        builder.add_layers(list(self._extra_layers))
+        result = run_sync(builder.build())
+        # The verbatim base is already validated (e.g. active_model fixed up), so
+        # re-validation won't reproduce its warnings; carry them forward to match
+        # the real orchestrator, which re-merges raw layer snapshots.
+        for warning in self._base_config.validation_warnings:
+            if warning not in result.validation_warnings:
+                result._validation_warnings.append(warning)
+        self._config = result
 
     def _publish(self, before: dict[str, Any], reason: str) -> None:
         after = self._config.model_dump(mode="json")
@@ -47,11 +86,6 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         return self._config
 
     @property
-    def layers(self) -> tuple[ConfigLayer[RawConfig], ...]:
-        # The verbatim fake has no layer stack; every value reads as a default.
-        return ()
-
-    @property
     def writable_layer_name(self) -> str:
         return UserConfigLayer().name
 
@@ -61,10 +95,7 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
     def persisted_active_model(self) -> str:
         # The verbatim fake has no layer stack, so the held config's value is
         # exactly what the test declared as the user's pin.
-        return self._config.active_model
-
-    def replace_config(self, config: C) -> None:
-        self._config = config
+        return self._base_config.active_model
 
     async def set_field(
         self,
@@ -78,9 +109,10 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
             orchestrator = await self._persistence_orchestrator()
             await orchestrator.set_field(path, value, reason)
         before = self._config.model_dump(mode="json")
-        data = self._config.model_dump()
+        data = self._base_config.model_dump()
         _set_pointer_in_place(data, path, value)
-        self._config = type(self._config).model_validate(data)
+        self._base_config = type(self._base_config).model_validate(data)
+        self.rebuild()
         self._publish(before, reason)
         return []
 
@@ -104,11 +136,12 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
             )
             if failures:
                 return failures
-        data = ensure_parent_paths(self._config.model_dump(), operations)
+        data = ensure_parent_paths(self._base_config.model_dump(), operations)
         data = json_apply_patch(
             data, [op.to_json_patch() for op in operations], in_place=False
         )
-        self._config = type(self._config).model_validate(data)
+        self._base_config = type(self._base_config).model_validate(data)
+        self.rebuild()
         self._publish(before, reason)
         return []
 

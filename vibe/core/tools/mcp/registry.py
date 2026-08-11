@@ -50,6 +50,29 @@ class MCPRegistry:
         self._failed: dict[str, str] = {}
 
     @staticmethod
+    def _format_mcp_error(exc: BaseException) -> str:
+        """Recursively unwrap ``BaseExceptionGroup`` into a ``"; "``-joined string.
+
+        Returns an empty string for exceptions with no message (e.g. bare
+        ``CancelledError``); callers that need a non-empty value should use
+        ``_format_failed`` instead.
+        """
+        if isinstance(exc, BaseExceptionGroup):
+            messages = [
+                formatted
+                for e in exc.exceptions
+                if e is not None and (formatted := MCPRegistry._format_mcp_error(e))
+            ]
+            if messages:
+                return "; ".join(messages)
+            return ""
+        return str(exc)
+
+    @staticmethod
+    def _format_failed(exc: BaseException) -> str:
+        return MCPRegistry._format_mcp_error(exc) or type(exc).__name__
+
+    @staticmethod
     def _server_key(srv: MCPServer) -> str:
         raw = srv.model_dump_json(exclude_none=False)
         return hashlib.sha256(raw.encode()).hexdigest()
@@ -88,10 +111,11 @@ class MCPRegistry:
         out: dict[str, type[BaseTool]] = {}
         for (key, srv), result in zip(servers, results, strict=True):
             if isinstance(result, BaseException):
+                formatted = self._format_failed(result)
                 logger.warning(
-                    "MCP discovery failed for server %r: %s", srv.name, result
+                    "MCP discovery failed for server %r: %s", srv.name, formatted
                 )
-                self._failed[srv.name] = str(result)
+                self._failed[srv.name] = formatted
                 continue
             if result is None:
                 continue
@@ -147,8 +171,9 @@ class MCPRegistry:
                 url, headers=headers, startup_timeout_sec=srv.startup_timeout_sec
             )
         except Exception as exc:
-            logger.warning("MCP HTTP discovery failed for %s: %s", url, exc)
-            self._failed[srv.name] = str(exc)
+            formatted = self._format_failed(exc)
+            logger.warning("MCP HTTP discovery failed for %s: %s", url, formatted)
+            self._failed[srv.name] = formatted
             return None
 
         tools: dict[str, type[BaseTool]] = {}
@@ -286,8 +311,11 @@ class MCPRegistry:
                         "MCP OAuth discovery failed for %s: %s", alias, matched
                     )
                 case None:
-                    logger.warning("MCP HTTP discovery failed for %s: %s", url, exc)
-                    self._failed[alias] = str(exc)
+                    formatted = self._format_failed(exc)
+                    logger.warning(
+                        "MCP HTTP discovery failed for %s: %s", url, formatted
+                    )
+                    self._failed[alias] = formatted
         return None
 
     async def _discover_stdio(self, srv: MCPStdio) -> dict[str, type[BaseTool]] | None:
@@ -304,8 +332,9 @@ class MCPRegistry:
                 startup_timeout_sec=srv.startup_timeout_sec,
             )
         except Exception as exc:
-            logger.warning("MCP stdio discovery failed for %r: %s", cmd, exc)
-            self._failed[srv.name] = str(exc)
+            formatted = self._format_failed(exc)
+            logger.warning("MCP stdio discovery failed for %r: %s", cmd, formatted)
+            self._failed[srv.name] = formatted
             return None
 
         tools: dict[str, type[BaseTool]] = {}

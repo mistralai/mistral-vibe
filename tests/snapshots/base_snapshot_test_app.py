@@ -63,7 +63,7 @@ def default_config(**kwargs) -> VibeConfigSchema:
 
 class BaseSnapshotTestApp(VibeApp):
     CSS_PATH = "../../vibe/cli/textual_ui/app.tcss"
-    _current_agent_name: str = BuiltinAgentName.DEFAULT
+    _current_agent_name: str = BuiltinAgentName.ASK
 
     def __init__(
         self,

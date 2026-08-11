@@ -26,6 +26,12 @@ class VoiceManagerListener:
     def on_transcribe_text(self, text: str) -> None:
         pass
 
+    def on_transcribe_error(self, message: str) -> None:
+        pass
+
+    def on_transcribe_notice(self, message: str) -> None:
+        pass
+
 
 class VoiceManagerPort(Protocol):
     @property

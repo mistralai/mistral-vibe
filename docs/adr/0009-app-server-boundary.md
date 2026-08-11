@@ -195,7 +195,7 @@ Session creation and user execution are separate:
 - `session/start` creates and attaches an empty session;
 - `session/resume` loads saved state and attaches it;
 - `session/continue` resolves and attaches the latest eligible session;
-- `session/read`, `session/list`, and `history/list` are passive reads;
+- `session/read`, `session/list`, and `session/history/list` are passive reads;
 - `session/fork` creates a session from an existing public boundary;
 - `session/close` flushes and closes the attached runtime;
 - `turn/start` begins structured user input and may mark harness instructions as
@@ -211,10 +211,12 @@ Turn input is structured content. The server owns normalization into
 model-visible input and persistence. Delivery surfaces do not construct private
 messages or maintain a second prompt renderer.
 
-Compaction and plan-context clearing may replace the active session identity
-while preserving the turn. The server emits a typed handoff containing the old
-ID, replacement `PublicSessionState`, event watermark, and session-log summary.
-The client adopts all of those values atomically before processing later events.
+Compaction preserves the active session identity and appends a checkpoint to the
+same public history. Plan-context clearing may replace the active session while
+preserving the turn. For replacement operations, the server emits a typed
+handoff containing the old ID, replacement `PublicSessionState`, event
+watermark, and session-log summary. The client adopts all of those values
+atomically before processing later events.
 
 Root creation and replacement are serialized lifecycle transitions. A staged
 replacement is either adopted after the previous root closes or is itself
@@ -250,10 +252,11 @@ variants:
 - notice.
 
 Entries have stable IDs and generation status. An in-progress entry may receive
-typed patches. A completed entry is immutable. Compaction, rewind, and clear may
-create a replacement session derived from an earlier boundary plus a checkpoint.
-The original stored session is not rewritten, and the client adopts the returned
-replacement snapshot rather than editing its existing projection.
+typed patches. A completed entry is immutable. Compaction appends a checkpoint
+without replacing the session. Rewind and clear may create a replacement session
+derived from an earlier boundary plus a checkpoint. The original stored session
+is not rewritten, and the client adopts the returned replacement snapshot rather
+than editing its existing projection.
 
 One effect entry owns the complete visible lifecycle of work: call, streaming
 output, approval blocking, result, duration, and terminal state. Tool names are

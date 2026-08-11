@@ -13,6 +13,7 @@ from vibe.cli.audio_player.audio_player_port import (
 )
 from vibe.cli.audio_player.utils import decode_wav
 from vibe.observability.logging import logger
+from vibe.utils.audio import portaudio_install_hint
 
 # sounddevice raises OSError on import when no audio driver is available.
 try:
@@ -20,7 +21,8 @@ try:
 
     if TYPE_CHECKING:
         from sounddevice import CallbackFlags, RawOutputStream
-except OSError:
+except OSError as e:
+    logger.warning("sounddevice unavailable, voice disabled: %r", e)
     sd = None  # type: ignore[assignment]
 
 DEFAULT_BLOCKSIZE = 4096
@@ -33,7 +35,8 @@ def check_audio_available() -> str | None:
     if sd is None:
         return (
             "sounddevice is not installed or PortAudio is missing "
-            "(install the 'sounddevice' package and the PortAudio system library)"
+            "(install the 'sounddevice' package and the PortAudio system library)."
+            + portaudio_install_hint()
         )
     try:
         sd.query_devices(kind="output")

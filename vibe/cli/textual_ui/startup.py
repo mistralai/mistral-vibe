@@ -9,7 +9,7 @@ from textual.binding import Binding, BindingType
 from textual.containers import CenterMiddle
 
 from vibe.app_server.host import AppServerHost
-from vibe.app_server.models import SavedSessionSummary
+from vibe.app_server.models import PublicSession
 from vibe.app_server.session import AppServerSession
 from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
 from vibe.setup.trusted_folders.trust_folder_dialog import (
@@ -22,6 +22,8 @@ from vibe.setup.trusted_folders.trust_folder_dialog import (
 class OpenedTextualSession:
     session: AppServerSession
     resumed: bool
+    showed_trust_prompt: bool = False
+    showed_resume_picker: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +40,7 @@ class _StartupSessionPicker(App[_PickerResult]):
     ]
 
     def __init__(
-        self, host: AppServerHost, sessions: list[SavedSessionSummary], cwd: str | None
+        self, host: AppServerHost, sessions: list[PublicSession], cwd: str | None
     ) -> None:
         super().__init__()
         self._host = host
@@ -50,7 +52,7 @@ class _StartupSessionPicker(App[_PickerResult]):
             yield SessionPickerApp(
                 sessions=self._sessions,
                 latest_messages={
-                    session.session_id: session.preview for session in self._sessions
+                    session.id: session.preview for session in self._sessions
                 },
                 cwd=self._cwd,
             )
@@ -91,20 +93,27 @@ async def open_textual_session(
     show_resume_picker: bool,
     initially_resuming: bool,
 ) -> OpenedTextualSession | None:
+    showed_trust_prompt = False
     try:
-        if prompt_for_workspace_trust and not await _resolve_workspace_trust(host):
-            await host.close()
-            return None
+        if prompt_for_workspace_trust:
+            trust_granted, showed_trust_prompt = await _resolve_workspace_trust(host)
+            if not trust_granted:
+                await host.close()
+                return None
 
         if not show_resume_picker:
             return OpenedTextualSession(
-                session=await host.open_session(), resumed=initially_resuming
+                session=await host.open_session(),
+                resumed=initially_resuming,
+                showed_trust_prompt=showed_trust_prompt,
             )
 
         sessions = await host.list_sessions(host.cwd)
         if not sessions:
             return OpenedTextualSession(
-                session=await host.start_session(), resumed=False
+                session=await host.start_session(),
+                resumed=False,
+                showed_trust_prompt=showed_trust_prompt,
             )
         result = await _StartupSessionPicker(host, sessions, host.cwd).run_async(
             inline=True
@@ -114,21 +123,28 @@ async def open_textual_session(
             return None
         if result.session_id is None:
             return OpenedTextualSession(
-                session=await host.start_session(), resumed=False
+                session=await host.start_session(),
+                resumed=False,
+                showed_trust_prompt=showed_trust_prompt,
+                showed_resume_picker=True,
             )
         return OpenedTextualSession(
-            session=await host.resume_session(result.session_id), resumed=True
+            session=await host.resume_session(result.session_id),
+            resumed=True,
+            showed_trust_prompt=showed_trust_prompt,
+            showed_resume_picker=True,
         )
     except BaseException:
         await host.close()
         raise
 
 
-async def _resolve_workspace_trust(host: AppServerHost) -> bool:
+async def _resolve_workspace_trust(host: AppServerHost) -> tuple[bool, bool]:
+    """Returns (trust_granted, prompt_shown)."""
     status = await host.trust_status(host.cwd)
     details = status.details
     if details is None:
-        return True
+        return True, False
     dialog = TrustFolderApp(
         cwd=Path(details.cwd),
         repo_root=Path(details.repo_root) if details.repo_root is not None else None,
@@ -141,8 +157,8 @@ async def _resolve_workspace_trust(host: AppServerHost) -> bool:
     try:
         decision = await dialog.run_trust_dialog_async()
     except TrustDialogQuitException:
-        return False
+        return False, True
     if decision is None:
-        return False
+        return False, True
     await host.decide_trust(decision, cwd=details.cwd)
-    return True
+    return True, True

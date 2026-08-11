@@ -12,7 +12,6 @@ from vibe.app_server.events import AppServerEvent, ClientProjection
 from vibe.app_server.models import (
     IdleSessionStatus,
     PublicHistoryEntry,
-    PublicHistoryPage,
     PublicSession,
     PublicSessionState,
 )
@@ -43,9 +42,9 @@ class CoreEventProjection:
                     created_at=1,
                     updated_at=1,
                 ),
-                history=PublicHistoryPage(),
+                history=[],
                 active_callbacks=[],
-                latest_turn=None,
+                turns=[],
             )
         )
         self._event_id = 0

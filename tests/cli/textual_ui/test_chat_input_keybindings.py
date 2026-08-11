@@ -13,6 +13,29 @@ OPTION_WORD_RIGHT_KEYS = ["alt+right", "ctrl+right"]
 
 
 @pytest.mark.asyncio
+async def test_undo_large_multiline_insert_does_not_crash() -> None:
+    app = build_test_vibe_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.1)
+
+        text_area = app.query_one(ChatTextArea)
+        text_area.focus()
+        await pilot.pause(0.1)
+
+        text_area.insert("line0\nline1\n")
+        await pilot.pause(0.1)
+
+        big_text = "\n".join(f"line{i}" for i in range(2, 50))
+        text_area.insert(big_text)
+        await pilot.pause(0.1)
+
+        text_area.undo()
+        await pilot.pause(0.1)
+
+        assert text_area.text == "line0\nline1\n"
+
+
+@pytest.mark.asyncio
 async def test_shift_backspace_deletes_character_like_backspace() -> None:
     app = build_test_vibe_app()
     async with app.run_test() as pilot:

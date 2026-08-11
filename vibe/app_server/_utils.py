@@ -23,7 +23,7 @@ from vibe.app_server.protocol import (
     TurnSteerParams,
 )
 from vibe.core.agent_loop import CompactionFailedError, ImagesNotSupportedError
-from vibe.core.llm.exceptions import BackendError
+from vibe.core.llm.exceptions import BackendError, IncompleteStreamError
 from vibe.core.session.image_snapshot import ImageSnapshotError, snapshot_image_bytes
 from vibe.core.types import (
     ContextTooLongError,
@@ -94,7 +94,7 @@ def decode_input(
     )
 
 
-def public_error(exc: Exception) -> PublicError:
+def public_error(exc: Exception) -> PublicError:  # noqa: PLR0912
     details: dict[str, JsonValue] = {}
     for source in (exc, exc.__cause__):
         if source is None:
@@ -121,8 +121,16 @@ def public_error(exc: Exception) -> PublicError:
         case CompactionFailedError():
             code = TurnErrorCode.COMPACTION_FAILED
             details["reason"] = exc.reason
+        case IncompleteStreamError():
+            code = TurnErrorCode.INCOMPLETE_STREAM
+        case BackendError() if exc.is_invalid_model:
+            code = TurnErrorCode.INVALID_MODEL
         case BackendError():
             code = TurnErrorCode.BACKEND_ERROR
+        case RuntimeError() if (
+            isinstance(cause := exc.__cause__, BackendError) and cause.is_invalid_model
+        ):
+            code = TurnErrorCode.INVALID_MODEL
         case RuntimeError() if isinstance(cause := exc.__cause__, BackendError):
             code = TurnErrorCode.BACKEND_ERROR
             details["provider"] = cause.provider

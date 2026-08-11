@@ -33,7 +33,6 @@ from vibe.core.utils.tags import (
     is_user_cancellation_event,
 )
 from vibe.core.utils.time import utc_now
-from vibe.utils.display import compact_complete_display
 from vibe.utils.paths import is_dangerous_directory
 from vibe.utils.platform import (
     WindowsShell,
@@ -64,7 +63,6 @@ __all__ = [
     "WindowsShellKind",
     "async_generator_retry",
     "async_retry",
-    "compact_complete_display",
     "get_platform_display_name",
     "get_platform_id",
     "get_platform_version",

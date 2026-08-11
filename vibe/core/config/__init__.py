@@ -26,7 +26,6 @@ from vibe.core.config.layer import (
     LayerImplementationError,
     LayerNotLoadedError,
     RawConfig,
-    TrustNotResolvedError,
     TrustResolutionError,
     UntrustedLayerError,
 )
@@ -172,7 +171,6 @@ __all__ = [
     "TranscribeClient",
     "TranscribeModelConfig",
     "TranscribeProviderConfig",
-    "TrustNotResolvedError",
     "TrustResolutionError",
     "UntrustedLayerError",
     "VibeConfigSchema",

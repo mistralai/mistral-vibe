@@ -66,7 +66,7 @@ async def test_action_copy_selection_shows_clipboard_notice(
         await vibe_app.mount(ClipboardSelectionWidget("hello"))
         with (
             patch("vibe.cli.clipboard.copy_to_clipboard", return_value=verified),
-            patch.object(vibe_app, "_show_clipboard_notice") as show_notice,
+            patch.object(vibe_app._inline_notice, "show") as show_notice,
         ):
             vibe_app.action_copy_selection()
             await pilot.pause(0.1)

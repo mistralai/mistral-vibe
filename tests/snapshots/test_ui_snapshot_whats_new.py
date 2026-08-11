@@ -16,7 +16,17 @@ from tests.update_notifier.adapters.fake_update_cache_repository import (
 from tests.update_notifier.adapters.fake_update_gateway import FakeUpdateGateway
 from vibe.app_server._account import WhoAmIResult
 from vibe.app_server.models import AccountPlanKind
+from vibe.cli.textual_ui.widgets.messages import WhatsNewMessage
 from vibe.cli.update_notifier import UpdateCache
+
+
+async def _wait_for_whats_new(pilot: Pilot) -> None:
+    for _ in range(200):
+        if pilot.app.query(WhatsNewMessage):
+            await pilot.pause()
+            return
+        await pilot.pause(0.01)
+    raise AssertionError("WhatsNewMessage was never mounted")
 
 
 class SnapshotTestAppWithWhatsNew(BaseSnapshotTestApp):
@@ -96,7 +106,7 @@ def test_snapshot_shows_whats_new_message(
     whats_new_file.write_text("# What's New\n\n- Feature 1\n- Feature 2\n- Feature 3")
 
     async def run_before(pilot: Pilot) -> None:
-        await pilot.pause(0.5)
+        await _wait_for_whats_new(pilot)
 
     with patch("vibe.cli.update_notifier.whats_new.VIBE_ROOT", tmp_path):
         assert snap_compare(
@@ -113,7 +123,7 @@ def test_snapshot_shows_upgrade_message(
     whats_new_file.write_text("# What's New\n\n- Feature 1\n- Feature 2\n- Feature 3")
 
     async def run_before(pilot: Pilot) -> None:
-        await pilot.pause(0.5)
+        await _wait_for_whats_new(pilot)
 
     with patch("vibe.cli.update_notifier.whats_new.VIBE_ROOT", tmp_path):
         assert snap_compare(
@@ -130,7 +140,7 @@ def test_snapshot_shows_switch_message(
     whats_new_file.write_text("# What's New\n\n- Feature 1\n- Feature 2\n- Feature 3")
 
     async def run_before(pilot: Pilot) -> None:
-        await pilot.pause(0.5)
+        await _wait_for_whats_new(pilot)
 
     with patch("vibe.cli.update_notifier.whats_new.VIBE_ROOT", tmp_path):
         assert snap_compare(
@@ -147,7 +157,7 @@ def test_snapshot_shows_no_plan_message(
     whats_new_file.write_text("# What's New\n\n- Feature 1\n- Feature 2\n- Feature 3")
 
     async def run_before(pilot: Pilot) -> None:
-        await pilot.pause(0.5)
+        await _wait_for_whats_new(pilot)
 
     with patch("vibe.cli.update_notifier.whats_new.VIBE_ROOT", tmp_path):
         assert snap_compare(

@@ -148,6 +148,19 @@ class TestEventMapping:
         assert events[0].message == "something broke"
 
     @pytest.mark.asyncio
+    async def test_empty_recording_error_is_treated_as_done(self) -> None:
+        mock_client = _patch_sdk([
+            _make_sdk_error("Cannot flush audio before sending any audio bytes")
+        ])
+        client = MistralTranscribeClient(_make_provider(), _make_model())
+        client._client = mock_client
+
+        events = await _collect(client)
+
+        assert len(events) == 1
+        assert isinstance(events[0], TranscribeDone)
+
+    @pytest.mark.asyncio
     async def test_unknown_event_is_skipped(self) -> None:
         mock_client = _patch_sdk([
             _make_sdk_session_created(),
@@ -162,3 +175,112 @@ class TestEventMapping:
         assert len(events) == 2
         assert isinstance(events[0], TranscribeSessionCreated)
         assert isinstance(events[1], TranscribeTextDelta)
+
+
+def _patch_sdk_then_raise(sdk_events: list[object], exc: Exception) -> MagicMock:
+    async def _fake_stream(**kwargs: object) -> AsyncIterator[object]:
+        audio_stream = kwargs["audio_stream"]
+        assert isinstance(audio_stream, AsyncIterator)
+        async for _ in audio_stream:
+            pass
+        for e in sdk_events:
+            yield e
+        raise exc
+
+    mock_client = MagicMock()
+    mock_client.audio.realtime.transcribe_stream = _fake_stream
+    return mock_client
+
+
+def _patch_sdk_drop_midstream(sdk_events: list[object], exc: Exception) -> MagicMock:
+    async def _fake_stream(**kwargs: object) -> AsyncIterator[object]:
+        audio_stream = kwargs["audio_stream"]
+        assert isinstance(audio_stream, AsyncIterator)
+        await audio_stream.__anext__()
+        for e in sdk_events:
+            yield e
+        raise exc
+
+    mock_client = MagicMock()
+    mock_client.audio.realtime.transcribe_stream = _fake_stream
+    return mock_client
+
+
+async def _pending_audio_stream() -> AsyncIterator[bytes]:
+    yield b"\x00\x00"
+    yield b"\x00\x00"
+
+
+async def _collect_from(
+    client: MistralTranscribeClient, audio_stream: AsyncIterator[bytes]
+) -> list[object]:
+    events: list[object] = []
+    async for event in client.transcribe(audio_stream):
+        events.append(event)
+    return events
+
+
+class TestConnectionCloseRace:
+    @pytest.mark.asyncio
+    async def test_connection_closed_after_output_is_swallowed(self) -> None:
+        mock_client = _patch_sdk_then_raise(
+            [_make_sdk_text_delta("hi"), _make_sdk_done("hi")],
+            RuntimeError("Connection is closed"),
+        )
+        client = MistralTranscribeClient(_make_provider(), _make_model())
+        client._client = mock_client
+
+        events = await _collect(client)
+
+        assert [type(e) for e in events] == [TranscribeTextDelta, TranscribeDone]
+
+    @pytest.mark.asyncio
+    async def test_connection_closed_without_text_completes_benignly(self) -> None:
+        mock_client = _patch_sdk_then_raise(
+            [_make_sdk_session_created()], RuntimeError("Connection is closed")
+        )
+        client = MistralTranscribeClient(_make_provider(), _make_model())
+        client._client = mock_client
+
+        events = await _collect(client)
+
+        assert [type(e) for e in events] == [TranscribeSessionCreated, TranscribeDone]
+
+    @pytest.mark.asyncio
+    async def test_connection_closed_after_text_without_done_completes(self) -> None:
+        mock_client = _patch_sdk_then_raise(
+            [_make_sdk_text_delta("hi")], RuntimeError("Connection is closed")
+        )
+        client = MistralTranscribeClient(_make_provider(), _make_model())
+        client._client = mock_client
+
+        events = await _collect(client)
+
+        assert [type(e) for e in events] == [TranscribeTextDelta, TranscribeDone]
+
+    @pytest.mark.asyncio
+    async def test_other_runtime_error_propagates(self) -> None:
+        mock_client = _patch_sdk_then_raise([], RuntimeError("boom"))
+        client = MistralTranscribeClient(_make_provider(), _make_model())
+        client._client = mock_client
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await _collect(client)
+
+    @pytest.mark.asyncio
+    async def test_connection_closed_midstream_surfaces_error(self) -> None:
+        mock_client = _patch_sdk_drop_midstream(
+            [_make_sdk_session_created(), _make_sdk_text_delta("hi")],
+            RuntimeError("Connection is closed"),
+        )
+        client = MistralTranscribeClient(_make_provider(), _make_model())
+        client._client = mock_client
+
+        events = await _collect_from(client, _pending_audio_stream())
+
+        assert [type(e) for e in events] == [
+            TranscribeSessionCreated,
+            TranscribeTextDelta,
+            TranscribeError,
+        ]
+        assert isinstance(events[-1], TranscribeError)

@@ -41,6 +41,9 @@ class AudioRecorderPort(Protocol):
     def peak(self) -> float: ...
 
     @property
+    def has_signal(self) -> bool: ...
+
+    @property
     def mode(self) -> RecordingMode: ...
 
     def start(

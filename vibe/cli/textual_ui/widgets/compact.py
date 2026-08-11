@@ -1,22 +1,12 @@
 from __future__ import annotations
 
-from textual.message import Message
-
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
-from vibe.utils.display import compact_complete_display
 
 
 class CompactMessage(StatusMessage):
-    class Completed(Message):
-        def __init__(self, compact_widget: CompactMessage) -> None:
-            super().__init__()
-            self.compact_widget = compact_widget
-
     def __init__(self) -> None:
         super().__init__()
         self.add_class("compact-message")
-        self.old_session_id: str | None = None
-        self.new_session_id: str | None = None
         self.error_message: str | None = None
 
     def get_content(self) -> str:
@@ -26,17 +16,10 @@ class CompactMessage(StatusMessage):
         if self.error_message:
             return f"Error: {self.error_message}"
 
-        return compact_complete_display(
-            old_session_id=self.old_session_id, new_session_id=self.new_session_id
-        )
+        return "Compaction completed."
 
-    def set_complete(
-        self, *, old_session_id: str | None = None, new_session_id: str | None = None
-    ) -> None:
-        self.old_session_id = old_session_id
-        self.new_session_id = new_session_id
+    def set_complete(self) -> None:
         self.stop_spinning(success=True)
-        self.post_message(self.Completed(self))
 
     def set_error(self, error_message: str) -> None:
         self.error_message = error_message

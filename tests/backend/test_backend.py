@@ -152,6 +152,7 @@ class TestBackend:
                     result.usage.completion_tokens
                     == result_data["usage"]["completion_tokens"]
                 )
+                assert result.stop is not None
 
                 if result.message.tool_calls is None:
                     return
@@ -219,6 +220,8 @@ class TestBackend:
                     extra_headers=None,
                 ):
                     results.append(result)
+
+                assert any(result.stop is not None for result in results)
 
                 for result, expected_result in zip(results, result_data, strict=True):
                     assert result.message.content == expected_result["message"]

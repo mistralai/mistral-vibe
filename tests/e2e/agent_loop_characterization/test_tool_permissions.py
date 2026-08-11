@@ -101,7 +101,10 @@ def test_write_file_approval_creates_file_and_rejection_leaves_file_absent(
     approved_path = e2e_workdir / APPROVED_FILE
     rejected_path = e2e_workdir / REJECTED_FILE
 
-    with spawned_vibe_process(e2e_workdir) as (child, captured):
+    with spawned_vibe_process(e2e_workdir, extra_args=["--agent", "ask"]) as (
+        child,
+        captured,
+    ):
         wait_for_main_screen(child, timeout=15)
         child.send("Create the approved file")
         child.send("\r")

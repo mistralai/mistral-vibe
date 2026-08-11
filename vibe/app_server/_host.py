@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+from datetime import datetime
 from functools import lru_cache
 import hashlib
 import json
@@ -18,19 +20,20 @@ from vibe.app_server._project_links import (
 )
 from vibe.app_server._projection import project_config_view, project_message_history
 from vibe.app_server._state import build_stored_public_state, history_page
+from vibe.app_server._utils import now_ms
 from vibe.app_server._workspace import (
     WorkspaceTrustError,
     decide_workspace_trust,
+    read_untrusted_config_dirs,
     read_workspace_trust,
 )
+from vibe.app_server.models import IdleSessionStatus, PublicSession
 from vibe.app_server.protocol import (
     ConfigReadParams,
     ConfigReadResponse,
     ConfigSchemaReadParams,
     ConfigSchemaReadResponse,
     EmptyResponse,
-    HistoryListParams,
-    HistoryListResponse,
     ProjectLinkMutationResponse,
     ProjectLinksCreateParams,
     ProjectLinksInspectRootParams,
@@ -49,6 +52,8 @@ from vibe.app_server.protocol import (
     ProjectLinksUnlinkResponse,
     ProtocolErrorCode,
     SessionDeleteParams,
+    SessionHistoryListParams,
+    SessionHistoryListResponse,
     SessionListParams,
     SessionListResponse,
     SessionReadParams,
@@ -58,13 +63,17 @@ from vibe.app_server.protocol import (
     WorkspaceLinkedWorktree,
     WorkspaceTrustDecisionParams,
     WorkspaceTrustStatusParams,
+    WorkspaceUntrustedConfigParams,
     WorkspaceWorktreeListParams,
     WorkspaceWorktreeListResponse,
 )
 from vibe.core.config import VibeConfigSchema, build_default_orchestrator
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.session.resume_sessions import list_local_resume_sessions
+from vibe.core.session.resume_sessions import (
+    ResumeSessionInfo,
+    list_local_resume_sessions,
+)
 from vibe.core.session.saved_sessions import (
     delete_saved_session,
     update_saved_session_title,
@@ -82,7 +91,6 @@ from vibe.observability.logging import logger
 _HOST_METHODS = frozenset({
     "config/read",
     "config/schema",
-    "history/list",
     "projectLinks/create",
     "projectLinks/inspectRoot",
     "projectLinks/link",
@@ -93,10 +101,12 @@ _HOST_METHODS = frozenset({
     "projectLinks/save",
     "projectLinks/unlink",
     "session/delete",
+    "session/history/list",
     "session/list",
     "session/read",
-    "session/title/update",
+    "session/rename",
     "workspace/trust/decision",
+    "workspace/trust/untrustedConfig",
     "workspace/trust/status",
     "workspace/worktrees/list",
 })
@@ -141,9 +151,7 @@ class HostRequestHandler:
             case "session/list":
                 params = validate_wire(SessionListParams, raw_params)
                 config = await self._load_config(params.cwd)
-                response = await asyncio.to_thread(
-                    project_session_list, config, params.cwd
-                )
+                response = await asyncio.to_thread(project_session_list, config, params)
             case "session/read":
                 params = validate_wire(SessionReadParams, raw_params)
                 config = await self._load_config(None)
@@ -153,7 +161,7 @@ class HostRequestHandler:
                 config = await self._load_config(None)
                 await delete_saved_session(params.session_id, config.session_logging)
                 response = EmptyResponse()
-            case "session/title/update":
+            case "session/rename":
                 params = validate_wire(SessionTitleUpdateParams, raw_params)
                 config = await self._load_config(None)
                 try:
@@ -166,18 +174,18 @@ class HostRequestHandler:
                     raise RequestFailure(
                         ProtocolErrorCode.INVALID_PARAMS, str(exc)
                     ) from exc
-                updated_at = metadata.get("end_time")
                 title = metadata.get("title")
                 if not isinstance(title, str):
                     raise RuntimeError("The saved session title was not updated")
+                updated_at = metadata.get("end_time")
                 response = SessionTitleUpdateResponse(
                     title=title,
                     updated_at=updated_at if isinstance(updated_at, str) else None,
                 )
-            case "history/list":
-                params = validate_wire(HistoryListParams, raw_params)
+            case "session/history/list":
+                params = validate_wire(SessionHistoryListParams, raw_params)
                 config = await self._load_config(None)
-                response = await asyncio.to_thread(self._list_history, params, config)
+                response = await asyncio.to_thread(self._history_list, params, config)
             case _ if method.startswith("workspace/"):
                 response = await self._dispatch_workspace(method, raw_params)
             case _ if method.startswith("projectLinks/"):
@@ -196,7 +204,7 @@ class HostRequestHandler:
             orchestrator.config,
             active_model_pinned=bool(orchestrator.persisted_active_model()),
         )
-        return ConfigReadResponse(config=view, base_config=view)
+        return ConfigReadResponse(config=view)
 
     async def _dispatch_project_links(
         self, method: str, raw_params: dict[str, Any]
@@ -286,6 +294,13 @@ class HostRequestHandler:
                     params.decision,
                     self._harness_files.trust_store,
                 )
+            case "workspace/trust/untrustedConfig":
+                params = validate_wire(WorkspaceUntrustedConfigParams, raw_params)
+                response = await asyncio.to_thread(
+                    read_untrusted_config_dirs,
+                    self._cwd(params.cwd),
+                    self._harness_files.trust_store,
+                )
             case "workspace/worktrees/list":
                 params = validate_wire(WorkspaceWorktreeListParams, raw_params)
                 response = await asyncio.to_thread(
@@ -299,28 +314,41 @@ class HostRequestHandler:
         self, params: SessionReadParams, config: VibeConfigSchema
     ) -> SessionReadResponse:
         messages, metadata = self._load_session(params.session_id, config)
-        return SessionReadResponse(
-            state=build_stored_public_state(
-                params.session_id,
-                messages,
-                metadata,
-                history_limit=params.history_limit,
-            )
+        public = build_stored_public_state(
+            params.session_id,
+            messages,
+            metadata,
+            history_limit=params.history_limit,
+            turns_limit=params.turns_limit,
+            include_history=params.include_history,
+            include_turns=params.include_turns,
         )
+        return SessionReadResponse(state=public, last_event_id=public.event_id)
 
-    def _list_history(
-        self, params: HistoryListParams, config: VibeConfigSchema
-    ) -> HistoryListResponse:
+    def _history_list(
+        self, params: SessionHistoryListParams, config: VibeConfigSchema
+    ) -> SessionHistoryListResponse:
         messages, metadata = self._load_session(params.session_id, config)
         all_history = project_message_history(params.session_id, messages, metadata)
-        return HistoryListResponse(
-            history=history_page(
-                all_history,
-                turn_id=params.turn_id,
-                before=params.before,
-                after=params.after,
-                limit=params.limit,
-            )
+        page = history_page(
+            all_history,
+            turn_id=params.turn_id,
+            before=params.cursor if params.sort_direction == "backward" else None,
+            after=params.cursor if params.sort_direction == "forward" else None,
+            limit=params.limit,
+        )
+        return SessionHistoryListResponse(
+            items=page.entries,
+            next_cursor=(
+                page.cursor.before
+                if params.sort_direction == "backward"
+                else page.cursor.after
+            ),
+            previous_cursor=(
+                page.cursor.after
+                if params.sort_direction == "backward"
+                else page.cursor.before
+            ),
         )
 
     def _load_session(
@@ -362,24 +390,98 @@ def config_schema_response() -> ConfigSchemaReadResponse:
 
 
 def project_session_list(
-    config: VibeConfigSchema, cwd: str | None
+    config: VibeConfigSchema, params: SessionListParams
 ) -> SessionListResponse:
-    sessions = list_local_resume_sessions(config, cwd)
-    return SessionListResponse.model_validate({
-        "sessions": [
-            {
-                "session_id": session.session_id,
-                "cwd": session.cwd,
-                "parent_session_id": session.parent_session_id,
-                "title": session.title,
-                "end_time": session.end_time,
-                "preview": SessionLoader.get_first_user_message(
+    sessions = list_local_resume_sessions(config, params.cwd)
+    roots = _session_roots(sessions)
+    filtered = [
+        session
+        for session in sessions
+        if (
+            params.root_session_id is None
+            or roots[session.session_id] == params.root_session_id
+        )
+        and (
+            params.parent_session_id is None
+            or session.parent_session_id == params.parent_session_id
+        )
+    ]
+    filtered.sort(
+        key=lambda session: (session.updated_at, session.session_id), reverse=True
+    )
+    start = _session_cursor_index(filtered, params.cursor)
+    page = filtered[start : start + params.limit]
+    return SessionListResponse(
+        items=[
+            PublicSession(
+                id=session.session_id,
+                root_session_id=roots[session.session_id],
+                parent_session_id=session.parent_session_id,
+                title=session.title,
+                preview=SessionLoader.get_first_user_message(
                     session.session_id, config.session_logging
                 ),
-            }
-            for session in sessions
-        ]
-    })
+                status=IdleSessionStatus(),
+                created_at=_time_ms(session.start_time or session.updated_at),
+                updated_at=_time_ms(session.updated_at),
+                cwd=session.cwd or None,
+            )
+            for session in page
+        ],
+        next_cursor=(
+            _encode_session_cursor(page[-1])
+            if start + len(page) < len(filtered) and page
+            else None
+        ),
+    )
+
+
+def _session_roots(sessions: list[ResumeSessionInfo]) -> dict[str, str]:
+    parents = {session.session_id: session.parent_session_id for session in sessions}
+    roots: dict[str, str] = {}
+    for session_id in parents:
+        seen: set[str] = set()
+        current = session_id
+        while (parent := parents.get(current)) is not None and parent in parents:
+            if parent in seen:
+                current = session_id
+                break
+            seen.add(current)
+            current = parent
+        roots[session_id] = current
+    return roots
+
+
+def _encode_session_cursor(session: ResumeSessionInfo) -> str:
+    payload = f"{session.updated_at}\0{session.session_id}".encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _session_cursor_index(sessions: list[ResumeSessionInfo], cursor: str | None) -> int:
+    if cursor is None:
+        return 0
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        updated_at, session_id = (
+            base64.urlsafe_b64decode(padded).decode().split("\0", 1)
+        )
+    except (ValueError, UnicodeDecodeError):
+        return len(sessions)
+    return next(
+        (
+            index + 1
+            for index, session in enumerate(sessions)
+            if (session.updated_at, session.session_id) == (updated_at, session_id)
+        ),
+        len(sessions),
+    )
+
+
+def _time_ms(value: str) -> int:
+    try:
+        return int(datetime.fromisoformat(value).timestamp() * 1000)
+    except ValueError:
+        return now_ms()
 
 
 def worktree_list_response(cwd: Path) -> WorkspaceWorktreeListResponse:

@@ -19,7 +19,12 @@ from vibe.core.tools.base import (
 from vibe.core.tools.io_port import ToolIOPort
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import resolve_file_tool_permission
+from vibe.core.tools.utils import (
+    DEFAULT_SENSITIVE_PATTERNS,
+    ToolPath,
+    resolve_file_tool_permission,
+    resolve_tool_path,
+)
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.utils.io import (
     ReadSafeResult,
@@ -32,7 +37,7 @@ from vibe.utils.tool_presentation import ToolEffectKind
 
 
 class EditArgs(BaseModel):
-    file_path: str = Field(description="The absolute path to the file to modify")
+    file_path: ToolPath = Field(description="The absolute path to the file to modify")
     old_string: str = Field(description="The text to replace")
     new_string: str = Field(
         description="The text to replace it with (must be different from old_string)"
@@ -68,7 +73,7 @@ class EditResult(BaseModel):
 class EditConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ASK
     sensitive_patterns: list[str] = Field(
-        default=["**/.env", "**/.env.*"],
+        default_factory=lambda: list(DEFAULT_SENSITIVE_PATTERNS),
         description="File patterns that trigger ASK even when permission is ALWAYS.",
     )
 
@@ -250,10 +255,7 @@ class Edit(
                 "No changes to make — old_string and new_string are identical"
             )
 
-        file_path = Path(file_path_str).expanduser()
-        if not file_path.is_absolute():
-            file_path = self.cwd / file_path
-        file_path = file_path.resolve()
+        file_path = resolve_tool_path(file_path_str, self.cwd)
 
         if not file_path.exists():
             raise ToolError(f"File does not exist: {file_path}")

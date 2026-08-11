@@ -15,9 +15,8 @@ from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.manager import ToolManager
 from vibe.core.trusted_folders import trusted_folders_manager
 
-_DISCOVERED_AND_AGENT_PROFILE_LAYERS_DISABLED = pytest.mark.skip(
-    reason="DiscoveredConfigLayer and AgentProfileLayer are not yet part of "
-    "build_default_orchestrator"
+_DISCOVERED_LAYER_DISABLED = pytest.mark.skip(
+    reason="DiscoveredConfigLayer is not yet part of build_default_orchestrator"
 )
 
 
@@ -55,7 +54,7 @@ async def test_build_default_orchestrator_uses_standard_layer_priority(
     user_config_path = config_dir / "config.toml"
     user_config_path.write_text(
         """\
-default_agent = "default"
+default_agent = "ask"
 context_warnings = false
 ask_confirmation_on_exit = true
 displayed_workdir = "user-only"
@@ -297,7 +296,7 @@ async def test_build_default_orchestrator_discovered_layer_sits_below_toml(
     assert orchestrator.config.disabled_tools == ["discovered-tool", "user-tool"]
 
 
-@_DISCOVERED_AND_AGENT_PROFILE_LAYERS_DISABLED
+@_DISCOVERED_LAYER_DISABLED
 @pytest.mark.asyncio
 async def test_tool_defaults_can_be_written_to_discovered_layer() -> None:
     orchestrator = await build_default_orchestrator()
@@ -317,7 +316,6 @@ async def test_tool_defaults_can_be_written_to_discovered_layer() -> None:
     assert orchestrator.config.tools["read_file"]["max_read_bytes"] == 51200
 
 
-@_DISCOVERED_AND_AGENT_PROFILE_LAYERS_DISABLED
 @pytest.mark.asyncio
 async def test_agent_profile_layer_overrides_runtime_overrides() -> None:
     orchestrator = await build_default_orchestrator({
@@ -350,7 +348,6 @@ async def test_agent_profile_layer_overrides_runtime_overrides() -> None:
     assert orchestrator.config.disabled_tools == ["runtime-disabled", "agent-disabled"]
 
 
-@_DISCOVERED_AND_AGENT_PROFILE_LAYERS_DISABLED
 @pytest.mark.asyncio
 async def test_agent_manager_switch_profile_updates_agent_profile_layer() -> None:
     orchestrator = await build_default_orchestrator()
@@ -368,7 +365,6 @@ async def test_agent_manager_switch_profile_updates_agent_profile_layer() -> Non
     assert tool_manager.get_tool_config("write_file").permission == ToolPermission.NEVER
 
 
-@_DISCOVERED_AND_AGENT_PROFILE_LAYERS_DISABLED
 @pytest.mark.asyncio
 async def test_agent_manager_switch_profile_replaces_agent_profile_layer() -> None:
     orchestrator = await build_default_orchestrator()
@@ -378,16 +374,13 @@ async def test_agent_manager_switch_profile_replaces_agent_profile_layer() -> No
 
     assert orchestrator.config.tools["write_file"]["permission"] == "never"
 
-    await _switch_profile_with_agent_layer(
-        manager, orchestrator, BuiltinAgentName.DEFAULT
-    )
+    await _switch_profile_with_agent_layer(manager, orchestrator, BuiltinAgentName.ASK)
 
-    assert manager.active_profile.name == BuiltinAgentName.DEFAULT
+    assert manager.active_profile.name == BuiltinAgentName.ASK
     assert "write_file" not in orchestrator.config.tools
     assert "write_file" not in manager.config.tools
 
 
-@_DISCOVERED_AND_AGENT_PROFILE_LAYERS_DISABLED
 @pytest.mark.asyncio
 async def test_agent_manager_switch_writes_discovered_agent_profile_layer(
     config_dir: Path, tmp_path: Path

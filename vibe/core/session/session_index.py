@@ -26,7 +26,9 @@ class SessionInfo(TypedDict):
     cwd: str
     parent_session_id: str | None
     title: str | None
+    start_time: str | None
     end_time: str | None
+    updated_at: str
 
 
 @dataclass
@@ -43,7 +45,13 @@ def _convert_to_utc_iso(date_str: str) -> str:
     return dt.astimezone(UTC).isoformat()
 
 
-def _build_info(metadata: dict[str, Any]) -> SessionInfo | None:
+def _mtime_to_utc_iso(mtime_ns: int) -> str:
+    return datetime.fromtimestamp(mtime_ns / 1_000_000_000, UTC).isoformat()
+
+
+def _build_info(
+    metadata: dict[str, Any], fallback_updated_at: str
+) -> SessionInfo | None:
     """Build a listing entry from raw meta.json, or None if it lacks a session id."""
     session_id = metadata.get("session_id")
     if not session_id:
@@ -60,13 +68,21 @@ def _build_info(metadata: dict[str, Any]) -> SessionInfo | None:
             end_time = _convert_to_utc_iso(end_time)
         except (ValueError, OSError):
             end_time = None
+    start_time = metadata.get("start_time")
+    if start_time:
+        try:
+            start_time = _convert_to_utc_iso(start_time)
+        except (ValueError, OSError):
+            start_time = None
 
     return {
         "session_id": session_id,
         "cwd": session_cwd,
         "parent_session_id": metadata.get("parent_session_id"),
         "title": metadata.get("title"),
+        "start_time": start_time,
         "end_time": end_time,
+        "updated_at": end_time or start_time or fallback_updated_at,
     }
 
 
@@ -84,7 +100,13 @@ def _entry_from_payload(payload: Any) -> _Entry | None:
         "cwd": cwd if isinstance(cwd, str) else "",
         "parent_session_id": payload.get("parent_session_id"),
         "title": payload.get("title"),
+        "start_time": payload.get("start_time"),
         "end_time": payload.get("end_time"),
+        "updated_at": (
+            payload["updated_at"]
+            if isinstance(payload.get("updated_at"), str) and payload["updated_at"]
+            else _mtime_to_utc_iso(mtime_ns)
+        ),
     }
     return _Entry(mtime_ns=mtime_ns, info=info)
 
@@ -117,7 +139,9 @@ class SessionIndex:
                     cwd=entry.info["cwd"],
                     parent_session_id=entry.info["parent_session_id"],
                     title=entry.info["title"],
+                    start_time=entry.info["start_time"],
                     end_time=entry.info["end_time"],
+                    updated_at=entry.info["updated_at"],
                 )
                 for entry in self._entries.values()
             ]
@@ -184,7 +208,7 @@ class SessionIndex:
         # load_session would reject, so keep it out of the listing.
         if msg_size == 0 and metadata.get("total_messages") != 0:
             return None
-        info = _build_info(metadata)
+        info = _build_info(metadata, _mtime_to_utc_iso(mtime_ns))
         if info is None:
             return None
         return _Entry(mtime_ns=mtime_ns, info=info)

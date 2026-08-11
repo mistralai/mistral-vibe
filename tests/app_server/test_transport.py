@@ -243,7 +243,7 @@ async def test_stdio_server_uses_the_same_json_rpc_lifecycle() -> None:
             "jsonrpc": "2.0",
             "id": "start",
             "method": "session/start",
-            "params": {"cwd": str(agent_loop.cwd)},
+            "params": {"agentConfig": {"cwd": str(agent_loop.cwd)}},
         },
         {
             "jsonrpc": "2.0",
@@ -264,7 +264,12 @@ async def test_stdio_server_uses_the_same_json_rpc_lifecycle() -> None:
     ).serve()
 
     responses = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert responses[0]["result"]["capabilities"]["transports"] == ["stdio"]
+    assert responses[0]["result"] == {
+        "serverInfo": {
+            "name": "vibe-app-server",
+            "version": responses[0]["result"]["serverInfo"]["version"],
+        }
+    }
     assert responses[1]["result"]["state"]["session"]["id"] == (agent_loop.session_id)
     assert responses[2]["result"]["state"]["session"]["id"] == (agent_loop.session_id)
 
@@ -309,7 +314,7 @@ async def test_app_server_session_round_trips_a_turn_over_stdio() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stdio_session_start_applies_the_serialized_session_options() -> None:
+async def test_stdio_session_start_maps_agent_config_workdir_to_runtime_cwd() -> None:
     agent_loop = build_test_agent_loop()
     captured: list[RootOpenRequest] = []
 
@@ -338,18 +343,20 @@ async def test_stdio_session_start_applies_the_serialized_session_options() -> N
             "id": "start",
             "method": "session/start",
             "params": {
-                "cwd": "/workspace",
-                "workspaceRoots": ["/other"],
-                "agent": "plan",
-                "autoApprove": True,
-                "enabledTools": ["read_file"],
-                "disabledTools": ["bash"],
-                "maxTurns": 3,
-                "maxPrice": 2.5,
-                "maxSessionTokens": 1000,
-                "headless": True,
-                "trustWorkspace": True,
-                "mcpServers": [],
+                "agentConfig": {
+                    "workdir": "/workspace",
+                    "workspaceRoots": ["/other"],
+                    "agent": "plan",
+                    "autoApprove": True,
+                    "enabledTools": ["read_file"],
+                    "disabledTools": ["bash"],
+                    "maxTurns": 3,
+                    "maxPrice": 2.5,
+                    "maxSessionTokens": 1000,
+                    "headless": True,
+                    "trustWorkspace": True,
+                    "mcpServers": [],
+                }
             },
         },
     ]
@@ -367,10 +374,14 @@ async def test_stdio_session_start_applies_the_serialized_session_options() -> N
     request = captured[0]
     assert request.client_capabilities.client_tools == ["terminal"]
     options = request.options
-    assert options.model_dump(by_alias=False) == {
+    assert options.model_dump(
+        by_alias=False,
+        exclude={"completion", "sandbox", "instructions", "tools", "hooks"},
+    ) == {
+        "workdir": "/workspace",
         "cwd": "/workspace",
         "workspace_roots": ["/other"],
-        "local_workspace_selection": None,
+        "worktree": None,
         "agent": "plan",
         "auto_approve": True,
         "enabled_tools": ["read_file"],

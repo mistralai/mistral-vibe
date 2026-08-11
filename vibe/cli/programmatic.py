@@ -152,7 +152,7 @@ def run_programmatic(
             await session.resources.runtime.wait_until_ready()
             await _warn_if_workspace_untrusted(session)
             output.start(session.history)
-            if teleport and session.resources.config.base.vibe_code_enabled:
+            if teleport and session.resources.config.current.vibe_code_enabled:
                 await _teleport(session, prompt, output)
             else:
                 async with aclosing(session.act(prompt)) as events:
@@ -161,7 +161,7 @@ def run_programmatic(
                         if isinstance(event, CallbackRequested):
                             await session.deny_callback(event.callback)
 
-                turn = session.state.latest_turn
+                turn = next(reversed(session.state.turns or []), None)
                 if turn is not None and turn.stop_reason is PublicTurnStopReason.LIMIT:
                     raise ProgrammaticLimitError(
                         _last_assistant_text(session.history)

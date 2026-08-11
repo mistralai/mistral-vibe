@@ -367,7 +367,6 @@ def set_agent_config(agent: AgentLoop, config: VibeConfigSchema) -> None:
             orchestrator._config = config
         case _:
             raise TypeError(f"unexpected orchestrator {orchestrator!r}")
-    agent.agent_manager.invalidate_config()
 
 
 def stub_config_reload(
@@ -468,7 +467,7 @@ def load_orchestrator() -> OrchestratorLoader[VibeConfigSchema]:
 def build_test_agent_loop(
     *,
     config: VibeConfigSchema | None = None,
-    agent_name: str = BuiltinAgentName.DEFAULT,
+    agent_name: str = BuiltinAgentName.ASK,
     backend: BackendLike | None = None,
     enable_streaming: bool = False,
     **kwargs,
@@ -534,11 +533,14 @@ def build_test_vibe_app(
         )
     )
     history_file = kwargs.pop("history_file", Path(".vibehistory"))
+    startup = kwargs.pop("startup", None) or StartupOptions(
+        initial_prompt=kwargs.pop("initial_prompt", None)
+    )
 
     return VibeApp(
         app_server=app_server_source,
         history_file=history_file,
-        startup=StartupOptions(initial_prompt=kwargs.pop("initial_prompt", None)),
+        startup=startup,
         current_version=resolved_current_version,
         update_notifier=resolved_update_notifier,
         update_cache_repository=resolved_update_cache_repository,

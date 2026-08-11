@@ -7,7 +7,11 @@ import pytest
 
 from vibe.core.experiments.active import DEFAULT_VARIANTS, ExperimentName
 from vibe.core.experiments.client import RemoteEvalClient
-from vibe.core.experiments.manager import ExperimentManager, hash_api_key
+from vibe.core.experiments.manager import (
+    ExperimentManager,
+    config_variants_from_response,
+    hash_api_key,
+)
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
 
 
@@ -517,6 +521,28 @@ async def test_initialize_drops_unknown_features() -> None:
     snapshot = manager.export_state()
     assert snapshot is not None
     assert set(snapshot.features.keys()) == {ExperimentName.SYSTEM_PROMPT.value}
+
+
+def test_config_variants_from_response_returns_forced_routing_variant() -> None:
+    response = _response({
+        ExperimentName.CLI_MODEL_ROUTING.value: {
+            "rules": [{"force": '{"active_model": "magistral"}', "tracks": []}]
+        }
+    })
+
+    variants = config_variants_from_response(response)
+
+    assert variants[ExperimentName.CLI_MODEL_ROUTING.value] == (
+        '{"active_model": "magistral"}'
+    )
+
+
+def test_config_variants_from_response_empty_without_forced_or_assigned() -> None:
+    response = _response({
+        ExperimentName.CLI_MODEL_ROUTING.value: {"defaultValue": "x", "rules": []}
+    })
+
+    assert config_variants_from_response(response) == {}
 
 
 def test_hydrate_drops_unknown_features() -> None:

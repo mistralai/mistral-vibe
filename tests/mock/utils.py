@@ -8,6 +8,7 @@ from vibe.core.types import (
     LLMMessage,
     LLMUsage,
     Role,
+    StopInfo,
     ToolCall,
     ToolStreamEvent,
 )
@@ -25,6 +26,7 @@ def mock_llm_chunk(
     prompt_tokens: int = 10,
     completion_tokens: int = 5,
     cached_tokens: int = 0,
+    stop_reason: str | None = "stop",
 ) -> LLMChunk:
     message = LLMMessage(
         role=role,
@@ -41,6 +43,7 @@ def mock_llm_chunk(
             completion_tokens=completion_tokens,
             cached_tokens=cached_tokens,
         ),
+        stop=StopInfo(reason=stop_reason) if stop_reason is not None else None,
     )
 
 

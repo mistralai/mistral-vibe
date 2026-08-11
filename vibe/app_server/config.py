@@ -56,6 +56,8 @@ class ConfigView(ProtocolModel):
     active_model: ModelConfigView
     # Whether the user has pinned a specific model, vs. the "default" (unpinned)
     active_model_pinned: bool
+    # Cold-cache first launch
+    awaiting_experiment_model: bool = False
     default_model_alias: str
     theme: str
     disable_welcome_banner_animation: bool

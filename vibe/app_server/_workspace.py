@@ -15,7 +15,10 @@ from vibe.app_server.models import (
     WorkspaceTrustDecision,
     WorkspaceTrustDetails,
 )
-from vibe.app_server.protocol import WorkspaceTrustStatusResponse
+from vibe.app_server.protocol import (
+    WorkspaceTrustStatusResponse,
+    WorkspaceUntrustedConfigResponse,
+)
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.autocompletion.path_prompt import (
     PathPromptPayload,
@@ -36,6 +39,7 @@ from vibe.core.trusted_folders import (
     WorkspaceTrustPrompt,
     apply_workspace_trust_decision,
     available_workspace_trust_decisions,
+    find_untrusted_config_dirs,
     maybe_build_workspace_trust_prompt,
 )
 from vibe.user_content import UserResourceLink
@@ -86,6 +90,16 @@ def decide_workspace_trust(
 
     apply_workspace_trust_decision(prompt, core_decision, manager=trust_store)
     return read_workspace_trust(resolved, trust_store)
+
+
+def read_untrusted_config_dirs(
+    cwd: Path, trust_store: TrustedFoldersManager
+) -> WorkspaceUntrustedConfigResponse:
+    resolved = cwd.expanduser().resolve()
+    dirs = find_untrusted_config_dirs(resolved, manager=trust_store)
+    return WorkspaceUntrustedConfigResponse(
+        dirs=[str(d) for d in dirs], settings_path=str(TRUSTED_FOLDERS_FILE.path)
+    )
 
 
 def _workspace_trust_details(prompt: WorkspaceTrustPrompt) -> WorkspaceTrustDetails:

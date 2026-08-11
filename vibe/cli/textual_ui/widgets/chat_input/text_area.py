@@ -3,18 +3,20 @@ from __future__ import annotations
 import platform
 import re
 import time
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
+from rich.style import Style
 from textual import events
 from textual._context import NoActiveAppError
 from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import TextArea
-from textual.widgets.text_area import Location, Selection
+from textual.widgets.text_area import Location, Selection, TextAreaTheme
 
 from vibe.cli.autocompletion.base import CompletionResult
 from vibe.cli.commands import CommandRegistry
 from vibe.cli.constants import CLIPBOARD_IMAGE_PASTE_SUPPORTED_SYSTEM
+from vibe.cli.input_modes import DEFAULT_MODE, InputMode
 from vibe.cli.textual_ui.external_editor import ExternalEditor
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
@@ -30,8 +32,6 @@ from vibe.cli.voice_manager.voice_manager_port import (
     VoiceManagerPort,
 )
 
-InputMode = Literal["!", "/", ">", "&"]
-
 _WORD = re.compile(r"\w+")
 _TRAILING_WORD = re.compile(r"\w+$")
 _DOUBLE_CLICK = 2
@@ -45,6 +45,13 @@ FEEDBACK_SNOOZE_LABEL = "snooze"
 
 class ChatTextArea(TextArea):
     ALLOW_SELECT: ClassVar[bool] = False
+
+    _CHAT_THEME: ClassVar[TextAreaTheme] = TextAreaTheme(
+        name="vibe-chat",
+        base_style=None,
+        selection_style=Style(reverse=True),
+        cursor_line_style=None,
+    )
 
     BINDINGS: ClassVar[list[Binding]] = [
         Binding(
@@ -80,7 +87,7 @@ class ChatTextArea(TextArea):
         ),
     ]
 
-    DEFAULT_MODE: ClassVar[Literal[">"]] = ">"
+    DEFAULT_MODE: ClassVar[InputMode] = DEFAULT_MODE
 
     class Submitted(Message):
         def __init__(self, value: str) -> None:
@@ -126,6 +133,8 @@ class ChatTextArea(TextArea):
     ) -> None:
         super().__init__(**kwargs)
         self._command_registry = command_registry
+        self.register_theme(self._CHAT_THEME)
+        self.theme = self._CHAT_THEME.name
         self._input_mode: InputMode = self.DEFAULT_MODE
         self._last_text = ""
         self._navigating_history = False
@@ -144,6 +153,13 @@ class ChatTextArea(TextArea):
         self._drag_chain: int = 0
         self._drag_anchor: Location | None = None
         self._dragged: bool = False
+
+    # Workaround for an undo crash fixed upstream in
+    # https://github.com/Textualize/textual/pull/6687 — remove this override
+    # once that fix ships in our pinned Textual version.
+    def _recompute_cursor_offset(self) -> None:
+        cursor_location = self.clamp_visitable(self.cursor_location)
+        self._cursor_offset = self.wrapped_document.location_to_offset(cursor_location)
 
     def on_blur(self, event: events.Blur) -> None:
         # set_reactive avoids the selection watcher, which would call
@@ -179,6 +195,13 @@ class ChatTextArea(TextArea):
         event.prevent_default()
         target = self.get_target_document_location(event)
         self._set_selection(Selection.cursor(target))
+        # A mouse click relocates the caret without firing on_key/on_text_changed.
+        # Re-evaluate completions at the new caret so a now-invalid inline ghost
+        # clears, while the slash/path popups simply re-render in place.
+        if self._completion_manager:
+            self._completion_manager.on_text_changed(
+                self.get_full_text(), self._get_full_cursor_offset()
+            )
         self._selecting = True
         self.capture_mouse()
         self._pause_blink(visible=False)
@@ -384,6 +407,20 @@ class ChatTextArea(TextArea):
                 self.get_full_text(), self._get_full_cursor_offset()
             )
 
+    def watch_selection(self, previous: Selection, selection: Selection) -> None:
+        # A pure caret move (arrow, word/line nav, home/end, …) leaves the text
+        # unchanged, so on_text_area_changed never fires. Re-evaluate completions
+        # at the new caret here so a now-invalid inline ghost clears. Edits,
+        # completion accepts and history loads change the text (their selection
+        # update runs before _last_text is refreshed), so they are skipped and
+        # handled by on_text_area_changed instead.
+        # getattr: the selection reactive can fire during TextArea.__init__,
+        # before this subclass sets _completion_manager / _last_text.
+        manager = getattr(self, "_completion_manager", None)
+        if manager is None or previous == selection or self.text != self._last_text:
+            return
+        manager.on_text_changed(self.get_full_text(), self._get_full_cursor_offset())
+
     def _mark_cursor_moved_if_needed(self) -> None:
         if (
             self._cursor_pos_after_load is not None
@@ -469,7 +506,7 @@ class ChatTextArea(TextArea):
             try:
                 self._voice_manager.start_recording()
             except RecordingStartError as e:
-                self.notify(str(e), severity="warning")
+                self.notify(str(e), severity="warning", markup=False)
             return True
 
         return False
@@ -575,6 +612,12 @@ class ChatTextArea(TextArea):
                 self.get_full_text(), self._get_full_cursor_offset()
             )
 
+    def set_inline_suggestion(self, suggestion: str) -> None:
+        self.suggestion = suggestion
+
+    def clear_inline_suggestion(self) -> None:
+        self.suggestion = ""
+
     def get_cursor_offset(self) -> int:
         text = self.text
         row, col = self.cursor_location
@@ -654,7 +697,7 @@ class ChatTextArea(TextArea):
         return self.get_cursor_offset() + self._get_mode_prefix_length()
 
     def _get_mode_prefix_length(self) -> int:
-        return {">": 0, "/": 1, "!": 1, "&": 1}[self._input_mode]
+        return 0 if self.is_default_mode else 1
 
     @property
     def mode_characters(self) -> set[InputMode]:
@@ -666,6 +709,10 @@ class ChatTextArea(TextArea):
     @property
     def input_mode(self) -> InputMode:
         return self._input_mode
+
+    @property
+    def is_default_mode(self) -> bool:
+        return self._input_mode == self.DEFAULT_MODE
 
     def set_mode(self, mode: InputMode) -> None:
         if self._input_mode != mode:

@@ -5,6 +5,7 @@ import contextlib
 from typing import TYPE_CHECKING, Final
 
 from vibe import __version__
+from vibe.core.experiments.cache import store_cached_eval_response
 from vibe.core.experiments.manager import ExperimentManager, hash_api_key
 from vibe.core.experiments.models import ExperimentAttributes
 from vibe.core.identity import IdentityResult, fetch_identity
@@ -60,6 +61,8 @@ async def initialize_experiments(
         # manager is fail-open and stayed empty, so nothing changed —
         # don't trigger a system prompt refresh.
         return False
+    with contextlib.suppress(Exception):
+        store_cached_eval_response(config, state)
     with contextlib.suppress(Exception):
         await session_logger.persist_experiments(state)
     return True

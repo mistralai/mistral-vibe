@@ -47,12 +47,16 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import (
     SERVER_METHODS,
+    AgentConfig,
     AppServerResponseError,
     CallbackCallParams,
     CallbackCallResponse,
+    CallbackResultError,
     ClientCapabilities,
     ClientInfo,
+    EventBatch,
     EventNotificationParams,
+    EventsReadParams,
     InitializeParams,
     InitializeResponse,
     InvalidParamsData,
@@ -64,7 +68,6 @@ from vibe.app_server.protocol import (
     ProtocolError,
     ProtocolErrorCode,
     RuntimeUpdatedParams,
-    ServerCapabilities,
     ServerErrorParams,
     ServerInfo,
     ServerRequest,
@@ -92,9 +95,11 @@ from vibe.core.worktree import (
     PreparedWorktree,
     WorktreeError,
     list_linked_worktrees,
+    prepare_auto_worktree_session,
     prepare_worktree_session,
     remove_worktree,
 )
+from vibe.core.worktree_naming_model import suggest_worktree_name
 from vibe.observability.logging import logger
 
 
@@ -106,6 +111,7 @@ class InitializationState(StrEnum):
 
 type OpenRoot = Callable[[RootOpenRequest], Awaitable[AgentLoop]]
 type StageRoot = Callable[[AgentLoop], Awaitable[None]]
+
 
 _SESSION_ATTACHMENT_CANDIDATES = frozenset({
     "session/fork",
@@ -131,7 +137,7 @@ class PendingClientRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class LocalWorkspaceResolution:
+class WorktreeResolution:
     options: SessionOptions
     prepared_worktree: PreparedWorktree | None = None
 
@@ -139,7 +145,7 @@ class LocalWorkspaceResolution:
 @dataclass(frozen=True, slots=True)
 class OpenedRuntime:
     agent_loop: AgentLoop
-    workspace_resolution: LocalWorkspaceResolution
+    worktree_resolution: WorktreeResolution
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,7 +291,8 @@ class AppServer:
             execution,
             self._notify,
             self._account_gateway,
-            self._identity_gateway,
+            current_event_id=self._event_watermark,
+            identity_gateway=self._identity_gateway,
         )
         coordinator = RootSessionCoordinator(
             agent_loop, resources, self._sessions, self._event_watermark, history
@@ -314,6 +321,7 @@ class AppServer:
                 stage=self._stage_root,
             ),
             self._runtime_factory,
+            self._event_watermark,
         )
         self._sessions.bind_root(session)
         self._root = _RootRuntime(
@@ -370,7 +378,7 @@ class AppServer:
             raise
         staged_root = self._require_root()
         try:
-            await self._sessions.restore_children(replacement)
+            await self._sessions.close_children()
             self._root_session.attach(replacement.session_id)
             replacement.start_initialize_experiments()
         except BaseException:
@@ -388,7 +396,7 @@ class AppServer:
             current_history=[],
             callbacks=[],
             active_turn=None,
-            last_turn=None,
+            completed_turns=[],
             history_limit=history_limit,
         )
 
@@ -556,7 +564,7 @@ class AppServer:
             await self._send_error(request.id, outcome)
             if attachment_candidate:
                 await self._finish_attachment(was_attached)
-            if request.method == "session/close":
+            if request.method == "session/stop":
                 await self.close()
             return
         try:
@@ -631,8 +639,9 @@ class AppServer:
     async def _after_response(
         self, request: ServerRequest, dispatched: DispatchResult
     ) -> None:
-        if request.method == "callback/respond":
-            callback_id = request.params.get("callbackId")
+        if request.method == "callback/result":
+            result = request.params.get("result")
+            callback_id = result.get("callbackId") if isinstance(result, dict) else None
             if isinstance(callback_id, str):
                 self._mark_callback_answered(callback_id)
         if dispatched.after_response is not None:
@@ -649,7 +658,7 @@ class AppServer:
             )
         if self._scheduler_enabled and dispatched.session_attached:
             self._ensure_scheduler()
-        if request.method == "session/close":
+        if request.method == "session/stop":
             await self.close()
 
     async def _dispatch_request(
@@ -657,13 +666,14 @@ class AppServer:
     ) -> DispatchResult:
         if method not in SERVER_METHODS:
             raise method_not_found(method)
+        if method == "events/read":
+            return self._events_read(raw_params)
         if method in {
             "config/schema",
+            "workspace/trust/untrustedConfig",
             "workspace/trust/status",
             "workspace/worktrees/list",
-        }:
-            return await self._host_handler.dispatch(method, raw_params)
-        if method.startswith("projectLinks/"):
+        } or method.startswith("projectLinks/"):
             return await self._host_handler.dispatch(method, raw_params)
         if method == "session/delete":
             return await self._delete_session(raw_params)
@@ -672,9 +682,18 @@ class AppServer:
         if self._root is None:
             return await self._dispatch_without_root(method, raw_params)
         result = await self._dispatch_to_root(method, raw_params)
-        if method == "session/close":
+        if method == "session/stop":
             await self._close_attached_runtime()
         return result
+
+    def _events_read(self, raw_params: dict[str, Any]) -> DispatchResult:
+        """Reserve pull-based event replay for future clients.
+
+        Vibe receives live updates through notifications. Without a replay
+        store, this procedure intentionally returns an empty batch.
+        """
+        EventsReadParams.model_validate(raw_params)
+        return DispatchResult(response=EventBatch())
 
     async def _close_attached_runtime(self) -> None:
         self._closed = True
@@ -694,7 +713,7 @@ class AppServer:
         is_root = (
             root is not None and params.session_id == root.session.agent_loop.session_id
         )
-        if is_root or self._sessions.has_child(params.session_id):
+        if is_root or self._sessions.references_child(params.session_id):
             raise RequestFailure(
                 ProtocolErrorCode.CONFLICT, "Deleting a live session is not supported"
             )
@@ -718,8 +737,8 @@ class AppServer:
         except RequestFailure as exc:
             if exc.code is ProtocolErrorCode.NOT_FOUND and method in {
                 "session/read",
-                "session/title/update",
-                "history/list",
+                "session/rename",
+                "session/history/list",
             }:
                 return await self._host_handler.dispatch(method, raw_params)
             raise
@@ -740,16 +759,17 @@ class AppServer:
         match method:
             case "session/start":
                 params = validate_wire(SessionStartParams, raw_params)
-                self._scheduler_enabled = not params.headless
+                self._scheduler_enabled = not params.agent_config.headless
                 opened = await self._open_runtime(open_root, params, None)
                 state = await self._attach_opened_runtime(opened, params.history_limit)
                 return DispatchResult(
-                    SessionStartResponse(state=state), session_attached=True
+                    SessionStartResponse(state=state, last_event_id=state.event_id),
+                    session_attached=True,
                 )
             case "session/resume":
                 params = validate_wire(SessionResumeParams, raw_params)
-                _reject_local_workspace_selection(params)
-                self._scheduler_enabled = not params.headless
+                self._scheduler_enabled = not params.agent_config.headless
+                _reject_worktree_input(params.agent_config)
                 try:
                     opened = await self._open_runtime(
                         open_root, params, params.session_id
@@ -763,12 +783,13 @@ class AppServer:
                     opened, params.history_limit, resumed=True
                 )
                 return DispatchResult(
-                    SessionResumeResponse(state=state), session_attached=True
+                    SessionResumeResponse(state=state, last_event_id=state.event_id),
+                    session_attached=True,
                 )
             case "session/continue":
                 params = validate_wire(SessionContinueParams, raw_params)
-                _reject_local_workspace_selection(params)
-                self._scheduler_enabled = not params.headless
+                self._scheduler_enabled = not params.agent_config.headless
+                _reject_worktree_input(params.agent_config)
                 try:
                     opened = await self._open_runtime(
                         open_root, params, None, continue_latest=True
@@ -779,7 +800,8 @@ class AppServer:
                     opened, params.history_limit, resumed=True
                 )
                 return DispatchResult(
-                    SessionContinueResponse(state=state), session_attached=True
+                    SessionContinueResponse(state=state, last_event_id=state.event_id),
+                    session_attached=True,
                 )
             case _:
                 raise RequestFailure(
@@ -792,14 +814,15 @@ class AppServer:
     ) -> PublicSessionState:
         try:
             self._bind_root(agent_loop)
-            await self._sessions.restore_children(agent_loop)
             started = await self._handler.dispatch(
                 "session/start",
                 SessionStartParams(
-                    cwd=str(agent_loop.cwd), history_limit=history_limit
+                    agent_config=AgentConfig(cwd=str(agent_loop.cwd)),
+                    history_limit=history_limit,
                 ).model_dump(mode="json", by_alias=True),
             )
-            state = validate_wire(SessionStartResponse, started.response).state
+            assert isinstance(started.response, SessionStartResponse)
+            state = started.response.state
             self._schedule_admin_config_fetch()
             if not resumed:
                 return state
@@ -850,15 +873,13 @@ class AppServer:
         *,
         continue_latest: bool = False,
     ) -> OpenedRuntime:
-        options = SessionOptions.model_validate(
-            params.model_dump(include=set(SessionOptions.model_fields))
-        )
+        options = params.agent_config.model_copy(update={"cwd": params.cwd})
         try:
-            workspace_resolution = await self._resolve_local_workspace(options)
+            worktree_resolution = await self._resolve_worktree(options)
             try:
                 agent_loop = await open_root(
                     RootOpenRequest(
-                        options=workspace_resolution.options,
+                        options=worktree_resolution.options,
                         client_info=self._initialized_client_info(),
                         client_capabilities=self._client_capabilities,
                         session_id=session_id,
@@ -866,10 +887,10 @@ class AppServer:
                     )
                 )
             except BaseException:
-                await self._cleanup_local_workspace(workspace_resolution)
+                await self._cleanup_worktree(worktree_resolution)
                 raise
             return OpenedRuntime(
-                agent_loop=agent_loop, workspace_resolution=workspace_resolution
+                agent_loop=agent_loop, worktree_resolution=worktree_resolution
             )
         except RuntimeAuthenticationError as exc:
             raise RequestFailure(
@@ -886,27 +907,41 @@ class AppServer:
         except WorktreeError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
 
-    async def _resolve_local_workspace(
-        self, options: SessionOptions
-    ) -> LocalWorkspaceResolution:
-        # Stay synchronous without a selection: hopping to a thread here would add
+    async def _resolve_worktree(self, options: SessionOptions) -> WorktreeResolution:
+        # Stay synchronous without a worktree: hopping to a thread here would add
         # an await point to every session start, letting a pipelined follow-up
         # request overtake the session attachment.
-        if options.local_workspace_selection is None:
-            return LocalWorkspaceResolution(options=options)
+        if options.worktree is None:
+            return WorktreeResolution(options=options)
+
+        # Named before the thread hop rather than inside it: the suggestion is
+        # async and nothing has been created yet, so a cancellation here costs
+        # nothing and needs no cleanup.
+        suggested_name = await self._suggest_worktree_name(options)
 
         # Shielded because the worker thread cannot be cancelled: it still creates
         # the worktree after a cancelled await, so the resolution has to stay
         # reachable for cleanup.
         resolve = asyncio.create_task(
-            asyncio.to_thread(resolve_local_workspace_selection, options)
+            asyncio.to_thread(resolve_worktree, options, suggested_name)
         )
         try:
             return await asyncio.shield(resolve)
         except asyncio.CancelledError:
             with suppress(BaseException):
-                await self._cleanup_local_workspace(await resolve)
+                await self._cleanup_worktree(await resolve)
             raise
+
+    @staticmethod
+    async def _suggest_worktree_name(options: SessionOptions) -> str | None:
+        # Only an auto worktree is named here; the other kinds already carry the
+        # name the caller chose, so they must not pay the latency.
+        worktree = options.worktree
+        if worktree is None or worktree.kind != "auto":
+            return None
+        return await suggest_worktree_name(
+            worktree.prompt, cwd=Path(options.cwd or Path.cwd())
+        )
 
     async def _attach_opened_runtime(
         self, opened: OpenedRuntime, history_limit: int, *, resumed: bool = False
@@ -916,13 +951,11 @@ class AppServer:
                 opened.agent_loop, history_limit, resumed=resumed
             )
         except BaseException:
-            await self._cleanup_local_workspace(opened.workspace_resolution)
+            await self._cleanup_worktree(opened.worktree_resolution)
             raise
 
-    async def _cleanup_local_workspace(
-        self, workspace_resolution: LocalWorkspaceResolution
-    ) -> None:
-        worktree = workspace_resolution.prepared_worktree
+    async def _cleanup_worktree(self, worktree_resolution: WorktreeResolution) -> None:
+        worktree = worktree_resolution.prepared_worktree
         if worktree is None or not worktree.created:
             return
         try:
@@ -956,7 +989,7 @@ class AppServer:
                     _, start = self._turns.start(
                         TurnStartParams(
                             session_id=self._agent_loop.session_id,
-                            input=[TextContentBlock(text=loop.prompt)],
+                            message=[TextContentBlock(text=loop.prompt)],
                         ),
                         scheduled_loop_id=loop.id,
                     )
@@ -979,12 +1012,7 @@ class AppServer:
         self._client_capabilities = params.capabilities
         self._initialization = InitializationState.INITIALIZE_RECEIVED
         return InitializeResponse(
-            server_info=ServerInfo(name="vibe-app-server", version=__version__),
-            capabilities=ServerCapabilities(
-                methods=list(SERVER_METHODS),
-                callback_kinds=["approval", "user_input"],
-                transports=[self._transport_kind],
-            ),
+            server_info=ServerInfo(name="vibe-app-server", version=__version__)
         )
 
     def _initialized_client_info(self) -> ClientInfo:
@@ -1196,10 +1224,11 @@ class AppServer:
     async def _reject_callback(
         self, session_id: str, callback_id: str, message: str
     ) -> None:
-        if self._sessions.has_child(session_id):
-            await self._sessions.reject_callback(session_id, callback_id, message)
+        error = CallbackResultError(message=message)
+        if await self._sessions.ensure_child(session_id):
+            await self._sessions.reject_callback(session_id, callback_id, error)
             return
-        await self._turns.reject_callback(callback_id, message)
+        await self._turns.reject_callback(callback_id, error)
 
     async def _send_error(self, request_id: Any, error: ProtocolError) -> None:
         await self._send({
@@ -1235,24 +1264,24 @@ def _omits_session_id(method: str, raw_params: dict[str, Any]) -> bool:
     return method in _SESSION_OPTIONAL_METHODS and raw_params.get("sessionId") is None
 
 
-def _reject_local_workspace_selection(params: SessionOpenParams) -> None:
+def _reject_worktree_input(options: SessionOptions) -> None:
     # The field rides on shared SessionOptions, so resume/continue accept it on
     # the wire. Resolving it there would mint a worktree and reopen the saved
     # session under it instead of the workspace it was recorded against.
-    if params.local_workspace_selection is None:
+    if options.worktree is None:
         return
     raise RequestFailure(
         ProtocolErrorCode.INVALID_PARAMS,
-        "localWorkspaceSelection is only supported when starting a session",
+        "worktree is only supported when starting a session",
     )
 
 
-def resolve_local_workspace_selection(
-    options: SessionOptions,
-) -> LocalWorkspaceResolution:
-    selection = options.local_workspace_selection
-    if selection is None:
-        return LocalWorkspaceResolution(options=options)
+def resolve_worktree(
+    options: SessionOptions, suggested_name: str | None = None
+) -> WorktreeResolution:
+    requested_worktree = options.worktree
+    if requested_worktree is None:
+        return WorktreeResolution(options=options)
 
     # Match the runtime default: non-desktop callers may omit cwd, in which case
     # the app-server process cwd is the local project root.
@@ -1261,9 +1290,9 @@ def resolve_local_workspace_selection(
         raise WorktreeError(f"Local project path is not a directory: {base_cwd}")
 
     prepared_worktree: PreparedWorktree | None = None
-    match selection.kind:
+    match requested_worktree.kind:
         case "existing":
-            requested = Path(selection.cwd).expanduser().resolve()
+            requested = Path(requested_worktree.cwd).expanduser().resolve()
             linked = list_linked_worktrees(base_cwd)
             if not any(worktree.path == requested for worktree in linked):
                 raise WorktreeError(
@@ -1272,19 +1301,22 @@ def resolve_local_workspace_selection(
             cwd = requested
         case "create":
             prepared_worktree = prepare_worktree_session(
-                selection.name, base_cwd, branch=selection.branch
+                requested_worktree.name, base_cwd, branch=requested_worktree.branch
             )
             cwd = prepared_worktree.path
-        case _:  # Safety net for future local workspace selection variants.
-            raise TypeError(f"Unsupported local workspace selection: {selection!r}")
+        case "auto":
+            prepared_worktree = prepare_auto_worktree_session(
+                base_cwd,
+                prompt=requested_worktree.prompt,
+                suggested_name=suggested_name,
+            )
+            cwd = prepared_worktree.path
+        case _:  # Safety net for future worktree input variants.
+            raise TypeError(f"Unsupported worktree input: {requested_worktree!r}")
 
-    return LocalWorkspaceResolution(
+    return WorktreeResolution(
         options=options.model_copy(
-            update={
-                "cwd": str(cwd),
-                "workspace_roots": [str(cwd)],
-                "local_workspace_selection": None,
-            }
+            update={"cwd": str(cwd), "workspace_roots": [str(cwd)], "worktree": None}
         ),
         prepared_worktree=prepared_worktree,
     )

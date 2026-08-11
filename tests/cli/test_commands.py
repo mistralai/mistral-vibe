@@ -48,6 +48,27 @@ class TestCommandRegistry:
         assert result == ("clear", registry.commands["clear"], "")
         assert registry.commands["clear"].handler == "_clear_history"
 
+    def test_clear_command_accepts_optional_prompt(self) -> None:
+        registry = CommandRegistry()
+
+        result = registry.parse_command("/clear fix the bug")
+
+        assert result is not None
+        cmd_name, cmd, cmd_args = result
+        assert cmd_name == "clear"
+        assert cmd.handler == "_clear_history"
+        assert cmd_args == "fix the bug"
+
+    def test_new_alias_accepts_optional_prompt(self) -> None:
+        registry = CommandRegistry()
+
+        result = registry.parse_command("/new hello")
+
+        assert result is not None
+        cmd_name, _, cmd_args = result
+        assert cmd_name == "clear"
+        assert cmd_args == "hello"
+
     def test_parse_command_uses_get_command_name(self) -> None:
         """parse_command and get_command_name stay in sync for same input."""
         registry = CommandRegistry()

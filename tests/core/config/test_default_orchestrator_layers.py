@@ -165,6 +165,21 @@ class TestBothTomlLayersInstalled:
             init_harness_files_manager("user", "project")
 
     @pytest.mark.asyncio
+    async def test_launched_from_home_does_not_double_user_config(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_user_config(config_dir, {"disabled_tools": ["user-tool"]})
+        # cwd == user home, so cwd/.vibe is the user config dir itself.
+        monkeypatch.chdir(config_dir.parent)
+
+        orch = await build_default_orchestrator()
+
+        assert orch.config.disabled_tools == ["user-tool"]
+        layer_names = {layer.name for layer in orch.layers}
+        assert "project-toml" not in layer_names
+        assert orch.writable_layer_name == "user-toml"
+
+    @pytest.mark.asyncio
     async def test_both_layers_present_in_stack(
         self, config_dir: Path, tmp_working_directory: Path
     ) -> None:

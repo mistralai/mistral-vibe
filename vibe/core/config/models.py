@@ -88,6 +88,11 @@ class ProviderConfig(BaseModel):
     api_style: str = "openai"
     backend: Backend = Backend.GENERIC
     reasoning_field_name: str = "reasoning_content"
+    # Whether this provider reliably terminates streams with a finish reason.
+    # When True, a stream that ends without one is treated as an incomplete
+    # stream (and retried). Set to False for OpenAI-compatible endpoints that
+    # do not emit a finish reason, to avoid spurious incomplete-stream errors.
+    emits_finish_reason: bool = True
     project_id: str = ""
     region: str = ""
     extra_headers: dict[str, str] = Field(default_factory=dict)

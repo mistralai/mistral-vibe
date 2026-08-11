@@ -63,6 +63,7 @@ from vibe.core.prompts import (
     load_system_prompt,
 )
 from vibe.core.types import Backend
+from vibe.core.utils.matching import name_matches
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key
 
@@ -259,6 +260,14 @@ class VibeConfigSchema(ConfigSchema):
         BeforeValidator(normalize_model_configs),
         AfterValidator(_non_empty),
     ] = Field(default_factory=lambda: normalize_model_configs(DEFAULT_MODELS))
+    allowed_models: Annotated[list[str], WithReplaceMerge()] = Field(
+        default_factory=list,
+        description=(
+            "An explicit list of model aliases/patterns to allow. If set, only these"
+            " models are selectable. An empty list allows all configured models."
+            " Supports glob patterns (e.g., 'mistral-*') and regex with 're:' prefix."
+        ),
+    )
     compaction_model: Annotated[ModelConfig | None, WithReplaceMerge()] = None
     auto_compact_threshold: Annotated[int, WithReplaceMerge()] = (
         DEFAULT_AUTO_COMPACT_THRESHOLD
@@ -363,10 +372,10 @@ class VibeConfigSchema(ConfigSchema):
         ),
     )
     default_agent: Annotated[str, WithReplaceMerge()] = Field(
-        default=BuiltinAgentName.DEFAULT,
+        default=BuiltinAgentName.ACCEPT_EDITS,
         description=(
             "Agent profile to use when no --agent flag is passed. "
-            "Builtin: default, plan, accept-edits, auto-approve. "
+            "Builtin: ask, plan, accept-edits, auto-approve. "
             "Applies in both interactive and programmatic (-p/--prompt) mode."
         ),
     )
@@ -411,10 +420,29 @@ class VibeConfigSchema(ConfigSchema):
     vibe_code_api_key_env_var: Annotated[str, WithReplaceMerge()] = (
         DEFAULT_MISTRAL_API_ENV_KEY
     )
-    enable_otel: Annotated[bool, WithReplaceMerge()] = False
-    otel_endpoint: Annotated[str, WithReplaceMerge()] = ""
-    otel_redaction: Annotated[OtelRedactionMode, WithReplaceMerge()] = (
-        OtelRedactionMode.DEFAULT
+
+    # Tracing
+    enable_otel: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Export OpenTelemetry traces for agent, model, and tool operations. "
+            "Requires enable_telemetry to be enabled."
+        ),
+    )
+    otel_endpoint: Annotated[str, WithReplaceMerge()] = Field(
+        default="",
+        description=(
+            "Base URL of a custom OTLP/HTTP collector. Vibe appends /v1/traces. "
+            "When empty, Vibe uses the configured Mistral telemetry endpoint."
+        ),
+    )
+    otel_redaction: Annotated[OtelRedactionMode, WithReplaceMerge()] = Field(
+        default=OtelRedactionMode.DEFAULT,
+        description=(
+            "Client-side span attribute redaction: default redacts sensitive "
+            "values, strict redacts sensitive attributes, and none disables "
+            "redaction."
+        ),
     )
     console_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_CONSOLE_BASE_URL
 
@@ -471,15 +499,39 @@ class VibeConfigSchema(ConfigSchema):
     )
 
     def resolve_default_model_alias(self) -> str:
-        if self.routed_default_model and self.routed_default_model in self.models:
+        available = self.available_models()
+        if self.routed_default_model and self.routed_default_model in available:
             return self.routed_default_model
-        if DEFAULT_ACTIVE_MODEL_CONFIG.alias in self.models:
+        if DEFAULT_ACTIVE_MODEL_CONFIG.alias in available or not available:
+            # If there are no available models, fallback to default
             return DEFAULT_ACTIVE_MODEL_CONFIG.alias
-        return next(iter(self.models))
+        return next(iter(available))
+
+    def available_models(self) -> dict[str, ModelConfig]:
+        if not self.allowed_models:
+            return self.models
+        allowed = {
+            alias: model
+            for alias, model in self.models.items()
+            if name_matches(alias, self.allowed_models)
+        }
+        # A filter that matches nothing degrades to "allow all" rather than
+        # bricking model selection; the mismatch already surfaces as a warning.
+        return allowed or self.models
 
     def get_active_model(self) -> ModelConfig:
-        alias = self.active_model or self.resolve_default_model_alias()
-        if model := self.models.get(alias):
+        if self.active_model and self.active_model not in self.models:
+            raise ValueError(
+                f"Active model '{self.active_model}' not found in configuration."
+            )
+        # An allowlist-excluded pin never runs: fall back to the default allowed model.
+        available = self.available_models()
+        alias = (
+            self.active_model
+            if self.active_model in available
+            else self.resolve_default_model_alias()
+        )
+        if model := available.get(alias):
             return model
         raise ValueError(
             f"Active model '{self.active_model}' not found in configuration."
@@ -602,13 +654,12 @@ class VibeConfigSchema(ConfigSchema):
 
     @model_validator(mode="after")
     def _inject_routed_model(self) -> VibeConfigSchema:
-        # Only inject for unpinned users
-        if self.active_model:
-            return self
         alias = self.routed_default_model
         model = self.routed_model_config
+        inject = not self.active_model or self.active_model == alias
         if (
-            alias
+            inject
+            and alias
             and model is not None
             and model.alias == alias
             and alias not in self.models
@@ -648,6 +699,21 @@ class VibeConfigSchema(ConfigSchema):
                 f"— defaulting to '{fallback}'."
             )
             object.__setattr__(self, "active_model", fallback)
+        return self
+
+    @model_validator(mode="after")
+    def _warn_unmatched_allowed_models(self) -> VibeConfigSchema:
+        for pattern in self.allowed_models:
+            if not (pattern or "").strip():
+                continue
+            if any(name_matches(alias, [pattern]) for alias in self.models):
+                continue
+            logger.warning(
+                "Allowed model '%s' matches none of your configured models.", pattern
+            )
+            self._validation_warnings.append(
+                f"Allowed model '{pattern}' matches none of your configured models."
+            )
         return self
 
     @model_validator(mode="after")

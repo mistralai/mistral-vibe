@@ -23,6 +23,8 @@ _CONTEXT_TOO_LONG_SUBSTRINGS = (
 
 _RESPONSE_TOO_LONG_SUBSTRINGS = ("max_tokens_exceeded", "finish_reason=length")
 
+_INVALID_MODEL_SUBSTRINGS = ("invalid_model",)
+
 
 class ErrorDetail(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -36,6 +38,15 @@ class PayloadSummary(BaseModel):
     temperature: float
     has_tools: bool
     tool_choice: StrToolChoice | AvailableTool | None
+
+
+class IncompleteStreamError(RuntimeError):
+    def __init__(self, provider: str, model: str) -> None:
+        self.provider = provider
+        self.model = model
+        super().__init__(
+            f"Model stream from {provider} ({model}) ended without a finish reason."
+        )
 
 
 class BackendError(RuntimeError):
@@ -77,12 +88,29 @@ class BackendError(RuntimeError):
         body = (self.body_text or "").lower()
         return any(s in body for s in _RESPONSE_TOO_LONG_SUBSTRINGS)
 
+    @property
+    def is_invalid_model(self) -> bool:
+        if self.status != HTTPStatus.BAD_REQUEST:
+            return False
+        body = (self.body_text or "").lower()
+        return any(s in body for s in _INVALID_MODEL_SUBSTRINGS)
+
     def _fmt(self) -> str:
         if self.status == HTTPStatus.UNAUTHORIZED:
             return "Invalid API key. Please check your API key and try again."
 
         if self.status == HTTPStatus.TOO_MANY_REQUESTS:
             return "Rate limit exceeded. Please wait a moment before trying again."
+
+        if self.is_invalid_model:
+            lines = [
+                f"Model '{self.model}' is not available on {self.provider}.",
+                "Switch to another configured model with /model, "
+                "or fix the model name with /config.",
+            ]
+            if self.parsed_error:
+                lines.append(f"Provider message: {self.parsed_error}")
+            return "\n".join(lines)
 
         rid = self.headers.get("x-request-id") or self.headers.get("request-id")
         if self.status:
@@ -136,6 +164,37 @@ class ErrorResponse(BaseModel):
 
 
 class BackendErrorBuilder:
+    @classmethod
+    def build_stream_error(
+        cls,
+        *,
+        provider: str,
+        endpoint: str,
+        status: int | None,
+        error_type: str,
+        error_message: str,
+        model: str,
+        messages: Sequence[LLMMessage],
+        temperature: float,
+        has_tools: bool,
+        tool_choice: StrToolChoice | AvailableTool | None,
+    ) -> BackendError:
+        return BackendError(
+            provider=provider,
+            endpoint=endpoint,
+            status=status,
+            reason=error_type,
+            headers=None,
+            body_text=json.dumps({
+                "error": {"type": error_type, "message": error_message}
+            }),
+            parsed_error=error_message,
+            model=model,
+            payload_summary=cls._payload_summary(
+                model, messages, temperature, has_tools, tool_choice
+            ),
+        )
+
     @classmethod
     def build_http_error(
         cls,

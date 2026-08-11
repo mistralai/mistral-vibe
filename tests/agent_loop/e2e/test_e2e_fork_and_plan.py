@@ -187,4 +187,4 @@ async def test_plan_mode_exit_switches_agent_mid_turn(mistral_api: MistralAPI) -
 
     await _act_with_user_input(agent, approve)
 
-    assert agent.agent_profile.name == BuiltinAgentName.DEFAULT
+    assert agent.agent_profile.name == BuiltinAgentName.ASK

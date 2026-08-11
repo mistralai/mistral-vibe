@@ -34,6 +34,7 @@ from vibe.core.compaction import (
 from vibe.core.compaction.context import (
     extract_summary,
     render_teleport_summary_request,
+    select_model_context,
 )
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 from vibe.core.config.harness_files import (
@@ -54,7 +55,7 @@ from vibe.core.hooks.manager import HooksManager
 from vibe.core.hooks.models import HookConfigResult, HookEvent
 from vibe.core.identity_cache import IdentityCache
 from vibe.core.llm.backend.factory import create_backend
-from vibe.core.llm.exceptions import BackendError
+from vibe.core.llm.exceptions import BackendError, IncompleteStreamError
 from vibe.core.llm.format import (
     APIToolFormatHandler,
     FailedToolCall,
@@ -400,7 +401,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self,
         config_orchestrator: ConfigOrchestrator[VibeConfigSchema],
         *,
-        agent_name: str = BuiltinAgentName.DEFAULT,
+        agent_name: str = BuiltinAgentName.ACCEPT_EDITS,
         max_turns: int | None = None,
         max_price: float | None = None,
         max_tokens: int | None = None,
@@ -418,6 +419,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         force_bypass_tool_permissions: bool = False,
         local_managed_shell_runtime_enabled: bool = True,
         experiment_state: EvalResponse | None = None,
+        await_experiment_model: bool = False,
         parent_session_id: str | None = None,
         cwd: Path | None = None,
         harness_files: HarnessFilesManager | None = None,
@@ -479,10 +481,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         )
         if experiment_state is not None:
             self.experiment_manager.hydrate(experiment_state)
-        # Session-scoped identity cache: experiment init fetches ``/users/me`` for
-        # the GrowthBook ``organizationId`` attribute, and the app's identity
-        # refresh needs the same data. Caching successes here lets the refresh
-        # reuse the experiment fetch instead of issuing a second round-trip.
+
+        self._await_experiment_model = await_experiment_model
         self.identity_cache = IdentityCache()
         self.tool_manager = ToolManager(
             lambda: self.config,
@@ -593,7 +593,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             ),
             tool_choice=self.format_handler.get_tool_choice,
             save=self._save_messages,
-            reset_session=self._reset_session,
             telemetry_client=self.telemetry_client,
             session_ids=lambda: (self.session_id, self.parent_session_id),
         )
@@ -633,6 +632,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             return True
         thread = self._deferred_init_thread
         return thread is not None and not thread.is_alive()
+
+    @property
+    def awaiting_experiment_model(self) -> bool:
+        if not self._await_experiment_model:
+            return False
+        task = self._experiments_task
+        return task is None or not task.done()
 
     def _complete_init(self) -> None:
         """Run deferred heavy I/O: MCP and connector discovery.
@@ -681,10 +687,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             layer = self.config_orchestrator.get_layer(GrowthbookLayer.NAME)
             if isinstance(layer, GrowthbookLayer):
                 layer.set_variants(self.experiment_manager.config_variants())
-
-    @property
-    def base_config(self) -> VibeConfigSchema:
-        return self._config_orchestrator.config
 
     @property
     def config(self) -> VibeConfigSchema:
@@ -822,7 +824,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def refresh_config(self) -> None:
         await self._config_orchestrator.reload()
-        self.agent_manager.invalidate_config()
         self._ensure_remote_registries()
         if self.mcp_registry is not None:
             self.mcp_registry.sync_active_servers(self.config.mcp_servers)
@@ -901,13 +902,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             launch_context=self.launch_context,
             resolve_identity=self.identity_cache.resolve,
         )
-        if updated:
+        if updated and self._await_experiment_model:
             with contextlib.suppress(Exception):
                 self._sync_growthbook_layer_variants()
                 await self.refresh_config()
                 await self.refresh_system_prompt()
 
-    async def hydrate_experiments_from_session(self) -> None:
+    async def hydrate_experiments_from_session(
+        self, *, refresh_prompt: bool = True
+    ) -> None:
         hydrated = await session_hydrate_experiments_from_session(
             config=self.config,
             manager=self.experiment_manager,
@@ -917,7 +920,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             with contextlib.suppress(Exception):
                 self._sync_growthbook_layer_variants()
                 await self.refresh_config()
-                await self.refresh_system_prompt()
+                if refresh_prompt:
+                    await self.refresh_system_prompt()
 
     def emit_new_session_telemetry(self) -> None:
         has_agents_md = has_agents_md_file(self.cwd)
@@ -959,10 +963,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         cleanup_scratchpad(self.scratchpad_dir)
 
     def _create_connector_registry(self) -> ConnectorRegistry | None:
-        if not self.base_config.enable_connectors:
+        # Runs during __init__ before agent_manager exists, so read the
+        # orchestrator config directly. Connector fields are profile-independent.
+        config = self._config_orchestrator.config
+        if not config.enable_connectors:
             return None
 
-        provider = self.base_config.get_mistral_provider()
+        provider = config.get_mistral_provider()
         if provider is None:
             return None
 
@@ -1084,7 +1091,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await self.session_logger.save_interaction(
             self.messages,
             self.stats,
-            self.base_config,
+            self.config,
             self.tool_manager,
             self.agent_profile,
             allow_empty=allow_empty,
@@ -1210,7 +1217,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 session_logger=self.session_logger,
                 vibe_code_sessions_base_url=self.config.vibe_code_sessions_base_url,
                 vibe_code_api_key=self.config.vibe_code_api_key,
-                vibe_config=self.base_config,
+                vibe_config=self.config,
                 workdir=self.cwd,
             )
         return self._teleport_service
@@ -1325,8 +1332,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         )
 
     def _teleport_context_messages(self, prompt: str | None) -> list[LLMMessage]:
-        excluded = None if prompt else self._last_user_message()
-        return [message for message in self.messages if message is not excluded]
+        messages = self._current_model_context()
+        excluded = None if prompt else self._last_user_message_from(messages)
+        return [message for message in messages if message is not excluded]
 
     async def _summarize_teleport_context(
         self, *, prompt: str | None, resolved_prompt: str
@@ -1369,7 +1377,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         )
 
     def _last_user_message(self) -> LLMMessage | None:
-        return AgentLoop._last_user_message_from(self.messages)
+        return AgentLoop._last_user_message_from(select_model_context(self.messages))
+
+    def _current_model_context(self) -> list[LLMMessage]:
+        return select_model_context(self.messages)
 
     @staticmethod
     def _last_user_message_from(messages: Sequence[LLMMessage]) -> LLMMessage | None:
@@ -1688,7 +1699,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         marker = skill_content_marker(name)
         return any(
             m.role == Role.tool and m.name == "skill" and marker in (m.content or "")
-            for m in self.messages
+            for m in self._current_model_context()
         )
 
     async def _inject_invoked_skill(
@@ -2383,6 +2394,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def _messages_for_backend(
         self, messages: Sequence[LLMMessage], active_model: ModelConfig
     ) -> Sequence[LLMMessage]:
+        messages = select_model_context(messages)
         if active_model.supports_images:
             return messages
         if not any(m.images for m in messages):
@@ -2398,7 +2410,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             return 0
         if active_model.supports_images:
             return 0
-        return sum(1 for m in self.messages if m.images)
+        return sum(1 for m in self._current_model_context() if m.images)
 
     async def _complete(
         self,
@@ -2419,15 +2431,20 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         """
         provider = self.config.get_provider_for_model(model)
         backend_metadata = self._build_backend_metadata(call_type)
+        backend_messages = self._messages_for_backend(messages, model)
 
         last_user_message = next(
-            (m for m in reversed(messages) if m.role == Role.user and not m.injected),
+            (
+                m
+                for m in reversed(backend_messages)
+                if m.role == Role.user and not m.injected
+            ),
             None,
         )
         self.telemetry_client.send_request_sent(
             model=model.alias,
-            nb_context_chars=sum(len(m.content or "") for m in messages),
-            nb_context_messages=len(messages),
+            nb_context_chars=sum(len(m.content or "") for m in backend_messages),
+            nb_context_messages=len(backend_messages),
             nb_prompt_chars=len(last_user_message.content or "")
             if last_user_message
             else 0,
@@ -2442,7 +2459,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             start_time = time.perf_counter()
             result = await self.backend.complete(
                 model=model,
-                messages=self._messages_for_backend(messages, model),
+                messages=backend_messages,
                 temperature=model.temperature,
                 tools=tools,
                 tool_choice=tool_choice,
@@ -2477,6 +2494,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 raise ContextTooLongError(provider.name, model.name) from e
             if _is_response_too_long_error(e):
                 raise ResponseTooLongError(provider.name, model.name) from e
+            if isinstance(e, BackendError) and e.is_invalid_model:
+                raise
             if _is_non_retryable_error(e):
                 raise
 
@@ -2511,12 +2530,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
         tool_choice = self.format_handler.get_tool_choice()
+        backend_messages = self._messages_for_backend(self.messages, active_model)
 
-        last_user_message = self._last_user_message()
+        last_user_message = self._last_user_message_from(backend_messages)
         self.telemetry_client.send_request_sent(
             model=active_model.alias,
-            nb_context_chars=sum(len(m.content or "") for m in self.messages),
-            nb_context_messages=len(self.messages),
+            nb_context_chars=sum(len(m.content or "") for m in backend_messages),
+            nb_context_messages=len(backend_messages),
             nb_prompt_chars=len(last_user_message.content or "")
             if last_user_message
             else 0,
@@ -2533,7 +2553,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             usage = LLMUsage()
             async for chunk in self.backend.complete_streaming(
                 model=active_model,
-                messages=self._messages_for_backend(self.messages, active_model),
+                messages=backend_messages,
                 temperature=active_model.temperature,
                 tools=available_tools,
                 tool_choice=tool_choice,
@@ -2558,7 +2578,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 yield processed_chunk
             end_time = time.perf_counter()
 
-            if chunk_agg is None or chunk_agg.usage is None:
+            if chunk_agg is None or (
+                provider.emits_finish_reason and chunk_agg.stop is None
+            ):
+                raise IncompleteStreamError(provider.name, active_model.name)
+            if chunk_agg.usage is None:
                 raise AgentLoopLLMResponseError(
                     "Usage data missing in final chunk of streamed completion"
                 )
@@ -2571,14 +2595,18 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         except Exception as e:
             if isinstance(e, RefusalError):
                 raise
-            if isinstance(e, BackendError):
+            if isinstance(e, BackendError | IncompleteStreamError):
                 self._record_interrupted_assistant(chunk_agg)
+            if isinstance(e, IncompleteStreamError):
+                raise
             if _should_raise_rate_limit_error(e):
                 raise RateLimitError(provider.name, active_model.name) from e
             if _is_context_too_long_error(e):
                 raise ContextTooLongError(provider.name, active_model.name) from e
             if _is_response_too_long_error(e):
                 raise ResponseTooLongError(provider.name, active_model.name) from e
+            if isinstance(e, BackendError) and e.is_invalid_model:
+                raise
             if _is_non_retryable_error(e):
                 raise
 
@@ -2686,7 +2714,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await self.session_logger.save_interaction(
             self.messages,
             self.stats,
-            self.base_config,
+            self.config,
             self.tool_manager,
             self.agent_profile,
         )
@@ -2711,8 +2739,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     @requires_init
     async def compact(self, extra_instructions: str = "") -> str:
-        # Summary generation + envelope + session reset live in the manager; the
-        # loop keeps the surrounding lifecycle (clean history, save, middleware).
+        # Summary generation and the context boundary live in the manager; the loop
+        # keeps the surrounding lifecycle (clean history, save, middleware).
         try:
             self._clean_message_history()
             await self._save_messages()
@@ -2784,7 +2812,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await self.session_logger.save_interaction(
             self.messages,
             self.stats,
-            self.base_config,
+            self.config,
             self.tool_manager,
             self.agent_profile,
         )
@@ -2793,15 +2821,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if generation != self._reload_generation:
             return
 
-        # Callers mutate the orchestrator (reload / set_field) before reinit; pick
-        # up whatever config it now holds.
-        self.agent_manager.invalidate_config()
         if max_turns is not None:
             self._max_turns = max_turns
         if max_price is not None:
             self._max_price = max_price
         self._ensure_remote_registries()
-        _ = self.config
 
         # Resolve the config the reloaded objects should reflect. For an agent switch
         # this is the target agent's config, computed without mutating the active

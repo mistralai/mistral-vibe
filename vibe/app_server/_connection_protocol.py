@@ -95,13 +95,5 @@ class ClientToolTerminalOutputResponse(ProtocolModel):
     truncated: bool
 
 
-class ServerCapabilities(ProtocolModel):
-    methods: list[str] = Field(default_factory=list)
-    callback_kinds: list[CallbackKind] = Field(default_factory=list)
-    transports: list[TransportKind] = Field(default_factory=list)
-
-
 class InitializeResponse(ProtocolModel):
     server_info: ServerInfo
-    protocol_version: Literal["1"] = "1"
-    capabilities: ServerCapabilities

@@ -37,7 +37,7 @@ async def test_fork_supports_implicit_target_set_field_on_forked_loop() -> None:
 
     agent = AgentLoop(
         orchestrator,
-        agent_name=BuiltinAgentName.DEFAULT,
+        agent_name=BuiltinAgentName.ASK,
         backend=FakeBackend(),
         mcp_registry=FakeMCPRegistry(),
     )
@@ -58,7 +58,7 @@ async def test_derived_runtime_inherits_experiment_state(derived_kind: str) -> N
     orchestrator = await _real_orchestrator()
     agent = AgentLoop(
         orchestrator,
-        agent_name=BuiltinAgentName.DEFAULT,
+        agent_name=BuiltinAgentName.ASK,
         backend=FakeBackend(),
         mcp_registry=FakeMCPRegistry(),
     )
@@ -96,7 +96,7 @@ async def test_child_hydrates_experiments_before_deferred_initialization(
     orchestrator = await _real_orchestrator()
     agent = AgentLoop(
         orchestrator,
-        agent_name=BuiltinAgentName.DEFAULT,
+        agent_name=BuiltinAgentName.ASK,
         backend=FakeBackend(),
         mcp_registry=FakeMCPRegistry(),
     )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import glob
 import os
+from pathlib import Path
 
 import pytest
 
@@ -33,6 +35,8 @@ from vibe.core.tools.permissions import (
     RequiredPermission,
     wildcard_match,
 )
+from vibe.core.tools.utils import DEFAULT_SENSITIVE_PATTERNS, matches_sensitive_pattern
+from vibe.utils import paths
 
 
 class TestBashGranularPermissions:
@@ -357,6 +361,36 @@ class TestReadGranularPermissions:
         result = tool.resolve_permission(ReadFileArgs(file_path="credentials.json"))
         assert isinstance(result, PermissionContext)
 
+    def test_sensitive_env_file_scopes_session_pattern_to_full_path(self):
+        # The session grant must be scoped to this file's full resolved path,
+        # not its bare name, otherwise approving one sensitive file covers a
+        # same-named file in another directory.
+        (self.workdir / ".env").touch()
+        tool = self._read()
+        result = tool.resolve_permission(ReadFileArgs(file_path=".env"))
+        assert isinstance(result, PermissionContext)
+        sensitive = [
+            rp
+            for rp in result.required_permissions
+            if rp.scope is PermissionScope.FILE_PATTERN
+        ]
+        assert len(sensitive) == 1
+        expected = str((self.workdir / ".env").resolve())
+        assert sensitive[0].invocation_pattern == expected
+        assert sensitive[0].session_pattern == glob.escape(expected)
+
+    def test_sensitive_case_insensitive_and_variants_flagged(self):
+        tool = self._read()
+        for name in [".ENV", ".Env", ".env~", ".envrc", ".env.LOCAL"]:
+            result = tool.resolve_permission(ReadFileArgs(file_path=name))
+            assert isinstance(result, PermissionContext), name
+            sensitive = [
+                rp
+                for rp in result.required_permissions
+                if rp.scope is PermissionScope.FILE_PATTERN
+            ]
+            assert len(sensitive) == 1, name
+
 
 class TestWriteFileGranularPermissions:
     @pytest.fixture(autouse=True)
@@ -436,6 +470,34 @@ class TestGrepGranularPermissions:
             if rp.scope is PermissionScope.FILE_PATTERN
         ]
         assert len(sensitive) == 1
+
+
+class TestSensitivePatternMatching:
+    @pytest.mark.parametrize(
+        "path", ["/wd/.ENV", "/wd/.Env", "/wd/.env", "/wd/sub/.env"]
+    )
+    def test_case_insensitive_match(self, path):
+        assert matches_sensitive_pattern(path, DEFAULT_SENSITIVE_PATTERNS)
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/wd/.env~",
+            "/wd/.envrc",
+            "/wd/.env.local",
+            "/wd/.env.PRODUCTION",
+            "/wd/.envrc.local",
+            "/wd/.envrc~",
+        ],
+    )
+    def test_variant_names_match(self, path):
+        assert matches_sensitive_pattern(path, DEFAULT_SENSITIVE_PATTERNS)
+
+    @pytest.mark.parametrize(
+        "path", ["/wd/main.py", "/wd/environment.txt", "/wd/readme.md"]
+    )
+    def test_non_sensitive_not_matched(self, path):
+        assert not matches_sensitive_pattern(path, DEFAULT_SENSITIVE_PATTERNS)
 
 
 class TestApprovalFlowSimulation:
@@ -559,21 +621,58 @@ class TestApprovalFlowSimulation:
         uncovered = [rp for rp in cmd_perms if not self._is_covered("bash", rp, rules)]
         assert len(uncovered) == 1
 
-    def test_read_sensitive_approved_covers_subsequent(self):
+    def test_read_sensitive_approved_covers_same_file(self):
+        env_path = str((Path.cwd() / ".env").resolve())
         rules = [
             ApprovedRule(
                 tool_name="read",
                 scope=PermissionScope.FILE_PATTERN,
-                session_pattern="*",
+                session_pattern=glob.escape(env_path),
             )
         ]
         rp = RequiredPermission(
             scope=PermissionScope.FILE_PATTERN,
-            invocation_pattern=".env.production",
-            session_pattern="*",
-            label="reading sensitive files (read)",
+            invocation_pattern=env_path,
+            session_pattern=glob.escape(env_path),
+            label="accessing sensitive files (read)",
         )
         assert self._is_covered("read", rp, rules)
+
+    def test_read_sensitive_approved_does_not_cover_other_sensitive(self):
+        env_path = str((Path.cwd() / ".env").resolve())
+        prod_path = str((Path.cwd() / ".env.production").resolve())
+        rules = [
+            ApprovedRule(
+                tool_name="read",
+                scope=PermissionScope.FILE_PATTERN,
+                session_pattern=glob.escape(env_path),
+            )
+        ]
+        rp = RequiredPermission(
+            scope=PermissionScope.FILE_PATTERN,
+            invocation_pattern=prod_path,
+            session_pattern=glob.escape(prod_path),
+            label="accessing sensitive files (read)",
+        )
+        assert not self._is_covered("read", rp, rules)
+
+    def test_read_sensitive_approved_does_not_cover_same_name_other_dir(self):
+        a_path = str((Path.cwd() / "service-a" / ".env").resolve())
+        b_path = str((Path.cwd() / "service-b" / ".env").resolve())
+        rules = [
+            ApprovedRule(
+                tool_name="read",
+                scope=PermissionScope.FILE_PATTERN,
+                session_pattern=glob.escape(a_path),
+            )
+        ]
+        rp = RequiredPermission(
+            scope=PermissionScope.FILE_PATTERN,
+            invocation_pattern=b_path,
+            session_pattern=glob.escape(b_path),
+            label="accessing sensitive files (read)",
+        )
+        assert not self._is_covered("read", rp, rules)
 
     def test_different_tool_rule_doesnt_cover(self):
         rules = [
@@ -821,6 +920,7 @@ class TestCollectOutsideDirs:
             return False
 
         monkeypatch.setattr(bash_module, "is_windows", lambda: True)
+        monkeypatch.setattr(paths, "is_windows", lambda: True)
         monkeypatch.setattr(bash_module, "is_path_within_workdir", is_within_workdir)
 
         dirs = _collect_outside_dirs(["cat /c/Users/victim/secret.txt"])

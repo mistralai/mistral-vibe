@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 import errno
-from typing import Final, cast
+import time
+from typing import Final
 import urllib.parse
 
 import anyio.to_thread
@@ -35,6 +36,7 @@ _MIN_REQUEST_LINE_PARTS: Final = 2
 _HEADER_TERMINATORS: Final = frozenset({b"\r\n", b"\n", b""})
 # OAuth 2.0 token-endpoint error signalling a permanently dead refresh token.
 _OAUTH_INVALID_GRANT: Final = "invalid_grant"
+_EXPIRED_TOKEN_TIME: Final = -1.0
 
 
 class MCPOAuthError(Exception):
@@ -189,6 +191,27 @@ class Fingerprint(BaseModel):
         await _kr_delete(_kr_username(alias, "fingerprint"))
 
 
+class StoredOAuthTokens(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    access_token: str
+    token_type: str = "Bearer"
+    expires_in: int | None = None
+    scope: str | None = None
+    refresh_token: str | None = None
+    expires_at: float | None = None
+
+    @classmethod
+    def from_token(cls, token: OAuthToken) -> StoredOAuthTokens:
+        expires_at = (
+            time.time() + token.expires_in if token.expires_in is not None else None
+        )
+        return cls(**token.model_dump(), expires_at=expires_at)
+
+    def to_token(self) -> OAuthToken:
+        return OAuthToken.model_validate(self.model_dump(exclude={"expires_at"}))
+
+
 class KeyringTokenStorage(TokenStorage):
     def __init__(
         self,
@@ -204,18 +227,27 @@ class KeyringTokenStorage(TokenStorage):
             raise MCPOAuthHeadlessError(server_alias=alias)
         self._alias = alias
         self._fallback_client_info = fallback_client_info
+        self.token_expiry_time: float | None = None
 
     async def get_tokens(self) -> OAuthToken | None:
         raw = await _kr_get(_kr_username(self._alias, "tokens"))
         if raw is None:
+            self.token_expiry_time = None
             return None
-        return OAuthToken.model_validate_json(raw)
+        stored = StoredOAuthTokens.model_validate_json(raw)
+        self.token_expiry_time = stored.expires_at
+        if stored.expires_at is None and stored.expires_in is not None:
+            self.token_expiry_time = _EXPIRED_TOKEN_TIME
+        return stored.to_token()
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
-        await _kr_set(_kr_username(self._alias, "tokens"), tokens.model_dump_json())
+        stored = StoredOAuthTokens.from_token(tokens)
+        self.token_expiry_time = stored.expires_at
+        await _kr_set(_kr_username(self._alias, "tokens"), stored.model_dump_json())
 
     async def delete_tokens(self) -> None:
         await _kr_delete(_kr_username(self._alias, "tokens"))
+        self.token_expiry_time = None
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         raw = await _kr_get(_kr_username(self._alias, "client_info"))
@@ -491,7 +523,7 @@ class RefreshAwareOAuthClientProvider(OAuthClientProvider):
         self,
         server_url: str,
         client_metadata: OAuthClientMetadata,
-        storage: TokenStorage,
+        storage: KeyringTokenStorage,
         *,
         server_alias: str,
         redirect_handler: Callable[[str], Awaitable[None]] | None = None,
@@ -507,17 +539,41 @@ class RefreshAwareOAuthClientProvider(OAuthClientProvider):
             client_metadata_url=client_metadata_url,
         )
         self._server_alias = server_alias
+        self._storage = storage
+
+    async def _initialize(self) -> None:
+        await super()._initialize()
+        self.context.token_expiry_time = self._storage.token_expiry_time
 
     async def _handle_refresh_response(self, response: httpx.Response) -> bool:
+        """Two corrections over the base class implementation:
+        1. Only clear stored tokens on a genuine invalid_grant error.
+        2. Preserve the previous refresh_token if the server did not return one.
+        """
         if response.status_code == httpx.codes.OK:
-            return await super()._handle_refresh_response(response)
+            previous_refresh_token = (
+                self.context.current_tokens.refresh_token
+                if self.context.current_tokens
+                else None
+            )
+            refreshed = await super()._handle_refresh_response(response)
+            tokens = self.context.current_tokens
+            if (
+                not refreshed
+                or tokens is None
+                or tokens.refresh_token is not None
+                or previous_refresh_token is None
+            ):
+                return refreshed
+            tokens = tokens.model_copy(update={"refresh_token": previous_refresh_token})
+            self.context.current_tokens = tokens
+            await self.context.storage.set_tokens(tokens)
+            return True
         reason, is_invalid_grant = await _classify_refresh_error(response)
         if is_invalid_grant:
             self.context.clear_tokens()
-            # storage is always KeyringTokenStorage (see build_oauth_provider)
-            storage = cast(KeyringTokenStorage, self.context.storage)
-            await storage.delete_tokens()
-            await storage.delete_client_info()
+            await self._storage.delete_tokens()
+            await self._storage.delete_client_info()
             raise MCPOAuthInvalidGrant(server_alias=self._server_alias, reason=reason)
         raise MCPOAuthTransientRefreshError(
             server_alias=self._server_alias, reason=reason

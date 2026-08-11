@@ -14,7 +14,7 @@ from tests.conftest import (
     build_test_vibe_config,
 )
 from tests.mock.utils import mock_llm_chunk
-from tests.stubs.fake_backend import FakeInterruptedStreamingBackend
+from tests.stubs.fake_backend import FakeBackend, FakeInterruptedStreamingBackend
 from vibe.app_server.events import CallbackRequested
 from vibe.app_server.models import (
     ApprovalCallbackDetail,
@@ -39,6 +39,7 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import WorkspaceTrustStatusResponse
 from vibe.app_server.session import AppServerTurnError
+from vibe.cli.commands import build_retry_prompt
 from vibe.cli.textual_ui import startup
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
@@ -343,7 +344,7 @@ async def test_workspace_trust_round_trips_through_app_server(
     monkeypatch.setattr(
         TrustFolderApp, "run_trust_dialog_async", AsyncMock(return_value="trust_cwd")
     )
-    assert await startup._resolve_workspace_trust(host)
+    assert await startup._resolve_workspace_trust(host) == (True, True)
 
     host.trust_status.assert_awaited_once_with("/workspace")
     host.decide_trust.assert_awaited_once_with("trust_cwd", cwd="/workspace")
@@ -412,6 +413,203 @@ def test_internal_error_message_does_not_hint_at_retry() -> None:
     )
 
     assert "/retry" not in message
+
+
+@pytest.mark.asyncio
+async def test_incomplete_stream_retries_and_reuses_assistant_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = MagicMock()
+    monkeypatch.setattr("vibe.cli.textual_ui.app.capture_sentry_exception", capture)
+    backend = FakeBackend([
+        [mock_llm_chunk(content="Ran three dummy read-only", stop_reason=None)],
+        [mock_llm_chunk(content=" tool calls successfully.")],
+    ])
+    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        chat_input = app.query_one(ChatInputContainer)
+        chat_input.post_message(ChatInputContainer.Submitted("hi"))
+        await _wait_until(pilot, lambda: len(backend.requests_messages) == 2)
+        await _wait_until(pilot, lambda: not app._agent_job_active())
+
+        assert len(app.query(AssistantMessage)) == 1
+        assert (
+            app.query_one(AssistantMessage).get_content()
+            == "Ran three dummy read-only tool calls successfully."
+        )
+        assert len(app.query(ErrorMessage)) == 0
+        assert len(app.query(SlashCommandMessage)) == 0
+
+    # A recovered retry is a transient blip; it must not reach Sentry.
+    assert capture.call_count == 0
+
+    retry_message = backend.requests_messages[-1][-1]
+    assert retry_message.injected is True
+    assert retry_message.content == build_retry_prompt("")
+
+
+@pytest.mark.asyncio
+async def test_incomplete_stream_hides_error_while_retrying() -> None:
+    gate = asyncio.Event()
+
+    class GatedRecoveryBackend(FakeBackend):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.calls = 0
+            self.second_started = asyncio.Event()
+
+        async def complete_streaming(self, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                self.second_started.set()
+                await gate.wait()
+            async for chunk in super().complete_streaming(**kwargs):
+                yield chunk
+
+    backend = GatedRecoveryBackend([
+        [mock_llm_chunk(content="partial", stop_reason=None)],
+        [mock_llm_chunk(content=" recovered.")],
+    ])
+    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        chat_input = app.query_one(ChatInputContainer)
+        chat_input.post_message(ChatInputContainer.Submitted("hi"))
+
+        # Wait until the automatic retry is in flight, then confirm no error is
+        # surfaced while we are still retrying and that the loader says so.
+        await _wait_until(pilot, backend.second_started.is_set)
+        assert len(app.query(ErrorMessage)) == 0
+        assert app._loading_widget is not None
+        assert app._loading_widget._base_status == "Retrying"
+
+        gate.set()
+        await _wait_until(pilot, lambda: not app._agent_job_active())
+
+        assert len(app.query(ErrorMessage)) == 0
+        assert len(app.query(SlashCommandMessage)) == 0
+        assert app.query_one(AssistantMessage).get_content() == "partial recovered."
+
+
+@pytest.mark.asyncio
+async def test_empty_incomplete_stream_retries_original_request() -> None:
+    backend = FakeBackend([[], [mock_llm_chunk(content="Recovered")]])
+    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        chat_input = app.query_one(ChatInputContainer)
+        chat_input.post_message(ChatInputContainer.Submitted("hi"))
+        await _wait_until(pilot, lambda: len(backend.requests_messages) == 2)
+        await _wait_until(pilot, lambda: not app._agent_job_active())
+
+        assert [message.get_content() for message in app.query(AssistantMessage)] == [
+            "Recovered"
+        ]
+        assert len(app.query(ErrorMessage)) == 0
+
+    assert all(
+        message.role is not Role.assistant for message in backend.requests_messages[-1]
+    )
+
+
+@pytest.mark.asyncio
+async def test_incomplete_stream_stops_after_two_automatic_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = MagicMock()
+    monkeypatch.setattr("vibe.cli.textual_ui.app.capture_sentry_exception", capture)
+    backend = FakeBackend([
+        [mock_llm_chunk(content="first", stop_reason=None)],
+        [mock_llm_chunk(content=" second", stop_reason=None)],
+        [mock_llm_chunk(content=" third", stop_reason=None)],
+    ])
+    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        chat_input = app.query_one(ChatInputContainer)
+        chat_input.post_message(ChatInputContainer.Submitted("hi"))
+        await _wait_until(pilot, lambda: len(backend.requests_messages) == 3)
+        await _wait_until(pilot, lambda: not app._agent_job_active())
+        await pilot.pause(0.1)
+
+        assert len(backend.requests_messages) == 3
+        assert len(app.query(ErrorMessage)) == 1
+        assert "/retry" in str(app.query_one(ErrorMessage)._error)
+
+    # The silent retries stay out of Sentry, but the exhausted case -- a
+    # persistent regression -- must still be reported exactly once.
+    assert capture.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_retry_does_not_drop_a_queued_prompt() -> None:
+    # A turn started by the queue drain that auto-retries an incomplete stream
+    # must not let the drain resume and start the next queued prompt
+    # concurrently -- that would collide ("A turn is already running") and drop
+    # the queued prompt. Gate turns 0 and 1 so the second prompt is queued only
+    # once the drained turn is already in flight (otherwise the drain batches
+    # both prompts into a single turn).
+    class GatedBackend(FakeBackend):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.calls = 0
+            self.started = [asyncio.Event() for _ in range(4)]
+            self.release = {0: asyncio.Event(), 1: asyncio.Event()}
+
+        async def complete_streaming(self, **kwargs):
+            idx = self.calls
+            self.calls += 1
+            self.started[idx].set()
+            if idx in self.release:
+                await self.release[idx].wait()
+            async for chunk in super().complete_streaming(**kwargs):
+                yield chunk
+
+    backend = GatedBackend([
+        [mock_llm_chunk(content="t0 done")],
+        [mock_llm_chunk(content="t1 partial", stop_reason=None)],
+        [mock_llm_chunk(content=" t1 done")],
+        [mock_llm_chunk(content="t2 done")],
+    ])
+    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        chat_input = app.query_one(ChatInputContainer)
+
+        # Turn 0 runs directly and blocks; queue t1 behind it.
+        chat_input.post_message(ChatInputContainer.Submitted("t0"))
+        await _wait_until(pilot, backend.started[0].is_set)
+        chat_input.post_message(ChatInputContainer.Submitted("t1"))
+        await _wait_until(pilot, lambda: len(app._input_queue) == 1)
+
+        # Release t0 -> drain starts t1 (alone). Once t1 is in flight, queue t2.
+        backend.release[0].set()
+        await _wait_until(pilot, backend.started[1].is_set)
+        chat_input.post_message(ChatInputContainer.Submitted("t2"))
+        await _wait_until(pilot, lambda: len(app._input_queue) == 1)
+
+        # Let t1 fail (incomplete) and auto-retry, then drain t2.
+        backend.release[1].set()
+        await _wait_until(pilot, lambda: len(backend.requests_messages) == 4)
+        await _wait_until(
+            pilot, lambda: not app._agent_job_active() and len(app._input_queue) == 0
+        )
+
+        # t2 survived the auto-retry and ran to completion; nothing collided.
+        contents = " ".join(m.get_content() for m in app.query(AssistantMessage))
+        assert "t2 done" in contents
+        assert len(app.query(ErrorMessage)) == 0
 
 
 @pytest.mark.asyncio

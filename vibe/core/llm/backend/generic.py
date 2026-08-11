@@ -16,7 +16,10 @@ from vibe.core.llm.backend.base import (
     build_chat_payload,
     finalize_chat_request,
 )
-from vibe.core.llm.backend.openai_responses import OpenAIResponsesAdapter
+from vibe.core.llm.backend.openai_responses import (
+    OpenAIResponsesAdapter,
+    OpenAIResponsesStreamError,
+)
 from vibe.core.llm.backend.reasoning_adapter import ReasoningAdapter
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.tracing import (
@@ -31,6 +34,7 @@ from vibe.core.types import (
     LLMMessage,
     LLMUsage,
     Role,
+    StopInfo,
     StrToolChoice,
 )
 from vibe.core.utils import RetryObserver, async_generator_retry, async_retry
@@ -89,7 +93,7 @@ class OpenAIAdapter(APIAdapter):
                         exclude={
                             "message_id": True,
                             "reasoning_message_id": True,
-                            "reasoning_state": True,
+                            "reasoning_payloads": True,
                             "injected": True,
                             "images": True,
                             "tool_result": True,
@@ -97,6 +101,7 @@ class OpenAIAdapter(APIAdapter):
                             "input_text": True,
                             "resources": True,
                             "manual_shell": True,
+                            "context_boundary": True,
                             "tool_calls": {"__all__": {"presentation"}},
                         },
                     ),
@@ -185,14 +190,29 @@ class OpenAIAdapter(APIAdapter):
             completion_tokens=usage_data.get("completion_tokens", 0),
             cached_tokens=prompt_details.get("cached_tokens", 0),
         )
+        choices = data.get("choices") or []
+        finish_reason = choices[0].get("finish_reason") if choices else None
+        stop = (
+            StopInfo(reason=str(finish_reason)) if finish_reason is not None else None
+        )
 
-        return LLMChunk(message=message, usage=usage)
+        return LLMChunk(message=message, usage=usage, stop=stop)
 
 
-_ADAPTERS: dict[str, APIAdapter] = {
-    "openai": OpenAIAdapter(),
-    "anthropic": AnthropicAdapter(),
-    "reasoning": ReasoningAdapter(),
+def _vertex_anthropic_adapter() -> APIAdapter:
+    # Imported on use because the Vertex adapter pulls in google.auth, which is
+    # heavy enough to be noticeable at CLI startup.
+    from vibe.core.llm.backend.vertex import VertexAnthropicAdapter
+
+    return VertexAnthropicAdapter()
+
+
+_ADAPTERS: dict[str, Callable[[], APIAdapter]] = {
+    "openai": OpenAIAdapter,
+    "reasoning": ReasoningAdapter,
+    "anthropic": AnthropicAdapter,
+    "openai-responses": OpenAIResponsesAdapter,
+    "vertex-anthropic": _vertex_anthropic_adapter,
 }
 
 
@@ -209,17 +229,13 @@ def _reports_usage(response_data: dict[str, Any]) -> bool:
 
 
 def _get_adapter(api_style: str) -> APIAdapter:
-    """Load the adapter for the given API style."""
-    if api_style == "openai-responses":
-        return OpenAIResponsesAdapter()
-    if api_style not in _ADAPTERS:
-        if api_style == "vertex-anthropic":
-            from vibe.core.llm.backend.vertex import VertexAnthropicAdapter
+    """Build the adapter for the given API style.
 
-            _ADAPTERS["vertex-anthropic"] = VertexAnthropicAdapter()
-        else:
-            raise KeyError(api_style)
-    return _ADAPTERS[api_style]
+    Adapters are built per request: several of them buffer state while parsing a
+    streamed response, and a shared instance would let concurrent sessions observe
+    each other's partial state.
+    """
+    return _ADAPTERS[api_style]()
 
 
 class GenericBackend:
@@ -429,6 +445,19 @@ class GenericBackend:
                         has_usage = True
                         usage += chunk.usage
                     yield chunk
+            except OpenAIResponsesStreamError as e:
+                raise BackendErrorBuilder.build_stream_error(
+                    provider=self._provider.name,
+                    endpoint=url,
+                    status=e.status,
+                    error_type=e.error_type,
+                    error_message=e.message,
+                    model=model.name,
+                    messages=messages,
+                    temperature=temperature,
+                    has_tools=bool(tools),
+                    tool_choice=tool_choice,
+                ) from e
             except httpx.HTTPStatusError as e:
                 set_model_call_http_status(span, e.response.status_code)
                 raise BackendErrorBuilder.build_http_error(

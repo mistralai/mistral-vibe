@@ -109,7 +109,7 @@ def parse_arguments() -> argparse.Namespace:
         "--agent",
         metavar="NAME",
         default=None,
-        help="Agent to use (builtin: default, plan, accept-edits, auto-approve, "
+        help="Agent to use (builtin: ask, plan, accept-edits, auto-approve, "
         "or custom from ~/.vibe/agents/NAME.toml). Defaults to the "
         "'default_agent' config setting in both interactive and programmatic "
         "(-p/--prompt) mode.",
@@ -134,10 +134,15 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--worktree",
+        nargs="?",
+        const=True,
+        default=None,
         metavar="NAME",
-        help="Create (or reuse) a git worktree under $VIBE_HOME/worktrees on "
-        "a branch named NAME and run inside it. Implicitly trusted for the "
-        "session. Ignored with --setup and --check-upgrade.",
+        help="Run inside a git worktree under $VIBE_HOME/worktrees. With NAME, "
+        "create (or reuse) a worktree and branch named NAME. Without NAME, "
+        "create a new one named after the prompt (or a random slug) on a "
+        "vibe/<name> branch. Implicitly trusted for the session. Ignored with "
+        "--setup and --check-upgrade.",
     )
     parser.add_argument(
         "--add-dir",
@@ -255,6 +260,29 @@ def _cleanup_worktree_on_exit(worktree: PreparedWorktree) -> None:
         rprint(f"[dim]Kept branch: {worktree.branch}[/]", file=sys.stderr)
 
 
+def _suggest_worktree_name(prompt: str | None) -> str | None:
+    # Bare `vibe --worktree` has nothing to name from, so skip the dotenv read
+    # and the event loop rather than spinning both up to be told None.
+    if not prompt:
+        return None
+
+    import asyncio
+
+    from vibe.core.config.harness_files import init_harness_files_manager
+    from vibe.core.config.vibe_schema import load_dotenv_values
+    from vibe.core.worktree_naming_model import suggest_worktree_name
+
+    # Worktrees are prepared before run_cli, so neither of the things the
+    # suggestion needs has happened yet. ~/.vibe/.env is not in os.environ, so a
+    # key that lives only there would read as absent; and loading config
+    # resolves prompts through the global harness manager, which is not
+    # initialised until later in main(). Both calls are idempotent -- the second
+    # init with these same sources returns without replacing the singleton.
+    load_dotenv_values()
+    init_harness_files_manager("user", "project")
+    return asyncio.run(suggest_worktree_name(prompt, cwd=Path.cwd()))
+
+
 def main() -> None:
     from vibe.core.utils.windows_asyncio import (
         silence_proactor_transport_teardown_warnings,
@@ -291,11 +319,24 @@ def main() -> None:
     # Must run before `cwd` is read and before run_cli so that session lookups
     # (-c / --resume picker) scope to the worktree directory.
     if args.worktree and not (args.setup or args.check_upgrade):
-        from vibe.core.worktree import WorktreeError, prepare_worktree_session
+        from vibe.core.worktree import (
+            WorktreeError,
+            prepare_auto_worktree_session,
+            prepare_worktree_session,
+        )
 
-        rprint(f"[dim]Preparing worktree {args.worktree!r}...[/]", file=sys.stderr)
+        requested = "" if args.worktree is True else f" {args.worktree!r}"
+        rprint(f"[dim]Preparing worktree{requested}...[/]", file=sys.stderr)
         try:
-            worktree_session = prepare_worktree_session(args.worktree, Path.cwd())
+            if args.worktree is True:
+                prompt = args.prompt or args.initial_prompt
+                worktree_session = prepare_auto_worktree_session(
+                    Path.cwd(),
+                    prompt=prompt,
+                    suggested_name=_suggest_worktree_name(prompt),
+                )
+            else:
+                worktree_session = prepare_worktree_session(args.worktree, Path.cwd())
         except WorktreeError as e:
             rprint(f"[red]Error: {e}[/]")
             sys.exit(1)

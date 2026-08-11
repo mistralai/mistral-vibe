@@ -277,7 +277,9 @@ class TurnErrorCode(StrEnum):
     INVALID_IMAGE_ATTACHMENT = auto()
     IMAGES_NOT_SUPPORTED = auto()
     COMPACTION_FAILED = auto()
+    INCOMPLETE_STREAM = auto()
     BACKEND_ERROR = auto()
+    INVALID_MODEL = auto()
     INTERNAL_ERROR = auto()
 
 
@@ -891,9 +893,16 @@ class PublicSessionState(ProtocolModel):
     format: Literal["vibe.public-session-state/v1"] = "vibe.public-session-state/v1"
     event_id: int = Field(ge=0, strict=True)
     session: PublicSession
-    history: PublicHistoryPage
-    active_callbacks: list[PublicCallbackEntry]
-    latest_turn: PublicTurn | None
+    history: list[PublicHistoryEntry] | None = None
+    history_before_cursor: str | None = None
+    turns: list[PublicTurn] | None = None
+    active_callbacks: list[PublicCallbackEntry] = Field(default_factory=list)
+
+    @property
+    def latest_turn(self) -> PublicTurn | None:
+        if not self.turns:
+            return None
+        return self.turns[-1]
 
 
 class JsonPatchOperation(ProtocolModel):

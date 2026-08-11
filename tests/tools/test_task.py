@@ -56,7 +56,7 @@ class TestTaskToolValidation:
     async def test_rejects_primary_agent(
         self, task_tool: Task, ctx: InvokeContext
     ) -> None:
-        args = TaskArgs(task="do something", agent="default")
+        args = TaskArgs(task="do something", agent="ask")
 
         with pytest.raises(ToolError) as exc_info:
             await collect_result(task_tool.run(args, ctx))

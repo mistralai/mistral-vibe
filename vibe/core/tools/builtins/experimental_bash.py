@@ -45,7 +45,7 @@ from vibe.core.tools.permissions import (
     RequiredPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import is_path_within_workdir
+from vibe.core.tools.utils import ToolPath, is_path_within_workdir, resolve_tool_path
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows
 from vibe.utils.io import decode_safe
@@ -326,7 +326,6 @@ _MUTATING_PATH_COMMANDS = {"cd", "chmod", "chown", "cp", "mkdir", "mv", "rm", "t
 _PATH_COMMANDS = _MUTATING_PATH_COMMANDS | set(_READ_ONLY_COMMANDS_POSIX)
 
 _FIND_EXECUTION_PREDICATES = {"-exec", "-execdir", "-ok", "-okdir"}
-_MSYS_DRIVE_PATH_PREFIX_LEN = 2
 
 
 def _split_command_tokens(
@@ -351,24 +350,6 @@ def _looks_like_path(token: str) -> bool:
         or "/" in token
         or "\\" in token
     )
-
-
-def _normalize_bash_path_token(token: str) -> str:
-    if not is_windows() or not token.startswith("/"):
-        return token
-    if len(token) < _MSYS_DRIVE_PATH_PREFIX_LEN:
-        return token
-
-    drive = token[1]
-    if not drive.isascii() or not drive.isalpha():
-        return token
-    if len(token) > _MSYS_DRIVE_PATH_PREFIX_LEN and token[
-        _MSYS_DRIVE_PATH_PREFIX_LEN
-    ] not in {"/", "\\"}:
-        return token
-
-    suffix = token[_MSYS_DRIVE_PATH_PREFIX_LEN:].replace("\\", "/")
-    return f"{drive.upper()}:{suffix or '/'}"
 
 
 def _collect_outside_dirs(
@@ -404,19 +385,7 @@ def _collect_outside_dirs(
             if not _looks_like_path(token):
                 continue
 
-            path_token = _normalize_bash_path_token(token)
-            if path_token != token:
-                if is_path_within_workdir(
-                    path_token, cwd=cwd, project_roots=project_roots
-                ):
-                    continue
-                if is_scratchpad_path(path_token, scratchpad_dir=scratchpad_dir):
-                    continue
-
-            resolved = Path(path_token).expanduser()
-            if not resolved.is_absolute():
-                resolved = command_cwd / resolved
-            resolved = resolved.resolve()
+            resolved = resolve_tool_path(token, command_cwd)
 
             if is_path_within_workdir(
                 str(resolved), cwd=cwd, project_roots=project_roots
@@ -1241,7 +1210,9 @@ class ExperimentalBashArgs(BaseModel):
         default=False,
         description="Kill the process group when timeout_seconds expires.",
     )
-    cwd: str | None = Field(default=None, description="Working directory override.")
+    cwd: ToolPath | None = Field(
+        default=None, description="Working directory override."
+    )
     env: dict[str, str] | None = Field(
         default=None, description="Environment variable overrides."
     )
@@ -1571,7 +1542,7 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         ):
             return guardrail_permission
 
-        command_cwd = Path(cwd).expanduser().resolve() if cwd is not None else self.cwd
+        command_cwd = resolve_tool_path(cwd, self.cwd)
         outside_dirs = _collect_outside_dirs(
             command_parts,
             command_cwd=command_cwd,
@@ -1715,7 +1686,7 @@ class ExperimentalBash(
         timeout = self._resolve_timeout(requested_timeout)
         max_bytes = self.config.max_output_bytes
         try:
-            cwd = Path(args.cwd).expanduser().resolve() if args.cwd else self.cwd
+            cwd = resolve_tool_path(args.cwd, self.cwd)
             manager = self._session_manager()
             shell = manager.resolve_shell(args.shell, self.config.shell)
             session = await asyncio.to_thread(

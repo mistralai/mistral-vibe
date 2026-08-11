@@ -60,21 +60,22 @@ class TestMapperPrepareMessages:
         content = converted[0]["content"]
         assert any(b.get("type") == "text" and b.get("text") == "Sure" for b in content)
 
-    def test_assistant_with_reasoning_content_and_signature(self, mapper):
+    def test_assistant_with_reasoning_block(self, mapper):
+        block = {"type": "thinking", "thinking": "hmm", "signature": "sig"}
         messages = [
             LLMMessage(
                 role=Role.assistant,
                 content="Answer",
                 reasoning_content="hmm",
-                reasoning_signature="sig",
+                reasoning_payloads=[block],
             )
         ]
         _, converted = mapper.prepare_messages(messages)
         content = converted[0]["content"]
-        assert content[0] == {"type": "thinking", "thinking": "hmm", "signature": "sig"}
+        assert content[0] == block
         assert content[1]["type"] == "text"
 
-    def test_unsigned_reasoning_content_dropped(self, mapper):
+    def test_reasoning_content_alone_is_not_replayed(self, mapper):
         messages = [
             LLMMessage(
                 role=Role.assistant, content="Answer", reasoning_content="thinking..."
@@ -82,14 +83,13 @@ class TestMapperPrepareMessages:
         ]
         _, converted = mapper.prepare_messages(messages)
         content = converted[0]["content"]
-        assert all(b.get("type") != "thinking" for b in content)
         assert content == [{"type": "text", "text": "Answer"}]
 
-    def test_unsigned_reasoning_with_tool_calls_keeps_tool_use(self, mapper):
+    def test_reasoning_content_alone_with_tool_calls_keeps_tool_use(self, mapper):
         messages = [
             LLMMessage(
                 role=Role.assistant,
-                reasoning_content="unsigned thinking",
+                reasoning_content="display only",
                 tool_calls=[
                     ToolCall(
                         id="tc_1",
@@ -101,8 +101,46 @@ class TestMapperPrepareMessages:
         ]
         _, converted = mapper.prepare_messages(messages)
         content = converted[0]["content"]
-        assert all(b.get("type") != "thinking" for b in content)
         assert [b["type"] for b in content] == ["tool_use"]
+
+    def test_reasoning_blocks_replayed_verbatim_in_order(self, mapper):
+        blocks = [
+            {"type": "thinking", "thinking": "first", "signature": "sig_1"},
+            {"type": "redacted_thinking", "data": "xyz"},
+            {"type": "thinking", "thinking": "", "signature": "sig_2"},
+        ]
+        messages = [
+            LLMMessage(
+                role=Role.assistant,
+                content="Answer",
+                reasoning_content="first",
+                reasoning_payloads=blocks,
+                tool_calls=[
+                    ToolCall(
+                        id="tc_1",
+                        index=0,
+                        function=FunctionCall(name="search", arguments="{}"),
+                    )
+                ],
+            )
+        ]
+        _, converted = mapper.prepare_messages(messages)
+        content = converted[0]["content"]
+        assert content[:3] == blocks
+        assert [b["type"] for b in content[3:]] == ["text", "tool_use"]
+
+    def test_reasoning_payloads_from_another_backend_is_dropped(self, mapper):
+        messages = [
+            LLMMessage(
+                role=Role.assistant,
+                content="Answer",
+                reasoning_payloads=[
+                    {"type": "reasoning", "encrypted_content": "enc:abc"}
+                ],
+            )
+        ]
+        _, converted = mapper.prepare_messages(messages)
+        assert converted[0]["content"] == [{"type": "text", "text": "Answer"}]
 
     def test_has_thinking_content_ignores_unsigned(self, adapter):
         messages = [
@@ -219,7 +257,9 @@ class TestMapperParseResponse:
         chunk = mapper.parse_response(data)
         assert chunk.message.content == "Answer"
         assert chunk.message.reasoning_content == "hmm"
-        assert chunk.message.reasoning_signature == "sig"
+        assert chunk.message.reasoning_payloads == [
+            {"type": "thinking", "thinking": "hmm", "signature": "sig"}
+        ]
 
     def test_redacted_thinking(self, mapper):
         data = {
@@ -232,6 +272,26 @@ class TestMapperParseResponse:
         chunk = mapper.parse_response(data)
         assert chunk.message.content == "Answer"
         assert chunk.message.reasoning_content is None
+        assert chunk.message.reasoning_payloads == [
+            {"type": "redacted_thinking", "data": "xyz"}
+        ]
+
+    def test_each_reasoning_block_kept_separately(self, mapper):
+        data = {
+            "content": [
+                {"type": "thinking", "thinking": "first", "signature": "sig_1"},
+                {"type": "redacted_thinking", "data": "xyz"},
+                {"type": "thinking", "thinking": "second", "signature": "sig_2"},
+                {"type": "text", "text": "Answer"},
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+        chunk = mapper.parse_response(data)
+        assert chunk.message.reasoning_payloads == [
+            {"type": "thinking", "thinking": "first", "signature": "sig_1"},
+            {"type": "redacted_thinking", "data": "xyz"},
+            {"type": "thinking", "thinking": "second", "signature": "sig_2"},
+        ]
 
     def test_tool_use(self, mapper):
         data = {
@@ -429,7 +489,9 @@ class TestAdapterPrepareRequest:
                 role=Role.assistant,
                 content="Answer",
                 reasoning_content="thinking...",
-                reasoning_signature="sig",
+                reasoning_payloads=[
+                    {"type": "thinking", "thinking": "thinking...", "signature": "sig"}
+                ],
             ),
             LLMMessage(role=Role.user, content="Follow up"),
         ]
@@ -573,6 +635,60 @@ class TestAdapterParseResponse:
         chunk = adapter.parse_response(data, provider)
         assert chunk.message.role == Role.assistant
         assert chunk.message.content is None
+
+    def test_streamed_reasoning_blocks_round_trip(self, adapter, provider, mapper):
+        events = [
+            {"type": "message_start", "message": {"usage": {"input_tokens": 1}}},
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "Let me "},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "check."},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "signature_delta", "signature": "sig_1"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "redacted_thinking", "data": "xyz"},
+            },
+            {"type": "content_block_stop", "index": 1},
+            {
+                "type": "content_block_start",
+                "index": 2,
+                "content_block": {"type": "tool_use", "id": "tc_1", "name": "search"},
+            },
+            {"type": "content_block_stop", "index": 2},
+        ]
+
+        accumulated = adapter.parse_response(events[0], provider).message
+        for event in events[1:]:
+            accumulated = accumulated + adapter.parse_response(event, provider).message
+
+        assert accumulated.reasoning_content == "Let me check."
+        assert accumulated.reasoning_payloads == [
+            {"type": "thinking", "thinking": "Let me check.", "signature": "sig_1"},
+            {"type": "redacted_thinking", "data": "xyz"},
+        ]
+
+        _, converted = mapper.prepare_messages([accumulated])
+        assert converted[0]["content"][:2] == [
+            {"type": "thinking", "thinking": "Let me check.", "signature": "sig_1"},
+            {"type": "redacted_thinking", "data": "xyz"},
+        ]
 
     def test_cache_control_last_user_message(self, adapter):
         messages = [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}]

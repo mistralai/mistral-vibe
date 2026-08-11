@@ -384,6 +384,124 @@ provider = "mistral"
 
 
 @pytest.mark.asyncio
+async def test_migrate_config_layers_renames_default_agent_to_ask(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text(
+        'default_agent = "default"\n'
+        'enabled_agents = ["default", "plan"]\n'
+        'disabled_agents = ["default"]\n'
+        'installed_agents = ["default", "lean"]\n'
+    )
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["default_agent"] == "ask"
+    assert persisted["enabled_agents"] == ["ask", "plan"]
+    assert persisted["disabled_agents"] == ["ask"]
+    assert persisted["installed_agents"] == ["ask", "lean"]
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_pins_default_agent_when_accept_edits_excluded_by_enabled(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('enabled_agents = ["default", "plan"]\n')
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["default_agent"] == "ask"
+    assert persisted["enabled_agents"] == ["ask", "plan"]
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_pins_default_agent_when_accept_edits_disabled(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('disabled_agents = ["accept-edits"]\n')
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["default_agent"] == "ask"
+    assert persisted["disabled_agents"] == ["accept-edits"]
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_does_not_pin_default_when_new_default_allowed(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('disabled_agents = ["default"]\n')
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert "default_agent" not in persisted
+    assert persisted["disabled_agents"] == ["ask"]
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_pins_default_when_only_old_default_enabled(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('enabled_agents = ["default"]\n')
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["default_agent"] == "ask"
+    assert persisted["enabled_agents"] == ["ask"]
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_does_not_pin_default_without_agent_filters(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('active_model = "current"\n')
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert "default_agent" not in persisted
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_pins_default_with_glob_pattern_enabled_agents(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('enabled_agents = ["re:ask"]\n')
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["default_agent"] == "ask"
+    assert persisted["enabled_agents"] == ["re:ask"]
+
+
+@pytest.mark.asyncio
 async def test_migrate_config_layers_is_noop_when_config_is_current(
     tmp_working_directory: Path,
 ) -> None:

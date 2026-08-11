@@ -154,11 +154,48 @@ from vibe.core.config.harness_files import (
 
 class _Orchestrator:
     def __init__(self, config):
+        self._base_config = config
         self._config = config
+        self._layers = []
 
     @property
     def config(self):
         return self._config
+
+    @property
+    def layers(self):
+        return tuple(self._layers)
+
+    def insert_layer(self, layer, index):
+        self._layers.insert(index, layer)
+
+    def remove_layer(self, index):
+        return self._layers.pop(index)
+
+    def replace_or_append_layer(self, name, layer):
+        index = next(
+            (i for i, existing in enumerate(self._layers) if existing.name == name),
+            None,
+        )
+        if index is None:
+            self._layers.append(layer)
+            return
+        self._layers.pop(index)
+        self._layers.insert(index, layer)
+
+    def rebuild(self):
+        from vibe.core.config.builder import ConfigBuilder
+        from vibe.core.config.layers.overrides import OverridesLayer
+        from vibe.core.utils.concurrency import run_sync
+
+        builder = ConfigBuilder(type(self._base_config))
+        builder.add_layer(
+            OverridesLayer(
+                data=self._base_config.model_dump(mode="json"), name="fake-base"
+            )
+        )
+        builder.add_layers(list(self._layers))
+        self._config = run_sync(builder.build())
 
     async def set_field(self, *args, **kwargs):
         return []

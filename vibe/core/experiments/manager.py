@@ -19,6 +19,13 @@ def hash_api_key(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:32]
 
 
+def config_variants_from_response(response: EvalResponse) -> dict[str, str]:
+    """Config-layer variants for a cached eval response, computed without network."""
+    manager = ExperimentManager(client=RemoteEvalClient())
+    manager.hydrate(response, source="cache")
+    return manager.config_variants()
+
+
 class ExperimentManager:
     def __init__(self, client: RemoteEvalClient | None = None) -> None:
         self._client = client if client is not None else RemoteEvalClient()
@@ -31,9 +38,9 @@ class ExperimentManager:
         self._response = self._filter_to_known_experiments(response)
         self._log_resolved_variants("resolved")
 
-    def hydrate(self, response: EvalResponse) -> None:
+    def hydrate(self, response: EvalResponse, *, source: str = "session") -> None:
         self._response = self._filter_to_known_experiments(response)
-        self._log_resolved_variants("restored from session")
+        self._log_resolved_variants(f"restored from {source}")
 
     def export_state(self) -> EvalResponse | None:
         return self._response

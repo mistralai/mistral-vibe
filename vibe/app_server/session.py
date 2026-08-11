@@ -50,8 +50,10 @@ from vibe.app_server.models import (
 from vibe.app_server.protocol import (
     CallbackCallParams,
     CallbackCallResponse,
-    CallbackRespondParams,
-    CallbackRespondResponse,
+    CallbackResult,
+    CallbackResultError,
+    CallbackResultParams,
+    CallbackResultResponse,
     ClientCapabilities,
     ClientInfo,
     ClientToolMethod,
@@ -67,8 +69,6 @@ from vibe.app_server.protocol import (
     RuntimeReadParams,
     RuntimeReadResponse,
     ServerRequest,
-    SessionCloseParams,
-    SessionCloseResponse,
     SessionContinueParams,
     SessionContinueResponse,
     SessionOptions,
@@ -78,6 +78,8 @@ from vibe.app_server.protocol import (
     SessionResumeResponse,
     SessionStartParams,
     SessionStartResponse,
+    SessionStopParams,
+    SessionStopResponse,
     TurnInterruptParams,
     TurnInterruptResponse,
     TurnStartParams,
@@ -194,19 +196,19 @@ class AppServerSession:
     ) -> AppServerSession:
         if resume_session_id is not None and continue_session:
             raise ValueError("Cannot resume a specific session and continue the latest")
-        open_options = (session_options or SessionOptions()).model_dump()
+        agent_config = session_options or SessionOptions()
         if continue_session:
             state = validate_wire(
                 SessionContinueResponse,
                 await client.request(
-                    "session/continue", SessionContinueParams(**open_options)
+                    "session/continue", SessionContinueParams(agent_config=agent_config)
                 ),
             ).state
         elif resume_session_id is None:
             state = validate_wire(
                 SessionStartResponse,
                 await client.request(
-                    "session/start", SessionStartParams(**open_options)
+                    "session/start", SessionStartParams(agent_config=agent_config)
                 ),
             ).state
         else:
@@ -214,7 +216,9 @@ class AppServerSession:
                 SessionResumeResponse,
                 await client.request(
                     "session/resume",
-                    SessionResumeParams(session_id=resume_session_id, **open_options),
+                    SessionResumeParams(
+                        session_id=resume_session_id, agent_config=agent_config
+                    ),
                 ),
             ).state
         bootstrap = await _read_bootstrap(client, state)
@@ -251,9 +255,9 @@ class AppServerSession:
 
     @property
     def turn_active(self) -> bool:
-        turn = self.state.latest_turn
-        return self._starting_turn or (
-            turn is not None and turn.status is PublicTurnStatus.IN_PROGRESS
+        return self._starting_turn or any(
+            turn.status is PublicTurnStatus.IN_PROGRESS
+            for turn in self.state.turns or []
         )
 
     def exit_summary(self) -> SessionExitSummary:
@@ -293,7 +297,7 @@ class AppServerSession:
                     "turn/start",
                     TurnStartParams(
                         session_id=self.session_id,
-                        input=_content_blocks(message, images, resources),
+                        message=_content_blocks(message, images, resources),
                         injected=injected,
                         client_user_message_id=client_message_id,
                         auto_title=auto_title,
@@ -361,7 +365,7 @@ class AppServerSession:
                     TurnSteerParams(
                         session_id=self.session_id,
                         expected_turn_id=active_turn_id,
-                        input=blocks,
+                        message=blocks,
                         client_user_message_id=client_message_id,
                         inject_invoked_skill=inject_invoked_skill,
                         mention_stats=mention_stats,
@@ -402,27 +406,40 @@ class AppServerSession:
         )
 
     def _active_public_turn_id(self) -> str | None:
-        turn = self.state.latest_turn
-        if turn is None or turn.status is not PublicTurnStatus.IN_PROGRESS:
-            return self._consumed_turn_id
-        return turn.id
+        return next(
+            (
+                turn.id
+                for turn in self.state.turns or []
+                if turn.status is PublicTurnStatus.IN_PROGRESS
+            ),
+            self._consumed_turn_id,
+        )
 
     async def respond_to_callback(
         self, callback_id: str, output: CallbackOutput
     ) -> None:
         client = await self._ensure_attached()
-        validate_wire(
-            CallbackRespondResponse,
-            await client.request(
-                "callback/respond",
-                CallbackRespondParams(
-                    session_id=self._callback_sessions.get(
-                        callback_id, self.session_id
-                    ),
-                    callback_id=callback_id,
-                    output=output,
-                ),
+        params = CallbackResultParams(
+            session_id=self._callback_sessions.get(callback_id, self.session_id),
+            result=CallbackResult(
+                callback_id=callback_id,
+                output=output.model_dump(mode="json", by_alias=True),
             ),
+        )
+        validate_wire(
+            CallbackResultResponse, await client.request("callback/result", params)
+        )
+
+    async def reject_callback(
+        self, callback_id: str, error: CallbackResultError
+    ) -> None:
+        client = await self._ensure_attached()
+        params = CallbackResultParams(
+            session_id=self._callback_sessions.get(callback_id, self.session_id),
+            result=CallbackResult(callback_id=callback_id, error=error),
+        )
+        validate_wire(
+            CallbackResultResponse, await client.request("callback/result", params)
         )
 
     async def deny_callback(
@@ -460,9 +477,9 @@ class AppServerSession:
         if client is not None:
             with suppress(Exception):
                 validate_wire(
-                    SessionCloseResponse,
+                    SessionStopResponse,
                     await client.request(
-                        "session/close", SessionCloseParams(session_id=self.session_id)
+                        "session/stop", SessionStopParams(session_id=self.session_id)
                     ),
                 )
         if self._message_task is not None:
@@ -555,15 +572,15 @@ class AppServerSession:
         await self._publish_event(event)
 
     async def _resync(self, client: AppServerClient) -> None:
-        response = validate_wire(
+        state = validate_wire(
             SessionReadResponse,
             await client.request(
                 "session/read", SessionReadParams(session_id=self.session_id)
             ),
-        )
+        ).state
         previous = self._state.projection.state
-        self._state.projection.replace_state(response.state)
-        await self._publish_snapshot(previous, response.state)
+        self._state.projection.replace_state(state)
+        await self._publish_snapshot(previous, state)
 
     async def _publish_snapshot(
         self, previous: PublicSessionState, current: PublicSessionState

@@ -7,9 +7,8 @@ from vibe.app_server._model import validate_wire
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.client_tools import ClientToolHandler
 from vibe.app_server.models import (
-    PublicHistoryPage,
+    PublicSession,
     PublicSessionState,
-    SavedSessionSummary,
     WorkspaceTrustDecision,
 )
 from vibe.app_server.protocol import (
@@ -18,9 +17,10 @@ from vibe.app_server.protocol import (
     ConfigSchemaReadParams,
     ConfigSchemaReadResponse,
     EmptyResponse,
-    HistoryListParams,
-    HistoryListResponse,
+    PageRequest,
     SessionDeleteParams,
+    SessionHistoryListParams,
+    SessionHistoryListResponse,
     SessionListParams,
     SessionListResponse,
     SessionOptions,
@@ -129,26 +129,36 @@ class AppServerHost:
         self._transferred = True
         return session
 
-    async def list_sessions(self, cwd: str | None = None) -> list[SavedSessionSummary]:
+    async def list_sessions(self, cwd: str | None = None) -> list[PublicSession]:
         self._require_host()
-        response = validate_wire(
-            SessionListResponse,
-            await self._client.request("session/list", SessionListParams(cwd=cwd)),
-        )
-        return response.sessions
+        cursor: str | None = None
+        sessions: list[PublicSession] = []
+        while True:
+            response = validate_wire(
+                SessionListResponse,
+                await self._client.request(
+                    "session/list", SessionListParams(cwd=cwd, cursor=cursor)
+                ),
+            )
+            sessions.extend(response.items)
+            if response.next_cursor is None:
+                break
+            cursor = response.next_cursor
+        return sessions
 
     async def read_session(
         self, session_id: str, *, history_limit: int = 200
     ) -> PublicSessionState:
         self._require_host()
-        response = validate_wire(
+        return validate_wire(
             SessionReadResponse,
             await self._client.request(
                 "session/read",
-                SessionReadParams(session_id=session_id, history_limit=history_limit),
+                SessionReadParams(
+                    session_id=session_id, history=PageRequest(limit=history_limit)
+                ),
             ),
-        )
-        return response.state
+        ).state
 
     async def list_history(
         self,
@@ -157,18 +167,27 @@ class AppServerHost:
         before: str | None = None,
         after: str | None = None,
         limit: int = 200,
-    ) -> PublicHistoryPage:
+    ) -> SessionHistoryListResponse:
         self._require_host()
         response = validate_wire(
-            HistoryListResponse,
+            SessionHistoryListResponse,
             await self._client.request(
-                "history/list",
-                HistoryListParams(
-                    session_id=session_id, before=before, after=after, limit=limit
+                "session/history/list",
+                SessionHistoryListParams(
+                    session_id=session_id,
+                    page=PageRequest(
+                        cursor=before or after,
+                        limit=limit,
+                        direction=(
+                            "forward"
+                            if after is not None and before is None
+                            else "backward"
+                        ),
+                    ),
                 ),
             ),
         )
-        return response.history
+        return response
 
     async def delete_session(self, session_id: str) -> None:
         self._require_host()
@@ -186,7 +205,7 @@ class AppServerHost:
         return validate_wire(
             SessionTitleUpdateResponse,
             await self._client.request(
-                "session/title/update",
+                "session/rename",
                 SessionTitleUpdateParams(session_id=session_id, title=title),
             ),
         )

@@ -30,7 +30,7 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "enabled_tools": None,
         "disabled_tools": None,
         "output": "text",
-        "agent": "default",
+        "agent": "ask",
         "auto_approve": False,
         "check_upgrade": False,
         "setup": False,

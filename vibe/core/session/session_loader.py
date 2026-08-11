@@ -180,9 +180,9 @@ class SessionLoader:
     ) -> list[SessionInfo]:
         sessions = session_index_for(config).list(cwd)
         # The index yields arbitrary order; callers expect most-recent first.
-        # end_time is normalized UTC ISO, so a lexicographic sort is
+        # updated_at is normalized UTC ISO, so a lexicographic sort is
         # chronological; sessions without one sort last.
-        sessions.sort(key=lambda item: item["end_time"] or "", reverse=True)
+        sessions.sort(key=lambda item: item["updated_at"], reverse=True)
         return sessions
 
     @staticmethod

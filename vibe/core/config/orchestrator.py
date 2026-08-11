@@ -26,6 +26,7 @@ from vibe.core.config.types import (
     ConfigChangeEvent,
     ConflictStrategy,
 )
+from vibe.core.utils.concurrency import run_sync
 
 
 class ConfigPatchValidationError(Exception):
@@ -99,6 +100,10 @@ class ConfigOrchestrator[S: ConfigSchema]:
     def config(self) -> S:
         return self._config
 
+    def rebuild(self) -> None:
+        """Re-merge the layer stack synchronously and install the result."""
+        self._config = run_sync(self._builder.build())
+
     @property
     def layers(self) -> tuple[ConfigLayer[RawConfig], ...]:
         """Active layers, lowest to highest priority. Read-only view."""
@@ -114,6 +119,25 @@ class ConfigOrchestrator[S: ConfigSchema]:
             if layer.name == name:
                 return layer
         raise KeyError(f"No layer named {name!r}")
+
+    def insert_layer(self, layer: ConfigLayer[RawConfig], index: int) -> None:
+        """Insert a layer at *index* (0 = lowest priority). Rebuild to apply."""
+        self._builder.insert_layer(layer, index)
+
+    def remove_layer(self, index: int) -> ConfigLayer[RawConfig]:
+        """Remove and return the layer at *index*. Rebuild to apply."""
+        return self._builder.remove_layer(index)
+
+    def replace_or_append_layer(self, name: str, layer: ConfigLayer[RawConfig]) -> None:
+        """Replace the layer named *name* in place, or append it when absent."""
+        index = next(
+            (i for i, existing in enumerate(self.layers) if existing.name == name), None
+        )
+        if index is None:
+            self.insert_layer(layer, len(self.layers))
+            return
+        self.remove_layer(index)
+        self.insert_layer(layer, index)
 
     async def load_persistence_layer(self) -> RawConfig:
         return await self._default_layer_resolver().load()

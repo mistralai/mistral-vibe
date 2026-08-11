@@ -15,6 +15,9 @@ PROJECTS_FILE = GlobalPath(lambda: VIBE_HOME.path / "projects.toml")
 CONNECTOR_BOOTSTRAP_CACHE_FILE = GlobalPath(
     lambda: VIBE_HOME.path / "connector_bootstrap_cache.json"
 )
+EXPERIMENT_EVAL_CACHE_FILE = GlobalPath(
+    lambda: VIBE_HOME.path / "experiment_eval_cache.json"
+)
 HISTORY_FILE = GlobalPath(lambda: VIBE_HOME.path / "vibehistory")
 PLANS_DIR = GlobalPath(lambda: VIBE_HOME.path / "plans")
 

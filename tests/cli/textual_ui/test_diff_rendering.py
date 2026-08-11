@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
+from unittest.mock import patch
 
 import pytest
 from textual.app import App, ComposeResult
@@ -19,6 +21,7 @@ from vibe.cli.textual_ui.widgets.diff_rendering import (
     edit_diff_inputs,
     language_for_path,
     render_edit_diff,
+    render_edit_diff_async,
 )
 
 
@@ -57,6 +60,31 @@ class TestLanguageForPath:
 
     def test_no_extension_falls_back_to_text(self) -> None:
         assert language_for_path("/src/Makefile") == "text"
+
+
+class TestEditDiffInputs:
+    @pytest.mark.asyncio
+    async def test_input_preparation_runs_in_another_thread(self) -> None:
+        loop_thread = threading.get_ident()
+        preparation_thread: int | None = None
+        expected = [DiffOccurrence(None, "old", "new")]
+
+        def capture_thread(*args, **kwargs):
+            nonlocal preparation_thread
+            preparation_thread = threading.get_ident()
+            return expected
+
+        with patch(
+            "vibe.cli.textual_ui.widgets.diff_rendering._edit_diff_inputs",
+            side_effect=capture_thread,
+        ):
+            occurrences = await edit_diff_inputs(
+                "example.py", "old", "new", replace_all=False
+            )
+
+        assert occurrences is expected
+        assert preparation_thread is not None
+        assert preparation_thread != loop_thread
 
 
 class TestBuildDiffLine:
@@ -117,6 +145,28 @@ class TestBuildDiffLine:
 
 
 class TestRenderEditDiff:
+    @pytest.mark.asyncio
+    async def test_async_render_runs_in_another_thread(self) -> None:
+        loop_thread = threading.get_ident()
+        render_thread: int | None = None
+
+        def capture_thread(*args, **kwargs):
+            nonlocal render_thread
+            render_thread = threading.get_ident()
+            return render_edit_diff(*args, **kwargs)
+
+        with patch(
+            "vibe.cli.textual_ui.widgets.diff_rendering.render_edit_diff",
+            side_effect=capture_thread,
+        ):
+            lines = await render_edit_diff_async(
+                [DiffOccurrence(1, "x = 1", "x = 2")], "py", ansi=False, dark=True
+            )
+
+        assert lines
+        assert render_thread is not None
+        assert render_thread != loop_thread
+
     def test_simple_replacement(self) -> None:
         lines = _render("x = 100", "x = 200", "py", 1, ansi=False)
         classes = [line.css_class for line in lines]

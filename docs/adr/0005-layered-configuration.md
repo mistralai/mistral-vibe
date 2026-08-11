@@ -23,9 +23,19 @@ The effective order is:
    enabled, followed by the project TOML layer (a discovered trusted
    `.vibe/config.toml`) when the `"project"` source is enabled;
 4. `VIBE_*` environment values;
-5. session/runtime overrides; and
-6. the active agent profile overlay, currently applied by `AgentManager` after
-   the orchestrator result.
+5. session/runtime overrides;
+6. the active agent profile layer (`AgentProfileLayer`); and
+7. the enforced admin layer (`AdminConfigLayer`), which shadows every layer
+   below it.
+
+`AgentProfileLayer` ships as a statically installed empty slot positioned just
+below the admin layer. `AgentManager` owns its contents: it fills the slot for
+the initial agent and, on a profile switch, replaces the layer in place with
+the new overrides, then rebuilds the orchestrator synchronously (`rebuild`, a
+`run_sync` bridge over `build`). Because the slot is replaced in place its
+priority is fixed by the stack definition, so the admin layer always outranks
+a profile. The effective config is the single merged result; there is no
+separate profile-free "base" config.
 
 The user and project TOML layers are installed together so a trusted project
 config inherits unspecified values from the user config; per-field merge
@@ -46,9 +56,12 @@ An untrusted project layer loads empty and is skipped by the merge builder.
 When the user source is enabled, implicit writes fall back to the user layer.
 A user or project TOML value overrides the corresponding GrowthBook assignment.
 
-The default layer is active; discovered and agent-profile layer classes exist
-but are not yet part of the default orchestrator stack. Code must follow the
-live stack rather than assume those layers are active.
+The default, GrowthBook, user, project, environment, override, agent-profile,
+and admin layers are all part of the default orchestrator stack. The
+agent-profile layer is statically installed but ships empty; `AgentManager`
+fills it in place when a profile is selected and rebuilds the orchestrator.
+Code must follow the live stack rather than assume a fixed layer set, since
+optional TOML layers may be absent.
 
 A/B test assignments that affect runtime behavior are configuration inputs.
 They must be mapped into config fields by `GrowthbookLayer`, then consumed from
@@ -71,21 +84,21 @@ values. Clients must not infer writable paths from its shape.
 
 The current resource methods are defined by `vibe.app_server.protocol`:
 
-- `config/read` returns effective and base redacted views;
+- `config/read` returns the effective redacted view (a single merged config;
+  no separate base view);
 - `config/reload` re-reads configured sources and optionally rebuilds runtime
   state;
-- `config/patch` validates and persists JSON-pointer edits, applying `set` and
+- `config/write` validates and persists JSON-pointer edits, applying `set` and
   `remove` ops that each optionally target a named layer;
-- `config/thinking/write` updates the active model's thinking level;
 - `config/proxy/read` and `config/proxy/write` manage the supported global
   proxy and certificate `.env` entries; and
 - `config/schema` exposes the live schema used by ACP settings clients.
 
 The proxy resource is deliberately separate from the TOML orchestrator.
 `config/schema` is configuration-form metadata; it is not a list of valid
-`config/patch` paths and is not the public app-server protocol schema.
+`config/write` paths and is not the public app-server protocol schema.
 
-For `config/patch`, the server:
+For `config/write`, the server:
 
 1. requires the session to be idle;
 2. converts all ops into one schema-aware patch;

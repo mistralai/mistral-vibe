@@ -45,7 +45,7 @@ TextArea > .text-area--cursor {
     align: left middle;
 }
 
-#clipboard-notice {
+#inline-notice {
     width: auto;
     height: 1;
     color: $text-muted;
@@ -246,6 +246,15 @@ OptionList, OptionList:focus {
         &:ansi {
             text-style: dim;
         }
+    }
+
+    & .text-area--suggestion {
+        color: $foreground;
+        text-opacity: 45%;
+    }
+
+    &:ansi .text-area--suggestion {
+        text-style: dim;
     }
 }
 

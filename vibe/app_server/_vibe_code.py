@@ -434,7 +434,7 @@ class VibeCodeController:
         url = (
             action.url
             if action is not None
-            else f"{self._agent_loop.base_config.vibe_base_url.rstrip('/')}/code/extensions?focus=key"
+            else f"{self._agent_loop.config.vibe_base_url.rstrip('/')}/code/extensions?focus=key"
         )
         if action is not None and action.kind is AccountActionKind.SWITCH_API_KEY:
             return (

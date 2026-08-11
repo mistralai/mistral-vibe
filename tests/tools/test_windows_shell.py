@@ -65,6 +65,7 @@ from vibe.core.tools.terminal_runtime import TerminalRuntime
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 from vibe.core.utils import is_windows
+from vibe.utils import paths
 
 
 class _UnusedBackend:
@@ -138,13 +139,16 @@ def test_windows_shell_resolver_prefers_pwsh_then_powershell(monkeypatch):
 def test_git_bash_normalizes_msys_drive_paths_before_workdir_check(
     tmp_path, monkeypatch
 ):
-    seen_paths: list[str] = []
+    # Compared as paths, not strings: str(WindowsPath) renders backslashes.
+    seen_paths: list[Path] = []
+    inside = {tmp_path, Path("C:/repo/file.txt")}
 
     def is_within_workdir(path: str, **_kwargs) -> bool:
-        seen_paths.append(path)
-        return path in {str(tmp_path), "C:/repo/file.txt"}
+        seen_paths.append(Path(path))
+        return Path(path) in inside
 
     monkeypatch.setattr(experimental_bash_module, "is_windows", lambda: True)
+    monkeypatch.setattr(paths, "is_windows", lambda: True)
     monkeypatch.setattr(
         experimental_bash_module, "is_path_within_workdir", is_within_workdir
     )
@@ -158,7 +162,7 @@ def test_git_bash_normalizes_msys_drive_paths_before_workdir_check(
     )
 
     assert outside_dirs == set()
-    assert "C:/repo/file.txt" in seen_paths
+    assert Path("C:/repo/file.txt") in seen_paths
 
 
 def test_managed_git_bash_env_uses_posix_defaults(monkeypatch):

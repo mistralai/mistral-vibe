@@ -303,7 +303,7 @@ class TestSpanHierarchy:
 
 class TestGenericModelCallSpan:
     BASE_URL = "https://api.fireworks.ai"
-    MODEL_NAME = "accounts/fireworks/models/glm-4p5"
+    MODEL_NAME = "accounts/fireworks/models/mistral-test"
 
     @staticmethod
     def _provider(base_url: str = BASE_URL) -> ProviderConfig:
@@ -319,7 +319,7 @@ class TestGenericModelCallSpan:
         return ModelConfig(
             name=TestGenericModelCallSpan.MODEL_NAME,
             provider="fireworks",
-            alias="glm-4p5",
+            alias="mistral-test",
         )
 
     @staticmethod

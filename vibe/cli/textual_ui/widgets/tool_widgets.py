@@ -4,14 +4,16 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, JsonValue
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.content import Content
+from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Markdown, Static
+from textual.worker import Worker
 
 from vibe.app_server.models import (
     EffectDetail,
@@ -38,7 +40,7 @@ from vibe.cli.textual_ui.widgets.diff_rendering import (
     DiffView,
     edit_diff_inputs,
     language_for_path,
-    render_edit_diff,
+    render_edit_diff_async,
 )
 from vibe.cli.textual_ui.widgets.links import LinkStatic, link_content
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
@@ -125,6 +127,15 @@ class ToolApprovalWidget[TArgs: BaseModel](Vertical):
 
 
 class ToolResultWidget[TResult: BaseModel](Static):
+    class BorderColorsChanged(Message):
+        def __init__(self, result_widget: ToolResultWidget[Any]) -> None:
+            self.result_widget = result_widget
+            super().__init__()
+
+        @property
+        def control(self) -> ToolResultWidget[Any]:
+            return self.result_widget
+
     # When True the whole result collapses into a one-line header; when False it
     # is always rendered in full (used by diff-style results like edit/write).
     COLLAPSIBLE: ClassVar[bool] = True
@@ -251,37 +262,90 @@ class WriteFileResultWidget(ToolResultWidget[FileWriteOutput]):
 
 
 class EditApprovalWidget(ToolApprovalWidget[FileEditInput]):
-    _diff_container: Vertical
+    def __init__(self, args: FileEditInput) -> None:
+        super().__init__(args)
+        self._diff_view = DiffView([], ansi=False, dark=True)
+        self._occurrences: list[DiffOccurrence] | None = None
+        self._requested_render_theme: tuple[bool, bool] | None = None
+        self._render_worker: Worker[None] | None = None
 
     def compose(self) -> ComposeResult:
         yield NoMarkupStatic(
             f"File: {self.args.file_path}", classes="approval-description"
         )
         yield NoMarkupStatic("")
-        self._diff_container = Vertical(classes="diff-scroll")
-        yield self._diff_container
+        yield Vertical(self._diff_view, classes="diff-scroll")
 
         if self.args.replace_all:
             yield NoMarkupStatic("(replace_all)", classes="approval-description")
 
     async def on_mount(self) -> None:
         # Approximate: queued edits ahead of this one may shift the real lines.
-        occurrences = await edit_diff_inputs(
+        self._occurrences = await edit_diff_inputs(
             self.args.file_path,
             self.args.old_string,
             self.args.new_string,
             replace_all=self.args.replace_all,
         )
-        ansi = self.app.native_ansi_color
-        dark = self.app.current_theme.dark
-        lines = render_edit_diff(
-            occurrences, language_for_path(self.args.file_path), ansi=ansi, dark=dark
-        )
-        await self._diff_container.mount(DiffView(lines, ansi=ansi, dark=dark))
+        if self.is_attached:
+            ansi, dark = self._requested_render_theme or (
+                self.app.native_ansi_color,
+                self.app.current_theme.dark,
+            )
+            self.request_diff_render(ansi=ansi, dark=dark)
+
+    def request_diff_render(self, *, ansi: bool, dark: bool) -> Worker[None] | None:
+        self._diff_view.set_render_mode(ansi=ansi, dark=dark)
+        self._requested_render_theme = (ansi, dark)
+        if self._occurrences is None:
+            return None
+        if self._render_worker is None or self._render_worker.is_finished:
+            self._render_worker = self.run_worker(
+                self._drain_diff_renders(), group="edit-diff-render"
+            )
+        return self._render_worker
+
+    async def _drain_diff_renders(self) -> None:
+        rendered_theme: tuple[bool, bool] | None = None
+        while self.is_attached and rendered_theme != self._requested_render_theme:
+            rendered_theme = self._requested_render_theme
+            if rendered_theme is None or self._occurrences is None:
+                return
+            ansi, dark = rendered_theme
+            lines = await render_edit_diff_async(
+                self._occurrences,
+                language_for_path(self.args.file_path),
+                ansi=ansi,
+                dark=dark,
+            )
+            if rendered_theme != self._requested_render_theme:
+                continue
+            self._diff_view.set_render_data(lines, ansi=ansi, dark=dark)
 
 
 class EditResultWidget(ToolResultWidget[FileEditOutput]):
     COLLAPSIBLE = False
+
+    def __init__(
+        self,
+        result: FileEditOutput | None,
+        success: bool,
+        message: str,
+        warnings: list[str] | None = None,
+    ) -> None:
+        super().__init__(result, success, message, warnings)
+        self._diff_view = DiffView([], ansi=False, dark=True)
+        self._requested_render_theme: tuple[bool, bool] | None = None
+        self._render_worker: Worker[None] | None = None
+        self._occurrences = (
+            [
+                DiffOccurrence(item.start_line, item.old_text, item.new_text)
+                for item in result.occurrences
+            ]
+            or [DiffOccurrence(None, result.old_string, result.new_string)]
+            if result
+            else []
+        )
 
     def compose(self) -> ComposeResult:
         if not self.result:
@@ -291,31 +355,53 @@ class EditResultWidget(ToolResultWidget[FileEditOutput]):
             NoMarkupStatic(f"⚠ {w}", classes="tool-result-warning")
             for w in self.warnings
         ]
-        occurrences = [
-            DiffOccurrence(item.start_line, item.old_text, item.new_text)
-            for item in self.result.occurrences
-        ] or [DiffOccurrence(None, self.result.old_string, self.result.new_string)]
-        ansi = self.app.native_ansi_color
-        dark = self.app.current_theme.dark
-        diff = DiffView(
-            render_edit_diff(
-                occurrences, language_for_path(self.result.file), ansi=ansi, dark=dark
-            ),
-            ansi=ansi,
-            dark=dark,
-        )
-        # Border rows sit below the warning lines, so shift the diff's own row
-        # colors down by the number of warnings.
-        self.border_row_colors = {
-            len(warnings) + row: color for row, color in diff.border_row_colors.items()
-        }
         # Wrap the diff in a horizontal-scroll container so wide lines can be
         # scrolled instead of clipped (overflow-x is `auto`, so the scrollbar
         # only shows when a line overruns the width). For a diff taller than the
         # viewport the bar sits at the bottom -- the same trade-off write_file's
         # code fence makes -- but that beats silently truncating long lines.
-        yield Vertical(*warnings, diff, classes="diff-scroll")
+        yield Vertical(*warnings, self._diff_view, classes="diff-scroll")
         yield from self._footer()
+
+    def on_mount(self) -> None:
+        self.request_diff_render(
+            ansi=self.app.native_ansi_color, dark=self.app.current_theme.dark
+        )
+
+    def request_diff_render(self, *, ansi: bool, dark: bool) -> Worker[None] | None:
+        self._diff_view.set_render_mode(ansi=ansi, dark=dark)
+        self._requested_render_theme = (ansi, dark)
+        if not self.result:
+            return None
+        if self._render_worker is None or self._render_worker.is_finished:
+            self._render_worker = self.run_worker(
+                self._drain_diff_renders(), group="edit-diff-render"
+            )
+        return self._render_worker
+
+    async def _drain_diff_renders(self) -> None:
+        rendered_theme: tuple[bool, bool] | None = None
+        while self.is_attached and rendered_theme != self._requested_render_theme:
+            rendered_theme = self._requested_render_theme
+            if rendered_theme is None or not self.result:
+                return
+            ansi, dark = rendered_theme
+            lines = await render_edit_diff_async(
+                self._occurrences,
+                language_for_path(self.result.file),
+                ansi=ansi,
+                dark=dark,
+            )
+            if rendered_theme != self._requested_render_theme:
+                continue
+            self._diff_view.set_render_data(lines, ansi=ansi, dark=dark)
+            # Border rows sit below the warning lines, so shift the diff's own row
+            # colors down by the number of warnings.
+            self.border_row_colors = {
+                len(self.warnings) + row: color
+                for row, color in self._diff_view.border_row_colors.items()
+            }
+            self.post_message(self.BorderColorsChanged(self))
 
 
 class TodoApprovalWidget(ToolApprovalWidget[TodoInput]):

@@ -42,6 +42,12 @@ class ConfigBuilder[S: ConfigSchema]:
     def add_layers(self, layers: list[ConfigLayer[RawConfig]]) -> None:
         self._layers.extend(layers)
 
+    def insert_layer(self, layer: ConfigLayer[RawConfig], index: int) -> None:
+        self._layers.insert(index, layer)
+
+    def remove_layer(self, index: int) -> ConfigLayer[RawConfig]:
+        return self._layers.pop(index)
+
     @property
     def layers(self) -> list[ConfigLayer[RawConfig]]:
         return self._layers

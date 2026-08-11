@@ -84,8 +84,8 @@ async def test_ctrl_y_flashes_clipboard_notice() -> None:
             text_area.load_text("hello world")
             text_area.select_all()
             await pilot.press("ctrl+y")
-            assert app._clipboard_notice.display is True
-            assert app._clipboard_notice.content == "Copied to clipboard"
+            assert app._inline_notice.display is True
+            assert app._inline_notice.content == "Copied to clipboard"
 
 
 @pytest.mark.asyncio
@@ -99,5 +99,5 @@ async def test_ctrl_shift_c_flashes_clipboard_notice() -> None:
             text_area.load_text("hello world")
             text_area.select_all()
             await pilot.press("ctrl+shift+c")
-            assert app._clipboard_notice.display is True
-            assert app._clipboard_notice.content == "Copied to clipboard"
+            assert app._inline_notice.display is True
+            assert app._inline_notice.content == "Copied to clipboard"

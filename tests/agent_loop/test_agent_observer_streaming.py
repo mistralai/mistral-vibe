@@ -431,7 +431,7 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
             enabled_tools=["todo"], tools={"todo": {"permission": "ask"}}
         ),
         backend=backend,
-        agent_name=BuiltinAgentName.DEFAULT,
+        agent_name=BuiltinAgentName.ASK,
         enable_streaming=True,
     )
     middleware = CountingMiddleware()

@@ -12,8 +12,9 @@ from textual.widgets import Static
 
 from vibe.cli.commands import CommandRegistry
 from vibe.cli.history_manager import HistoryManager
+from vibe.cli.input_modes import InputMode
 from vibe.cli.textual_ui.recording.recording_indicator import RecordingIndicator
-from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea, InputMode
+from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 from vibe.cli.voice_manager.voice_manager_port import (
@@ -45,6 +46,12 @@ class ChatInputBody(VoiceManagerListener, Widget):
 
     class CompletionResetRequested(Message):
         pass
+
+    class InlineNoticeRequested(Message):
+        def __init__(self, message: str, *, timeout: float = 4.0) -> None:
+            self.message = message
+            self.timeout = timeout
+            super().__init__()
 
     def __init__(
         self,
@@ -259,6 +266,15 @@ class ChatInputBody(VoiceManagerListener, Widget):
         if not self.input_widget:
             return
         self.input_widget.insert(text)
+
+    def on_transcribe_error(self, message: str) -> None:
+        self._reset_recording_ui()
+        self.notify(
+            f"Voice transcription failed: {message}", severity="error", markup=False
+        )
+
+    def on_transcribe_notice(self, message: str) -> None:
+        self.post_message(self.InlineNoticeRequested(message, timeout=2.0))
 
     def _start_recording_ui(self) -> None:
         if not self._voice_manager:

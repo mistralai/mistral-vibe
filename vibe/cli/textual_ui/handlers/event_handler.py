@@ -16,7 +16,6 @@ from vibe.app_server.events import (
 from vibe.app_server.models import (
     AgentChangedNoticeDetail,
     CancelledEffectState,
-    CompactionDetails,
     CompletedEffectState,
     ContextClearedNoticeDetail,
     FailedEffectState,
@@ -105,20 +104,22 @@ class EventHandler:
         self._pending_error_results: list[ToolResultMessage] = []
         self._retry_presentation: _RetryPresentation | None = None
 
-    def offer_retry(self, error: ErrorMessage) -> None:
+    def offer_retry(self, error: ErrorMessage | None = None) -> None:
         presentation = self._retry_presentation
         if presentation is None:
             presentation = _RetryPresentation(self._turn_assistant_message)
             self._retry_presentation = presentation
         elif presentation.assistant is None:
             presentation.assistant = self._turn_assistant_message
-        presentation.transient_widgets.append(error)
+        if error is not None:
+            presentation.transient_widgets.append(error)
         presentation.active = False
 
-    def begin_retry(self, command: SlashCommandMessage) -> bool:
+    def begin_retry(self, command: SlashCommandMessage | None = None) -> bool:
         if self._retry_presentation is None:
             return False
-        self._retry_presentation.transient_widgets.append(command)
+        if command is not None:
+            self._retry_presentation.transient_widgets.append(command)
         self._retry_presentation.active = True
         return True
 
@@ -173,7 +174,7 @@ class EventHandler:
                 await self.finalize_streaming()
                 await self._handle_compact_start()
                 if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
-                    await self._handle_compact_end(entry)
+                    await self._handle_compact_end()
             case PublicNoticeEntry():
                 await self._resolve_retry_presentation(continue_assistant=False)
                 await self._handle_notice(entry, loading_widget)
@@ -215,7 +216,7 @@ class EventHandler:
             case PublicCheckpointEntry(kind="compaction"):
                 if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
                     await self.finalize_streaming()
-                    await self._handle_compact_end(entry)
+                    await self._handle_compact_end()
             case _:
                 pass
 
@@ -432,13 +433,10 @@ class EventHandler:
         self.current_compact = compact
         await self.mount_callback(compact)
 
-    async def _handle_compact_end(self, entry: PublicCheckpointEntry) -> None:
+    async def _handle_compact_end(self) -> None:
         if self.current_compact is None:
             return
-        details = CompactionDetails.model_validate(entry.details)
-        self.current_compact.set_complete(
-            old_session_id=details.old_session_id, new_session_id=details.new_session_id
-        )
+        self.current_compact.set_complete()
         self.current_compact = None
 
     def _resolve_pending_errors(self, *, escalate: bool) -> None:

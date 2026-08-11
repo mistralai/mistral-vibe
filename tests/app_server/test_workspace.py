@@ -5,9 +5,15 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from vibe.app_server._workspace import PromptPreparationError, prepare_prompt
+from vibe.app_server._workspace import (
+    PromptPreparationError,
+    prepare_prompt,
+    read_untrusted_config_dirs,
+)
 from vibe.app_server.models import ImageAttachment
 from vibe.core.config import ModelConfig, ProviderConfig
+from vibe.core.paths import TRUSTED_FOLDERS_FILE
+from vibe.core.trusted_folders import TrustedFoldersManager
 from vibe.core.types import Backend
 from vibe.utils.images import MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE
 
@@ -110,3 +116,28 @@ def test_prepare_prompt_rejects_oversize_image(
 def test_image_limits_match_public_cli_contract() -> None:
     assert MAX_IMAGE_BYTES == 10 * 1024 * 1024
     assert MAX_IMAGES_PER_MESSAGE == 8
+
+
+def test_read_untrusted_config_dirs_reports_dirs_and_settings_path(
+    tmp_path: Path,
+) -> None:
+    vibe_dir = tmp_path / ".vibe"
+    (vibe_dir / "tools").mkdir(parents=True)
+    trust_store = TrustedFoldersManager()
+    trust_store.add_trusted(tmp_path)
+    trust_store.add_untrusted(vibe_dir)
+
+    response = read_untrusted_config_dirs(tmp_path, trust_store)
+
+    assert response.dirs == [str(vibe_dir.resolve())]
+    assert response.settings_path == str(TRUSTED_FOLDERS_FILE.path)
+
+
+def test_read_untrusted_config_dirs_empty_when_nothing_broken(tmp_path: Path) -> None:
+    (tmp_path / ".vibe" / "tools").mkdir(parents=True)
+    trust_store = TrustedFoldersManager()
+    trust_store.add_trusted(tmp_path)
+
+    response = read_untrusted_config_dirs(tmp_path, trust_store)
+
+    assert response.dirs == []

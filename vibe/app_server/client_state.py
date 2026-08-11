@@ -12,7 +12,6 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import (
     AgentsListResponse,
-    ConfigReadResponse,
     DiagnosticsListResponse,
     RuntimeReadResponse,
     RuntimeSnapshot,
@@ -62,11 +61,6 @@ class ClientSessionState:
         )
         return primary[(index + 1) % len(primary)]
 
-    def apply_config(self, response: ConfigReadResponse) -> None:
-        self.config = response.config
-        self.base_config = response.base_config
-        self.state.session.model = response.config.active_model.alias
-
     def apply_agents(self, response: AgentsListResponse) -> None:
         self.active_agent = response.active
         self.agents = list(response.agents)
@@ -83,7 +77,6 @@ class ClientSessionState:
 
     def apply_runtime(self, snapshot: RuntimeSnapshot) -> None:
         self.config = snapshot.config
-        self.base_config = snapshot.base_config
         self.active_agent = snapshot.active_agent
         self.agents = list(snapshot.agents)
         self.skills = list(snapshot.skills)

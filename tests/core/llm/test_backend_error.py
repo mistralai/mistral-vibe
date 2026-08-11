@@ -122,3 +122,46 @@ class TestBackendErrorIsResponseTooLong:
     def test_false_when_substring_missing(self) -> None:
         err = _make_error(status=422, body_text="some unrelated error")
         assert not err.is_response_too_long
+
+
+class TestBackendErrorIsInvalidModel:
+    def test_true_on_400_with_invalid_model_body(self) -> None:
+        err = _make_error(
+            status=400,
+            body_text='{"error":{"type":"invalid_model","message":"Invalid model: mistral-large-turbo"}}',
+        )
+        assert err.is_invalid_model
+
+    def test_false_when_status_not_400(self) -> None:
+        err = _make_error(status=422, body_text='{"error":{"type":"invalid_model"}}')
+        assert not err.is_invalid_model
+
+    def test_false_when_substring_missing(self) -> None:
+        err = _make_error(status=400, body_text="some unrelated error")
+        assert not err.is_invalid_model
+
+    def test_fmt_mentions_model_provider_and_recovery_paths(self) -> None:
+        err = _make_error(
+            status=400,
+            body_text='{"error":{"type":"invalid_model","message":"Invalid model: mistral-large-turbo"}}',
+        )
+        msg = str(err)
+        assert "test-model" in msg
+        assert "test-provider" in msg
+        assert "/model" in msg
+        assert "/config" in msg
+
+    def test_fmt_includes_parsed_error_when_available(self) -> None:
+        err = BackendError(
+            provider="test-provider",
+            endpoint="/v1/chat/completions",
+            status=400,
+            reason="Bad Request",
+            headers={},
+            body_text='{"error":{"type":"invalid_model"}}',
+            parsed_error="Invalid model: mistral-large-turbo",
+            model="test-model",
+            payload_summary=_make_payload_summary(),
+        )
+        msg = str(err)
+        assert "Invalid model: mistral-large-turbo" in msg

@@ -86,8 +86,11 @@ class CommandCompleter(Completer):
     ) -> tuple[int, int] | None:
         if not text.startswith("/"):
             return None
-        first_space = text.find(" ")
-        end = cursor_pos if first_space == -1 else min(cursor_pos, first_space)
+        # Replace the whole command word — from the start up to the first
+        # whitespace (space or newline) — regardless of caret position. Ending at
+        # the caret would corrupt the command when accepting mid-token; ending at
+        # len(text) would wipe any following lines (chat input allows newlines).
+        end = next((i for i, char in enumerate(text) if char.isspace()), len(text))
         return (0, end)
 
 

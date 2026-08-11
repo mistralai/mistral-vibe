@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 import tomllib
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any
 
 from vibe.agents import AgentSafety, AgentType
 from vibe.core.agents._migration import (
@@ -12,14 +12,10 @@ from vibe.core.agents._migration import (
     migrate_agent_profile_config,
 )
 from vibe.core.paths import PLANS_DIR
-from vibe.core.utils.merge import MergeStrategy
-
-if TYPE_CHECKING:
-    from vibe.core.config import VibeConfigSchema
 
 
 class BuiltinAgentName(StrEnum):
-    DEFAULT = "default"
+    ASK = "ask"
     PLAN = "plan"
     ACCEPT_EDITS = "accept-edits"
     AUTO_APPROVE = "auto-approve"
@@ -36,19 +32,6 @@ class AgentProfile:
     agent_type: AgentType = AgentType.AGENT
     overrides: dict[str, Any] = field(default_factory=dict)
     install_required: bool = False
-
-    def apply_to_config(self, base: VibeConfigSchema) -> VibeConfigSchema:
-        merged = cast(
-            dict[str, Any],
-            MergeStrategy.DEEP_MERGE.apply(base.model_dump(), self.overrides),
-        )
-        profile_disabled_tools = self.overrides.get("disabled_tools")
-        if isinstance(profile_disabled_tools, list):
-            merged["disabled_tools"] = list(
-                dict.fromkeys([*base.disabled_tools, *profile_disabled_tools])
-            )
-
-        return type(base).model_validate(merged)
 
     @classmethod
     def from_toml(cls, path: Path) -> AgentProfile:
@@ -77,9 +60,9 @@ def _plan_overrides() -> dict[str, Any]:
     }
 
 
-DEFAULT = AgentProfile(
-    BuiltinAgentName.DEFAULT,
-    "Default",
+ASK = AgentProfile(
+    BuiltinAgentName.ASK,
+    "Ask",
     "Requires approval for tool executions",
     AgentSafety.NEUTRAL,
     overrides={"disabled_tools": ["exit_plan_mode"]},
@@ -134,6 +117,7 @@ LEAN = AgentProfile(
     overrides={
         "system_prompt_id": "lean",
         "active_model": "leanstral",
+        "allowed_models": ["leanstral"],
         "providers": [
             {
                 "name": "mistral-testing",
@@ -165,7 +149,7 @@ LEAN = AgentProfile(
 )
 
 BUILTIN_AGENTS: dict[str, AgentProfile] = {
-    BuiltinAgentName.DEFAULT: DEFAULT,
+    BuiltinAgentName.ASK: ASK,
     BuiltinAgentName.PLAN: PLAN,
     BuiltinAgentName.ACCEPT_EDITS: ACCEPT_EDITS,
     BuiltinAgentName.AUTO_APPROVE: AUTO_APPROVE,

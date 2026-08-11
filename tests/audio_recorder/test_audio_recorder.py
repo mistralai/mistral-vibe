@@ -388,6 +388,45 @@ class TestPeak:
         assert recorder.peak == 0.0
 
 
+class TestHasSignal:
+    def test_has_signal_false_before_recording(self) -> None:
+        recorder = AudioRecorder()
+        assert recorder.has_signal is False
+
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
+    def test_has_signal_true_after_loud_block(self, mock_stream_cls: MagicMock) -> None:
+        recorder = AudioRecorder()
+        recorder.start(RecordingMode.BUFFER)
+
+        callback = _get_callback(mock_stream_cls)
+        callback(_make_pcm_frames(16_384), 1024, {}, sd.CallbackFlags())
+
+        assert recorder.has_signal is True
+
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
+    def test_has_signal_false_for_pure_silence(
+        self, mock_stream_cls: MagicMock
+    ) -> None:
+        recorder = AudioRecorder()
+        recorder.start(RecordingMode.BUFFER)
+
+        callback = _get_callback(mock_stream_cls)
+        callback(_make_pcm_frames(0), 1024, {}, sd.CallbackFlags())
+
+        assert recorder.has_signal is False
+
+    @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
+    def test_has_signal_resets_on_restart(self, mock_stream_cls: MagicMock) -> None:
+        recorder = AudioRecorder()
+        recorder.start(RecordingMode.BUFFER)
+        callback = _get_callback(mock_stream_cls)
+        callback(_make_pcm_frames(16_384), 1024, {}, sd.CallbackFlags())
+        recorder.stop()
+
+        recorder.start(RecordingMode.BUFFER)
+        assert recorder.has_signal is False
+
+
 class TestGuardAudioInput:
     def test_guard_returns_sample_rate_when_compatible(self) -> None:
         with (
@@ -428,6 +467,20 @@ class TestGuardAudioInput:
             recorder = AudioRecorder()
             with pytest.raises(AudioBackendUnavailableError):
                 recorder.start(RecordingMode.BUFFER)
+
+    def test_start_surfaces_import_error_reason(self) -> None:
+        import_error = OSError("cannot load libportaudio.dylib")
+        with (
+            patch("vibe.cli.audio_recorder.audio_recorder.sd", None),
+            patch(
+                "vibe.cli.audio_recorder.audio_recorder._SD_IMPORT_ERROR", import_error
+            ),
+        ):
+            recorder = AudioRecorder()
+            with pytest.raises(AudioBackendUnavailableError) as exc_info:
+                recorder.start(RecordingMode.BUFFER)
+            assert "cannot load libportaudio.dylib" in str(exc_info.value)
+            assert exc_info.value.__cause__ is import_error
 
     @patch("vibe.cli.audio_recorder.audio_recorder.sd.RawInputStream")
     def test_start_raises_when_no_device(self, mock_stream_cls: MagicMock) -> None:

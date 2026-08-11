@@ -1,4 +1,4 @@
-"""Session ID generation with a stable suffix preserved across compact/fork/rewind."""
+"""Session ID generation with a stable suffix preserved across fork and rewind."""
 
 from __future__ import annotations
 

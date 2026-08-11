@@ -4,6 +4,13 @@
 
 Sessions are durable local records of conversation state, metadata, tool availability, stats, and resumability data.
 
+Compaction keeps the current session identity and transcript. The compacted
+context is stored as an injected message marked with
+`context_boundary = "compaction"`. Model requests include the current system
+message, the latest marked compaction message, and everything written after it.
+Public history still projects the complete transcript and renders each marked
+message as a compaction checkpoint.
+
 Session persistence should be append-friendly for ordinary message writes,
 atomic for metadata, tolerant of old transcript shapes through migrations, and
 independent of one delivery surface. An explicitly selected in-place rewind is
@@ -54,9 +61,11 @@ and destructive behavior must remain explicit.
 - Treat old transcript formats as real inputs unless a migration intentionally drops support.
 - Do not store surface-only widget state in core session transcripts.
 - Keep image/session attachment behavior explicit about what is persisted and what remains memory-only.
-- Treat compaction and context-clear session replacement as an explicit handoff:
-  atomically adopt the returned session ID, public state, event watermark, and
-  session-log summary.
+- Keep compaction in the current session and append its marked context message
+  through the normal session logger.
+- Treat context-clear session replacement as an explicit handoff: atomically
+  adopt the returned session ID, public state, event watermark, and session-log
+  summary.
 - Treat every rewind result as an authoritative state replacement, even when
   the session ID does not change.
 - For a forked rewind, preserve the source session and adopt the returned
@@ -76,6 +85,8 @@ and destructive behavior must remain explicit.
 ## Flag To User When
 
 - A change breaks existing session resume or requires users to discard old transcripts.
+- Compaction changes the session identity, rewrites earlier transcript entries,
+  or sends messages before the latest compaction boundary to the model.
 - A rewind would destructively update a session without an explicit in-place
   choice.
 - UI state is being added to core transcript data.

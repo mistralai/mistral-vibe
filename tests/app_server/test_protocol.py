@@ -9,6 +9,7 @@ import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.stubs.app_server import build_test_app_server
+from vibe.app_server._dispatch import DispatchResult
 from vibe.app_server.client import AppServerClient, AppServerConnectionClosed
 from vibe.app_server.protocol import (
     AppServerResponseError,
@@ -16,9 +17,11 @@ from vibe.app_server.protocol import (
     ClientCapabilities,
     ClientInfo,
     JsonPatchOperation,
+    JsonRpcErrorResponse,
     JsonRpcProtocolError,
-    JsonRpcSuccessResponse,
+    ProtocolError,
     ProtocolErrorCode,
+    ServerRequest,
     SessionUpdatedParams,
     validate_json_rpc_envelope,
 )
@@ -58,15 +61,7 @@ async def test_client_rejects_snake_case_response_fields() -> None:
     await peer_transport.send({
         "jsonrpc": "2.0",
         "id": request["id"],
-        "result": {
-            "server_info": {"name": "test-server", "version": "1"},
-            "protocol_version": "1",
-            "capabilities": {
-                "methods": [],
-                "callback_kinds": [],
-                "transports": ["in_process"],
-            },
-        },
+        "result": {"server_info": {"name": "test-server", "version": "1"}},
     })
 
     with pytest.raises(ValidationError):
@@ -142,19 +137,29 @@ async def test_server_rejects_unknown_response_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_late_callback_delivery_ack_is_valid_after_semantic_answer() -> None:
+async def test_late_callback_delivery_error_is_ignored_after_semantic_answer() -> None:
     client_transport, server_transport = memory_transport_pair()
     agent_loop = build_test_agent_loop()
     server = build_test_app_server(agent_loop, server_transport)
     server._callback_requests[7] = CallbackDelivery(
-        session_id=agent_loop.session_id, callback_id="callback-1", answered=True
+        session_id=agent_loop.session_id, callback_id="callback-1"
     )
 
+    await server._after_response(
+        ServerRequest(
+            id="callback-result",
+            method="callback/result",
+            params={"result": {"callbackId": "callback-1"}},
+        ),
+        DispatchResult(response=CallbackCallResponse(callback_id="callback-1")),
+    )
+    assert server._callback_requests[7].answered
+
     await server._handle_response(
-        JsonRpcSuccessResponse(
+        JsonRpcErrorResponse(
             id=7,
-            result=CallbackCallResponse(callback_id="callback-1").model_dump(
-                mode="json", by_alias=True
+            error=ProtocolError(
+                code=ProtocolErrorCode.INTERNAL_ERROR, message="delivery failed"
             ),
         )
     )
@@ -221,7 +226,7 @@ async def test_shutdown_closes_root_and_transport_after_child_cleanup_failure() 
     client = AppServerClient(client_transport, run_peer=server.serve)
     await client.initialize(ClientInfo(name="test", version="1"))
     await client.notify("initialized")
-    await client.request("session/start", {"cwd": str(agent_loop.cwd)})
+    await client.request("session/start", {"agentConfig": {"cwd": str(agent_loop.cwd)}})
     handler = server._handler
     handler.close = AsyncMock()
     server._sessions.close = AsyncMock(side_effect=RuntimeError("child close failed"))
@@ -264,8 +269,8 @@ async def test_session_close_records_pointer_before_responding(
 
     await client.initialize(ClientInfo(name="test", version="1"))
     await client.notify("initialized")
-    await client.request("session/start", {"cwd": str(agent_loop.cwd)})
-    await client.request("session/close", {"sessionId": agent_loop.session_id})
+    await client.request("session/start", {"agentConfig": {"cwd": str(agent_loop.cwd)}})
+    await client.request("session/stop", {"sessionId": agent_loop.session_id})
 
     record.assert_called_once_with(
         agent_loop.config.session_logging, agent_loop.session_id
@@ -292,8 +297,8 @@ async def test_session_close_does_not_record_unpersisted_pointer(
 
     await client.initialize(ClientInfo(name="test", version="1"))
     await client.notify("initialized")
-    await client.request("session/start", {"cwd": str(agent_loop.cwd)})
-    await client.request("session/close", {"sessionId": agent_loop.session_id})
+    await client.request("session/start", {"agentConfig": {"cwd": str(agent_loop.cwd)}})
+    await client.request("session/stop", {"sessionId": agent_loop.session_id})
 
     record.assert_not_called()
     await client.close()

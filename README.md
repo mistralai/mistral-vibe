@@ -77,6 +77,7 @@ pip install mistral-vibe
 - [Configuration](#configuration)
   - [Configuration File Location](#configuration-file-location)
   - [API Key Configuration](#api-key-configuration)
+  - [OpenTelemetry Tracing](#opentelemetry-tracing)
   - [Custom System Prompts](#custom-system-prompts)
   - [Custom Agent Configurations](#custom-agent-configurations)
   - [Tool Management](#tool-management)
@@ -113,9 +114,9 @@ pip install mistral-vibe
 
 Vibe comes with several built-in agent profiles, each designed for different use cases:
 
-- **`default`**: Standard agent that requires approval for tool executions. Best for general use.
+- **`ask`**: Requires approval for tool executions.
 - **`plan`**: Read-only agent for exploration and planning. Auto-approves safe tools like `grep` and `read`.
-- **`accept-edits`**: Auto-approves file edits only (`write_file`, `edit`). Useful for code refactoring.
+- **`accept-edits`**: The default agent. Auto-approves file edits only (`write_file`, `edit`). Useful for code refactoring.
 - **`auto-approve`**: Auto-approves all tool executions. Use with caution.
 
 Use the `--agent` flag to select a different agent:
@@ -131,7 +132,7 @@ To change the default agent used when `--agent` is not passed, set
 default_agent = "plan"
 ```
 
-Valid values are `default`, `plan`, `accept-edits`, `auto-approve`,
+Valid values are `ask`, `plan`, `accept-edits`, `auto-approve`,
 `lean` (only when listed in `installed_agents`), or the name of any
 custom agent file in `~/.vibe/agents/` or the project's `.vibe/agents/`
 directory. Subagents such as `explore` are not accepted.
@@ -237,7 +238,7 @@ Simply run `vibe` to enter the interactive chat loop.
 - **Tool Output Toggle**: Press `Ctrl+O` to toggle the tool output view.
 - **Todo View Toggle**: Press `Ctrl+T` to toggle the todo list view.
 - **Debug Console**: Press `Ctrl+\` to toggle the debug console.
-- **Agent Selection**: Press `Shift+Tab` to cycle through agents (default, plan, ...).
+- **Agent Selection**: Press `Shift+Tab` to cycle through agents (ask, plan, ...).
 - **Exit**: Type `/exit`, `exit`, `quit`, `:q`, or `:quit` in the input box, or press `Ctrl+C` / `Ctrl+D` twice within ~1 second. Set `ask_confirmation_on_exit = false` (or toggle it in `/config`) to make `Ctrl+D` quit on the first press; `Ctrl+C` always requires confirmation.
 
 ### Copying & Text Selection
@@ -267,7 +268,7 @@ You can run Vibe non-interactively by piping input or using the `--prompt` flag.
 vibe --prompt "Refactor the main function in cli/main.py to be more modular."
 ```
 
-By default, it uses your configured `default_agent` (`default` unless changed).
+By default, it uses your configured `default_agent` (`accept-edits` unless changed).
 To approve all tool calls without prompting, pass `--auto-approve` or `--yolo`
 (also available for interactive sessions):
 
@@ -472,6 +473,31 @@ enable_system_trust_store = true
 
 `SSL_CERT_FILE` and `SSL_CERT_DIR` are still supported and are loaded as additional trust anchors.
 
+### OpenTelemetry Tracing
+
+Vibe can export traces for agent, model, and tool operations over OTLP/HTTP. Enable tracing in `config.toml`:
+
+```toml
+enable_otel = true
+```
+
+By default, Vibe sends traces to the telemetry endpoint associated with the configured Mistral provider and authenticates with that provider's API key. `enable_telemetry` must also remain enabled.
+
+To send traces to another collector, configure its base URL. Vibe appends `/v1/traces`; configure authentication with the standard `OTEL_EXPORTER_OTLP_*` environment variables when needed.
+
+```toml
+enable_otel = true
+otel_endpoint = "https://collector.example.com:4318"
+```
+
+Span attributes are redacted on the client before export. The default mode redacts sensitive values, `strict` redacts sensitive attributes entirely, and `none` disables redaction:
+
+```toml
+otel_redaction = "default" # "default", "strict", or "none"
+```
+
+Use `none` only when the collector is trusted to receive potentially sensitive prompt, response, and tool data.
+
 ### Custom System Prompts
 
 You can create `AGENTS.md` files to add custom instructions. You can also replace the entire system prompt.
@@ -507,6 +533,9 @@ compaction_prompt_id = "my_compaction_prompt"
 ```
 
 Any extra instructions passed to `/compact ...` are appended after the configured compaction prompt.
+
+Compaction keeps the same session and visible conversation. Later model requests
+use the latest compacted context followed by newer messages.
 
 ### Custom Agent Configurations
 
@@ -852,6 +881,21 @@ vibe --worktree my-feature
 The worktree lives under `$VIBE_HOME/worktrees/<repo-name>-<repo-hash>/NAME` and is checked out on a branch named `NAME` (created if it doesn't exist, attached if it does). Vibe `cd`s into it before the session starts and trusts it for the session (no trust prompt). If you start Vibe from a subdirectory, Vibe enters the matching subdirectory inside the worktree.
 
 Existing worktrees are reused only when they belong to the same git repository and are checked out on branch `NAME`; otherwise Vibe exits with an error instead of running in the wrong checkout.
+
+Pass `--worktree` with no name to have Vibe name one for you:
+
+```bash
+vibe "Fix the login bug" --worktree     # -> fix-the-login-bug, on vibe/fix-the-login-bug
+vibe --worktree                         # no prompt -> a random slug, e.g. brave-quiet-otter
+```
+
+The name comes from your prompt, shortened to whole words. Without a prompt — or when the prompt has nothing usable in it, such as emoji only — Vibe generates a random slug instead. Unlike the named form, this never reuses an existing worktree: Vibe claims a free name, adding `-2`, `-3` and so on if needed, so two sessions started at once can never land in the same checkout. The branch is always `vibe/<name>`, matching the worktrees Le Chat Desktop creates.
+
+Order matters, because `--worktree` takes an optional value: `vibe --worktree "Fix the login bug"` reads the prompt as the *name*. Put the prompt first, or separate it with `--`:
+
+```bash
+vibe --worktree -- "Fix the login bug"
+```
 
 Automatic cleanup only applies to worktrees Vibe created this run, and only after a session actually started — a startup failure (bad config, `--continue` with no sessions) never deletes anything, and a reused worktree is always left in place. When an interactive session exits, Vibe removes the worktree directory automatically if there are no uncommitted changes, untracked files, or commits beyond the commit where the worktree session started. If any of those exist, Vibe asks whether to keep or remove the worktree. When Vibe created the branch it is deleted alongside the worktree; a branch that already existed and was merely attached is kept unless you confirm its deletion. Keeping preserves the directory and branch so you can return later; removing force-deletes them, discarding changes, untracked files, and commits. Programmatic runs (`vibe -p ... --worktree NAME`) do not clean up automatically because there is no exit prompt; remove them manually with `git worktree remove`. `--worktree` is ignored with `--setup` and `--check-upgrade`.
 

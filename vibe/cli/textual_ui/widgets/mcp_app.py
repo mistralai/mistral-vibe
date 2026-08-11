@@ -272,12 +272,18 @@ class MCPApp(Container):
         option_list.add_option(Option(Text(title, style="bold"), disabled=True))
         max_name = max(len(source.name) for source in sources)
         max_transport = max(len(source.transport) + 2 for source in sources)
-        tool_labels = {
-            source.name: _tool_count_text(
-                sum(tool.enabled for tool in source.tools), len(source.tools)
-            )
-            for source in sources
-        }
+        tool_labels = {}
+        for source in sources:
+            enabled = sum(tool.enabled for tool in source.tools)
+            total = len(source.tools)
+            if (
+                source.kind is MCPSourceKind.SERVER
+                and source.status is MCPSourceStatus.UNAVAILABLE
+                and total == 0
+            ):
+                tool_labels[source.name] = "tool discovery failed"
+            else:
+                tool_labels[source.name] = _tool_count_text(enabled, total)
         max_tools = max(len(label) for label in tool_labels.values())
         for source in sources:
             label = Text(no_wrap=True)
@@ -321,7 +327,17 @@ class MCPApp(Container):
             _DETAIL_VIEW_HELP if source.tools else _DETAIL_VIEW_HELP_NO_TOOLS
         )
         if not source.tools:
-            option_list.add_option(Option("No tools discovered", disabled=True))
+            if (
+                source.kind is MCPSourceKind.SERVER
+                and source.status is MCPSourceStatus.UNAVAILABLE
+            ):
+                option_list.add_option(Option("Tool discovery failed", disabled=True))
+                if error := self._state.discovery_errors.get(source.name):
+                    option_list.add_option(
+                        Option(Text(error, style="dim"), disabled=True)
+                    )
+            else:
+                option_list.add_option(Option("No tools discovered", disabled=True))
             return
         for tool in sorted(source.tools, key=lambda item: item.name):
             label = Text(no_wrap=True)
@@ -393,7 +409,12 @@ def _source_status(source: MCPSourceSummary) -> tuple[str, str, str]:
         case MCPSourceStatus.NEEDS_SETUP:
             return "○", "dim", "needs setup"
         case MCPSourceStatus.UNAVAILABLE:
-            return "○", "dim", "error - try refreshing"
+            hint = (
+                "check your config"
+                if source.kind is MCPSourceKind.SERVER
+                else "try refreshing"
+            )
+            return "○", "dim", f"error - {hint}"
         case MCPSourceStatus.DISABLED:
             return "○", "dim", "disabled"
 

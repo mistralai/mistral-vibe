@@ -89,9 +89,7 @@ def make_agent_loop(
     backend: FakeBackend,
     approval_handler: ApprovalRequestHandler | None = None,
 ) -> AgentLoop:
-    agent_name = (
-        BuiltinAgentName.AUTO_APPROVE if auto_approve else BuiltinAgentName.DEFAULT
-    )
+    agent_name = BuiltinAgentName.AUTO_APPROVE if auto_approve else BuiltinAgentName.ASK
     agent_loop = build_test_agent_loop(
         config=make_config(todo_permission=todo_permission),
         agent_name=agent_name,

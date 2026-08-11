@@ -6,9 +6,11 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.app_server._projection import (
     project_config,
     project_history,
+    project_mcp,
     project_session_log,
     project_stats,
 )
@@ -17,12 +19,14 @@ from vibe.app_server.models import (
     CancelledEffectState,
     CompletedEffectState,
     FailedEffectState,
+    MCPSourceStatus,
+    PublicCheckpointEntry,
     PublicEffectEntry,
     PublicMessageEntry,
     PublicReasoningEntry,
     ResourceContentBlock,
 )
-from vibe.core.config import SessionLoggingConfig
+from vibe.core.config import MCPStdio, SessionLoggingConfig
 from vibe.core.types import (
     FunctionCall,
     ImageAttachment,
@@ -188,6 +192,67 @@ def test_config_view_reports_unpinned_default_model() -> None:
     assert config.active_model.alias == "alpha"
 
 
+def test_config_view_awaiting_experiment_model_on_cold_cache() -> None:
+    # Cold-cache first launch: the routed model isn't known yet, so the banner
+    # spins instead of naming the model.
+    agent_loop = build_test_agent_loop(await_experiment_model=True)
+
+    config = project_config(agent_loop)
+
+    assert config.awaiting_experiment_model is True
+
+
+def test_config_view_not_awaiting_experiment_model_on_warm_cache() -> None:
+    agent_loop = build_test_agent_loop()
+
+    config = project_config(agent_loop)
+
+    assert config.awaiting_experiment_model is False
+
+
+@pytest.mark.asyncio
+async def test_apply_cached_experiment_variants_sets_routed_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # End-to-end for the warm-cache startup path.
+    from vibe.app_server._runtime import _apply_cached_experiment_variants
+    from vibe.core.config import build_default_orchestrator
+    from vibe.core.experiments import cache
+    from vibe.core.experiments.active import ExperimentName
+    from vibe.core.experiments.models import EvalResponse
+
+    monkeypatch.setattr(cache, "_cache_key", lambda _config: "user-abc")
+    orchestrator = await build_default_orchestrator()
+    routing = ExperimentName.CLI_MODEL_ROUTING.value
+    response = EvalResponse.model_validate({
+        "features": {
+            routing: {"rules": [{"force": '{"active_model": "magistral-medium"}'}]}
+        }
+    })
+    cache.store_cached_eval_response(orchestrator.config, response)
+    assert not orchestrator.config.routed_default_model
+
+    await _apply_cached_experiment_variants(orchestrator)
+
+    assert orchestrator.config.routed_default_model == "magistral-medium"
+
+
+@pytest.mark.asyncio
+async def test_apply_cached_experiment_variants_noop_on_cold_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.app_server._runtime import _apply_cached_experiment_variants
+    from vibe.core.config import build_default_orchestrator
+    from vibe.core.experiments import cache
+
+    monkeypatch.setattr(cache, "_cache_key", lambda _config: "user-abc")
+    orchestrator = await build_default_orchestrator()
+
+    await _apply_cached_experiment_variants(orchestrator)
+
+    assert not orchestrator.config.routed_default_model
+
+
 @pytest.mark.asyncio
 async def test_session_log_is_persisted_only_after_it_is_saved(tmp_path: Path) -> None:
     agent_loop = build_test_agent_loop(
@@ -269,3 +334,56 @@ def test_persisted_user_message_preserves_structured_resources() -> None:
     )
     assert resource.resource.uri == "file:///workspace/spec.md"
     assert resource.resource.media_type == "text/markdown"
+
+
+def test_project_mcp_discovery_error_marks_server_unavailable() -> None:
+    server = MCPStdio(name="broken", transport="stdio", command="fake-cmd")
+    config = build_test_vibe_config(mcp_servers=[server])
+    registry = FakeMCPRegistry()
+    registry.sync_active_servers([server])
+    agent_loop = build_test_agent_loop(config=config, mcp_registry=registry)
+
+    state = project_mcp(agent_loop, discovery_errors={"broken": "no binary found"})
+
+    (source,) = [s for s in state.sources if s.name == "broken"]
+    assert source.status is MCPSourceStatus.UNAVAILABLE
+
+
+def test_project_mcp_discovery_error_does_not_affect_healthy_server() -> None:
+    healthy = MCPStdio(name="healthy", transport="stdio", command="fake-cmd")
+    broken = MCPStdio(name="broken", transport="stdio", command="missing-cmd")
+    config = build_test_vibe_config(mcp_servers=[healthy, broken])
+    registry = FakeMCPRegistry()
+    registry.sync_active_servers([healthy, broken])
+    agent_loop = build_test_agent_loop(config=config, mcp_registry=registry)
+
+    state = project_mcp(agent_loop, discovery_errors={"broken": "no binary found"})
+
+    statuses = {s.name: s.status for s in state.sources}
+    assert statuses["broken"] is MCPSourceStatus.UNAVAILABLE
+    assert statuses["healthy"] is not MCPSourceStatus.UNAVAILABLE
+
+
+def test_persisted_compaction_boundary_projects_completed_checkpoint() -> None:
+    agent_loop = build_test_agent_loop()
+    agent_loop.messages.reset([
+        LLMMessage(role=Role.user, content="Before", message_id="user-1"),
+        LLMMessage(
+            role=Role.user,
+            content="Compacted context",
+            injected=True,
+            message_id="compaction-1",
+            context_boundary="compaction",
+        ),
+        LLMMessage(role=Role.assistant, content="After", message_id="assistant-1"),
+    ])
+
+    history = project_history(agent_loop)
+
+    checkpoint = next(
+        entry for entry in history if isinstance(entry, PublicCheckpointEntry)
+    )
+    assert checkpoint.id == "checkpoint:compaction:compaction-1"
+    assert checkpoint.kind == "compaction"
+    assert checkpoint.message == "Context compacted"
+    assert checkpoint.generation_status == "completed"

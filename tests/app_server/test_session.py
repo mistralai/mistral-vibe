@@ -32,7 +32,6 @@ from vibe.app_server.events import (
     CallbackRequested,
     HistoryEntryAdded,
     HistoryEntryUpdated,
-    SessionCompacted,
     SessionContextCleared,
     SessionSnapshot,
     StatsUpdated,
@@ -59,13 +58,13 @@ from vibe.app_server.models import (
     UserQuestionResult,
 )
 from vibe.app_server.protocol import (
-    SERVER_METHODS,
     AppServerResponseError,
     CallbackCallResponse,
+    CallbackResultError,
     ClientCapabilities,
     ClientInfo,
-    ConfigPatchOpWire,
-    ConfigPatchParams,
+    ConfigWriteOpWire,
+    ConfigWriteParams,
     Notification,
     ProtocolErrorCode,
     RuntimeUpdatedParams,
@@ -84,9 +83,10 @@ from vibe.app_server.server import AppServer
 from vibe.app_server.session import AppServerSession, AppServerTurnError
 from vibe.app_server.transport import memory_transport_pair
 from vibe.core.agent_loop import AgentLoop
-from vibe.core.compaction import CompactionFailedError
+from vibe.core.compaction import CompactionFailedError, select_model_context
 from vibe.core.config import ModelConfig, SessionLoggingConfig
 from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.session.session_loader import SessionLoader
 from vibe.core.tools.models import ToolPermission
 from vibe.core.types import (
     AgentStats,
@@ -102,6 +102,18 @@ from vibe.core.types import (
     UserMessageEvent,
 )
 from vibe.user_content import UserResourceLink
+
+
+def _wire_resume_request(session_id: str) -> dict:
+    return SessionResumeParams(session_id=session_id).model_dump(
+        mode="json", by_alias=True
+    )
+
+
+def _wire_read_request(session_id: str) -> dict:
+    return SessionReadParams(session_id=session_id).model_dump(
+        mode="json", by_alias=True
+    )
 
 
 @pytest.mark.asyncio
@@ -396,7 +408,6 @@ async def test_completed_turn_refreshes_runtime_projection() -> None:
     await agent_loop.config_orchestrator.set_field(
         "/theme", "server-updated-theme", target_layer=OverridesLayer.NAME
     )
-    agent_loop.agent_manager.invalidate_config()
 
     try:
         _ = [event async for event in session.act("refresh runtime")]
@@ -447,6 +458,101 @@ async def test_persisted_session_resume_appends_checkpoint(tmp_path: Path) -> No
 
     assert len(checkpoints) == 1
     assert checkpoints[0].message == "Session resumed"
+
+
+@pytest.mark.asyncio
+async def test_compaction_keeps_session_and_restores_full_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logging = SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    config = build_test_vibe_config(session_logging=logging)
+    backend = FakeBackend([
+        [mock_llm_chunk(content="Before compaction")],
+        [mock_llm_chunk(content="<summary>First turn completed</summary>")],
+        [mock_llm_chunk(content="After compaction")],
+    ])
+    agent_loop = build_test_agent_loop(
+        config=config, backend=backend, enable_streaming=True
+    )
+    session = await create_test_app_server_session(agent_loop)
+
+    try:
+        await _consume(session.act("first question", client_message_id="user-1"))
+        session_id = session.session_id
+        await session.compact()
+        assert session.session_id == session_id
+        assert [
+            entry.text
+            for entry in session.history
+            if isinstance(entry, PublicMessageEntry)
+        ] == ["first question", "Before compaction"]
+        assert (
+            sum(
+                isinstance(entry, PublicCheckpointEntry) and entry.kind == "compaction"
+                for entry in session.history
+            )
+            == 1
+        )
+        await _consume(session.act("second question", client_message_id="user-2"))
+        session_dir = agent_loop.session_logger.session_dir
+        assert session_dir is not None
+    finally:
+        await session.close()
+
+    saved_messages, metadata = SessionLoader.load_session(session_dir)
+    assert metadata["session_id"] == session_id
+    assert [
+        message.content
+        for message in saved_messages
+        if message.role in {Role.user, Role.assistant} and not message.context_boundary
+    ] == ["first question", "Before compaction", "second question", "After compaction"]
+    boundaries = [
+        message
+        for message in saved_messages
+        if message.context_boundary == "compaction"
+    ]
+    assert len(boundaries) == 1
+    assert len(SessionLoader.list_sessions(logging)) == 1
+
+    resumed_backend = FakeBackend([[mock_llm_chunk(content="Resumed answer")]])
+    monkeypatch.setattr(
+        "vibe.core.agent_loop._loop.create_backend", lambda **_: resumed_backend
+    )
+    resumed = await attach_test_app_server_session(
+        start_test_app_server(
+            build_test_agent_loop(
+                config=config, backend=resumed_backend, enable_streaming=True
+            )
+        ),
+        resume_session_id=session_id,
+    )
+    try:
+        assert any(
+            isinstance(entry, PublicCheckpointEntry) and entry.kind == "compaction"
+            for entry in resumed.history
+        )
+        assert [
+            entry.text
+            for entry in resumed.history
+            if isinstance(entry, PublicMessageEntry)
+        ] == [
+            "first question",
+            "Before compaction",
+            "second question",
+            "After compaction",
+        ]
+        await _consume(resumed.act("third question", client_message_id="user-3"))
+    finally:
+        await resumed.close()
+
+    model_context = resumed_backend.requests_messages[0]
+    assert len(model_context) == 5
+    assert model_context[1].context_boundary == "compaction"
+    assert [message.content for message in model_context[2:]] == [
+        "second question",
+        "After compaction",
+        "third question",
+    ]
 
 
 @pytest.mark.asyncio
@@ -524,6 +630,62 @@ async def test_attached_fork_rebases_exit_usage(tmp_path: Path) -> None:
 
     assert summary.usage.input_tokens == 0
     assert summary.usage.output_tokens == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message_id", "expected_context"),
+    [
+        pytest.param("u1", ["first", "first reply"], id="before-compaction"),
+        pytest.param(
+            "u2",
+            ["first compacted context", "second", "second reply"],
+            id="between-compactions",
+        ),
+        pytest.param(
+            "u3",
+            ["second compacted context", "third", "third reply"],
+            id="after-compactions",
+        ),
+    ],
+)
+async def test_fork_uses_latest_compaction_boundary_in_copied_prefix(
+    message_id: str, expected_context: list[str]
+) -> None:
+    source = build_test_agent_loop()
+    source.messages.reset([
+        LLMMessage(role=Role.system, content="system"),
+        LLMMessage(role=Role.user, content="first", message_id="u1"),
+        LLMMessage(role=Role.assistant, content="first reply"),
+        LLMMessage(
+            role=Role.user,
+            content="first compacted context",
+            injected=True,
+            context_boundary="compaction",
+        ),
+        LLMMessage(role=Role.user, content="second", message_id="u2"),
+        LLMMessage(role=Role.assistant, content="second reply"),
+        LLMMessage(
+            role=Role.user,
+            content="second compacted context",
+            injected=True,
+            context_boundary="compaction",
+        ),
+        LLMMessage(role=Role.user, content="third", message_id="u3"),
+        LLMMessage(role=Role.assistant, content="third reply"),
+    ])
+
+    forked = await AgentRuntimeFactory().fork(source, message_id)
+    try:
+        assert forked.parent_session_id == source.session_id
+        assert [
+            message.content
+            for message in select_model_context(forked.messages)
+            if message.role is not Role.system
+        ] == expected_context
+    finally:
+        await forked.aclose()
+        await source.aclose()
 
 
 @pytest.mark.asyncio
@@ -711,12 +873,42 @@ async def test_history_list_can_filter_by_turn() -> None:
     finally:
         await session.close()
 
-    assert page.entries
-    assert all(entry.turn_id == first_turn.id for entry in page.entries)
+    assert page.data
+    assert all(entry.turn_id == first_turn.id for entry in page.data)
     assert not any(
         isinstance(entry, PublicMessageEntry) and entry.text == "second question"
-        for entry in page.entries
+        for entry in page.data
     )
+
+
+@pytest.mark.asyncio
+async def test_history_list_uses_next_cursor_to_load_older_entries() -> None:
+    backend = FakeBackend([
+        [mock_llm_chunk(content=f"answer {index}")] for index in range(3)
+    ])
+    session = await create_test_app_server_session(
+        build_test_agent_loop(backend=backend, enable_streaming=True)
+    )
+    try:
+        for index in range(3):
+            await _consume(session.act(f"question {index}"))
+
+        history_ids = [entry.id for entry in session.resources.sessions.history]
+        latest = await session.resources.sessions.list_history(limit=2)
+        assert latest.next_cursor is not None
+        older = await session.resources.sessions.list_history(
+            before=latest.next_cursor, limit=2
+        )
+        forward = await session.resources.sessions.list_history(
+            after=older.items[-1].id, limit=2
+        )
+    finally:
+        await session.close()
+
+    assert [entry.id for entry in latest.items] == history_ids[-2:]
+    assert latest.previous_cursor is None
+    assert [entry.id for entry in older.items] == history_ids[-4:-2]
+    assert [entry.id for entry in forward.items] == history_ids[-2:]
 
 
 @pytest.mark.asyncio
@@ -790,11 +982,11 @@ async def test_concurrent_resumes_replace_roots_serially(
     await client.request("session/start", SessionStartParams())
 
     first_resume = asyncio.create_task(
-        client.request("session/resume", SessionResumeParams(session_id="first"))
+        client.request("session/resume", _wire_resume_request("first"))
     )
     await first_entered.wait()
     second_resume = asyncio.create_task(
-        client.request("session/resume", SessionResumeParams(session_id="second"))
+        client.request("session/resume", _wire_resume_request("second"))
     )
     await asyncio.sleep(0)
     assert sources == [initial]
@@ -834,9 +1026,7 @@ async def test_resume_reserves_session_before_loading_replacement(
     await client.request("session/start", SessionStartParams())
 
     resume = asyncio.create_task(
-        client.request(
-            "session/resume", SessionResumeParams(session_id=replacement.session_id)
-        )
+        client.request("session/resume", _wire_resume_request(replacement.session_id))
     )
     await entered.wait()
     try:
@@ -906,9 +1096,7 @@ async def test_failed_root_close_discards_staged_replacement(
 
     try:
         with pytest.raises(AppServerResponseError, match="close failed"):
-            await client.request(
-                "session/resume", SessionResumeParams(session_id="replacement")
-            )
+            await client.request("session/resume", _wire_resume_request("replacement"))
         replacement_close.assert_awaited_once_with()
         assert server._root is None
     finally:
@@ -1037,7 +1225,7 @@ async def test_agent_switches_during_approval_and_remains_selected() -> None:
             if not isinstance(event, CallbackRequested):
                 continue
             assert (await session.resources.agents.switch("plan")).name == "plan"
-            assert (await session.resources.agents.switch("default")).name == "default"
+            assert (await session.resources.agents.switch("ask")).name == "ask"
             assert (await session.resources.agents.switch("plan")).name == "plan"
             await session.respond_to_callback(
                 event.callback.callback_id,
@@ -1262,6 +1450,70 @@ async def test_callback_response_is_retry_safe_and_rejects_conflicts() -> None:
         await agent_loop.aclose()
 
 
+@pytest.mark.asyncio
+async def test_callback_result_requires_output_or_error() -> None:
+    agent_loop = build_test_agent_loop()
+    session = await create_test_app_server_session(agent_loop)
+
+    try:
+        client = await session._ensure_attached()
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await client.request(
+                "callback/result",
+                {
+                    "sessionId": session.session_id,
+                    "result": {"callbackId": "callback-1"},
+                },
+            )
+    finally:
+        await session.close()
+        await agent_loop.aclose()
+
+    assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert (
+        exc_info.value.error.message == "Callback result must include output or error"
+    )
+
+
+@pytest.mark.asyncio
+async def test_callback_error_is_retry_safe_and_rejects_conflicts() -> None:
+    tool_call = ToolCall(
+        id="todo-1",
+        index=0,
+        function=FunctionCall(name="todo", arguments='{"action":"read"}'),
+    )
+    backend = FakeBackend([[mock_llm_chunk(content="", tool_calls=[tool_call])]])
+    config = build_test_vibe_config(
+        enabled_tools=["todo"], tools={"todo": {"permission": ToolPermission.ASK.value}}
+    )
+    agent_loop = build_test_agent_loop(
+        config=config, backend=backend, enable_streaming=True
+    )
+    session = await create_test_app_server_session(agent_loop)
+    error = CallbackResultError(
+        message="Client cannot answer this callback",
+        code="client_unavailable",
+        details={"retryable": False},
+    )
+
+    try:
+        with pytest.raises(AppServerTurnError, match=error.message):
+            async for event in session.act("read todos"):
+                if not isinstance(event, CallbackRequested):
+                    continue
+                await session.reject_callback(event.callback.callback_id, error)
+                await session.reject_callback(event.callback.callback_id, error)
+                with pytest.raises(AppServerResponseError) as exc_info:
+                    await session.reject_callback(
+                        event.callback.callback_id,
+                        CallbackResultError(message="A different callback error"),
+                    )
+                assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT
+    finally:
+        await session.close()
+        await agent_loop.aclose()
+
+
 def test_callback_delivery_acknowledgement_has_no_semantic_output() -> None:
     response = CallbackCallResponse(callback_id="approval-1")
 
@@ -1361,14 +1613,14 @@ async def test_runtime_mutation_result_publishes_the_coherent_snapshot(
         await client.notify("initialized")
         await client.request("session/start", SessionStartParams())
         await client.request(
-            "config/patch",
-            ConfigPatchParams(
+            "config/write",
+            ConfigWriteParams(
                 session_id=agent_loop.session_id,
                 ops=[
-                    ConfigPatchOpWire(
+                    ConfigWriteOpWire(
                         op="set", path="/disable_welcome_banner_animation", value=True
                     ),
-                    ConfigPatchOpWire(
+                    ConfigWriteOpWire(
                         op="set", path="/autocopy_to_clipboard", value=False
                     ),
                 ],
@@ -1458,9 +1710,7 @@ async def test_initialize_must_be_first_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_initialize_requires_initialized_notification_and_advertises_capabilities() -> (
-    None
-):
+async def test_initialize_requires_initialized_notification() -> None:
     agent_loop = build_test_agent_loop()
     client = start_test_app_server(agent_loop)
 
@@ -1469,25 +1719,28 @@ async def test_initialize_requires_initialized_notification_and_advertises_capab
             ClientInfo(name="test", version="1"),
             ClientCapabilities(callback_kinds=["approval", "user_input"]),
         )
-        assert response.protocol_version == "1"
-        assert response.capabilities.methods == list(SERVER_METHODS)
-        assert response.capabilities.callback_kinds == ["approval", "user_input"]
-        assert response.capabilities.transports == ["in_process"]
+        assert response.model_dump(mode="json") == {
+            "serverInfo": {
+                "name": "vibe-app-server",
+                "version": response.server_info.version,
+            }
+        }
 
         with pytest.raises(AppServerResponseError) as exc_info:
             await client.request(
-                "session/read", SessionReadParams(session_id=agent_loop.session_id)
+                "session/read", _wire_read_request(agent_loop.session_id)
             )
         assert exc_info.value.error.code is ProtocolErrorCode.NOT_INITIALIZED
 
         await client.notify("initialized")
         await client.request("session/start", SessionStartParams())
-        session = SessionReadResponse.model_validate(
+        public = validate_wire(
+            SessionReadResponse,
             await client.request(
-                "session/read", SessionReadParams(session_id=agent_loop.session_id)
-            )
+                "session/read", _wire_read_request(agent_loop.session_id)
+            ),
         )
-        assert session.state.session.id == agent_loop.session_id
+        assert public.state.session.id == agent_loop.session_id
     finally:
         await client.close()
         await agent_loop.aclose()
@@ -1766,22 +2019,16 @@ async def test_clear_history_adopts_replacement_before_next_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_compaction_hands_active_turn_to_replacement_session() -> None:
+async def test_auto_compaction_keeps_active_turn_in_same_session() -> None:
     agent_loop = build_test_agent_loop()
     agent_loop.stats.session_prompt_tokens = 11
     agent_loop.stats.session_completion_tokens = 7
     original_session_id = agent_loop.session_id
-    replacement_session_id = f"{original_session_id}-compacted"
 
     async def compacting_act(msg: str, **_kwargs):
         yield UserMessageEvent(content=msg, message_id="user-1")
         yield CompactStartEvent(
             current_context_tokens=100, threshold=90, tool_call_id="compact-1"
-        )
-        agent_loop.session_id = replacement_session_id
-        agent_loop.parent_session_id = original_session_id
-        agent_loop.session_logger.reset_session(
-            replacement_session_id, parent_session_id=original_session_id
         )
         agent_loop.stats.session_prompt_tokens += 2
         agent_loop.stats.session_completion_tokens += 1
@@ -1789,22 +2036,25 @@ async def test_auto_compaction_hands_active_turn_to_replacement_session() -> Non
             tool_call_id="compact-1",
             summary_length=12,
             old_session_id=original_session_id,
-            new_session_id=replacement_session_id,
+            new_session_id=original_session_id,
         )
         yield AssistantEvent(content="continued", message_id="assistant-1")
 
     agent_loop.act = compacting_act
     session = await create_test_app_server_session(agent_loop)
     try:
-        events = await _consume(session.act("continue"))
+        await _consume(session.act("continue"))
     finally:
         await session.close()
 
-    assert session.session_id == replacement_session_id
-    assert any(isinstance(event, SessionCompacted) for event in events)
-    assert all(entry.session_id == replacement_session_id for entry in session.history)
+    assert session.session_id == original_session_id
+    assert any(
+        isinstance(entry, PublicCheckpointEntry) and entry.kind == "compaction"
+        for entry in session.history
+    )
+    assert all(entry.session_id == original_session_id for entry in session.history)
     assert session.state.latest_turn is not None
-    assert session.state.latest_turn.session_id == replacement_session_id
+    assert session.state.latest_turn.session_id == original_session_id
     assert session.state.latest_turn.status == "completed"
     assert session.exit_summary().usage.input_tokens == 2
     assert session.exit_summary().usage.output_tokens == 1
@@ -1846,10 +2096,9 @@ async def test_plan_clear_hands_active_turn_to_replacement_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_interrupt_routes_from_replaced_session_during_handoff_race() -> None:
+async def test_interrupt_routes_during_compaction_without_session_handoff() -> None:
     agent_loop = build_test_agent_loop()
     original_session_id = agent_loop.session_id
-    replacement_session_id = f"{original_session_id}-compacted"
     transitioned = asyncio.Event()
 
     async def compacting_act(msg: str, **_kwargs):
@@ -1857,16 +2106,11 @@ async def test_interrupt_routes_from_replaced_session_during_handoff_race() -> N
         yield CompactStartEvent(
             current_context_tokens=100, threshold=90, tool_call_id="compact-1"
         )
-        agent_loop.session_id = replacement_session_id
-        agent_loop.parent_session_id = original_session_id
-        agent_loop.session_logger.reset_session(
-            replacement_session_id, parent_session_id=original_session_id
-        )
         yield CompactEndEvent(
             tool_call_id="compact-1",
             summary_length=12,
             old_session_id=original_session_id,
-            new_session_id=replacement_session_id,
+            new_session_id=original_session_id,
         )
         transitioned.set()
         await asyncio.Event().wait()
@@ -1885,13 +2129,17 @@ async def test_interrupt_routes_from_replaced_session_during_handoff_race() -> N
             "turn/interrupt",
             {"sessionId": original_session_id, "expectedTurnId": turn_id},
         )
-        events = await turn
+        await turn
     finally:
         turn.cancel()
         await session.close()
 
-    assert response == {"interrupted": True}
-    assert any(isinstance(event, SessionCompacted) for event in events)
+    assert response["accepted"] is True
+    assert isinstance(response["lastEventId"], int)
+    assert any(
+        isinstance(entry, PublicCheckpointEntry) and entry.kind == "compaction"
+        for entry in session.history
+    )
     assert session.state.latest_turn is not None
     assert session.state.latest_turn.status == "interrupted"
 

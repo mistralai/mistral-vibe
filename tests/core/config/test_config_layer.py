@@ -14,7 +14,6 @@ from vibe.core.config.layer import (
     ConfigPatchApplicationError,
     LayerImplementationError,
     RawConfig,
-    TrustNotResolvedError,
     UntrustedLayerError,
 )
 from vibe.core.config.layers.agent_profile import AgentProfileLayer
@@ -64,17 +63,6 @@ class StubLayer(ConfigLayer[BaseModel]):
 
     async def _save_to_store(self, _next_config: BaseModel) -> str:
         raise NotImplementedError("StubLayer.apply() is not implemented")
-
-
-class ObservableStubLayer(StubLayer):
-    """Stub that records _on_trust_changed calls."""
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.trust_changes: list[tuple[bool | None, bool | None]] = []
-
-    async def _on_trust_changed(self, old: bool | None, new: bool | None) -> None:
-        self.trust_changes.append((old, new))
 
 
 class WritableStubLayer(StubLayer):
@@ -250,107 +238,6 @@ async def test_resolve_trust_untrusted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_trust_fires_on_trust_changed() -> None:
-    layer = ObservableStubLayer(trusted=True)
-    await layer.resolve_trust()
-    assert layer.trust_changes == [(None, True)]
-
-
-@pytest.mark.asyncio
-async def test_resolve_trust_no_callback_when_unchanged() -> None:
-    layer = ObservableStubLayer(trusted=True)
-    await layer.resolve_trust()
-    layer.trust_changes.clear()
-    await layer.resolve_trust()
-    assert layer.trust_changes == []
-
-
-@pytest.mark.asyncio
-async def test_grant_trust() -> None:
-    layer = StubLayer(trusted=False)
-    await layer.resolve_trust()
-    await layer.grant_trust()
-    assert layer.is_trusted is True
-
-
-@pytest.mark.asyncio
-async def test_grant_trust_fires_callback() -> None:
-    layer = ObservableStubLayer(trusted=False)
-    await layer.resolve_trust()
-    layer.trust_changes.clear()
-    await layer.grant_trust()
-    assert layer.trust_changes == [(False, True)]
-
-
-@pytest.mark.asyncio
-async def test_grant_trust_noop_when_already_trusted() -> None:
-    layer = ObservableStubLayer(trusted=True)
-    await layer.resolve_trust()
-    layer.trust_changes.clear()
-    await layer.grant_trust()
-    assert layer.trust_changes == []
-
-
-@pytest.mark.asyncio
-async def test_revoke_trust() -> None:
-    layer = StubLayer(trusted=True)
-    await layer.resolve_trust()
-    await layer.revoke_trust()
-    assert layer.is_trusted is False
-
-
-@pytest.mark.asyncio
-async def test_revoke_trust_fires_callback() -> None:
-    layer = ObservableStubLayer(trusted=True)
-    await layer.resolve_trust()
-    layer.trust_changes.clear()
-    await layer.revoke_trust()
-    assert layer.trust_changes == [(True, False)]
-
-
-@pytest.mark.asyncio
-async def test_revoke_trust_clears_data() -> None:
-    layer = StubLayer(data={"k": "v"})
-    await layer.load()
-    assert layer.read_count == 1
-    await layer.revoke_trust()
-    await layer.grant_trust()
-    await layer.load()
-    assert layer.read_count == 2
-
-
-@pytest.mark.asyncio
-async def test_on_trust_changed_failure_preserves_state() -> None:
-    class FailingLayer(StubLayer):
-        def __init__(self, **kwargs: Any) -> None:
-            super().__init__(**kwargs)
-            self.should_fail = True
-
-        async def _on_trust_changed(self, old: bool | None, new: bool | None) -> None:
-            if self.should_fail:
-                raise RuntimeError("persistence failure")
-
-    layer = FailingLayer(trusted=False)
-    assert layer.is_trusted is None
-
-    # Resolve trust without failing (so we can test grant_trust separately)
-    layer.should_fail = False
-    await layer.resolve_trust()
-    assert layer.is_trusted is False
-
-    # Now make _on_trust_changed fail during grant_trust
-    layer.should_fail = True
-    with pytest.raises(LayerImplementationError, match="_on_trust_changed") as exc_info:
-        await layer.grant_trust()
-    assert isinstance(exc_info.value.__cause__, RuntimeError)
-    assert layer.is_trusted is False
-
-    layer.should_fail = False
-    await layer.grant_trust()
-    assert layer.is_trusted is True
-
-
-@pytest.mark.asyncio
 async def test_check_trust_failure_wrapped() -> None:
     class BrokenTrustLayer(StubLayer):
         async def _check_trust(self) -> bool:
@@ -411,24 +298,6 @@ async def test_load_untrusted_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_load_after_grant_trust() -> None:
-    layer = StubLayer(trusted=False)
-    await layer.resolve_trust()
-    await layer.grant_trust()
-    result = await layer.load()
-    assert isinstance(result, RawConfig)
-
-
-@pytest.mark.asyncio
-async def test_load_after_revoke_trust_raises() -> None:
-    layer = StubLayer(trusted=True)
-    await layer.load()
-    await layer.revoke_trust()
-    with pytest.raises(UntrustedLayerError):
-        await layer.load()
-
-
-@pytest.mark.asyncio
 async def test_invalidate_cache_causes_reload() -> None:
     layer = StubLayer()
     await layer.load()
@@ -436,20 +305,6 @@ async def test_invalidate_cache_causes_reload() -> None:
     await layer.invalidate_cache()
     await layer.load()
     assert layer.read_count == 2
-
-
-@pytest.mark.asyncio
-async def test_revoke_grant_cycle_refreshes_data() -> None:
-    layer = StubLayer(data={"v": 1})
-    result1 = await layer.load()
-    assert result1.model_dump() == {"v": 1}
-
-    await layer.revoke_trust()
-    layer._data = {"v": 2}
-    await layer.grant_trust()
-
-    result2 = await layer.load()
-    assert result2.model_dump() == {"v": 2}
 
 
 @pytest.mark.asyncio
@@ -723,42 +578,6 @@ async def test_save_to_store_failure_wrapped() -> None:
     assert isinstance(exc_info.value.__cause__, OSError)
 
 
-@pytest.mark.asyncio
-async def test_grant_trust_raises_when_trust_not_resolved() -> None:
-    """grant_trust() must fail if trust has never been resolved."""
-    layer = StubLayer(trusted=True, data={"k": "v"})
-
-    # Trust not yet resolved — grant_trust should raise
-    with pytest.raises(TrustNotResolvedError):
-        await layer.grant_trust()
-    assert layer.is_trusted is None
-
-    # Resolve trust first, then grant_trust succeeds
-    await layer.resolve_trust()
-    await layer.grant_trust()
-    assert layer.is_trusted is True
-
-
-@pytest.mark.asyncio
-async def test_revoke_trust_raises_when_trust_not_resolved() -> None:
-    """revoke_trust() must fail if trust has never been resolved."""
-    trust_store: dict[str, bool] = {"/tmp/proj": True}
-    layer = FakeLocalProjectLayer(
-        project_path="/tmp/proj", data={"key": "val"}, trust_store=trust_store
-    )
-
-    # Trust not yet resolved — revoke_trust should raise
-    with pytest.raises(TrustNotResolvedError):
-        await layer.revoke_trust()
-    assert layer.is_trusted is None
-
-    # Resolve trust (storage says trusted), then revoke succeeds
-    await layer.resolve_trust()
-    assert layer.is_trusted is True
-    await layer.revoke_trust()
-    assert layer.is_trusted is False
-
-
 # Scenario: LocalUserConfigLayer
 
 
@@ -802,68 +621,6 @@ async def test_scenario_local_user_layer_always_trusted() -> None:
     })
     assert isinstance(validated, UserConfigSchema)
     assert validated.active_model == "mistral-large"
-
-
-# Scenario: LocalProjectConfigLayer
-
-
-class FakeLocalProjectLayer(ConfigLayer[BaseModel]):
-    def __init__(
-        self, *, project_path: str, data: dict[str, Any], trust_store: dict[str, bool]
-    ) -> None:
-        super().__init__(name=f"project-toml:{project_path}")
-        self._project_path = project_path
-        self._data = data
-        self._trust_store = trust_store
-
-    async def _check_trust(self) -> bool:
-        return self._trust_store.get(self._project_path, False)
-
-    async def _on_trust_changed(self, old: bool | None, new: bool | None) -> None:
-        if new:
-            self._trust_store[self._project_path] = True
-        else:
-            self._trust_store.pop(self._project_path, None)
-
-    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
-        return LayerConfigSnapshot(data=dict(self._data), fingerprint="project-fp")
-
-    async def _save_to_store(self, _next_config: BaseModel) -> str:
-        raise NotImplementedError
-
-
-@pytest.mark.asyncio
-async def test_scenario_local_project_layer_trust_lifecycle() -> None:
-    trust_store: dict[str, bool] = {}
-    project_data = {"disabled_tools": ["rm"], "max_tokens": 4096}
-
-    # 1. Fresh layer with empty trust store — load raises
-    layer = FakeLocalProjectLayer(
-        project_path="/tmp/my-project", data=project_data, trust_store=trust_store
-    )
-    with pytest.raises(UntrustedLayerError):
-        await layer.load()
-
-    # 2. Grant trust — persisted in store, load succeeds
-    await layer.grant_trust()
-    assert trust_store == {"/tmp/my-project": True}
-    result = await layer.load()
-    assert result.model_dump() == project_data
-
-    # 3. New instance with same trust store — loads directly
-    layer2 = FakeLocalProjectLayer(
-        project_path="/tmp/my-project", data=project_data, trust_store=trust_store
-    )
-    assert layer2.is_trusted is None
-    result2 = await layer2.load()
-    assert layer2.is_trusted is True
-    assert result2.model_dump() == project_data
-
-    # 4. Revoke trust — removed from store, load raises
-    await layer2.revoke_trust()
-    assert "/tmp/my-project" not in trust_store
-    with pytest.raises(UntrustedLayerError):
-        await layer2.load()
 
 
 def test_toml_snapshot_drops_none_optional_fields_and_round_trips(

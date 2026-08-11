@@ -22,6 +22,7 @@ from vibe.app_server._projection import project_config, project_config_view
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.protocol import (
     AppServerResponseError,
+    AutoWorktreeInput,
     ClientCapabilities,
     ClientInfo,
     ConfigFieldsReadParams,
@@ -29,12 +30,14 @@ from vibe.app_server.protocol import (
     ConfigReadParams,
     ConfigReadResponse,
     ConfigSchemaReadParams,
-    CreateLocalWorkspaceSelection,
-    ExistingLocalWorkspaceSelection,
-    HistoryListParams,
+    EmptyResponse,
+    ExistingWorktreeInput,
+    NewWorktreeInput,
     ProtocolErrorCode,
     SessionDeleteParams,
+    SessionHistoryListParams,
     SessionListParams,
+    SessionListResponse,
     SessionMCPStdioServer,
     SessionOptions,
     SessionReadParams,
@@ -46,7 +49,7 @@ from vibe.app_server.protocol import (
     WorkspaceWorktreeListResponse,
 )
 import vibe.app_server.server as server_module
-from vibe.app_server.server import AppServer, resolve_local_workspace_selection
+from vibe.app_server.server import AppServer, resolve_worktree
 from vibe.app_server.session import AppServerSession
 from vibe.app_server.transport import memory_transport_pair
 from vibe.core.agent_loop import AgentLoop
@@ -55,8 +58,10 @@ from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.hooks.config import HookConfigResult
+from vibe.core.session.resume_sessions import ResumeSessionInfo
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.trusted_folders import trusted_folders_manager
+import vibe.core.worktree as worktree_module
 from vibe.core.worktree import (
     GitUnavailableError,
     list_linked_worktrees,
@@ -87,23 +92,143 @@ def _init_repo(root: Path) -> Repo:
 def test_session_start_worktree_create_selection_resolves_cwd(tmp_path: Path) -> None:
     _init_repo(tmp_path)
 
-    resolution = resolve_local_workspace_selection(
+    resolution = resolve_worktree(
         SessionOptions(
             cwd=str(tmp_path),
             workspace_roots=[str(tmp_path)],
-            local_workspace_selection=CreateLocalWorkspaceSelection(
+            worktree=NewWorktreeInput(
                 branch="feat/app-server-worktree", name="app-server-worktree"
             ),
         )
     )
 
     options = resolution.options
-    assert options.local_workspace_selection is None
+    assert options.worktree is None
     assert options.cwd is not None
     assert options.workspace_roots == [options.cwd]
     assert Repo(options.cwd).active_branch.name == "feat/app-server-worktree"
     assert resolution.prepared_worktree is not None
     assert resolution.prepared_worktree.created is True
+
+
+def test_session_start_worktree_auto_selection_names_from_prompt(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+
+    resolution = resolve_worktree(
+        SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            worktree=AutoWorktreeInput(prompt="Fix the login bug"),
+        )
+    )
+
+    options = resolution.options
+    assert options.worktree is None
+    assert options.cwd is not None
+    assert options.workspace_roots == [options.cwd]
+    assert resolution.prepared_worktree is not None
+    assert resolution.prepared_worktree.name == "fix-the-login-bug"
+    assert resolution.prepared_worktree.branch == "vibe/fix-the-login-bug"
+    assert resolution.prepared_worktree.created is True
+    assert resolution.prepared_worktree.branch_created is True
+
+
+def test_session_start_worktree_auto_selection_uses_a_suggested_name(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+
+    resolution = resolve_worktree(
+        SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            worktree=AutoWorktreeInput(prompt="Fix the login bug"),
+        ),
+        "repair-oauth-redirect",
+    )
+
+    assert resolution.prepared_worktree is not None
+    assert resolution.prepared_worktree.name == "repair-oauth-redirect"
+    assert resolution.prepared_worktree.branch == "vibe/repair-oauth-redirect"
+
+
+@pytest.mark.asyncio
+async def test_auto_worktree_asks_the_model_for_a_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    asked: list[str | None] = []
+
+    async def suggest(prompt: str | None, **_kwargs: Any) -> str:
+        asked.append(prompt)
+        return "repair-oauth-redirect"
+
+    monkeypatch.setattr(server_module, "suggest_worktree_name", suggest)
+
+    suggested = await AppServer._suggest_worktree_name(
+        SessionOptions(
+            cwd=str(tmp_path), worktree=AutoWorktreeInput(prompt="Fix the login bug")
+        )
+    )
+
+    assert suggested == "repair-oauth-redirect"
+    assert asked == ["Fix the login bug"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "worktree",
+    [
+        None,
+        ExistingWorktreeInput(cwd="/tmp/somewhere"),
+        NewWorktreeInput(branch="feat/x", name="feat-x"),
+    ],
+)
+async def test_only_an_auto_worktree_pays_for_a_model_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, worktree: Any
+) -> None:
+    async def explode(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("a named worktree must not wait on the model")
+
+    monkeypatch.setattr(server_module, "suggest_worktree_name", explode)
+
+    options = SessionOptions(cwd=str(tmp_path), worktree=worktree)
+
+    assert await AppServer._suggest_worktree_name(options) is None
+
+
+def test_session_start_worktree_auto_selection_is_unique_per_call(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+
+    def resolve() -> str:
+        resolution = resolve_worktree(
+            SessionOptions(
+                cwd=str(tmp_path),
+                worktree=AutoWorktreeInput(prompt="Fix the login bug"),
+            )
+        )
+        assert resolution.prepared_worktree is not None
+        return resolution.prepared_worktree.name
+
+    assert resolve() == "fix-the-login-bug"
+    assert resolve() == "fix-the-login-bug-2"
+
+
+def test_session_start_worktree_auto_selection_without_prompt_uses_a_slug(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo(tmp_path)
+    monkeypatch.setattr(worktree_module, "create_slug", lambda: "brave-quiet-otter")
+
+    resolution = resolve_worktree(
+        SessionOptions(cwd=str(tmp_path), worktree=AutoWorktreeInput())
+    )
+
+    assert resolution.prepared_worktree is not None
+    assert resolution.prepared_worktree.name == "brave-quiet-otter"
 
 
 def test_session_start_worktree_existing_selection_resolves_cwd(tmp_path: Path) -> None:
@@ -112,21 +237,46 @@ def test_session_start_worktree_existing_selection_resolves_cwd(tmp_path: Path) 
         "existing-worktree", tmp_path, branch="feat/existing-worktree"
     )
 
-    resolution = resolve_local_workspace_selection(
+    resolution = resolve_worktree(
         SessionOptions(
             cwd=str(tmp_path),
             workspace_roots=[str(tmp_path)],
-            local_workspace_selection=ExistingLocalWorkspaceSelection(
-                cwd=str(worktree.path)
-            ),
+            worktree=ExistingWorktreeInput(cwd=str(worktree.path)),
         )
     )
 
     options = resolution.options
-    assert options.local_workspace_selection is None
+    assert options.worktree is None
     assert options.cwd == str(worktree.path)
     assert options.workspace_roots == [str(worktree.path)]
     assert resolution.prepared_worktree is None
+
+
+def test_session_list_falls_back_for_malformed_saved_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_test_vibe_config()
+    monkeypatch.setattr(
+        host_module,
+        "list_local_resume_sessions",
+        lambda _config, _cwd: [
+            ResumeSessionInfo(
+                session_id="session-1",
+                cwd="/workspace",
+                start_time="not-a-timestamp",
+                updated_at="",
+            )
+        ],
+    )
+    monkeypatch.setattr(host_module, "now_ms", lambda: 123_456)
+    monkeypatch.setattr(
+        host_module.SessionLoader, "get_first_user_message", lambda *_args: ""
+    )
+
+    response = host_module.project_session_list(config, SessionListParams())
+
+    assert response.items[0].created_at == 123_456
+    assert response.items[0].updated_at == 123_456
 
 
 @pytest.mark.asyncio
@@ -152,10 +302,7 @@ async def test_session_start_rejects_existing_selection_outside_linked_worktrees
                 client_info=ClientInfo(name="unlinked-worktree-client", version="1"),
                 capabilities=ClientCapabilities(),
                 session_options=SessionOptions(
-                    cwd=str(tmp_path),
-                    local_workspace_selection=ExistingLocalWorkspaceSelection(
-                        cwd=str(unlinked)
-                    ),
+                    cwd=str(tmp_path), worktree=ExistingWorktreeInput(cwd=str(unlinked))
                 ),
             )
     finally:
@@ -167,11 +314,22 @@ async def test_session_start_rejects_existing_selection_outside_linked_worktrees
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "worktree",
+    [
+        {
+            "kind": "create",
+            "branch": "feat/rejected-selection",
+            "name": "rejected-selection",
+        },
+        {"kind": "auto"},
+    ],
+)
+@pytest.mark.parametrize(
     ("method", "extra_params"),
     [("session/resume", {"sessionId": "saved-session"}), ("session/continue", {})],
 )
 async def test_worktree_selection_is_rejected_outside_session_start(
-    tmp_path: Path, method: str, extra_params: dict[str, str]
+    tmp_path: Path, method: str, extra_params: dict[str, str], worktree: dict[str, str]
 ) -> None:
     repo = _init_repo(tmp_path)
 
@@ -190,12 +348,7 @@ async def test_worktree_selection_is_rejected_outside_session_start(
             await client.request(
                 method,
                 {
-                    "cwd": str(tmp_path),
-                    "localWorkspaceSelection": {
-                        "kind": "create",
-                        "branch": "feat/rejected-selection",
-                        "name": "rejected-selection",
-                    },
+                    "agentConfig": {"cwd": str(tmp_path), "worktree": worktree},
                     **extra_params,
                 },
             )
@@ -231,7 +384,7 @@ async def test_session_start_cleans_created_worktree_when_runtime_open_fails(
                 capabilities=ClientCapabilities(),
                 session_options=SessionOptions(
                     cwd=str(tmp_path),
-                    local_workspace_selection=CreateLocalWorkspaceSelection(
+                    worktree=NewWorktreeInput(
                         branch="feat/startup-fails", name="startup-fails"
                     ),
                 ),
@@ -252,19 +405,17 @@ async def test_session_start_cleans_created_worktree_when_cancelled_mid_resoluti
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
-    real_resolve = server_module.resolve_local_workspace_selection
+    real_resolve = server_module.resolve_worktree
 
-    def slow_resolve(options: SessionOptions) -> Any:
+    def slow_resolve(options: SessionOptions, suggested_name: str | None = None) -> Any:
         started.set()
         release.wait(5)
         try:
-            return real_resolve(options)
+            return real_resolve(options, suggested_name)
         finally:
             finished.set()
 
-    monkeypatch.setattr(
-        server_module, "resolve_local_workspace_selection", slow_resolve
-    )
+    monkeypatch.setattr(server_module, "resolve_worktree", slow_resolve)
 
     async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
         raise AssertionError("runtime should not open after cancellation")
@@ -277,10 +428,12 @@ async def test_session_start_cleans_created_worktree_when_cancelled_mid_resoluti
         server._open_runtime(
             open_root,
             SessionStartParams(
-                cwd=str(tmp_path),
-                local_workspace_selection=CreateLocalWorkspaceSelection(
-                    branch="feat/cancelled", name="cancelled"
-                ),
+                agent_config=SessionOptions(
+                    cwd=str(tmp_path),
+                    worktree=NewWorktreeInput(
+                        branch="feat/cancelled", name="cancelled"
+                    ),
+                )
             ),
             None,
         )
@@ -376,7 +529,7 @@ async def test_passive_host_renames_saved_session(
 
     try:
         result = await handler.dispatch(
-            "session/title/update",
+            "session/rename",
             SessionTitleUpdateParams(
                 session_id=saved.session_id, title="  Reviewed session  "
             ).model_dump(mode="json", by_alias=True),
@@ -385,14 +538,13 @@ async def test_passive_host_renames_saved_session(
         await saved.aclose()
         await saved.telemetry_client.aclose()
 
-    response = cast(SessionTitleUpdateResponse, result.response)
+    assert isinstance(result.response, SessionTitleUpdateResponse)
     session_path = SessionLoader.find_session_by_id(
         saved.session_id, config.session_logging
     )
     assert session_path is not None
     _, metadata = SessionLoader.load_session(session_path)
-    assert response.title == "Reviewed session"
-    assert response.updated_at == metadata["end_time"]
+    assert result.response.title == "Reviewed session"
     assert metadata["title"] == "Reviewed session"
 
 
@@ -694,25 +846,33 @@ async def test_passive_host_requests_do_not_open_runtime(
         listed = await client.request(
             "session/list", SessionListParams(cwd=str(Path.cwd()))
         )
-        assert listed["sessions"]
+        assert SessionListResponse.model_validate(listed).data
         await client.request(
             "session/read", SessionReadParams(session_id=saved.session_id)
         )
         await client.request(
-            "history/list", HistoryListParams(session_id=saved.session_id)
+            "session/history/list",
+            SessionHistoryListParams(session_id=saved.session_id),
         )
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await client.request("history/list", {"sessionId": saved.session_id})
+        assert exc_info.value.error.code is ProtocolErrorCode.METHOD_NOT_FOUND
         await client.request(
             "workspace/trust/status", WorkspaceTrustStatusParams(cwd=str(Path.cwd()))
         )
         assert opened == []
         assert config_loads and all(required is False for required in config_loads)
 
-        await client.request(
+        deleted = await client.request(
             "session/delete", SessionDeleteParams(session_id=saved.session_id)
         )
+        assert isinstance(EmptyResponse.model_validate(deleted), EmptyResponse)
         assert opened == []
 
-        await client.request("session/start", SessionStartParams(cwd=str(Path.cwd())))
+        await client.request(
+            "session/start",
+            SessionStartParams(agent_config=SessionOptions(cwd=str(Path.cwd()))),
+        )
         assert len(opened) == 1
         config_load_count = len(config_loads)
         await client.request("session/list", SessionListParams(cwd=str(Path.cwd())))
@@ -783,7 +943,6 @@ async def test_config_read_serves_the_catalogue_with_and_without_a_session(
         assert passive.config == project_config_view(
             host_config, active_model_pinned=bool(host_config.active_model)
         )
-        assert passive.base_config == passive.config
         assert passive.stripped_history_images == 0
         assert [model.alias for model in passive.config.models] == ["medium", "small"]
         assert passive.config.active_model.thinking == "max"
@@ -796,7 +955,10 @@ async def test_config_read_serves_the_catalogue_with_and_without_a_session(
         assert exc_info.value.error.code is ProtocolErrorCode.NOT_FOUND
         assert opened == []
 
-        await client.request("session/start", SessionStartParams(cwd=str(Path.cwd())))
+        await client.request(
+            "session/start",
+            SessionStartParams(agent_config=SessionOptions(cwd=str(Path.cwd()))),
+        )
         attached = validate_wire(
             ConfigReadResponse,
             await client.request(
@@ -804,7 +966,6 @@ async def test_config_read_serves_the_catalogue_with_and_without_a_session(
             ),
         )
         assert attached.config == project_config(root)
-        assert attached.base_config == project_config(root, base=True)
         assert [model.alias for model in attached.config.models] != ["medium", "small"]
 
         omitted = validate_wire(
@@ -840,7 +1001,10 @@ async def test_config_fields_read_hides_internal_settings() -> None:
     await client.notify("initialized")
 
     try:
-        await client.request("session/start", SessionStartParams(cwd=str(Path.cwd())))
+        await client.request(
+            "session/start",
+            SessionStartParams(agent_config=SessionOptions(cwd=str(Path.cwd()))),
+        )
         response = validate_wire(
             ConfigFieldsReadResponse,
             await client.request(
@@ -890,8 +1054,7 @@ async def test_config_mutations_are_rejected_without_a_session(
     await client.initialize(ClientInfo(name="mutation-client", version="1"))
     await client.notify("initialized")
     session_scoped = (
-        ("config/thinking/write", {"level": "low"}),
-        ("config/patch", {"ops": []}),
+        ("config/write", {"ops": []}),
         ("config/reload", {}),
         ("config/proxy/read", {}),
         ("config/proxy/write", {"changes": {}}),
@@ -905,7 +1068,10 @@ async def test_config_mutations_are_rejected_without_a_session(
             assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT, method
         assert opened == []
 
-        await client.request("session/start", SessionStartParams(cwd=str(Path.cwd())))
+        await client.request(
+            "session/start",
+            SessionStartParams(agent_config=SessionOptions(cwd=str(Path.cwd()))),
+        )
         for method, params in session_scoped:
             with pytest.raises(AppServerResponseError) as exc_info:
                 await client.request(method, params)

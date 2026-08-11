@@ -57,9 +57,19 @@ class HarnessFilesManager:
         ]
 
     @property
+    def cwd_is_user_config_home(self) -> bool:
+        """True when the cwd's ``.vibe`` dir is the user config dir itself."""
+        return (self._effective_cwd / ".vibe").resolve() == VIBE_HOME.path.resolve()
+
+    @property
+    def project_source_enabled(self) -> bool:
+        """True when the project layer is eligible for this cwd."""
+        return "project" in self.sources and not self.cwd_is_user_config_home
+
+    @property
     def _trusted_workdir(self) -> Path | None:
         """Return cwd if project source is enabled and trusted, else None."""
-        if "project" not in self.sources:
+        if not self.project_source_enabled:
             return None
         cwd = self._effective_cwd
         if self.trust_store.is_trusted(cwd) is not True:

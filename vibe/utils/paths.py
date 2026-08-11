@@ -2,7 +2,56 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import os
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+import re
+
+from vibe.utils.platform import is_windows
+
+# fullmatch + DOTALL: a "$" anchor would match before a trailing newline and drop it.
+_MSYS_DRIVE = re.compile(r"/([A-Za-z])([/\\].*)?", re.DOTALL)
+
+
+class UnanchoredWindowsPathError(ValueError):
+    """A Windows path that names a drive or a root, but not both."""
+
+    def __init__(self, raw: str) -> None:
+        self.raw = raw
+        super().__init__(
+            f"'{raw}' is not anchored: a Windows path must give both a drive and "
+            "a root ('C:\\Users\\...') or neither ('src/main.py'). Windows would "
+            f"resolve '{raw}' against the current directory of whichever drive is "
+            "active and silently use the wrong location. Use a drive-qualified "
+            "path such as 'C:\\Users\\...', a Git Bash path such as "
+            "'/c/Users/...', or a path relative to the working directory."
+        )
+
+
+def normalize_windows_path(raw: str) -> str:
+    """Fold a Git Bash / MSYS drive path (``/c/Users``) into ``C:/Users``."""
+    raw = raw.strip()
+    if not is_windows() or not (match := _MSYS_DRIVE.fullmatch(raw)):
+        return raw
+
+    suffix = (match[2] or "/").replace("\\", "/")
+    return f"{match[1].upper()}:{suffix}"
+
+
+def target_pure_path(raw: str) -> PurePath:
+    """Read a path by the target platform's rules; ``Path`` follows the host's."""
+    return PureWindowsPath(raw) if is_windows() else PurePosixPath(raw)
+
+
+def normalize_windows_input_path(raw: str) -> str:
+    """Normalize a model-supplied path, rejecting one Windows cannot anchor."""
+    normalized = normalize_windows_path(raw)
+    if not is_windows():
+        return normalized
+
+    path = PureWindowsPath(normalized)
+    if bool(path.root) != bool(path.drive):
+        raise UnanchoredWindowsPathError(raw)
+
+    return normalized
 
 
 class GlobalPath:

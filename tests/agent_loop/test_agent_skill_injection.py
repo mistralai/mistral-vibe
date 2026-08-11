@@ -13,6 +13,7 @@ from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.types import (
     AssistantEvent,
     BaseEvent,
+    LLMMessage,
     Role,
     ToolCallEvent,
     ToolResultEvent,
@@ -111,6 +112,33 @@ async def test_skill_content_injected_only_once(tmp_path: Path) -> None:
     ]
     assert len(full_loads) == 1
     assert "already loaded" in (skill_tool_msgs[1].content or "")
+
+
+@pytest.mark.asyncio
+async def test_skill_content_reloads_after_compaction_boundary(tmp_path: Path) -> None:
+    agent_loop = _make_loop(tmp_path, body="Follow the plan carefully.", turns=2)
+
+    await _act_and_collect(agent_loop, "/test-skill")
+    agent_loop.messages.append(
+        LLMMessage(
+            role=Role.user,
+            content="compacted context",
+            injected=True,
+            context_boundary="compaction",
+        )
+    )
+    await _act_and_collect(agent_loop, "/test-skill")
+
+    skill_tool_msgs = [
+        message
+        for message in agent_loop.messages
+        if message.role == Role.tool and message.name == "skill"
+    ]
+    assert len(skill_tool_msgs) == 2
+    assert all(
+        '<skill_content name="test-skill">' in (message.content or "")
+        for message in skill_tool_msgs
+    )
 
 
 @pytest.mark.asyncio

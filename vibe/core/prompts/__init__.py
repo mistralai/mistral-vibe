@@ -36,6 +36,7 @@ class UtilityPrompt(Prompt):
     DANGEROUS_DIRECTORY = auto()
     PROJECT_CONTEXT = auto()
     TURN_SUMMARY = auto()
+    WORKTREE_NAME = auto()
 
 
 class MissingPromptFileError(ValueError):

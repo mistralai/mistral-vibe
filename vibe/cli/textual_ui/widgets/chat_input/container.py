@@ -10,6 +10,9 @@ from textual.message import Message
 
 from vibe.app_server.models import AgentSafety
 from vibe.cli.autocompletion.completers import CommandCompleter, PathCompleter
+from vibe.cli.autocompletion.inline_skill_completion import (
+    InlineSkillCompletionController,
+)
 from vibe.cli.autocompletion.path_completion import PathCompletionController
 from vibe.cli.autocompletion.slash_command import SlashCommandController
 from vibe.cli.commands import CommandRegistry
@@ -66,6 +69,11 @@ class ChatInputContainer(Vertical):
                     watcher_enabled_getter=self._file_watcher_for_autocomplete_getter
                 ),
                 self,
+            ),
+            InlineSkillCompletionController(
+                self._skill_entries_getter or (lambda: []),
+                self,
+                self._input_is_default_mode,
             ),
         ])
         self._body: ChatInputBody | None = None
@@ -129,11 +137,12 @@ class ChatInputContainer(Vertical):
                 widget.get_full_text(), widget._get_full_cursor_offset()
             )
 
+    def _input_is_default_mode(self) -> bool:
+        widget = self.input_widget
+        return widget is None or widget.is_default_mode
+
     def dismiss_completion(self) -> bool:
-        if self._completion_manager.is_active:
-            self._completion_manager.reset()
-            return True
-        return False
+        return self._completion_manager.dismiss()
 
     def focus_input(self) -> None:
         if self._body:
@@ -154,6 +163,14 @@ class ChatInputContainer(Vertical):
         except Exception:
             return
         popup.hide()
+
+    def show_inline_suggestion(self, suggestion: str) -> None:
+        if widget := self.input_widget:
+            widget.set_inline_suggestion(suggestion)
+
+    def clear_inline_suggestion(self) -> None:
+        if widget := self.input_widget:
+            widget.clear_inline_suggestion()
 
     def _format_insertion(self, replacement: str, suffix: str) -> str:
         """Format the insertion text with appropriate spacing.

@@ -20,13 +20,18 @@ from vibe.core.tools.base import (
 from vibe.core.tools.io_port import ToolIOPort
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import resolve_file_tool_permission
+from vibe.core.tools.utils import (
+    DEFAULT_SENSITIVE_PATTERNS,
+    ToolPath,
+    resolve_file_tool_permission,
+    resolve_tool_path,
+)
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.utils.tool_presentation import ToolEffectKind
 
 
 class WriteFileArgs(BaseModel):
-    file_path: str = Field(
+    file_path: ToolPath = Field(
         description="The absolute path to the file to write (must be absolute, not relative)"
     )
     content: str = Field(description="The content to write to the file")
@@ -41,7 +46,7 @@ class WriteFileResult(BaseModel):
 class WriteFileConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ASK
     sensitive_patterns: list[str] = Field(
-        default=["**/.env", "**/.env.*"],
+        default_factory=lambda: list(DEFAULT_SENSITIVE_PATTERNS),
         description="File patterns that trigger ASK even when permission is ALWAYS.",
     )
     max_write_bytes: int = 64_000
@@ -128,10 +133,7 @@ class WriteFile(
                 f"Content exceeds {self.config.max_write_bytes} bytes limit"
             )
 
-        file_path = Path(args.file_path).expanduser()
-        if not file_path.is_absolute():
-            file_path = self.cwd / file_path
-        file_path = file_path.resolve()
+        file_path = resolve_tool_path(args.file_path, self.cwd)
 
         if file_path.exists():
             raise ToolError(

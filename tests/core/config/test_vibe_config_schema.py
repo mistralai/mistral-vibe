@@ -95,6 +95,10 @@ def test_active_model_defaults_to_unpinned_sentinel() -> None:
     assert config.active_model == ""
 
 
+def test_default_agent_is_accept_edits() -> None:
+    assert VibeConfigSchema().default_agent == "accept-edits"
+
+
 def test_unpinned_active_model_resolves_to_default_model() -> None:
     from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
 
@@ -218,7 +222,7 @@ def test_gated_model_not_injected_without_routing() -> None:
     assert _ROUTED_TEST_ALIAS not in config.models
 
 
-def test_gated_model_not_injected_when_pinned() -> None:
+def test_gated_model_not_injected_when_pinned_to_other_model() -> None:
     config = VibeConfigSchema.model_validate({
         "active_model": "devstral-small",
         "routed_default_model": _ROUTED_TEST_ALIAS,
@@ -228,6 +232,18 @@ def test_gated_model_not_injected_when_pinned() -> None:
     assert config.active_model == "devstral-small"
     assert config.get_active_model().alias == "devstral-small"
     assert _ROUTED_TEST_ALIAS not in config.models
+
+
+def test_gated_model_injected_when_pinned_to_routed_alias() -> None:
+    config = VibeConfigSchema.model_validate({
+        "active_model": _ROUTED_TEST_ALIAS,
+        "routed_default_model": _ROUTED_TEST_ALIAS,
+        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
+    })
+
+    assert config.active_model == _ROUTED_TEST_ALIAS
+    assert config.models.get(_ROUTED_TEST_ALIAS) == _ROUTED_TEST_MODEL
+    assert config.get_active_model().alias == _ROUTED_TEST_ALIAS
 
 
 def test_user_model_entry_wins_over_routed_injection() -> None:
@@ -256,6 +272,112 @@ def test_known_active_model_is_not_overridden(caplog: pytest.LogCaptureFixture) 
         })
     assert config.active_model == "b"
     assert "is not in your configured models" not in caplog.text
+
+
+def test_allowed_models_filters_available_models() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+        ModelConfig(name="model-c", provider="mistral", alias="c"),
+    ]
+    config = VibeConfigSchema.model_validate({
+        "models": models,
+        "allowed_models": ["a", "c"],
+    })
+
+    assert set(config.available_models()) == {"a", "c"}
+    assert set(config.models) == {"a", "b", "c"}
+
+
+def test_unmatched_allowed_model_emits_validation_warning() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+    config = VibeConfigSchema.model_validate({
+        "models": models,
+        "allowed_models": ["a", "does-not-exist"],
+    })
+
+    assert len(config.validation_warnings) == 1
+    assert "does-not-exist" in config.validation_warnings[0]
+
+
+def test_matched_allowed_models_emit_no_warning() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+    config = VibeConfigSchema.model_validate({
+        "models": models,
+        "allowed_models": ["a", "b*"],
+    })
+
+    assert config.validation_warnings == ()
+
+
+def test_disallowed_active_model_pin_falls_back_to_allowed_model() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+    # "b" is configured but excluded by the allowlist, so it must never resolve
+    # as the active model even though it is pinned.
+    config = VibeConfigSchema.model_validate({
+        "active_model": "b",
+        "models": models,
+        "allowed_models": ["a"],
+    })
+
+    active = config.get_active_model()
+    assert active.alias == "a"
+    assert active.alias in config.available_models()
+
+
+def test_allowed_active_model_pin_is_respected() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+    config = VibeConfigSchema.model_validate({
+        "active_model": "b",
+        "models": models,
+        "allowed_models": ["a", "b"],
+    })
+
+    assert config.get_active_model().alias == "b"
+
+
+def test_default_alias_resolves_within_allowed_models() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+    config = VibeConfigSchema.model_validate({
+        "active_model": "",
+        "models": models,
+        "allowed_models": ["b"],
+    })
+
+    assert config.resolve_default_model_alias() == "b"
+    assert config.get_active_model().alias == "b"
+
+
+def test_allowed_models_matching_nothing_falls_back_to_all() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+    config = VibeConfigSchema.model_validate({
+        "active_model": "a",
+        "models": models,
+        "allowed_models": ["does-not-exist"],
+    })
+
+    assert set(config.available_models()) == {"a", "b"}
+    assert config.get_active_model().alias == "a"
+    assert len(config.validation_warnings) == 1
+    assert "does-not-exist" in config.validation_warnings[0]
 
 
 def test_no_models_raises() -> None:

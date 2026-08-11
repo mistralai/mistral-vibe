@@ -134,6 +134,7 @@ class ShellController:
             )
 
         self._operations.add(params.operation_id)
+        cwd = Path(params.cwd) if params.cwd else self._cwd
         process: asyncio.subprocess.Process | None = None
         stdout: list[str] = []
         stderr: list[str] = []
@@ -141,7 +142,7 @@ class ShellController:
         timed_out = False
         interrupted = False
         try:
-            process = await spawn_shell_command(params.command, cwd=self._cwd)
+            process = await spawn_shell_command(params.command, cwd=cwd)
             self._processes[params.operation_id] = process
             readers = [
                 asyncio.create_task(
@@ -182,7 +183,7 @@ class ShellController:
         return ShellRunResponse(
             operation_id=params.operation_id,
             command=params.command,
-            cwd=str(self._cwd),
+            cwd=str(cwd),
             stdout="".join(stdout),
             stderr="".join(stderr),
             exit_code=(1 if timed_out or interrupted else process.returncode or 0),

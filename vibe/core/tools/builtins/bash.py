@@ -28,11 +28,12 @@ from vibe.core.tools.permissions import (
     RequiredPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import is_path_within_workdir
+from vibe.core.tools.utils import is_path_within_workdir, resolve_tool_path
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows, kill_async_subprocess
 from vibe.core.utils.shell import spawn_shell_command, uses_posix_shell
 from vibe.utils.io import decode_safe
+from vibe.utils.paths import normalize_windows_path
 from vibe.utils.tool_presentation import ToolEffectKind
 
 
@@ -168,7 +169,6 @@ _MUTATING_PATH_COMMANDS = {"cd", "chmod", "chown", "cp", "mkdir", "mv", "rm", "t
 _PATH_COMMANDS = _MUTATING_PATH_COMMANDS | set(_READ_ONLY_COMMANDS_POSIX)
 
 _FIND_EXECUTION_PREDICATES = {"-exec", "-execdir", "-ok", "-okdir"}
-_MSYS_DRIVE_PATH_PREFIX_LEN = 2
 
 
 def _split_command_tokens(command: str) -> list[str]:
@@ -185,26 +185,6 @@ def _split_command_tokens(command: str) -> list[str]:
         return list(lexer)
     except ValueError:
         return command.split()
-
-
-def _normalize_bash_path_token(token: str) -> str:
-    if not is_windows():
-        return token
-    if not token.startswith("/"):
-        return token
-    if len(token) < _MSYS_DRIVE_PATH_PREFIX_LEN:
-        return token
-
-    drive = token[1]
-    if not drive.isascii() or not drive.isalpha():
-        return token
-    if len(token) > _MSYS_DRIVE_PATH_PREFIX_LEN and token[
-        _MSYS_DRIVE_PATH_PREFIX_LEN
-    ] not in {"/", "\\"}:
-        return token
-
-    suffix = token[_MSYS_DRIVE_PATH_PREFIX_LEN:].replace("\\", "/")
-    return f"{drive.upper()}:{suffix or '/'}"
 
 
 def _collect_outside_dirs(
@@ -259,17 +239,12 @@ def _collect_outside_dirs(
                 or "\\" in token
             ):
                 continue
-            path_token = _normalize_bash_path_token(token)
+            path_token = normalize_windows_path(token)
             if is_within_workdir(path_token):
                 continue
             if is_scratchpad_path(path_token, scratchpad_dir=scratchpad_dir):
                 continue
-            # Resolve relative / home-relative paths, then collect parent dir
-            resolved = Path(path_token).expanduser()
-            if not resolved.is_absolute():
-                resolved = resolved_cwd / resolved
-            resolved = resolved.resolve()
-            # For a directory target use the dir itself; for a file use its parent
+            resolved = resolve_tool_path(path_token, resolved_cwd)
             parent = str(resolved) if resolved.is_dir() else str(resolved.parent)
             dirs.add(parent)
     return dirs

@@ -3,9 +3,9 @@ from __future__ import annotations
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import (
     ACCEPT_EDITS,
+    ASK,
     AUTO_APPROVE,
     BUILTIN_AGENTS,
-    DEFAULT,
     EXPLORE,
     PLAN,
     AgentProfile,
@@ -16,9 +16,9 @@ from vibe.core.agents.models import (
 
 __all__ = [
     "ACCEPT_EDITS",
+    "ASK",
     "AUTO_APPROVE",
     "BUILTIN_AGENTS",
-    "DEFAULT",
     "EXPLORE",
     "PLAN",
     "AgentManager",

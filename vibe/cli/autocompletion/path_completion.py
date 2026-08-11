@@ -44,16 +44,20 @@ class PathCompletionController:
         # fragment must not be empty (including @) and not contain any spaces
         return bool(fragment) and " " not in fragment
 
+    def is_showing(self) -> bool:
+        return bool(self._suggestions)
+
     def reset(self) -> None:
         with self._query_lock:
             if self._pending_future and not self._pending_future.done():
                 self._pending_future.cancel()
             self._pending_future = None
             self._last_query = None
-        if self._suggestions:
-            self._suggestions.clear()
-            self._selected_index = 0
-            self._view.clear_completion_suggestions()
+        if not self._suggestions:
+            return
+        self._suggestions.clear()
+        self._selected_index = 0
+        self._view.clear_completion_suggestions()
 
     def on_text_changed(self, text: str, cursor_index: int) -> None:
         if not self.can_handle(text, cursor_index):
@@ -111,8 +115,12 @@ class PathCompletionController:
         app = getattr(self._view, "app", None)
 
         if suggestions:
+            # Keep the highlighted item across re-renders that don't change the
+            # list (e.g. a caret move), so Up/Down navigation survives cursor
+            # moves.
+            if suggestions != self._suggestions:
+                self._selected_index = 0
             self._suggestions = suggestions
-            self._selected_index = 0
             if app:
                 app.call_after_refresh(
                     self._view.render_completion_suggestions,

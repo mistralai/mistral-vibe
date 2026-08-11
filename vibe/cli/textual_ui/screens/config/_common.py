@@ -237,6 +237,18 @@ class ConfigOptionList(NavigableOptionList):
         self._on_query_changed = on_query_changed
         self._query = ""
 
+    def scroll_to_highlight(self, top: bool = False) -> None:
+        highlighted = self.highlighted
+        if highlighted is not None and all(
+            option.disabled for option in self.options[:highlighted]
+        ):
+            # The first selectable row sits below one or more disabled section
+            # headers. Scrolling only the row into view (e.g. after wrapping up
+            # from the bottom) hides those headers, so pin the list to the top.
+            self.scroll_to(y=0, animate=False)
+            return
+        super().scroll_to_highlight(top=top)
+
     def on_key(self, event: events.Key) -> None:
         if event.key == "backspace":
             self._query = self._query[:-1]
@@ -285,7 +297,9 @@ def filter_field_views(
         score = max(name_match.score, desc_match.score * 0.5)
         if view.name in boost_names:
             score *= _BOOST_FACTOR
-        if name_match.matched or desc_match.matched:
+        # Scattered subsequence "matches" score 0; treat them as non-matches so
+        # they neither pollute the list nor inflate the merge-threshold count.
+        if score > 0:
             scored.append((score, index, view))
 
     scored.sort(key=lambda item: (-item[0], item[1]))

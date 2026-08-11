@@ -192,6 +192,17 @@ async def test_respects_default_ignore_patterns(grep, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_broad_search_does_not_leak_sensitive_file_contents(grep, tmp_path):
+    (tmp_path / ".env").write_text("SECRET_TOKEN=supersecret\n")
+    (tmp_path / "app.py").write_text("uses SECRET_TOKEN here\n")
+
+    result = await collect_result(grep.run(GrepArgs(pattern="SECRET_TOKEN", path=".")))
+
+    assert "app.py" in result.matches
+    assert "supersecret" not in result.matches
+
+
+@pytest.mark.asyncio
 async def test_respects_vibeignore_file(grep, tmp_path):
     (tmp_path / ".vibeignore").write_text("custom_dir/\n*.tmp\n")
     custom_dir = tmp_path / "custom_dir"
@@ -290,6 +301,64 @@ def test_cwd_is_not_serialized_into_the_model_facing_result():
     assert result.parsed_matches[0].path == str(
         (Path("/private/workspace") / "target.py").resolve()
     )
+
+
+class TestCollectExcludePatterns:
+    def _grep(self, tmp_path, monkeypatch, **config_kwargs):
+        monkeypatch.chdir(tmp_path)
+        config = GrepToolConfig(**config_kwargs)
+        return Grep(config_getter=lambda: config, state=BaseToolState())
+
+    def test_configured_exclude_patterns_preserved(self, tmp_path, monkeypatch):
+        grep = self._grep(tmp_path, monkeypatch)
+        patterns = grep._collect_exclude_patterns()
+        assert "node_modules/" in patterns
+        assert ".git/" in patterns
+
+    def test_sensitive_patterns_not_added_as_cli_excludes(self, tmp_path, monkeypatch):
+        # Sensitive files are enforced by filtering output, not CLI excludes: a
+        # case-sensitive basename glob would miss `.ENV`/`.Env`, and a path glob
+        # like `**/secrets/**` would collapse to a meaningless `**` exclude.
+        grep = self._grep(
+            tmp_path, monkeypatch, sensitive_patterns=["**/.env", "**/secrets/**"]
+        )
+        patterns = grep._collect_exclude_patterns()
+        assert ".env" not in patterns
+        assert "**" not in patterns
+
+    def test_vibeignore_patterns_still_collected(self, tmp_path, monkeypatch):
+        (tmp_path / ".vibeignore").write_text("custom_dir/\n*.tmp\n")
+        grep = self._grep(tmp_path, monkeypatch)
+        patterns = grep._collect_exclude_patterns()
+        assert "custom_dir/" in patterns
+        assert "*.tmp" in patterns
+
+
+class TestDropSensitiveMatches:
+    def _grep(self, tmp_path, monkeypatch, **config_kwargs):
+        monkeypatch.chdir(tmp_path)
+        config = GrepToolConfig(**config_kwargs)
+        return Grep(config_getter=lambda: config, state=BaseToolState())
+
+    def test_drops_lowercase_sensitive_file(self, tmp_path, monkeypatch):
+        grep = self._grep(tmp_path, monkeypatch)
+        lines = ["app.py:1:x", ".env:1:SECRET=1"]
+        assert grep._drop_sensitive_matches(lines) == ["app.py:1:x"]
+
+    def test_drops_case_variant_sensitive_files(self, tmp_path, monkeypatch):
+        grep = self._grep(tmp_path, monkeypatch)
+        lines = ["app.py:1:x", ".ENV:1:SECRET=1", "sub/.Env:2:SECRET=2"]
+        assert grep._drop_sensitive_matches(lines) == ["app.py:1:x"]
+
+    def test_drops_path_glob_sensitive_matches(self, tmp_path, monkeypatch):
+        grep = self._grep(tmp_path, monkeypatch, sensitive_patterns=["**/secrets/**"])
+        lines = ["app.py:1:x", "secrets/token.txt:1:abc"]
+        assert grep._drop_sensitive_matches(lines) == ["app.py:1:x"]
+
+    def test_keeps_all_when_no_sensitive_patterns(self, tmp_path, monkeypatch):
+        grep = self._grep(tmp_path, monkeypatch, sensitive_patterns=[])
+        lines = ["app.py:1:x", ".env:1:SECRET=1"]
+        assert grep._drop_sensitive_matches(lines) == lines
 
 
 @pytest.mark.skipif(not shutil.which("grep"), reason="GNU grep not available")
@@ -393,6 +462,34 @@ class TestGnuGrepBackend:
 
         assert result.match_count == 50
         assert result.was_truncated
+
+    @pytest.mark.asyncio
+    async def test_does_not_leak_sensitive_file_contents(self, grep_gnu_only, tmp_path):
+        (tmp_path / ".env").write_text("SECRET_TOKEN=supersecret\n")
+        (tmp_path / "app.py").write_text("uses SECRET_TOKEN here\n")
+
+        result = await collect_result(
+            grep_gnu_only.run(GrepArgs(pattern="SECRET_TOKEN", path="."))
+        )
+
+        assert "app.py" in result.matches
+        assert "supersecret" not in result.matches
+
+    @pytest.mark.asyncio
+    async def test_does_not_leak_case_variant_sensitive_files(
+        self, grep_gnu_only, tmp_path
+    ):
+        (tmp_path / ".ENV").write_text("SECRET_TOKEN=uppercase\n")
+        (tmp_path / ".Env").write_text("SECRET_TOKEN=mixedcase\n")
+        (tmp_path / "app.py").write_text("uses SECRET_TOKEN here\n")
+
+        result = await collect_result(
+            grep_gnu_only.run(GrepArgs(pattern="SECRET_TOKEN", path="."))
+        )
+
+        assert "app.py" in result.matches
+        assert "uppercase" not in result.matches
+        assert "mixedcase" not in result.matches
 
 
 @pytest.mark.skipif(not shutil.which("rg"), reason="ripgrep not available")

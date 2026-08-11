@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tomllib
 
@@ -107,3 +108,21 @@ class TestFileSystemCacheStore:
         with cache_path.open("rb") as f:
             data = tomllib.load(f)
         assert data["feedback"]["last_shown_at"] == 100
+
+    def test_concurrent_writes_to_distinct_sections_do_not_clobber(
+        self, tmp_path: Path
+    ) -> None:
+        # Startup writers race on one file; without serialized read-modify-write
+        # the last writer wins and drops the others' sections.
+        cache_path = tmp_path / "cache.toml"
+        sections = [f"section_{i}" for i in range(40)]
+
+        def write(section: str) -> None:
+            FileSystemCacheStore(cache_path).write_section(section, {"value": section})
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(write, sections))
+
+        with cache_path.open("rb") as f:
+            data = tomllib.load(f)
+        assert {s: {"value": s} for s in sections} == data

@@ -19,7 +19,12 @@ from vibe.core.tools.base import (
 from vibe.core.tools.io_port import ToolIOPort
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import resolve_file_tool_permission
+from vibe.core.tools.utils import (
+    DEFAULT_SENSITIVE_PATTERNS,
+    ToolPath,
+    resolve_file_tool_permission,
+    resolve_tool_path,
+)
 from vibe.core.types import ToolStreamEvent
 from vibe.utils import VIBE_WARNING_TAG
 from vibe.utils.io import read_lines_safe_async
@@ -51,7 +56,7 @@ def _display_relative(path: Path, base: Path) -> Path:
 
 
 class ReadFileArgs(BaseModel):
-    file_path: str = Field(description="The absolute path to the file to read")
+    file_path: ToolPath = Field(description="The absolute path to the file to read")
     offset: int | None = Field(
         default=None,
         ge=1,
@@ -78,7 +83,7 @@ class ReadFileResult(BaseModel):
 class ReadFileConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
     sensitive_patterns: list[str] = Field(
-        default=["**/.env", "**/.env.*"],
+        default_factory=lambda: list(DEFAULT_SENSITIVE_PATTERNS),
         description="File patterns that trigger ASK even when permission is ALWAYS.",
     )
     max_read_bytes: int = Field(
@@ -213,10 +218,7 @@ class ReadFile(
         if not raw_path.strip():
             raise ToolError("file_path cannot be empty")
 
-        path = Path(raw_path).expanduser()
-        if not path.is_absolute():
-            path = self.cwd / path
-        path = path.resolve()
+        path = resolve_tool_path(raw_path, self.cwd)
 
         if not path.exists():
             raise ToolError(f"File not found at: {path}")

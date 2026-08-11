@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.24.1] - 2026-08-11
+
+### Added
+
+- Inline ghost-text completion for mid-prompt skills
+- `/clear` and `/new` accept an optional first prompt and show the resume id
+- Compacted conversation history is preserved
+- OpenTelemetry tracing configuration is now available
+
+### Changed
+
+- Default agent renamed to `ask` and defaults to accept-edits
+- Auto worktrees are named with a model
+- Faster resume by deferring sub-agent instantiation
+
+### Fixed
+
+- Surface MCP server startup failures to the user
+- Text selection is now visible in the chat input
+- Provider reasoning is replayed verbatim
+- Detect and retry incomplete LLM streams
+- Surface voice transcription errors instead of swallowing them
+- Proactively refresh expired MCP OAuth tokens
+- Theme switching is now responsive
+- Crash on undo of a large multiline insert in the chat input
+- Config modal headers stay visible on wrap, with a tighter layout
+- Trusting the cwd no longer untrusts `<cwd>/.vibe`
+- Home directory is no longer treated as a project root
+- Explain the fallback when the configured default model is invalid
+- Scope sensitive-file read grants and stop chat bypass
+- Git Bash paths no longer create bogus `C:\c\...` directories on Windows
+- Use POSIX separators when shortening home paths in display
+- `/clear` resume hint gated on session persistability
+
+
 ## [2.24.0] - 2026-08-05
 
 ### Added

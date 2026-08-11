@@ -14,7 +14,7 @@ from vibe.acp.agent import SessionStarter, VibeAcpAgent
 from vibe.app_server.local import LocalHarnessOptions, ResumeSessionIntent
 from vibe.app_server.session import AppServerSession
 from vibe.core.config import ModelConfig, SessionLoggingConfig
-from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
+from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role, StopInfo
 
 
 @pytest.fixture
@@ -23,6 +23,7 @@ def backend() -> FakeBackend:
         LLMChunk(
             message=LLMMessage(role=Role.assistant, content="Hi"),
             usage=LLMUsage(prompt_tokens=1, completion_tokens=1),
+            stop=StopInfo(reason="stop"),
         )
     )
     return backend

@@ -215,7 +215,7 @@ async def test_external_switch_rebases_next_cycle_on_active_agent() -> None:
         await _wait_for_mode_switch(app)
         await pilot.pause()
 
-        await app.app_server.resources.agents.switch("default")
+        await app.app_server.resources.agents.switch("ask")
         app.action_cycle_mode()
         await _wait_for_mode_switch(app)
         await pilot.pause()

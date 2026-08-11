@@ -43,6 +43,7 @@ from vibe.app_server.models import (
     UserQuestionRequest,
 )
 from vibe.app_server.protocol import (
+    CallbackResultError,
     ContextInjectParams,
     ContextInjectResponse,
     JsonPatchOperation,
@@ -111,7 +112,7 @@ class CallbackRejectedError(RuntimeError):
 class CallbackRecord:
     event: ApprovalRequestEvent | UserInputRequestEvent
     future: asyncio.Future[CallbackOutput]
-    output: CallbackOutput | None = None
+    resolution: CallbackOutput | CallbackResultError | None = None
     core_resolved: bool = False
     resolution_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -152,7 +153,7 @@ class TurnController:
         self._session_coordinator = session_coordinator
         self._session_execution: ActiveSessionExecution | None = None
         self._active_turn: PublicTurn | None = None
-        self._last_turn: PublicTurn | None = None
+        self._completed_turns: list[PublicTurn] = []
         self._active_task: asyncio.Task[None] | None = None
         self._projector: EventProjector | None = None
         self._harness_effects: dict[str, EventProjector] = {}
@@ -165,8 +166,15 @@ class TurnController:
         return self._active_turn
 
     @property
-    def last_turn(self) -> PublicTurn | None:
-        return self._last_turn
+    def completed_turns(self) -> list[PublicTurn]:
+        return self._completed_turns.copy()
+
+    @property
+    def turns(self) -> list[PublicTurn]:
+        return [
+            *self._completed_turns,
+            *([self._active_turn] if self._active_turn is not None else []),
+        ]
 
     @property
     def history(self) -> list[PublicHistoryEntry]:
@@ -205,7 +213,6 @@ class TurnController:
         session_execution = self._execution.begin(SessionExecutionKind.TURN, turn.id)
         self._session_execution = session_execution
         self._active_turn = turn
-        self._last_turn = None
         self._scheduled_loop_id = scheduled_loop_id
         self._projector = EventProjector(
             params.session_id,
@@ -235,9 +242,12 @@ class TurnController:
         if self._active_turn.id != turn_id:
             raise StaleTurnError(self._active_turn.id)
         await task
-        if self._last_turn is None or self._last_turn.id != turn_id:
+        completed = next(
+            (turn for turn in self._completed_turns if turn.id == turn_id), None
+        )
+        if completed is None:
             raise RuntimeError(f"Turn did not complete: {turn_id}")
-        return self._last_turn
+        return completed
 
     async def link_subagent(self, tool_call_id: str, child_session_id: str) -> None:
         projector = self._projector
@@ -292,7 +302,7 @@ class TurnController:
         self._harness_effects.pop(entry_id, None)
 
     async def steer(self, params: TurnSteerParams) -> TurnSteerResponse:
-        turn = self._require_active_turn(params.expected_turn_id)
+        self._require_active_turn(params.expected_turn_id)
         decoded = decode_input(
             params, session_dir=self._agent_loop.session_logger.session_dir
         )
@@ -307,13 +317,13 @@ class TurnController:
             client_message_id=params.client_user_message_id,
         )
         await self._project_events(events, user_message_source="turn_steer")
-        return TurnSteerResponse(turn_id=turn.id)
+        return TurnSteerResponse()
 
     def interrupt(self, params: TurnInterruptParams) -> TurnInterruptResponse:
         self._require_active_turn(params.expected_turn_id)
         if self._active_task is not None:
             self._active_task.cancel()
-        return TurnInterruptResponse(interrupted=True)
+        return TurnInterruptResponse()
 
     async def inject(
         self,
@@ -354,8 +364,8 @@ class TurnController:
         if record is None:
             raise CallbackNotFoundError(f"Callback not found: {callback_id}")
         async with record.resolution_lock:
-            if record.output is not None:
-                if record.output.model_dump(mode="json") == output.model_dump(
+            if record.resolution is not None:
+                if record.resolution.model_dump(mode="json") == output.model_dump(
                     mode="json"
                 ):
                     return "duplicate"
@@ -371,16 +381,27 @@ class TurnController:
                 for update in self._projector.resolve_callback(callback_id, output):
                     await self._emit_projected(update)
             await self._emit_status("running")
-            record.output = output
+            record.resolution = output
             if not record.future.done():
                 record.future.set_result(output)
             return "accepted"
 
-    async def reject_callback(self, callback_id: str, message: str) -> None:
+    async def reject_callback(
+        self, callback_id: str, error: CallbackResultError
+    ) -> str:
         record = self._callbacks.get(callback_id)
         if record is None:
-            return
-        self._reject_callback_record(record, CallbackRejectedError(message))
+            raise CallbackNotFoundError(f"Callback not found: {callback_id}")
+        async with record.resolution_lock:
+            if record.resolution is not None:
+                if record.resolution.model_dump(mode="json") == error.model_dump(
+                    mode="json"
+                ):
+                    return "duplicate"
+                raise CallbackConflictError("Callback already has a different answer")
+            record.resolution = error
+            self._reject_callback_record(record, CallbackRejectedError(error.message))
+            return "accepted"
 
     async def close(self) -> None:
         errors: list[BaseException] = []
@@ -399,7 +420,7 @@ class TurnController:
     async def reset(self) -> None:
         await self.close()
         self._active_turn = None
-        self._last_turn = None
+        self._completed_turns.clear()
         self._active_task = None
         self._session_execution = None
         self._projector = None
@@ -521,7 +542,7 @@ class TurnController:
                 "stop_reason": stop_reason,
             }
         )
-        self._last_turn = completed
+        self._completed_turns.append(completed)
         await self._emit_stats()
         self._active_turn = None
         self._projector = None
@@ -687,7 +708,7 @@ class TurnController:
             current_history=self.history,
             callbacks=self.callbacks,
             active_turn=turn,
-            last_turn=self._last_turn,
+            completed_turns=self.completed_turns,
         )
         common = {
             "event_id": 0,

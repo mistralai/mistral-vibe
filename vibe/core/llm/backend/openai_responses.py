@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from http import HTTPStatus
 import json
 import logging
 from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, cast
@@ -17,6 +18,7 @@ from vibe.core.types import (
     LLMMessage,
     LLMUsage,
     Role,
+    StopInfo,
     StrToolChoice,
     ToolCall,
 )
@@ -27,6 +29,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EMPTY_USAGE = LLMUsage(prompt_tokens=0, completion_tokens=0)
+
+
+class OpenAIResponsesStreamError(RuntimeError):
+    def __init__(self, error_type: str, message: str) -> None:
+        self.error_type = error_type
+        self.message = message
+        super().__init__(f"OpenAI Responses stream error ({error_type}): {message}")
+
+    @property
+    def status(self) -> HTTPStatus | None:
+        match self.error_type:
+            case "authentication_error" | "invalid_api_key":
+                return HTTPStatus.UNAUTHORIZED
+            case "too_many_requests" | "rate_limit_error" | "rate_limit_exceeded":
+                return HTTPStatus.TOO_MANY_REQUESTS
+            case "server_error":
+                return HTTPStatus.INTERNAL_SERVER_ERROR
+            case _:
+                return None
 
 
 class _ResponsesInputTokensDetails(TypedDict, total=False):
@@ -67,8 +88,11 @@ class _ResponsesMessageItem(TypedDict, total=False):
 
 class _ResponsesReasoningItem(TypedDict, total=False):
     type: str
+    id: str
     encrypted_content: str
     summary: list[_ResponsesSummaryBlock]
+    content: list[dict[str, Any]]
+    status: str
 
 
 class _ResponsesObject(TypedDict, total=False):
@@ -142,16 +166,17 @@ class _OpenAIResponsesStreamParser:
         )
 
     @staticmethod
-    def _reasoning_state_from_output(output: list[dict[str, Any]]) -> list[str] | None:
-        reasoning_state: list[str] = []
+    def _reasoning_payloads_from_output(
+        output: list[dict[str, Any]],
+    ) -> list[dict[str, Any]] | None:
+        reasoning_payloads: list[dict[str, Any]] = []
         for item in output:
             if item.get("type") != "reasoning":
                 continue
             reasoning_item = _RESPONSES_REASONING_ITEM_ADAPTER.validate_python(item)
-            encrypted_content = reasoning_item.get("encrypted_content")
-            if encrypted_content:
-                reasoning_state.append(encrypted_content)
-        return reasoning_state or None
+            if reasoning_item.get("encrypted_content"):
+                reasoning_payloads.append(item)
+        return reasoning_payloads or None
 
     @staticmethod
     def _tool_call_from_item(
@@ -371,9 +396,10 @@ class _OpenAIResponsesStreamParser:
             message=LLMMessage(
                 role=Role.assistant,
                 content="",
-                reasoning_state=self._reasoning_state_from_output(output),
+                reasoning_payloads=self._reasoning_payloads_from_output(output),
             ),
             usage=self._usage_from_response(response_obj.get("usage")),
+            stop=StopInfo(reason=data.get("type", "").removeprefix("response.")),
         )
 
     def _on_error(self, data: _ResponsesStreamEvent) -> LLMChunk:
@@ -381,9 +407,7 @@ class _OpenAIResponsesStreamParser:
         error = _RESPONSES_ERROR_DATA_ADAPTER.validate_python(data.get("error") or {})
         error_type = error.get("type", "unknown_error")
         error_message = error.get("message", "Unknown streaming error")
-        raise RuntimeError(
-            f"OpenAI Responses stream error ({error_type}): {error_message}"
-        )
+        raise OpenAIResponsesStreamError(error_type, error_message)
 
     def _on_unknown_event(self, data: _ResponsesStreamEvent) -> LLMChunk:
         if event_type := data.get("type"):
@@ -458,16 +482,18 @@ class OpenAIResponsesAdapter(APIAdapter):
                         })
 
                 case Role.assistant:
-                    for encrypted_content in msg.reasoning_state or []:
+                    input_items.extend(
+                        item
+                        for item in msg.reasoning_payloads or []
+                        if item.get("type") == "reasoning"
+                    )
+                    # An assistant message the model never produced would sit
+                    # between a reasoning item and the tool call it belongs to.
+                    if msg.content:
                         input_items.append({
-                            "type": "reasoning",
-                            "encrypted_content": encrypted_content,
-                            "summary": [],
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": msg.content}],
                         })
-                    input_items.append({
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": msg.content or ""}],
-                    })
                     for tc in msg.tool_calls or []:
                         input_items.append({
                             "type": "function_call",
@@ -512,6 +538,7 @@ class OpenAIResponsesAdapter(APIAdapter):
             "model": model_name,
             "input": input_items,
             "store": False,
+            "include": ["reasoning.encrypted_content"],
         }
         if self._is_temperature_supported(model_name):
             payload["temperature"] = temperature
@@ -635,7 +662,9 @@ class OpenAIResponsesAdapter(APIAdapter):
             role=Role.assistant,
             content="".join(text_parts),
             reasoning_content="".join(reasoning_parts) or None,
-            reasoning_state=self._stream_parser._reasoning_state_from_output(output),
+            reasoning_payloads=self._stream_parser._reasoning_payloads_from_output(
+                output
+            ),
             tool_calls=tool_calls or None,
         )
 

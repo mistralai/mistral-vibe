@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import suppress
 from dataclasses import dataclass
 import hashlib
 import os
@@ -14,10 +16,14 @@ if TYPE_CHECKING:
     from git.exc import GitCommandError, NoSuchPathError
 
 from vibe.core.paths import WORKTREES_DIR
+from vibe.core.utils.slug import create_slug
+from vibe.core.worktree_naming import worktree_name_from_text, worktree_name_with_suffix
 
 _INVALID_WORKTREE_NAME_CHARS = frozenset('<>:"/\\|?*')
 _GIT_USAGE_ERROR_STATUS = 129
 _WORKTREE_REV_PARSE_PARTS = 2
+_AUTO_WORKTREE_BRANCH_PREFIX = "vibe/"
+_MAX_AUTO_WORKTREE_ATTEMPTS = 100
 _RESERVED_WORKTREE_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"}
     | {f"COM{index}" for index in range(1, 10)}
@@ -151,6 +157,109 @@ def prepare_worktree_session(
         if note := _cleanup_failed_prepare(repo, target, branch, branch_created):
             e.add_note(note)
         raise
+
+
+def prepare_auto_worktree_session(
+    base: Path, *, prompt: str | None = None, suggested_name: str | None = None
+) -> PreparedWorktree:
+    repo = _open_repo(base)
+    common_git_dir = _common_git_dir(repo)
+    repo_root = _primary_worktree_root(repo, common_git_dir)
+    relative_base = _relative_base(repo, base)
+    worktree_root = _worktree_root(repo_root, common_git_dir)
+
+    name, branch, target = _claim_auto_worktree(
+        repo, worktree_root, _auto_worktree_name(prompt, suggested_name)
+    )
+    try:
+        _create_worktree(repo, target, branch, branch_created=True)
+    except Exception:
+        _discard_worktree_claim(repo, target, branch)
+        raise
+
+    try:
+        return _build_prepared(
+            name,
+            branch,
+            target,
+            relative_base,
+            repo_root,
+            created=True,
+            branch_created=True,
+        )
+    except Exception as e:
+        if note := _cleanup_failed_prepare(repo, target, branch, branch_created=True):
+            e.add_note(note)
+        raise
+
+
+def _auto_worktree_name(prompt: str | None, suggested: str | None = None) -> str:
+    # The model's answer and the raw prompt go through the same slugifier, so a
+    # name that reaches git is portable however it was produced. Either can
+    # reduce to "" or to a reserved device name such as "nul", neither of which
+    # survives _validate_worktree_name, hence the walk down to a random slug.
+    for text in (suggested, prompt):
+        if text is None:
+            continue
+        name = worktree_name_from_text(text)
+        if _is_portable_worktree_name(name):
+            return name
+    return create_slug()
+
+
+def _auto_worktree_candidates(base_name: str) -> Iterator[str]:
+    yield base_name
+    for suffix in range(2, _MAX_AUTO_WORKTREE_ATTEMPTS + 1):
+        yield worktree_name_with_suffix(base_name, suffix)
+
+
+def _claim_auto_worktree(
+    repo: Repo, worktree_root: Path, base_name: str
+) -> tuple[str, str, Path]:
+    # mkdir is the atomic claim: git worktree add cannot report *why* it failed
+    # (a taken path and an invalid ref both exit 128), so a lost race has to be
+    # detected before git runs or it is indistinguishable from a real failure.
+    for name in _auto_worktree_candidates(base_name):
+        branch = f"{_AUTO_WORKTREE_BRANCH_PREFIX}{name}"
+        if _branch_exists(repo, branch):
+            continue
+        target = worktree_root / name
+        try:
+            target.mkdir(parents=True)
+        except FileExistsError:
+            continue
+        except OSError as e:
+            raise WorktreeError(
+                f"Failed to claim worktree directory {target}: {e}"
+            ) from e
+        return name, branch, target
+
+    raise WorktreeError(
+        f"Unable to find an unused worktree name for {base_name!r} after "
+        f"{_MAX_AUTO_WORKTREE_ATTEMPTS} attempts."
+    )
+
+
+def _discard_worktree_claim(repo: Repo, target: Path, branch: str) -> None:
+    git = _git_python()
+    # rmdir refuses a populated directory, so a partial checkout is never lost,
+    # and git's own remove_junk may have removed it already.
+    with suppress(OSError):
+        target.rmdir()
+    # `worktree add -b` creates the branch before it validates the path, so a
+    # failed add leaves it behind. _claim_auto_worktree would then skip this
+    # name for every later call, walking the suffix chain until it reports
+    # exhaustion instead of the real failure.
+    #
+    # -d rather than -D: the branch this call created still points at HEAD, so
+    # a safe delete removes it, while a racing branch carrying commits is
+    # refused. That is a partial guard, not a full one -- a branch someone else
+    # created at HEAD between the _branch_exists check and the add is merged
+    # too, so it is deleted (recoverable from the reflog). Proving ownership
+    # would mean leaving the branch and burning the name on every failure,
+    # which costs more than the narrow race it closes.
+    with suppress(git.git_command_error):
+        repo.git.branch("-d", branch)
 
 
 def list_linked_worktrees(base: Path) -> tuple[LinkedWorktree, ...]:

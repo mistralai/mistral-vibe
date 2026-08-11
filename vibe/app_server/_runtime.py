@@ -35,8 +35,11 @@ from vibe.core.config import (
     build_default_orchestrator,
 )
 from vibe.core.config.harness_files import HarnessFilesManager
+from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.experiments.cache import load_cached_eval_response
+from vibe.core.experiments.manager import config_variants_from_response
 from vibe.core.experiments.models import EvalResponse
 from vibe.core.hooks.config import load_hooks_from_fs
 from vibe.core.hooks.models import HookConfigResult
@@ -136,6 +139,7 @@ class _AgentLoopBlueprint:
     session_id: str | None = None
     session_dir: Path | None = None
     experiment_state: EvalResponse | None = None
+    await_experiment_model: bool = False
 
     def build(self) -> AgentLoop:
         return AgentLoop(
@@ -158,6 +162,7 @@ class _AgentLoopBlueprint:
                 self.policy.local_managed_shell_runtime_enabled
             ),
             experiment_state=self.experiment_state,
+            await_experiment_model=self.await_experiment_model,
             parent_session_id=self.parent_session_id,
             cwd=self.cwd,
             harness_files=self.harness_files,
@@ -213,6 +218,7 @@ class _RootRuntimeBlueprint:
                 "terminal" not in self.client_capabilities.client_tools
             ),
         )
+        cached = load_cached_eval_response(self.config)
         return _AgentLoopBlueprint(
             config_orchestrator=self.config_orchestrator.copy(),
             agent_name=self.options.agent or self.config.default_agent,
@@ -222,6 +228,8 @@ class _RootRuntimeBlueprint:
             harness_files=self.harness_files,
             session_id=session_id,
             session_dir=session_dir,
+            experiment_state=cached,
+            await_experiment_model=cached is None and session_id is None,
         ).build()
 
 
@@ -254,8 +262,8 @@ class AgentRuntimeFactory:
         return _find_session_to_continue(source.config, cwd=cwd)
 
     async def resume_root(self, source: AgentLoop, session_id: str) -> AgentLoop:
-        session_path, loaded_messages, metadata = _load_session(
-            source.config, session_id
+        session_path, loaded_messages, metadata = await asyncio.to_thread(
+            _load_session, source.config, session_id
         )
         replacement = self._create_like(
             source,
@@ -265,14 +273,17 @@ class AgentRuntimeFactory:
             session_dir=session_path,
         )
         return await self._hydrate_resumed(
-            replacement, loaded_messages=loaded_messages, metadata=metadata
+            replacement,
+            loaded_messages=loaded_messages,
+            metadata=metadata,
+            skip_init_wait=True,
         )
 
     async def resume_blueprint(
         self, blueprint: _RootRuntimeBlueprint, session_id: str
     ) -> AgentLoop:
-        session_path, loaded_messages, metadata = _load_session(
-            blueprint.config, session_id
+        session_path, loaded_messages, metadata = await asyncio.to_thread(
+            _load_session, blueprint.config, session_id
         )
         replacement = blueprint.build(
             parent_session_id=_parent_session_id(metadata),
@@ -280,7 +291,10 @@ class AgentRuntimeFactory:
             session_dir=session_path,
         )
         return await self._hydrate_resumed(
-            replacement, loaded_messages=loaded_messages, metadata=metadata
+            replacement,
+            loaded_messages=loaded_messages,
+            metadata=metadata,
+            skip_init_wait=True,
         )
 
     @staticmethod
@@ -289,16 +303,15 @@ class AgentRuntimeFactory:
         *,
         loaded_messages: list[LLMMessage],
         metadata: dict[str, object],
+        skip_init_wait: bool = False,
     ) -> AgentLoop:
         try:
-            await replacement.wait_until_ready()
-            await replacement.hydrate_experiments_from_session()
-            system_messages = [
-                message
-                for message in replacement.messages
-                if message.role is Role.system
-            ]
-            replacement.messages.reset([*system_messages, *loaded_messages])
+            if not skip_init_wait:
+                await replacement.wait_until_ready()
+            await replacement.hydrate_experiments_from_session(
+                refresh_prompt=not skip_init_wait
+            )
+            replacement.messages.reset_preserving_system(loaded_messages)
             if isinstance(raw_stats := metadata.get("stats"), dict):
                 stats = AgentStats.model_validate(raw_stats)
                 if stats.cached_input_price_per_million is None:
@@ -357,12 +370,17 @@ class AgentRuntimeFactory:
     async def resume_child(
         self, parent: AgentLoop, agent_name: str, session_id: str, session_dir: Path
     ) -> AgentLoop:
-        loaded_messages, metadata = SessionLoader.load_session(session_dir)
+        loaded_messages, metadata = await asyncio.to_thread(
+            SessionLoader.load_session, session_dir
+        )
         child = await self.create_child(
             parent, agent_name, session_id=session_id, session_dir=session_dir
         )
         return await self._hydrate_resumed(
-            child, loaded_messages=loaded_messages, metadata=metadata
+            child,
+            loaded_messages=loaded_messages,
+            metadata=metadata,
+            skip_init_wait=True,
         )
 
     async def fork(self, source: AgentLoop, message_id: str | None) -> AgentLoop:
@@ -379,7 +397,7 @@ class AgentRuntimeFactory:
             await forked.session_logger.save_interaction(
                 forked.messages,
                 forked.stats,
-                forked.base_config,
+                forked.config,
                 forked.tool_manager,
                 forked.agent_profile,
             )
@@ -488,6 +506,7 @@ class HarnessProcess:
         config_orchestrator = await build_default_orchestrator(
             overrides, harness_files=harness_files
         )
+        await _apply_cached_experiment_variants(config_orchestrator)
         hook_config_result = await asyncio.to_thread(
             load_hooks_from_fs, harness_files=harness_files
         )
@@ -591,6 +610,25 @@ def _project_session_mcp_server(server: SessionMCPServer) -> MCPServer:
             )
         case _:
             raise TypeError(f"Unsupported session MCP server: {type(server).__name__}")
+
+
+async def _apply_cached_experiment_variants(
+    config_orchestrator: ConfigOrchestrator[VibeConfigSchema],
+) -> None:
+    """Apply the last cached experiment variants to config before first render."""
+    cached = load_cached_eval_response(config_orchestrator.config)
+    if cached is None:
+        return
+    variants = config_variants_from_response(cached)
+    if not variants:
+        return
+    try:
+        layer = config_orchestrator.get_layer(GrowthbookLayer.NAME)
+    except KeyError:
+        return
+    if isinstance(layer, GrowthbookLayer):
+        layer.set_variants(variants)
+        await config_orchestrator.reload()
 
 
 def _session_config_overrides(options: SessionOptions) -> dict[str, object]:

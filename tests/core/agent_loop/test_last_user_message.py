@@ -43,3 +43,15 @@ def test_skips_injected_user_messages() -> None:
 def test_returns_user_message_with_empty_content() -> None:
     empty = LLMMessage(role=Role.user, content="")
     assert _call(empty) is empty
+
+
+def test_ignores_user_messages_before_latest_compaction() -> None:
+    previous = LLMMessage(role=Role.user, content="previous")
+    boundary = LLMMessage(
+        role=Role.user,
+        content="compacted context",
+        injected=True,
+        context_boundary="compaction",
+    )
+
+    assert _call(previous, boundary) is None

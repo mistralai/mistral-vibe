@@ -165,6 +165,28 @@ active_transcribe_model = "voxtral-realtime"
 active_tts_model = "voxtral-tts"
 ```
 
+### OpenTelemetry Tracing
+
+Set `enable_otel = true` to export traces for agent, model, and tool operations
+over OTLP/HTTP. `enable_telemetry` must also be enabled. With no explicit
+endpoint, Vibe uses the configured Mistral provider's telemetry endpoint and API
+key.
+
+To use another collector, set `otel_endpoint` to its base URL; Vibe appends
+`/v1/traces`. Configure custom-collector authentication through the standard
+`OTEL_EXPORTER_OTLP_*` environment variables.
+
+`otel_redaction` controls client-side span attribute redaction: `default`
+redacts sensitive values, `strict` redacts sensitive attributes entirely, and
+`none` disables redaction. Use `none` only for a collector trusted to receive
+potentially sensitive prompt, response, and tool data.
+
+```toml
+enable_otel = true
+otel_endpoint = "https://collector.example.com:4318"
+otel_redaction = "default"
+```
+
 ### Providers
 
 ```toml
@@ -179,6 +201,9 @@ name = "llamacpp"
 api_base = "http://127.0.0.1:8080/v1"
 api_key_env_var = ""
 extra_headers = { "X-Custom-Header" = "value" }  # optional per-provider HTTP headers
+emits_finish_reason = false  # set false for OpenAI-compatible endpoints that end
+                             # streams without a finish reason; avoids spurious
+                             # "incomplete stream" errors and retries (default true)
 ```
 
 ### Models
@@ -302,14 +327,14 @@ disabled_skills = ["experimental-*"]
 agent_paths = ["/path/to/custom/agents"]
 
 # Enable/disable agents
-enabled_agents = ["default", "plan"]
+enabled_agents = ["ask", "plan"]
 disabled_agents = ["auto-approve"]
 
 # Opt-in builtin agents (only affects agents with install_required=True, e.g. lean)
 installed_agents = ["lean"]
 
 # Agent profile to use when --agent is not passed
-# (default: "default"). Valid values: "default", "plan", "accept-edits",
+# (default: "accept-edits"). Valid values: "ask", "plan", "accept-edits",
 # "auto-approve", "lean" (only when listed in installed_agents), or any
 # custom agent name from ~/.vibe/agents/ or .vibe/agents/. Subagents
 # (e.g. "explore") are rejected. Applies in both interactive and programmatic
@@ -640,6 +665,7 @@ vibe --agent NAME                   # Select agent profile (falls back to `defau
 vibe --auto-approve / --yolo         # Approve all tool calls for the selected agent
 vibe --workdir DIR                  # Change working directory
 vibe --worktree NAME                # Create/reuse a git worktree under $VIBE_HOME/worktrees on branch NAME and run inside it. Auto-cleanup only for worktrees Vibe created this run and only after a session started; reused worktrees and attached (pre-existing) branches are kept unless confirmed. -p sessions keep worktrees. Ignored with --setup/--check-upgrade.
+vibe --worktree                     # Same, but Vibe picks an unused name from the prompt (a random slug when there is no prompt) on a vibe/<name> branch, and never reuses an existing worktree. The prompt must precede the flag or follow a `--`, since --worktree otherwise reads it as NAME.
 vibe --add-dir DIR                  # Extra working dir loaded for context (repeatable). Implicitly trusted.
 vibe --trust                        # Trust cwd for this invocation only (not persisted)
 vibe -c / --continue                # Continue most recent session in this terminal (TTY-scoped, falls back to latest in cwd)
@@ -665,9 +691,9 @@ There are two kinds of agents:
 
 ### Agents
 
-- **default**: Standard interactive agent
+- **ask**: Requests approval for tool executions
 - **plan**: Planning-focused agent
-- **accept-edits**: Auto-approves file edits but asks for other tools
+- **accept-edits**: Default agent; auto-approves file edits but asks for other tools
 - **auto-approve**: Auto-approves all tool calls
 - **lean**: Specialized Lean 4 proof assistant. Not available by default — must be
   installed with `/leanstall` (removed with `/unleanstall`). Use `--agent lean
@@ -688,10 +714,11 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/thinking` - Select thinking level
 - `/theme` - Select Textual UI theme; `auto` follows terminal/OS appearance (persisted in config)
 - `/reload` - Reload configuration, agent instructions, and skills from disk
-- `/clear`, `/new` - Clear conversation history
+- `/clear`, `/new` - Start a new conversation. Optionally pass a prompt to seed it
 - `/log` - Show path to current interaction log file
 - `/debug` - Toggle debug console
-- `/compact` - Compact conversation history by summarizing
+- `/compact` - Compact model context by summarizing. The session ID and visible
+  conversation stay intact.
 - `/retry [additional instructions]` - Continue a model response interrupted by
   a backend error without repeating text already shown. Optional instructions
   are passed to the model for the continuation. Relevant error messages also
@@ -836,6 +863,11 @@ Two entry points:
 Skills with `user-invocable: false` are model-only: they are hidden from the
 slash menu and `/skill-name` will not resolve them (it is treated as a plain
 prompt). The model can still load them via the `skill` tool.
+
+A `/` at the very start of the input opens the slash menu (commands and skills).
+A `/word` typed mid-prompt (not the first word) instead shows an inline ghost-text
+preview of the best-matching skill name; press `Tab` to accept it. Only skills are
+offered inline, and no popup is shown.
 
 ## Environment Variables
 

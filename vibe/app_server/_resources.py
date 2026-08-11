@@ -41,16 +41,15 @@ from vibe.app_server.protocol import (
     ConfigFieldsReadParams,
     ConfigFieldsReadResponse,
     ConfigMutationResponse,
-    ConfigPatchOpWire,
-    ConfigPatchParams,
-    ConfigPatchResponse,
     ConfigProxyReadParams,
     ConfigProxyReadResponse,
     ConfigProxyWriteParams,
     ConfigReadParams,
     ConfigReadResponse,
     ConfigReloadParams,
-    ConfigThinkingWriteParams,
+    ConfigWriteOpWire,
+    ConfigWriteParams,
+    ConfigWriteResponse,
     ConnectorAuthReadParams,
     ConnectorAuthReadResponse,
     ConnectorRefreshParams,
@@ -109,12 +108,7 @@ from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.mcp_servers import MCPServerAddError, persist_oauth_mcp_server
 from vibe.core.config.orchestrator import ConfigPatchValidationError
-from vibe.core.config.patch import (
-    AddOperationPatch,
-    PatchOp,
-    RemoveOperationPatch,
-    escape_json_pointer_token,
-)
+from vibe.core.config.patch import AddOperationPatch, PatchOp, RemoveOperationPatch
 from vibe.core.config.types import ConcurrencyConflictError
 from vibe.core.feedback import (
     record_feedback_asked,
@@ -150,11 +144,13 @@ class ResourceRequestHandler:
         execution: SessionExecution,
         notify: Callable[[str, ProtocolModel], Awaitable[None]],
         account_gateway: AccountGateway | None = None,
+        current_event_id: Callable[[str], int] | None = None,
         identity_gateway: IdentityGateway | None = None,
     ) -> None:
         self._agent_loop = agent_loop
         self._execution = execution
         self._notify = notify
+        self._current_event_id = current_event_id or (lambda _session_id: 0)
         self._account = AccountController(agent_loop, account_gateway)
         self._identity = IdentityController(agent_loop, identity_gateway)
         self._loops = LoopManager(agent_loop.session_logger)
@@ -236,7 +232,6 @@ class ResourceRequestHandler:
         issues, hooks_count = project_diagnostics(self._agent_loop)
         return RuntimeSnapshot(
             config=project_config(self._agent_loop),
-            base_config=project_config(self._agent_loop, base=True),
             active_agent=active,
             agents=agents,
             skills=project_skills(self._agent_loop),
@@ -287,27 +282,22 @@ class ResourceRequestHandler:
                     validate_wire(ConfigReadParams, raw_params)
                 )
                 runtime_updated = False
+            case "config/write":
+                write_response = await self._config_write(
+                    validate_wire(ConfigWriteParams, raw_params)
+                )
+                response = write_response
+                runtime_updated = not write_response.rejected and not (
+                    write_response.failures
+                )
             case "config/fields/read":
                 response = await self._config_fields_read(
                     validate_wire(ConfigFieldsReadParams, raw_params)
                 )
                 runtime_updated = False
-            case "config/patch":
-                patch_response = await self._config_patch(
-                    validate_wire(ConfigPatchParams, raw_params)
-                )
-                response = patch_response
-                runtime_updated = not patch_response.rejected and not (
-                    patch_response.failures
-                )
             case "config/reload":
                 response = await self._config_reload(
                     validate_wire(ConfigReloadParams, raw_params)
-                )
-                runtime_updated = True
-            case "config/thinking/write":
-                response = await self._config_thinking_write(
-                    validate_wire(ConfigThinkingWriteParams, raw_params)
                 )
                 runtime_updated = True
             case "config/proxy/read":
@@ -539,9 +529,9 @@ class ResourceRequestHandler:
     def _config_read(self, params: ConfigReadParams) -> ConfigReadResponse:
         if params.session_id is not None:
             self._require_session(params.session_id)
-        return self._config_response()
+        return ConfigReadResponse(config=project_config(self._agent_loop))
 
-    async def _config_patch(self, params: ConfigPatchParams) -> ConfigPatchResponse:
+    async def _config_write(self, params: ConfigWriteParams) -> ConfigWriteResponse:
         self._execution.require_idle()
         self._require_session(params.session_id)
         operations: list[PatchOp] = []
@@ -563,18 +553,16 @@ class ResourceRequestHandler:
                 operations, reason=params.reason
             )
         except (ConfigPatchValidationError, ValueError):
-            return ConfigPatchResponse(runtime=self.runtime_snapshot(), rejected=True)
+            return ConfigWriteResponse(runtime=self.runtime_snapshot(), rejected=True)
         if failures:
-            return ConfigPatchResponse(
+            return ConfigWriteResponse(
                 runtime=self.runtime_snapshot(),
                 failures=[str(failure) for failure in failures],
             )
         if params.reload_runtime:
             self._clear_mcp_discovery_errors()
             await self._agent_loop.reload_with_initial_messages(reload_hooks=True)
-        else:
-            self._agent_loop.agent_manager.invalidate_config()
-        return ConfigPatchResponse(
+        return ConfigWriteResponse(
             runtime=self.runtime_snapshot(),
             stripped_history_images=(
                 self._agent_loop.count_history_images_unsupported_by_active_model()
@@ -705,26 +693,6 @@ class ResourceRequestHandler:
             AdminConfigOutcome.APPLIED, enforced_keys=layer.enforced_keys
         )
 
-    async def _config_thinking_write(
-        self, params: ConfigThinkingWriteParams
-    ) -> ConfigMutationResponse:
-        self._execution.require_idle()
-        self._require_session(params.session_id)
-        model = self._agent_loop.config.get_active_model()
-        value = model.model_dump(mode="json")
-        value["thinking"] = params.level
-        failures = await self._agent_loop.config_orchestrator.set_field(
-            f"/models/{escape_json_pointer_token(model.alias)}", value
-        )
-        if failures:
-            failure = failures[0]
-            raise RequestFailure(
-                ProtocolErrorCode.INTERNAL_ERROR,
-                f"Failed to update configuration: {failure}",
-            ) from failure
-        self._agent_loop.agent_manager.invalidate_config()
-        return self._config_mutation_response()
-
     async def _config_proxy_read(
         self, params: ConfigProxyReadParams
     ) -> ConfigProxyReadResponse:
@@ -787,16 +755,16 @@ class ResourceRequestHandler:
     async def _agent_install(
         self, params: AgentInstallParams, *, install: bool
     ) -> AgentsListResponse:
-        installed = list(self._agent_loop.base_config.installed_agents)
+        installed = list(self._agent_loop.config.installed_agents)
         if install and params.agent_name not in installed:
             installed.append(params.agent_name)
         if not install:
             installed = [name for name in installed if name != params.agent_name]
-        response = await self._config_patch(
-            ConfigPatchParams(
+        response = await self._config_write(
+            ConfigWriteParams(
                 session_id=params.session_id,
                 ops=[
-                    ConfigPatchOpWire(
+                    ConfigWriteOpWire(
                         op="set",
                         path="/installed_agents",
                         value=cast(JsonValue, installed),
@@ -893,7 +861,6 @@ class ResourceRequestHandler:
     async def _mcp_toggle(self, params: MCPToggleParams) -> RuntimeMutationResponse:
         self._execution.require_idle()
         self._require_session(params.session_id)
-        self._clear_mcp_discovery_errors()
         try:
             await persist_mcp_toggle(
                 self._agent_loop.config_orchestrator,
@@ -905,6 +872,11 @@ class ResourceRequestHandler:
         except ConcurrencyConflictError as exc:
             raise RequestFailure(ProtocolErrorCode.CONFLICT, str(exc)) from exc
         await self._agent_loop.refresh_config()
+        if params.tool_name is None and not params.disabled:
+            self._clear_mcp_discovery_errors()
+            await self._agent_loop.wait_until_ready()
+            await self._agent_loop.tool_manager.refresh_remote_tools_async()
+        await self._agent_loop.refresh_system_prompt()
         return RuntimeMutationResponse(runtime=self.runtime_snapshot())
 
     async def _mcp_add(self, params: MCPAddParams) -> MCPAddResponse:
@@ -969,17 +941,10 @@ class ResourceRequestHandler:
             await registry.login(params.name, on_url=on_url)
         except ValueError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
+        await self._agent_loop.wait_until_ready()
+        await self._agent_loop.tool_manager.refresh_remote_tools_async()
         await self._agent_loop.refresh_system_prompt()
         return RuntimeMutationResponse(runtime=self.runtime_snapshot())
-
-    def _config_response(self) -> ConfigReadResponse:
-        return ConfigReadResponse(
-            config=project_config(self._agent_loop),
-            base_config=project_config(self._agent_loop, base=True),
-            stripped_history_images=(
-                self._agent_loop.count_history_images_unsupported_by_active_model()
-            ),
-        )
 
     def _config_mutation_response(self) -> ConfigMutationResponse:
         return ConfigMutationResponse(

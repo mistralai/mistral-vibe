@@ -116,6 +116,27 @@ def find_repo_trustable_files_for_cwd(cwd: Path, repo_root: Path | None) -> list
     return sorted(found)
 
 
+def find_untrusted_config_dirs(
+    cwd: Path, *, manager: TrustedFoldersManager | None = None
+) -> list[Path]:
+    """Config dirs under a trusted *cwd* that are explicitly untrusted.
+
+    These are the folders left in a broken state by the fixed bug where trusting
+    a folder also marked its nested ``.vibe``/``.agents`` untrusted. Returns an
+    empty list unless *cwd* itself is trusted.
+    """
+    manager = manager or trusted_folders_manager
+    resolved_cwd = cwd.resolve()
+    if manager.is_trusted(resolved_cwd) is not True:
+        return []
+
+    return sorted(
+        config_dir
+        for config_dir in find_local_config_dirs(resolved_cwd).config_dirs
+        if manager.is_explicitly_untrusted(config_dir)
+    )
+
+
 def maybe_build_workspace_trust_prompt(
     cwd: Path,
     *,

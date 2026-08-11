@@ -490,7 +490,7 @@ class TestConcurrentReloads:
 
         assert results == [None, None]
         assert agent.messages[0].content == winning_system_prompt
-        assert agent.base_config.system_prompt_id == "cli"
+        assert agent.config.system_prompt_id == "cli"
 
 
 class TestCompactStatsHandling:
@@ -570,7 +570,7 @@ class TestCompactStatsHandling:
         assert agent.stats.tool_calls_succeeded == 1
 
     @pytest.mark.asyncio
-    async def test_compact_resets_session_id(self) -> None:
+    async def test_compact_keeps_session_id(self) -> None:
         backend = FakeBackend([
             [mock_llm_chunk(content="Long response " * 100)],
             [mock_llm_chunk(content="<summary>")],
@@ -589,7 +589,7 @@ class TestCompactStatsHandling:
 
         await agent.compact()
 
-        assert agent.session_id != original_session_id
+        assert agent.session_id == original_session_id
         assert agent.session_id == agent.session_logger.session_id
 
 

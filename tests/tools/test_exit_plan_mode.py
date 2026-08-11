@@ -56,11 +56,11 @@ def _plan_profile() -> AgentProfile:
     )
 
 
-def _default_profile() -> AgentProfile:
+def _ask_profile() -> AgentProfile:
     return AgentProfile(
-        name=BuiltinAgentName.DEFAULT,
-        display_name="Default",
-        description="Default mode",
+        name=BuiltinAgentName.ASK,
+        display_name="Ask",
+        description="Ask mode",
         safety=AgentSafety.SAFE,
     )
 
@@ -102,7 +102,7 @@ class TestErrorCases:
 
     @pytest.mark.asyncio
     async def test_requires_plan_mode(self, tool: ExitPlanMode) -> None:
-        manager = MockAgentManager(active_profile=_default_profile())
+        manager = MockAgentManager(active_profile=_ask_profile())
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=manager,  # type: ignore[arg-type]
@@ -182,7 +182,7 @@ class TestClearContextOption:
         assert clear_cb.calls == 1
 
     @pytest.mark.asyncio
-    async def test_manual_switches_to_default_without_clear(
+    async def test_manual_switches_to_ask_without_clear(
         self, tool: ExitPlanMode, plan_manager: MockAgentManager
     ) -> None:
         switch_cb = MockSwitchAgentCallback()
@@ -196,7 +196,7 @@ class TestClearContextOption:
         )
         result = await collect_result(tool.run(ExitPlanModeArgs(), ctx))
         assert result.switched is True
-        assert switch_cb.calls == [BuiltinAgentName.DEFAULT]
+        assert switch_cb.calls == [BuiltinAgentName.ASK]
         assert clear_cb.calls == 0
 
     @pytest.mark.asyncio

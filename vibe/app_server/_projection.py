@@ -45,6 +45,7 @@ from vibe.app_server.models import (
     MCPSourceSummary,
     MCPState,
     MCPToolSummary,
+    PublicCheckpointEntry,
     PublicEffectEntry,
     PublicEntryGenerationStatus,
     PublicError,
@@ -85,17 +86,21 @@ from vibe.user_content import UserResource
 from vibe.utils.tool_presentation import ToolCallPresentation
 
 
-def project_config(agent_loop: AgentLoop, *, base: bool = False) -> ConfigView:
+def project_config(agent_loop: AgentLoop) -> ConfigView:
     return project_config_view(
-        agent_loop.base_config if base else agent_loop.config,
+        agent_loop.config,
         active_model_pinned=bool(
             agent_loop.config_orchestrator.persisted_active_model()
         ),
+        awaiting_experiment_model=agent_loop.awaiting_experiment_model,
     )
 
 
 def project_config_view(
-    config: VibeConfigSchema, *, active_model_pinned: bool = False
+    config: VibeConfigSchema,
+    *,
+    active_model_pinned: bool = False,
+    awaiting_experiment_model: bool = False,
 ) -> ConfigView:
     transcribe_model = config.get_active_transcribe_model()
     tts_model = config.get_active_tts_model()
@@ -107,6 +112,7 @@ def project_config_view(
     return ConfigView(
         active_model=_project_model_config(config.get_active_model()),
         active_model_pinned=active_model_pinned,
+        awaiting_experiment_model=awaiting_experiment_model,
         default_model_alias=default_model_alias,
         theme=config.theme,
         disable_welcome_banner_animation=config.disable_welcome_banner_animation,
@@ -120,7 +126,9 @@ def project_config_view(
         enable_update_checks=config.enable_update_checks,
         enable_notifications=config.enable_notifications,
         vibe_code_enabled=config.vibe_code_enabled,
-        models=[_project_model_config(model) for model in config.models.values()],
+        models=[
+            _project_model_config(model) for model in config.available_models().values()
+        ],
         transcribe_models=[model.alias for model in config.transcribe_models],
         tts_models=[model.alias for model in config.tts_models],
         transcription=TranscriptionConfigView(
@@ -256,9 +264,10 @@ def project_mcp(
     agent_loop: AgentLoop, *, discovery_errors: Mapping[str, str] | None = None
 ) -> MCPState:
     tools = _project_mcp_tools(agent_loop)
+    discovery_errors_set = set(discovery_errors) if discovery_errors else set()
     return MCPState(
         sources=[
-            *_project_mcp_servers(agent_loop, tools),
+            *_project_mcp_servers(agent_loop, tools, discovery_errors_set),
             *_project_mcp_connectors(agent_loop, tools),
         ],
         discovery_errors=dict(discovery_errors or {}),
@@ -297,7 +306,9 @@ def _project_mcp_tools(
 
 
 def _project_mcp_servers(
-    agent_loop: AgentLoop, tools: dict[tuple[MCPSourceKind, str], list[MCPToolSummary]]
+    agent_loop: AgentLoop,
+    tools: dict[tuple[MCPSourceKind, str], list[MCPToolSummary]],
+    discovery_errors: set[str],
 ) -> list[MCPSourceSummary]:
     registry = agent_loop.mcp_registry
     server_statuses = registry.status() if registry is not None else {}
@@ -305,6 +316,8 @@ def _project_mcp_servers(
     for server in agent_loop.config.mcp_servers:
         if server.disabled:
             status = MCPSourceStatus.DISABLED
+        elif server.name in discovery_errors:
+            status = MCPSourceStatus.UNAVAILABLE
         else:
             match server_statuses.get(server.name):
                 case AuthStatus.NEEDS_AUTH:
@@ -476,6 +489,9 @@ def _project_stored_message(
 ) -> None:
     if message.role is Role.system:
         return
+    if message.context_boundary == "compaction":
+        _append_compaction_history(session_id, message, index, created_at, entries)
+        return
     if message.injected:
         _append_injected_history(session_id, message, entries)
         return
@@ -518,6 +534,26 @@ def _append_injected_history(
             title="shell",
             detail=shell_effect_detail(shell.command),
             state=restored_shell_effect_state(shell),
+        )
+    )
+
+
+def _append_compaction_history(
+    session_id: str,
+    message: LLMMessage,
+    index: int,
+    created_at: int,
+    entries: list[PublicHistoryEntry],
+) -> None:
+    message_id = message.message_id or f"history:{index}:compaction"
+    entries.append(
+        PublicCheckpointEntry(
+            **_history_fields(
+                session_id, f"checkpoint:compaction:{message_id}", created_at
+            ),
+            kind="compaction",
+            message="Context compacted",
+            details={},
         )
     )
 

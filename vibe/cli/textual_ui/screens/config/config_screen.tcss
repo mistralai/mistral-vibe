@@ -10,12 +10,12 @@
     border: round $primary;
     border-title-color: $primary;
     border-title-style: bold;
-    padding: 1 2;
+    padding: 1 2 0 2;
 }
 
 .config-screen-search {
     height: auto;
-    margin: 1 0 2 0;
+    margin: 0 0 1 0;
     color: $primary;
 }
 

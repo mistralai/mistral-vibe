@@ -88,6 +88,59 @@ async def test_unresolved_trust_defaults_to_untrusted(
 
 
 @pytest.mark.asyncio
+async def test_resolve_and_load_never_mutate_trust_store_when_untrusted(
+    tmp_working_directory: Path,
+) -> None:
+    """Resolving/loading must be a pure read of the trust store.
+
+    Trust resolution used to write back into the store, marking the layer's
+    ``.vibe`` directory untrusted while the parent stayed trusted. That silently
+    disabled project config on the next launch. Neither ``resolve_trust`` nor a
+    failed ``load`` may touch the store.
+    """
+    config_path = tmp_working_directory / ".vibe" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text('active_model = "project-model"\n')
+
+    trusted_before = list(trusted_folders_manager._trusted)
+    untrusted_before = list(trusted_folders_manager._untrusted)
+
+    layer = ProjectConfigLayer(path=tmp_working_directory)
+    assert await layer.resolve_trust() is False
+    with pytest.raises(UntrustedLayerError):
+        await layer.load()
+
+    assert trusted_folders_manager.is_explicitly_untrusted(config_path.parent) is False
+    assert trusted_folders_manager._trusted == trusted_before
+    assert trusted_folders_manager._untrusted == untrusted_before
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_load_do_not_untrust_vibe_dir_under_untrusted_parent(
+    tmp_working_directory: Path,
+) -> None:
+    """Trust resolution is a pure read even with an explicitly untrusted parent.
+
+    Distrusting the workspace must not cascade a fresh untrusted entry onto its
+    ``.vibe`` directory; only the entry the user set may exist afterwards.
+    """
+    trusted_folders_manager.add_untrusted(tmp_working_directory)
+    config_path = tmp_working_directory / ".vibe" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text('active_model = "project-model"\n')
+
+    untrusted_before = list(trusted_folders_manager._untrusted)
+
+    layer = ProjectConfigLayer(path=tmp_working_directory)
+    assert await layer.resolve_trust() is False
+    with pytest.raises(UntrustedLayerError):
+        await layer.load()
+
+    assert trusted_folders_manager.is_explicitly_untrusted(config_path.parent) is False
+    assert trusted_folders_manager._untrusted == untrusted_before
+
+
+@pytest.mark.asyncio
 async def test_missing_file_returns_empty(tmp_working_directory: Path) -> None:
     trusted_folders_manager.add_trusted(tmp_working_directory)
 
@@ -118,71 +171,6 @@ async def test_trust_uses_path_parent_for_resolution(
     layer = ProjectConfigLayer(path=project_dir)
     data = await layer.load()
     assert data.model_extra == {"value": "trusted"}
-
-
-@pytest.mark.asyncio
-async def test_grant_trust_marks_folder_trusted(tmp_working_directory: Path) -> None:
-    config_path = tmp_working_directory / ".vibe" / "config.toml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text('key = "value"\n')
-    layer = ProjectConfigLayer(path=tmp_working_directory)
-    trusted_folders_manager.add_untrusted(tmp_working_directory / ".vibe")
-
-    await layer.resolve_trust()
-    await layer.grant_trust()
-    assert trusted_folders_manager.is_trusted(tmp_working_directory / ".vibe") is True
-
-
-@pytest.mark.asyncio
-async def test_revoke_trust_marks_folder_untrusted(tmp_working_directory: Path) -> None:
-    config_path = tmp_working_directory / ".vibe" / "config.toml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text('key = "value"\n')
-    layer = ProjectConfigLayer(path=tmp_working_directory)
-    trusted_folders_manager.add_trusted(tmp_working_directory / ".vibe")
-
-    await layer.resolve_trust()
-    await layer.revoke_trust()
-    assert trusted_folders_manager.is_trusted(tmp_working_directory / ".vibe") is False
-
-
-@pytest.mark.asyncio
-async def test_grant_trust_without_config_file_is_noop(
-    tmp_working_directory: Path,
-) -> None:
-    layer = ProjectConfigLayer(path=tmp_working_directory)
-    trusted_folders_manager.add_untrusted(tmp_working_directory)
-
-    await layer.grant_trust()
-    assert trusted_folders_manager.is_trusted(tmp_working_directory) is False
-
-
-@pytest.mark.asyncio
-async def test_revoke_trust_without_config_file_is_noop(
-    tmp_working_directory: Path,
-) -> None:
-    layer = ProjectConfigLayer(path=tmp_working_directory)
-    trusted_folders_manager.add_trusted(tmp_working_directory)
-
-    await layer.revoke_trust()
-    assert trusted_folders_manager.is_trusted(tmp_working_directory) is True
-
-
-@pytest.mark.asyncio
-async def test_trust_stored_at_vibe_subdir(tmp_working_directory: Path) -> None:
-    config_path = tmp_working_directory / ".vibe" / "config.toml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text('key = "value"\n')
-    layer = ProjectConfigLayer(path=tmp_working_directory)
-
-    await layer.resolve_trust()
-    await layer.grant_trust()
-
-    assert (
-        str((tmp_working_directory / ".vibe").resolve())
-        in trusted_folders_manager._trusted
-    )
-    assert str(tmp_working_directory.resolve()) not in trusted_folders_manager._trusted
 
 
 @pytest.mark.asyncio
@@ -289,22 +277,6 @@ async def test_trusted_ancestor_satisfies_trust_check(
     layer = ProjectConfigLayer(path=child)
     data = await layer.load()
     assert data.model_extra == {"active_model": "child-model"}
-
-
-@pytest.mark.asyncio
-async def test_grant_trust_then_load_reads_config_without_prior_resolve(
-    tmp_working_directory: Path,
-) -> None:
-    config_path = tmp_working_directory / ".vibe" / "config.toml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text('key = "value"\n')
-
-    layer = ProjectConfigLayer(path=tmp_working_directory)
-    await layer.resolve_trust()
-    await layer.grant_trust()
-    data = await layer.load()
-
-    assert data.model_extra == {"key": "value"}
 
 
 @pytest.mark.asyncio

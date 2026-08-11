@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import TypeAdapter
+
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._execution import (
     SessionExecution,
@@ -51,6 +53,7 @@ from vibe.app_server._workspace import (
     prepare_prompt,
 )
 from vibe.app_server.models import (
+    CallbackOutput,
     PublicCallbackEntry,
     PublicHistoryEntry,
     PublicSessionState,
@@ -59,14 +62,13 @@ from vibe.app_server.protocol import (
     AgentSwitchParams,
     CallbackRespondParams,
     CallbackRespondResponse,
+    CallbackResultError,
+    CallbackResultParams,
+    CallbackResultResponse,
     ContextInjectParams,
     EmptyResponse,
-    HistoryListParams,
-    HistoryListResponse,
     ProtocolErrorCode,
     RuntimeMutationResponse,
-    SessionCloseParams,
-    SessionCloseResponse,
     SessionCompactParams,
     SessionCompactResponse,
     SessionContinueParams,
@@ -75,6 +77,8 @@ from vibe.app_server.protocol import (
     SessionForkResponse,
     SessionHistoryClearParams,
     SessionHistoryClearResponse,
+    SessionHistoryListParams,
+    SessionHistoryListResponse,
     SessionListParams,
     SessionLogReadParams,
     SessionLogReadResponse,
@@ -93,16 +97,23 @@ from vibe.app_server.protocol import (
     SessionSettingsUpdateParams,
     SessionStartParams,
     SessionStartResponse,
+    SessionStopParams,
+    SessionStopResponse,
     SessionTitleUpdateParams,
     SessionTitleUpdateResponse,
+    SessionTurnsListParams,
+    SessionTurnsListResponse,
     TeleportCancelParams,
     TeleportCancelResponse,
     TeleportPushRespondParams,
     TeleportStartParams,
     TeleportStartResponse,
     TurnInterruptParams,
+    TurnInterruptResponse,
     TurnStartParams,
+    TurnStartResponse,
     TurnSteerParams,
+    TurnSteerResponse,
     VibeCodeProjectCancelParams,
     VibeCodeProjectCreateParams,
     VibeCodeProjectCreateResponse,
@@ -123,6 +134,8 @@ from vibe.app_server.protocol import (
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.compaction import CompactionFailedError
 from vibe.core.session.saved_sessions import update_saved_session_title_at_path
+
+DEFAULT_HISTORY_LIMIT = 200
 
 type ReplaceRoot = Callable[[str, int], Awaitable[PublicSessionState]]
 type AdoptRoot = Callable[[AgentLoop, int], Awaitable[PublicSessionState]]
@@ -148,14 +161,16 @@ class CoreRequestHandler:
         root_session: RootSessionCoordinator,
         root_lifecycle: RootLifecycle,
         runtime_factory: AgentRuntimeFactory,
+        current_event_id: Callable[[str], int],
     ) -> None:
         self._agent_loop = agent_loop
         self._turns = turns
         self._execution = execution
         self._sessions = sessions
         self._root_session = root_session
+        self._current_event_id = current_event_id
         self._shell = ShellRequestHandler(
-            agent_loop, turns, execution, self._require_attached
+            agent_loop, turns, execution, self._require_attached, self._current_event_id
         )
         self._vibe_code = VibeCodeController(
             agent_loop, notify, execution, resources.read_account
@@ -217,16 +232,18 @@ class CoreRequestHandler:
         match namespace:
             case "session":
                 result = await self._dispatch_session(method, raw_params)
-            case "history":
-                result = self._dispatch_history(method, raw_params)
-            case "shell":
-                result = await self._shell.dispatch(method, raw_params)
             case "turn":
                 result = await self._dispatch_turn(method, raw_params)
             case "workspace" | "vibeCode":
                 result = await self._dispatch_product(method, raw_params)
             case "callback":
                 result = await self._dispatch_callback(method, raw_params)
+            case "plugin":
+                # Reserved for future clients; Vibe has no plugin backing yet.
+                raise RequestFailure(
+                    ProtocolErrorCode.NOT_IMPLEMENTED,
+                    f"Plugins are not supported: {method}",
+                )
             case "review":
                 result = self._review.dispatch(method, raw_params)
             case (
@@ -353,26 +370,33 @@ class CoreRequestHandler:
     async def _dispatch_session(
         self, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult:
+        if method == "session/shellCommand":
+            return await self._shell.dispatch(method, raw_params)
         if method in {
             "session/start",
             "session/resume",
             "session/continue",
-            "session/close",
+            "session/stop",
         }:
             return await self._dispatch_session_lifecycle(method, raw_params)
-        if method.startswith("session/rewind"):
-            return await self._dispatch_rewind(method, raw_params)
-        if method == "session/read":
-            return await self._dispatch_session_records(method, raw_params)
+        if (
+            method == "session/read"
+            or method.startswith("session/rewind")
+            or method
+            in {
+                "session/history/list",
+                "session/turns/list",
+                "session/archive",
+                "session/rename",
+                "session/compact",
+            }
+        ):
+            return await self._dispatch_session_delegated(method, raw_params)
         runtime_updated = False
         session_attached = False
         match method:
-            case "session/title/update":
-                response: ProtocolModel = await self._session_title_update(
-                    validate_wire(SessionTitleUpdateParams, raw_params)
-                )
             case "session/ready/wait":
-                response = await self._wait_ready(
+                response: ProtocolModel = await self._wait_ready(
                     validate_wire(SessionReadyWaitParams, raw_params)
                 )
             case "session/ready/read":
@@ -401,7 +425,7 @@ class CoreRequestHandler:
             case "session/list":
                 params = validate_wire(SessionListParams, raw_params)
                 response = await asyncio.to_thread(
-                    project_session_list, self._agent_loop.config, params.cwd
+                    project_session_list, self._agent_loop.config, params
                 )
             case "session/context/inject":
                 params = validate_wire(ContextInjectParams, raw_params)
@@ -411,15 +435,54 @@ class CoreRequestHandler:
                 response = await self._history_clear(
                     validate_wire(SessionHistoryClearParams, raw_params)
                 )
-            case "session/compact/start":
-                response = await self._compact(
-                    validate_wire(SessionCompactParams, raw_params)
-                )
             case _:
                 raise method_not_found(method)
         return DispatchResult(
             response, runtime_updated=runtime_updated, session_attached=session_attached
         )
+
+    async def _dispatch_session_delegated(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult:
+        if method == "session/read":
+            return await self._dispatch_session_records(method, raw_params)
+        if method.startswith("session/rewind"):
+            return await self._dispatch_rewind(method, raw_params)
+        if method == "session/rename":
+            return DispatchResult(
+                await self._session_rename(
+                    validate_wire(SessionTitleUpdateParams, raw_params)
+                )
+            )
+        if method == "session/compact":
+            return DispatchResult(
+                await self._compact(validate_wire(SessionCompactParams, raw_params))
+            )
+        return await self._dispatch_session_catalog(method, raw_params)
+
+    async def _dispatch_session_catalog(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult:
+        match method:
+            case "session/history/list":
+                return DispatchResult(
+                    await self._history_list(
+                        validate_wire(SessionHistoryListParams, raw_params)
+                    )
+                )
+            case "session/turns/list":
+                return DispatchResult(
+                    await self._session_turns_list(
+                        validate_wire(SessionTurnsListParams, raw_params)
+                    )
+                )
+            case "session/archive":
+                # Reserved for future clients; Vibe has no archive backing yet.
+                raise RequestFailure(
+                    ProtocolErrorCode.NOT_IMPLEMENTED,
+                    "Archiving sessions is not supported",
+                )
+        raise method_not_found(method)
 
     async def _dispatch_session_records(
         self, method: str, raw_params: dict[str, Any]
@@ -427,14 +490,25 @@ class CoreRequestHandler:
         match method:
             case "session/read":
                 params = validate_wire(SessionReadParams, raw_params)
-                if self._sessions.has_child(params.session_id):
-                    state = self._sessions.public_state(
-                        params.session_id, params.history_limit
+                if await self._sessions.ensure_child(params.session_id):
+                    public = self._sessions.public_state(
+                        params.session_id,
+                        params.history_limit,
+                        turns_limit=params.turns_limit,
+                        include_history=params.include_history,
+                        include_turns=params.include_turns,
                     )
                 else:
                     self._require_session(params.session_id)
-                    state = self._public_state(params.history_limit)
-                response: ProtocolModel = SessionReadResponse(state=state)
+                    public = self._public_state(
+                        params.history_limit,
+                        turns_limit=params.turns_limit,
+                        include_history=params.include_history,
+                        include_turns=params.include_turns,
+                    )
+                response: ProtocolModel = SessionReadResponse(
+                    state=public, last_event_id=public.event_id
+                )
             case _:
                 raise method_not_found(method)
         return DispatchResult(response)
@@ -459,7 +533,10 @@ class CoreRequestHandler:
             self._root_session.attach(self._agent_loop.session_id)
             self._agent_loop.start_initialize_experiments()
             return DispatchResult(
-                SessionStartResponse(state=self._public_state(params.history_limit)),
+                SessionStartResponse(
+                    state=(state := self._public_state(params.history_limit)),
+                    last_event_id=state.event_id,
+                ),
                 session_attached=True,
             )
         if method == "session/resume":
@@ -483,14 +560,16 @@ class CoreRequestHandler:
                 raise RequestFailure(ProtocolErrorCode.NOT_FOUND, str(exc)) from exc
             state = await self._root_lifecycle.replace(session_id, params.history_limit)
             return DispatchResult(
-                SessionContinueResponse(state=state),
+                SessionContinueResponse(state=state, last_event_id=state.event_id),
                 session_attached=True,
                 runtime_updated=True,
             )
-        params = validate_wire(SessionCloseParams, raw_params)
-        self._require_attached(params.session_id)
-        await self.close()
-        return DispatchResult(SessionCloseResponse())
+        if method == "session/stop":
+            stop_params = validate_wire(SessionStopParams, raw_params)
+            self._require_attached(stop_params.session_id)
+            await self.close()
+            return DispatchResult(SessionStopResponse())
+        raise method_not_found(method)
 
     async def _dispatch_rewind(
         self, method: str, raw_params: dict[str, Any]
@@ -508,31 +587,36 @@ class CoreRequestHandler:
                 raise method_not_found(method)
         return DispatchResult(response)
 
-    def _dispatch_history(
-        self, method: str, raw_params: dict[str, Any]
-    ) -> DispatchResult:
-        if method != "history/list":
-            raise method_not_found(method)
-        response = self._history_list(validate_wire(HistoryListParams, raw_params))
-        return DispatchResult(response)
-
     async def _dispatch_turn(
         self, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult:
+        response: ProtocolModel
         match method:
             case "turn/start":
-                params = validate_wire(TurnStartParams, raw_params)
-                self._require_attached(params.session_id)
-                response, after_response = self._turns.start(params)
+                start_params = validate_wire(TurnStartParams, raw_params)
+                self._require_attached(start_params.session_id)
+                vibe_turn, after_response = self._turns.start(start_params)
+                response = TurnStartResponse(
+                    turn=vibe_turn.turn,
+                    last_event_id=self._current_event_id(start_params.session_id),
+                )
             case "turn/steer":
-                params = validate_wire(TurnSteerParams, raw_params)
-                self._require_turn_route(params.session_id, params.expected_turn_id)
-                response = await self._turns.steer(params)
+                steer_params = validate_wire(TurnSteerParams, raw_params)
+                self._require_turn_route(
+                    steer_params.session_id, steer_params.expected_turn_id
+                )
+                await self._turns.steer(steer_params)
+                response = TurnSteerResponse(
+                    last_event_id=self._current_event_id(steer_params.session_id)
+                )
                 after_response = None
             case "turn/interrupt":
                 params = validate_wire(TurnInterruptParams, raw_params)
                 self._require_turn_route(params.session_id, params.expected_turn_id)
-                response = self._turns.interrupt(params)
+                self._turns.interrupt(params)
+                response = TurnInterruptResponse(
+                    last_event_id=self._current_event_id(params.session_id)
+                )
                 after_response = None
             case _:
                 raise method_not_found(method)
@@ -591,12 +675,39 @@ class CoreRequestHandler:
     async def _dispatch_callback(
         self, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult:
-        if method != "callback/respond":
-            raise method_not_found(method)
-        response = await self._callback_respond(
-            validate_wire(CallbackRespondParams, raw_params)
+        if method == "callback/result":
+            return DispatchResult(
+                await self._callback_result(
+                    validate_wire(CallbackResultParams, raw_params)
+                )
+            )
+        raise method_not_found(method)
+
+    async def _callback_result(
+        self, params: CallbackResultParams
+    ) -> CallbackResultResponse:
+        if params.result.error is not None:
+            await self._reject_callback(
+                params.session_id, params.callback_id, params.result.error
+            )
+        elif params.result.output is None:
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS,
+                "Callback result must include output or error",
+            )
+        else:
+            await self._callback_respond(
+                CallbackRespondParams(
+                    session_id=params.session_id,
+                    callback_id=params.callback_id,
+                    output=TypeAdapter(CallbackOutput).validate_python(
+                        params.result.output
+                    ),
+                )
+            )
+        return CallbackResultResponse(
+            last_event_id=self._current_event_id(params.session_id)
         )
-        return DispatchResult(response)
 
     async def _session_resume(self, params: SessionResumeParams) -> DispatchResult:
         if params.session_id != self._agent_loop.session_id:
@@ -604,13 +715,16 @@ class CoreRequestHandler:
                 params.session_id, params.history_limit
             )
             return DispatchResult(
-                SessionResumeResponse(state=state),
+                SessionResumeResponse(state=state, last_event_id=state.event_id),
                 session_attached=True,
                 runtime_updated=True,
             )
         self._root_session.attach(params.session_id)
         return DispatchResult(
-            SessionResumeResponse(state=self._public_state(params.history_limit)),
+            SessionResumeResponse(
+                state=(state := self._public_state(params.history_limit)),
+                last_event_id=state.event_id,
+            ),
             session_attached=True,
             runtime_updated=True,
         )
@@ -645,6 +759,11 @@ class CoreRequestHandler:
         if updated_at is None and session_logger.session_metadata is not None:
             updated_at = session_logger.session_metadata.end_time
         return SessionTitleUpdateResponse(title=title, updated_at=updated_at)
+
+    async def _session_rename(
+        self, params: SessionTitleUpdateParams
+    ) -> SessionTitleUpdateResponse:
+        return await self._session_title_update(params)
 
     async def _session_fork(self, params: SessionForkParams) -> SessionForkResponse:
         self._require_attached(params.source_session_id)
@@ -688,7 +807,9 @@ class CoreRequestHandler:
             if params.attach:
                 state = await self._root_lifecycle.adopt(forked, params.history_limit)
                 return SessionForkResponse(
-                    source_session_id=params.source_session_id, state=state
+                    source_session_id=params.source_session_id,
+                    state=state,
+                    last_event_id=state.event_id,
                 )
 
             try:
@@ -699,7 +820,7 @@ class CoreRequestHandler:
                     current_history=[],
                     callbacks=[],
                     active_turn=None,
-                    last_turn=None,
+                    completed_turns=[],
                     history_limit=params.history_limit,
                 )
                 if self._root_lifecycle.stage is not None:
@@ -710,7 +831,9 @@ class CoreRequestHandler:
                     await close_agent_loop(forked)
 
         return SessionForkResponse(
-            source_session_id=params.source_session_id, state=state
+            source_session_id=params.source_session_id,
+            state=state,
+            last_event_id=state.event_id,
         )
 
     def _rewind_read(
@@ -776,20 +899,80 @@ class CoreRequestHandler:
             )
         return index
 
-    def _history_list(self, params: HistoryListParams) -> HistoryListResponse:
-        if self._sessions.has_child(params.session_id):
+    async def _history_list(
+        self, params: SessionHistoryListParams
+    ) -> SessionHistoryListResponse:
+        if await self._sessions.ensure_child(params.session_id):
             history = self._sessions.history(params.session_id)
         else:
             self._require_session(params.session_id)
             history = self._all_history()
-        return HistoryListResponse(
-            history=history_page(
-                history,
-                turn_id=params.turn_id,
-                before=params.before,
-                after=params.after,
-                limit=params.limit,
+        page = history_page(
+            history,
+            turn_id=params.turn_id,
+            before=params.cursor if params.sort_direction == "backward" else None,
+            after=params.cursor if params.sort_direction == "forward" else None,
+            limit=params.limit,
+        )
+        return SessionHistoryListResponse(
+            items=page.entries,
+            next_cursor=(
+                page.cursor.before
+                if params.sort_direction == "backward"
+                else page.cursor.after
+            ),
+            previous_cursor=(
+                page.cursor.after
+                if params.sort_direction == "backward"
+                else page.cursor.before
+            ),
+        )
+
+    async def _session_turns_list(
+        self, params: SessionTurnsListParams
+    ) -> SessionTurnsListResponse:
+        if await self._sessions.ensure_child(params.session_id):
+            turns = self._sessions.turns(params.session_id)
+        else:
+            self._require_session(params.session_id)
+            turns = self._turns.turns
+        if params.sort_direction == "backward":
+            if params.cursor is None:
+                page = turns[-params.limit :]
+                first_index = max(0, len(turns) - len(page))
+            else:
+                end = next(
+                    (
+                        index
+                        for index, turn in enumerate(turns)
+                        if turn.id == params.cursor
+                    ),
+                    0,
+                )
+                first_index = max(0, end - params.limit)
+                page = turns[first_index:end]
+            last_index = first_index + len(page) - 1
+        else:
+            first_index = (
+                0
+                if params.cursor is None
+                else next(
+                    (
+                        index + 1
+                        for index, turn in enumerate(turns)
+                        if turn.id == params.cursor
+                    ),
+                    len(turns),
+                )
             )
+            page = turns[first_index : first_index + params.limit]
+            last_index = first_index + len(page) - 1
+        next_cursor = page[0].id if page and first_index > 0 else None
+        backwards_cursor = page[-1].id if page and last_index < len(turns) - 1 else None
+        if params.sort_direction == "forward":
+            next_cursor, backwards_cursor = backwards_cursor, next_cursor
+        return SessionTurnsListResponse(
+            items=page, next_cursor=next_cursor, previous_cursor=backwards_cursor
         )
 
     async def _wait_ready(
@@ -826,7 +1009,7 @@ class CoreRequestHandler:
     async def _callback_respond(
         self, params: CallbackRespondParams
     ) -> CallbackRespondResponse:
-        if self._sessions.has_child(params.session_id):
+        if await self._sessions.ensure_child(params.session_id):
             attached = self._root_session.attached_session_id
             if attached is None or not self._sessions.child_belongs_to(
                 params.session_id, attached
@@ -842,6 +1025,22 @@ class CoreRequestHandler:
         self._require_attached(params.session_id)
         status = await self._turns.answer_callback(params.callback_id, params.output)
         return CallbackRespondResponse.model_validate({"status": status})
+
+    async def _reject_callback(
+        self, session_id: str, callback_id: str, error: CallbackResultError
+    ) -> str:
+        if await self._sessions.ensure_child(session_id):
+            attached = self._root_session.attached_session_id
+            if attached is None or not self._sessions.child_belongs_to(
+                session_id, attached
+            ):
+                raise RequestFailure(
+                    ProtocolErrorCode.CONFLICT,
+                    "Child session is not linked to the attached session",
+                )
+            return await self._sessions.reject_callback(session_id, callback_id, error)
+        self._require_attached(session_id)
+        return await self._turns.reject_callback(callback_id, error)
 
     async def _history_clear(
         self, params: SessionHistoryClearParams
@@ -862,7 +1061,7 @@ class CoreRequestHandler:
                 params.session_id,
                 current_history=previous_history,
                 checkpoint_kind="clear",
-                checkpoint_message="Conversation history cleared",
+                checkpoint_message="New conversation started",
             )
         return SessionHistoryClearResponse(
             state=handoff.state, session_log=handoff.session_log
@@ -898,7 +1097,14 @@ class CoreRequestHandler:
             summary=summary, state=handoff.state, session_log=handoff.session_log
         )
 
-    def _public_state(self, history_limit: int) -> PublicSessionState:
+    def _public_state(
+        self,
+        history_limit: int,
+        *,
+        turns_limit: int | None = None,
+        include_history: bool = True,
+        include_turns: bool = True,
+    ) -> PublicSessionState:
         callbacks = [
             entry
             for entry in self._all_history()
@@ -908,8 +1114,11 @@ class CoreRequestHandler:
             current_history=self._turns.history,
             callbacks=callbacks,
             active_turn=self._turns.active_turn,
-            last_turn=self._turns.last_turn,
+            completed_turns=self._turns.completed_turns,
             history_limit=history_limit,
+            turns_limit=turns_limit,
+            include_history=include_history,
+            include_turns=include_turns,
         )
 
     def _all_history(self) -> list[PublicHistoryEntry]:

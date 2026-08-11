@@ -48,6 +48,7 @@ from vibe.core.types import (
     LLMMessage,
     LLMUsage,
     Role,
+    StopInfo,
     StrToolChoice,
     ToolCall,
 )
@@ -415,7 +416,8 @@ class MistralBackend:
                 reasoning_effort=reasoning_effort,
             )
 
-            message = response.choices[0].message
+            choice = response.choices[0]
+            message = choice.message
             parsed = (
                 self._mapper.parse_content(message.content)
                 if message and message.content
@@ -434,6 +436,11 @@ class MistralBackend:
                     prompt_tokens=response.usage.prompt_tokens or 0,
                     completion_tokens=response.usage.completion_tokens or 0,
                     cached_tokens=_cached_tokens(response.usage),
+                ),
+                stop=(
+                    StopInfo(reason=str(choice.finish_reason))
+                    if choice.finish_reason is not None
+                    else None
                 ),
             )
 
@@ -502,7 +509,8 @@ class MistralBackend:
             async for chunk in stream:
                 # Some models terminate the stream with a usage-only chunk that
                 # carries no choices.
-                delta = chunk.data.choices[0].delta if chunk.data.choices else None
+                choice = chunk.data.choices[0] if chunk.data.choices else None
+                delta = choice.delta if choice else None
                 parsed = (
                     self._mapper.parse_content(delta.content)
                     if delta and delta.content
@@ -527,6 +535,11 @@ class MistralBackend:
                         cached_tokens=_cached_tokens(chunk.data.usage),
                     ),
                     correlation_id=correlation_id,
+                    stop=(
+                        StopInfo(reason=str(choice.finish_reason))
+                        if choice and choice.finish_reason is not None
+                        else None
+                    ),
                 )
 
         except SDKError as e:

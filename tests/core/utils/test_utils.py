@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from vibe.core.utils import compact_complete_display
 import vibe.utils.io as io_utils
 from vibe.utils.io import (
     _FILE_WRITE_LOCKS,
@@ -17,20 +16,6 @@ from vibe.utils.io import (
     read_safe,
     read_safe_async,
 )
-
-
-class TestCompactCompleteDisplay:
-    def test_includes_session_ids_when_available(self) -> None:
-        assert compact_complete_display(
-            old_session_id="11111111-1111-1111-1111-111111111111",
-            new_session_id="22222222-2222-2222-2222-222222222222",
-        ) == (
-            "Compaction completed.\n"
-            "session: 11111111 (before compaction) → 22222222 (after compaction)"
-        )
-
-    def test_returns_base_message_without_session_ids(self) -> None:
-        assert compact_complete_display() == "Compaction completed."
 
 
 class TestReadSafe:

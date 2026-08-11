@@ -80,7 +80,9 @@ class CommandRegistry:
             ),
             "clear": Command(
                 aliases=frozenset(["/clear", "/new"]),
-                description="Clear conversation history",
+                description=(
+                    "Start a new conversation. Optionally pass a prompt to seed it."
+                ),
                 handler="_clear_history",
             ),
             "copy": Command(
@@ -275,7 +277,7 @@ class CommandRegistry:
             "- `Ctrl+C` Quit (or clear input if text present)",
             "- `Ctrl+G` Edit input in external editor",
             "- `Ctrl+O` Toggle tool output view",
-            "- `Shift+Tab` Cycle through agents (default, plan, ...)",
+            "- `Shift+Tab` Cycle through agents (ask, plan, ...)",
             "- `Esc Esc` Rewind to a previous message (when input is empty)",
             "",
             "### Special Features",

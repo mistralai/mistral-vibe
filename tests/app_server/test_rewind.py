@@ -56,7 +56,7 @@ async def test_rewind_inplace_truncates_session(tmp_path: Path) -> None:
         await agent_loop.aclose()
 
     assert result.state.session.id == original_session_id
-    assert session.history == result.state.history.entries
+    assert session.history == result.state.history
     assert [
         entry.text for entry in session.history if isinstance(entry, PublicMessageEntry)
     ] == ["first message", "First response"]

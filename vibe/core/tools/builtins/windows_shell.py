@@ -51,7 +51,7 @@ from vibe.core.tools.builtins.managed_shell.backend import ManagedShellBackendEr
 from vibe.core.tools.io_port import ShellCommandRequest
 from vibe.core.tools.permissions import PermissionContext, RequiredPermission
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import is_path_within_workdir
+from vibe.core.tools.utils import ToolPath, is_path_within_workdir, resolve_tool_path
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows, kill_async_subprocess
 from vibe.observability.logging import logger
@@ -713,7 +713,9 @@ class WindowsShellArgs(BaseModel):
         ge=0,
         description="Foreground wait time before the command is killed.",
     )
-    cwd: str | None = Field(default=None, description="Working directory override.")
+    cwd: ToolPath | None = Field(
+        default=None, description="Working directory override."
+    )
     env: dict[str, str] | None = Field(
         default=None, description="Environment variable overrides."
     )
@@ -808,7 +810,7 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         ):
             return guardrail_permission
 
-        command_cwd = Path(cwd).expanduser().resolve() if cwd is not None else self.cwd
+        command_cwd = resolve_tool_path(cwd, self.cwd)
         outside_dirs, dynamic_paths = _analyze_windows_paths(
             command_parts,
             command_cwd=command_cwd,
@@ -905,7 +907,7 @@ class WindowsShell(
         max_bytes = self.config.max_output_bytes
         proc: asyncio.subprocess.Process | None = None
         try:
-            cwd = Path(args.cwd).expanduser().resolve() if args.cwd else self.cwd
+            cwd = resolve_tool_path(args.cwd, self.cwd)
             shell = resolve_powershell_shell(args.shell, self.config.shell)
             argv = build_windows_shell_argv(shell, args.command)
             if (

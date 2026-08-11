@@ -85,7 +85,7 @@ class ExitPlanMode(
             ),
             QuestionChoice(
                 label=LABEL_MANUAL,
-                description="Switch to default agent mode (manual approval for edits)",
+                description="Switch to ask mode (manual approval for edits)",
             ),
             QuestionChoice(
                 label=LABEL_NO, description="Stay in plan mode and continue planning"
@@ -126,10 +126,8 @@ class ExitPlanMode(
                 "starting implementation from the approved plan."
             )
         elif answer_lower == LABEL_MANUAL.lower():
-            target = BuiltinAgentName.DEFAULT
-            base_message = (
-                "Switched to default agent mode. Edits will require your approval."
-            )
+            target = BuiltinAgentName.ASK
+            base_message = "Switched to ask mode. Edits will require your approval."
             clear_message = base_message
         elif answer.is_other:
             yield ExitPlanModeResult(

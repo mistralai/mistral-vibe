@@ -188,6 +188,16 @@ def test_count_history_images_unsupported_by_active_model(
     )
     assert agent.count_history_images_unsupported_by_active_model() == 2
 
+    agent.messages.append(
+        LLMMessage(
+            role=Role.user,
+            content="compacted context",
+            injected=True,
+            context_boundary="compaction",
+        )
+    )
+    assert agent.count_history_images_unsupported_by_active_model() == 0
+
 
 @pytest.mark.asyncio
 async def test_new_images_with_non_vision_model_still_raises(

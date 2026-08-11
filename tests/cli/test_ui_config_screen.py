@@ -13,6 +13,7 @@ from tests.conftest import (
 )
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.screens.config import ConfigScreen
+from vibe.cli.textual_ui.screens.config._common import ConfigOptionList
 from vibe.cli.textual_ui.screens.config.edit import _TargetedEditScreen
 from vibe.cli.textual_ui.widgets.theme_picker import sorted_theme_names
 from vibe.core.agent_loop import AgentLoop
@@ -102,6 +103,33 @@ async def test_config_screen_splits_popular_and_advanced_sections() -> None:
 
         # Section headers are rendered as non-selectable rows.
         assert None in screen._rendered_ids
+
+
+@pytest.mark.asyncio
+async def test_config_screen_wrap_to_top_keeps_headers_visible() -> None:
+    app = build_test_vibe_app()
+    # Small viewport so the full list cannot fit and must scroll.
+    async with app.run_test(size=(80, 12)) as pilot:
+        await pilot.pause(0.1)
+        await app._show_config()
+        await pilot.pause(0.2)
+        screen = app.screen
+        assert isinstance(screen, ConfigScreen)
+
+        option_list = screen.query_one("#config-screen-options", ConfigOptionList)
+        # First selectable row sits just below the header at index 0.
+        assert option_list.highlighted == 1
+
+        # Wrap up to the bottom, forcing the list to scroll down.
+        await pilot.press("up")
+        await pilot.pause(0.1)
+        assert option_list.scroll_offset.y > 0
+
+        # Wrap back down to the first row; the header must scroll into view.
+        await pilot.press("down")
+        await pilot.pause(0.1)
+        assert option_list.highlighted == 1
+        assert option_list.scroll_offset.y == 0
 
 
 @pytest.mark.asyncio

@@ -8,12 +8,13 @@ import pytest
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.stubs.app_server import create_test_app_server_session
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
+from vibe.app_server.models import MCPSourceStatus
 from vibe.app_server.protocol import (
     AppServerResponseError,
     Notification,
     ProtocolErrorCode,
 )
-from vibe.core.config import MCPHttp, MCPOAuth
+from vibe.core.config import MCPHttp, MCPOAuth, MCPStdio
 from vibe.core.config.types import ConcurrencyConflictError
 
 
@@ -27,6 +28,21 @@ class LoginMCPRegistry(FakeMCPRegistry):
     ) -> None:
         self.login_calls.append(alias)
         await on_url("https://auth.example.com/oauth")
+
+
+class FailingMCPRegistry(FakeMCPRegistry):
+    """Registry that always fails discovery for a named server."""
+
+    def __init__(self, failing_server: str) -> None:
+        super().__init__()
+        self._failing_server = failing_server
+
+    async def get_tools_async(self, servers):
+        working = [s for s in servers if s.name != self._failing_server]
+        for s in servers:
+            if s.name == self._failing_server:
+                self._failed[s.name] = "connection refused"
+        return await super().get_tools_async(working)
 
 
 @pytest.mark.asyncio
@@ -104,3 +120,119 @@ async def test_unknown_notifications_do_not_enter_mcp_login_stream() -> None:
         await session.close()
 
     assert consumed is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_toggle_enable_rediscovers_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("vibe.app_server._resources.persist_mcp_toggle", AsyncMock())
+    server = MCPStdio(name="search", transport="stdio", command="fake-cmd")
+    config = build_test_vibe_config(mcp_servers=[server])
+    agent_loop = build_test_agent_loop(config=config)
+    refresh_mock = AsyncMock()
+    agent_loop.tool_manager.refresh_remote_tools_async = refresh_mock
+    session = await create_test_app_server_session(agent_loop)
+
+    try:
+        await session.connect()
+        await session.resources.mcp.toggle("search", source="server", disabled=False)
+    finally:
+        await session.close()
+
+    refresh_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mcp_toggle_disable_does_not_rediscover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("vibe.app_server._resources.persist_mcp_toggle", AsyncMock())
+    server = MCPStdio(name="search", transport="stdio", command="fake-cmd")
+    config = build_test_vibe_config(mcp_servers=[server])
+    agent_loop = build_test_agent_loop(config=config)
+    refresh_mock = AsyncMock()
+    agent_loop.tool_manager.refresh_remote_tools_async = refresh_mock
+    session = await create_test_app_server_session(agent_loop)
+
+    try:
+        await session.connect()
+        await session.resources.mcp.toggle("search", source="server", disabled=True)
+    finally:
+        await session.close()
+
+    refresh_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_toggle_tool_does_not_rediscover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("vibe.app_server._resources.persist_mcp_toggle", AsyncMock())
+    server = MCPStdio(name="search", transport="stdio", command="fake-cmd")
+    config = build_test_vibe_config(mcp_servers=[server])
+    agent_loop = build_test_agent_loop(config=config)
+    refresh_mock = AsyncMock()
+    agent_loop.tool_manager.refresh_remote_tools_async = refresh_mock
+    session = await create_test_app_server_session(agent_loop)
+
+    try:
+        await session.connect()
+        await session.resources.mcp.toggle(
+            "search", source="server", disabled=True, tool_name="search_web"
+        )
+    finally:
+        await session.close()
+
+    refresh_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_login_rediscovers_tools() -> None:
+    registry = LoginMCPRegistry()
+    config = build_test_vibe_config(
+        mcp_servers=[
+            MCPHttp(
+                name="search",
+                transport="http",
+                url="https://mcp.example.com",
+                auth=MCPOAuth(type="oauth", scopes=[]),
+            )
+        ]
+    )
+    agent_loop = build_test_agent_loop(config=config, mcp_registry=registry)
+    refresh_mock = AsyncMock()
+    agent_loop.tool_manager.refresh_remote_tools_async = refresh_mock
+    session = await create_test_app_server_session(agent_loop)
+
+    try:
+        await session.connect()
+        async for _event in session.resources.mcp.login("search"):
+            pass
+    finally:
+        await session.close()
+
+    refresh_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mcp_toggle_enable_broken_server_stays_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("vibe.app_server._resources.persist_mcp_toggle", AsyncMock())
+    server = MCPStdio(name="search", transport="stdio", command="fake-cmd")
+    config = build_test_vibe_config(mcp_servers=[server])
+    registry = FailingMCPRegistry(failing_server="search")
+    agent_loop = build_test_agent_loop(config=config, mcp_registry=registry)
+    session = await create_test_app_server_session(agent_loop)
+
+    try:
+        await session.connect()
+        mcp_state = await session.resources.mcp.toggle(
+            "search", source="server", disabled=False
+        )
+    finally:
+        await session.close()
+
+    broken = next(s for s in mcp_state.sources if s.name == "search")
+    assert broken.status == MCPSourceStatus.UNAVAILABLE

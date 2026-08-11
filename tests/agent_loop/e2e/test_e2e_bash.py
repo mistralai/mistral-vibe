@@ -101,7 +101,7 @@ async def test_bash_output_truncated_to_max_bytes(mistral_api: MistralAPI) -> No
 @pytest.mark.asyncio
 async def test_bash_denylisted_command_is_skipped(mistral_api: MistralAPI) -> None:
     result = await _run_bash(
-        mistral_api, "vim file.txt", agent_name=BuiltinAgentName.DEFAULT
+        mistral_api, "vim file.txt", agent_name=BuiltinAgentName.ASK
     )
 
     assert result.skipped is True
@@ -115,7 +115,7 @@ async def test_bash_allowlisted_command_runs_without_approval(
 ) -> None:
     # No interaction responder is available; an allowlisted command still runs.
     result = await _run_bash(
-        mistral_api, "echo allowed", agent_name=BuiltinAgentName.DEFAULT
+        mistral_api, "echo allowed", agent_name=BuiltinAgentName.ASK
     )
 
     assert result.skipped is False
@@ -129,7 +129,7 @@ async def test_bash_non_allowlisted_command_requires_approval(
     result = await _run_bash(
         mistral_api,
         "touch newfile.txt",
-        agent_name=BuiltinAgentName.DEFAULT,
+        agent_name=BuiltinAgentName.ASK,
         approval=ApprovalResponse.YES,
     )
 
@@ -144,7 +144,7 @@ async def test_bash_non_allowlisted_command_denied_at_prompt_is_skipped(
     result = await _run_bash(
         mistral_api,
         "touch denied.txt",
-        agent_name=BuiltinAgentName.DEFAULT,
+        agent_name=BuiltinAgentName.ASK,
         approval=ApprovalResponse.NO,
     )
 
@@ -160,7 +160,7 @@ async def test_bash_command_touching_outside_workdir_requires_approval(
     result = await _run_bash(
         mistral_api,
         f"touch {outside}",
-        agent_name=BuiltinAgentName.DEFAULT,
+        agent_name=BuiltinAgentName.ASK,
         approval=ApprovalResponse.NO,
     )
 

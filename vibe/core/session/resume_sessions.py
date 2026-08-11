@@ -15,8 +15,10 @@ def short_session_id(session_id: str) -> str:
 class ResumeSessionInfo:
     session_id: str
     cwd: str
-    title: str | None
-    end_time: str | None
+    title: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    updated_at: str = ""
     parent_session_id: str | None = None
 
     @property
@@ -33,7 +35,9 @@ def list_local_resume_sessions(
             cwd=session["cwd"],
             parent_session_id=session["parent_session_id"],
             title=session.get("title"),
+            start_time=session.get("start_time"),
             end_time=session.get("end_time"),
+            updated_at=session["updated_at"],
         )
         for session in SessionLoader.list_sessions(config.session_logging, cwd=cwd)
     ]

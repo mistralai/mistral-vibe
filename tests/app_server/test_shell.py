@@ -7,12 +7,25 @@ import pytest
 from tests.conftest import build_test_agent_loop
 from tests.stubs.app_server import create_test_app_server_session
 from vibe.app_server._projection import project_history
+from vibe.app_server._session_resources import ShellTimelineEvent
 from vibe.app_server._shell_requests import _manual_shell_context
 from vibe.app_server.events import HistoryEntryAdded, HistoryEntryUpdated
-from vibe.app_server.models import CompletedEffectState, PublicEffectEntry
+from vibe.app_server.models import (
+    CompletedEffectState,
+    FailedEffectState,
+    PublicEffectEntry,
+)
 from vibe.app_server.protocol import ShellRunResponse
 from vibe.core.types import Role
 from vibe.utils.tool_presentation import ToolEffectKind
+
+
+def _final_effect(events: list[ShellTimelineEvent]) -> PublicEffectEntry:
+    entries = [event.entry for event in events]
+    assert entries, "no timeline events were emitted"
+    final = entries[-1]
+    assert isinstance(final, PublicEffectEntry)
+    return final
 
 
 def test_manual_shell_context_caps_stdout_and_stderr_independently() -> None:
@@ -46,11 +59,6 @@ async def test_shell_is_one_public_effect_and_injects_model_context() -> None:
         ]
     finally:
         await session.close()
-
-    result = next(event for event in events if isinstance(event, ShellRunResponse))
-    assert result.stdout == "hello"
-    assert result.stderr == "warning"
-    assert result.exit_code == 0
 
     added = next(event for event in events if isinstance(event, HistoryEntryAdded))
     assert isinstance(added.entry, PublicEffectEntry)
@@ -98,10 +106,9 @@ async def test_shell_timeout_terminates_process() -> None:
     finally:
         await session.close()
 
-    result = next(event for event in events if isinstance(event, ShellRunResponse))
-    assert result.timed_out is True
-    assert result.interrupted is False
-    assert result.exit_code != 0
+    final = _final_effect(events)
+    assert isinstance(final.state, FailedEffectState)
+    assert "timed out" in final.state.error.message
     assert time.monotonic() - started_at < 2
 
 
@@ -114,7 +121,7 @@ async def test_closing_shell_stream_interrupts_process_and_allows_next_command()
     stream = session.resources.shell.run("printf 'started'; sleep 10")
 
     try:
-        events = []
+        events: list[ShellTimelineEvent] = []
         while not any(isinstance(event, HistoryEntryUpdated) for event in events):
             events.append(await anext(stream))
         await stream.aclose()
@@ -126,6 +133,6 @@ async def test_closing_shell_stream_interrupts_process_and_allows_next_command()
         await stream.aclose()
         await session.close()
 
-    result = next(event for event in events if isinstance(event, ShellRunResponse))
-    assert result.stdout == "finished"
-    assert result.exit_code == 0
+    final = _final_effect(events)
+    assert isinstance(final.state, CompletedEffectState)
+    assert final.state.output == {"stdout": "finished", "stderr": ""}

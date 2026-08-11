@@ -282,7 +282,9 @@ class TestParseFullResponse:
         chunk = adapter.parse_response(data, provider)
         assert chunk.message.content == "Here's my answer."
         assert chunk.message.reasoning_content == "Let me think..."
-        assert chunk.message.reasoning_signature == "sig123"
+        assert chunk.message.reasoning_payloads == [
+            {"type": "thinking", "thinking": "Let me think...", "signature": "sig123"}
+        ]
 
     def test_response_with_cache_tokens(self, adapter, provider):
         data = {
@@ -309,6 +311,9 @@ class TestParseFullResponse:
         chunk = adapter.parse_response(data, provider)
         assert chunk.message.content == "Answer."
         assert chunk.message.reasoning_content is None
+        assert chunk.message.reasoning_payloads == [
+            {"type": "redacted_thinking", "data": "redacted_data_here"}
+        ]
 
     def test_response_empty_usage(self, adapter, provider):
         data = {"content": [{"type": "text", "text": "Hello"}], "usage": {}}
@@ -423,21 +428,36 @@ class TestStreamingEvents:
         assert chunk.message.role == Role.assistant
         assert chunk.message.content is None
 
-    def test_signature_delta(self, adapter, provider):
-        data = {
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "signature_delta", "signature": "sig_abc"},
-        }
-        chunk = adapter.parse_response(data, provider)
-        assert chunk.message.reasoning_signature == "sig_abc"
+    def test_signature_delta_lands_on_the_open_block(self, adapter, provider):
+        adapter.parse_response(
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""},
+            },
+            provider,
+        )
+        adapter.parse_response(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "signature_delta", "signature": "sig_abc"},
+            },
+            provider,
+        )
+        chunk = adapter.parse_response(
+            {"type": "content_block_stop", "index": 0}, provider
+        )
+        assert chunk.message.reasoning_payloads == [
+            {"type": "thinking", "thinking": "", "signature": "sig_abc"}
+        ]
 
     def test_message_start_resets_state(self, adapter, provider):
-        adapter._current_index = 5
+        adapter._open_reasoning_blocks[5] = {"type": "thinking", "thinking": "stale"}
 
         data = {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}
         adapter.parse_response(data, provider)
-        assert adapter._current_index == 0
+        assert adapter._open_reasoning_blocks == {}
 
     def test_full_streaming_sequence(self, adapter, provider):
         chunks = []

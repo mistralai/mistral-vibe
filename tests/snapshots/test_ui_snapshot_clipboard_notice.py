@@ -13,7 +13,7 @@ class ClipboardNoticeSnapshotApp(BaseSnapshotTestApp):
 
 def test_snapshot_clipboard_notice_visible(snap_compare: SnapCompare) -> None:
     async def run_before(pilot: Pilot) -> None:
-        notice = pilot.app.query_one("#clipboard-notice", Static)
+        notice = pilot.app.query_one("#inline-notice", Static)
         notice.update("Selection copied to clipboard")
         notice.display = True
         await pilot.pause(0.1)

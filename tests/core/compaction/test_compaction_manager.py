@@ -94,7 +94,6 @@ def _build_manager(
         available_tools=lambda: [],
         tool_choice=lambda: "auto",
         save=_noop,
-        reset_session=_noop,
         telemetry_client=cast(TelemetryClient, telemetry),
         session_ids=lambda: ("sid", None),
     )
@@ -111,7 +110,7 @@ def _conversation() -> MessageList:
 
 
 @pytest.mark.asyncio
-async def test_primary_success_resets_to_envelope() -> None:
+async def test_primary_success_appends_compaction_boundary() -> None:
     messages = _conversation()
     stats = AgentStats()
     manager, complete, telemetry = _build_manager(
@@ -125,9 +124,16 @@ async def test_primary_success_resets_to_envelope() -> None:
     assert summary == "all done"
     assert len(complete.calls) == 1  # no fallback
     assert not telemetry.failures
-    assert [m.role for m in messages] == [Role.system, Role.user]
-    assert "all done" in (messages[1].content or "")
-    assert parse_previous_user_messages(messages[1].content or "") == [
+    assert [m.role for m in messages] == [
+        Role.system,
+        Role.user,
+        Role.assistant,
+        Role.user,
+        Role.user,
+    ]
+    assert messages[-1].context_boundary == "compaction"
+    assert "all done" in (messages[-1].content or "")
+    assert parse_previous_user_messages(messages[-1].content or "") == [
         "oldest ask",
         "newest ask",
     ]
@@ -211,7 +217,7 @@ async def test_overflow_trims_whole_rounds_then_succeeds() -> None:
     # Second attempt sent fewer messages than the first (a round was dropped).
     assert len(complete.calls[1]["messages"]) < len(complete.calls[0]["messages"])
     # Prior user messages are preserved from the pre-trim snapshot.
-    assert parse_previous_user_messages(messages[1].content or "") == [
+    assert parse_previous_user_messages(messages[-1].content or "") == [
         "oldest ask",
         "newest ask",
     ]
@@ -319,7 +325,7 @@ async def test_terminal_failure_reports_primary_reason() -> None:
     assert summary == "(no summary available)"
     assert telemetry.failures == ["tool_call"]  # fires once, primary reason kept
     assert len(complete.calls) == 2
-    assert "(no summary available)" in (messages[1].content or "")
+    assert "(no summary available)" in (messages[-1].content or "")
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,6 @@ from vibe.app_server.models import (
     PublicCallbackEntry,
     PublicEntryGenerationStatus,
     PublicHistoryEntry,
-    PublicHistoryPage,
     PublicSession,
     PublicSessionState,
     PublicTurn,
@@ -137,8 +136,8 @@ def reconcile_snapshot(
             )
         )
 
-    previous_entries = {entry.id: entry for entry in previous.history.entries}
-    for entry in current.history.entries:
+    previous_entries = {entry.id: entry for entry in previous.history or []}
+    for entry in current.history or []:
         prior = previous_entries.get(entry.id)
         if prior is None:
             events.append(HistoryEntryAdded(entry))
@@ -157,14 +156,15 @@ def reconcile_snapshot(
             )
         )
 
-    previous_turn = previous.latest_turn
-    current_turn = current.latest_turn
-    if current_turn is None or current_turn == previous_turn:
-        return events
-    if current_turn.status is PublicTurnStatus.IN_PROGRESS:
-        events.append(TurnStarted(current_turn))
-    else:
-        events.append(TurnCompleted(current_turn))
+    previous_turns = {turn.id: turn for turn in previous.turns or []}
+    for current_turn in current.turns or []:
+        previous_turn = previous_turns.get(current_turn.id)
+        if current_turn == previous_turn:
+            continue
+        if current_turn.status is PublicTurnStatus.IN_PROGRESS:
+            events.append(TurnStarted(current_turn))
+        else:
+            events.append(TurnCompleted(current_turn))
     return events
 
 
@@ -208,20 +208,24 @@ def parse_server_event(
 class ClientProjection:
     def __init__(self, state: PublicSessionState) -> None:
         self.state = state
-        self._entries = {entry.id: entry for entry in state.history.entries}
+        self._entries = {entry.id: entry for entry in state.history or []}
         self._last_event_id = state.event_id
 
     @property
     def history(self) -> list[PublicHistoryEntry]:
-        return self.state.history.entries
+        return self.state.history or []
+
+    @property
+    def history_before_cursor(self) -> str | None:
+        return self.state.history_before_cursor
 
     def replace_state(self, state: PublicSessionState) -> None:
         self._replace_state(state)
 
-    def prepend_history_page(self, page: PublicHistoryPage) -> None:
+    def prepend_history_page(self, entries: list[PublicHistoryEntry]) -> None:
         page_entries: list[PublicHistoryEntry] = []
         page_ids: set[str] = set()
-        for entry in page.entries:
+        for entry in entries:
             if entry.id in page_ids:
                 raise ValueError(f"Duplicate paged history entry: {entry.id}")
             page_ids.add(entry.id)
@@ -231,8 +235,9 @@ class ClientProjection:
                 continue
             self._entries[entry.id] = entry
             page_entries.append(entry)
-        self.state.history.entries[:0] = page_entries
-        self.state.history.cursor.before = page.cursor.before
+        if self.state.history is None:
+            self.state.history = []
+        self.state.history[:0] = page_entries
 
     def ensure_callback(self, callback: PublicCallbackEntry) -> bool:
         if callback.id in self._entries:
@@ -246,7 +251,7 @@ class ClientProjection:
                 f"Turn belongs to session {turn.session_id!r}, "
                 f"expected {self.state.session.id!r}"
             )
-        self.state.latest_turn = turn
+        self._replace_turn(turn)
 
     def consume(self, notification: Notification) -> AppServerEvent | None:
         params = _parse_event_params(notification)
@@ -279,10 +284,10 @@ class ClientProjection:
             case HistoryEntryUpdatedParams():
                 event = self._update_entry(params)
             case TurnStartedParams():
-                self.state.latest_turn = params.turn
+                self._replace_turn(params.turn)
                 event = TurnStarted(params.turn)
             case TurnCompletedParams():
-                self.state.latest_turn = params.turn
+                self._replace_turn(params.turn)
                 event = TurnCompleted(params.turn)
             case StatsUpdatedParams():
                 self.state.session.token_usage = params.stats.token_usage
@@ -340,14 +345,16 @@ class ClientProjection:
 
     def _replace_state(self, state: PublicSessionState) -> None:
         self.state = state
-        self._entries = {entry.id: entry for entry in state.history.entries}
+        self._entries = {entry.id: entry for entry in state.history or []}
         self._last_event_id = state.event_id
 
     def _add_entry(self, entry: PublicHistoryEntry) -> None:
         if entry.id in self._entries:
             raise ValueError(f"Duplicate public history entry: {entry.id}")
         self._entries[entry.id] = entry
-        self.state.history.entries.append(entry)
+        if self.state.history is None:
+            self.state.history = []
+        self.state.history.append(entry)
         if (
             isinstance(entry, PublicCallbackEntry)
             and entry.state.status == "open"
@@ -383,10 +390,24 @@ class ClientProjection:
 
     def _replace_entry(self, entry: PublicHistoryEntry) -> None:
         self._entries[entry.id] = entry
-        for index, existing in enumerate(self.state.history.entries):
+        history = self.state.history
+        if history is None:
+            return
+        for index, existing in enumerate(history):
             if existing.id == entry.id:
-                self.state.history.entries[index] = entry
+                history[index] = entry
                 return
+
+    def _replace_turn(self, turn: PublicTurn) -> None:
+        turns = self.state.turns
+        if turns is None:
+            self.state.turns = [turn]
+            return
+        for index, existing in enumerate(turns):
+            if existing.id == turn.id:
+                turns[index] = turn
+                return
+        turns.append(turn)
 
     def _update_session(self, params: SessionUpdatedParams) -> SessionUpdated:
         previous = self.state.session

@@ -194,7 +194,7 @@ class AcpCommandController:
             return await self._reply(session, f"Failed to reload config: {exc}")
         session.commands.refresh(
             AcpCommandContext(
-                vibe_code_enabled=session.app_server.resources.config.base.vibe_code_enabled
+                vibe_code_enabled=session.app_server.resources.config.current.vibe_code_enabled
             )
         )
         try:

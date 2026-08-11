@@ -57,6 +57,8 @@ async def test_trust_is_resolved_before_session_open(
 
     assert opened is not None
     assert opened.session is session
+    assert opened.showed_trust_prompt is True
+    assert opened.showed_resume_picker is False
     assert calls == ["trust_status", "trust_decision", "open_session"]
 
 
@@ -89,6 +91,7 @@ async def test_resume_picker_selects_session_before_opening_runtime(
 
     assert opened is not None and opened.resumed
     assert opened.session is session
+    assert opened.showed_resume_picker is True
     host.resume_session.assert_awaited_once_with("saved")
     host.start_session.assert_not_awaited()
 

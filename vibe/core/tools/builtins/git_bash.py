@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 import os
-from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel, Field
@@ -47,6 +46,7 @@ from vibe.core.tools.permissions import (
     RequiredPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.tools.utils import ToolPath, resolve_tool_path
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows, kill_async_subprocess
 from vibe.utils.io import decode_safe
@@ -148,7 +148,9 @@ class GitBashArgs(BaseModel):
         ge=0,
         description="Foreground wait time before the command is killed.",
     )
-    cwd: str | None = Field(default=None, description="Working directory override.")
+    cwd: ToolPath | None = Field(
+        default=None, description="Working directory override."
+    )
     env: dict[str, str] | None = Field(
         default=None, description="Environment variable overrides."
     )
@@ -248,7 +250,7 @@ class GitBash(
         max_bytes = self.config.max_output_bytes
         proc: asyncio.subprocess.Process | None = None
         try:
-            cwd = Path(args.cwd).expanduser().resolve() if args.cwd else self.cwd
+            cwd = resolve_tool_path(args.cwd, self.cwd)
             shell = resolve_git_bash_shell(args.shell, self.config.shell)
             argv = build_windows_shell_argv(shell, args.command)
             if (

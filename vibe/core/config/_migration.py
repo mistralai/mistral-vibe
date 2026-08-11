@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config.layer import (
     ConfigLayer,
     EmptyLayerError,
@@ -12,6 +13,7 @@ from vibe.core.config.layer import (
 )
 from vibe.core.config.layers._base import BaseTomlConfigLayer
 from vibe.core.config.patch import ConfigPatch, ReplaceOperationPatch
+from vibe.core.utils import name_matches
 
 # One-shot id: syncs an existing bash allowlist up to the current default
 # read-only commands once, so users keep the ability to remove any of them.
@@ -20,6 +22,8 @@ BASH_READ_ONLY_MIGRATION = "bash_read_only_defaults_v1"
 # Old tool name -> new tool name. The new tools replaced these in-place, so
 # existing user configs keyed by the old names need their settings moved over.
 RENAMED_TOOLS: dict[str, str] = {"read": "read_file", "search_replace": "edit"}
+
+RENAMED_AGENTS: dict[str, str] = {"default": "ask"}
 
 # Options on the old tool that have no equivalent on the new one; dropped on migrate.
 DROPPED_TOOL_OPTIONS: dict[str, tuple[str, ...]] = {
@@ -64,6 +68,7 @@ def migrate_config(data: dict[str, Any]) -> bool:
     changed |= _migrate_model_renames(data)
     changed |= _migrate_devstral_small_thinking(data)
     changed |= _migrate_renamed_tools(data)
+    changed |= _migrate_renamed_agents(data)
     return changed
 
 
@@ -212,3 +217,44 @@ def _migrate_renamed_tools(data: dict[str, Any]) -> bool:
             changed = True
 
     return changed
+
+
+def _migrate_renamed_agents(data: dict[str, Any]) -> bool:
+    changed = False
+
+    default_agent = data.get("default_agent")
+    if isinstance(default_agent, str) and default_agent in RENAMED_AGENTS:
+        data["default_agent"] = RENAMED_AGENTS[default_agent]
+        changed = True
+
+    for list_key in ("enabled_agents", "disabled_agents", "installed_agents"):
+        names = data.get(list_key)
+        if not isinstance(names, list):
+            continue
+        renamed = [
+            RENAMED_AGENTS.get(name, name) if isinstance(name, str) else name
+            for name in names
+        ]
+        if renamed != names:
+            data[list_key] = renamed
+            changed = True
+
+    if "default_agent" not in data:
+        ask = RENAMED_AGENTS["default"]
+        if _agent_filters_exclude(
+            data, BuiltinAgentName.ACCEPT_EDITS
+        ) and not _agent_filters_exclude(data, ask):
+            data["default_agent"] = ask
+            changed = True
+
+    return changed
+
+
+def _agent_filters_exclude(data: dict[str, Any], agent: str) -> bool:
+    enabled = data.get("enabled_agents")
+    if isinstance(enabled, list) and enabled:
+        return not name_matches(agent, enabled)
+    disabled = data.get("disabled_agents")
+    if isinstance(disabled, list):
+        return name_matches(agent, disabled)
+    return False

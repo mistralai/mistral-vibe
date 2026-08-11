@@ -6,12 +6,14 @@ from weakref import WeakKeyDictionary
 from textual.widget import Widget
 
 from vibe.app_server.models import (
+    PublicCheckpointEntry,
     PublicEffectEntry,
     PublicEntryGenerationStatus,
     PublicHistoryEntry,
     PublicMessageEntry,
     PublicReasoningEntry,
 )
+from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
     ReasoningMessage,
@@ -27,6 +29,8 @@ def history_entry_renders_widget(entry: PublicHistoryEntry) -> bool:
         case PublicMessageEntry(role="assistant"):
             return bool(entry.text)
         case PublicReasoningEntry() | PublicEffectEntry():
+            return True
+        case PublicCheckpointEntry(kind="compaction"):
             return True
         case _:
             return False
@@ -77,6 +81,10 @@ def _entry_widgets(
         case PublicEffectEntry():
             call = ToolCallMessage(entry)
             return [call, ToolResultMessage(entry, call)]
+        case PublicCheckpointEntry(kind="compaction"):
+            message = CompactMessage()
+            message.set_complete()
+            return [message]
         case _:
             return []
 
@@ -103,6 +111,7 @@ def visible_history_widgets_count(children: list[Widget]) -> int:
     history_widget_types = (
         UserMessage,
         AssistantMessage,
+        CompactMessage,
         ReasoningMessage,
         ToolCallMessage,
         ToolResultMessage,

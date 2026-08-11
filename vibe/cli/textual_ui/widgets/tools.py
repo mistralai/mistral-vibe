@@ -536,6 +536,12 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             return
         self._border.set_row_colors(self._result_widget.border_row_colors)
 
+    def on_tool_result_widget_border_colors_changed(
+        self, message: ToolResultWidget.BorderColorsChanged
+    ) -> None:
+        if message.control is self._result_widget:
+            self._apply_border_colors()
+
     async def on_click(self, event: events.Click) -> None:
         if self._click_is_passive(event):
             return

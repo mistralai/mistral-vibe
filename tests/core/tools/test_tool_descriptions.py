@@ -13,6 +13,7 @@ from vibe.core.tools.builtins.experimental_bash import (
     BashStdin,
     ExperimentalBash,
 )
+from vibe.core.tools.builtins.git_bash import ExperimentalGitBash, GitBash
 from vibe.core.tools.builtins.read_file import ReadFile
 from vibe.core.tools.builtins.web_fetch import WebFetch
 from vibe.core.tools.builtins.web_search import WebSearch
@@ -48,3 +49,19 @@ def test_tool_names_are_unified() -> None:
     assert WriteFile.get_name() == "write_file"
     assert WebFetch.get_name() == "web_fetch"
     assert WebSearch.get_name() == "web_search"
+
+
+def test_git_bash_prompt_names_tool_and_disables_bash_alias() -> None:
+    description = GitBash.get_full_description()
+
+    assert "named `git_bash`" in description
+    assert "no `bash` tool" in description
+    assert "POSIX/Git Bash syntax" in description
+
+
+def test_experimental_git_bash_prompt_names_tool_and_disables_bash_alias() -> None:
+    description = ExperimentalGitBash.get_full_description()
+
+    assert "named `git_bash`" in description
+    assert "no `bash` tool" in description
+    assert "POSIX/Git Bash syntax" in description

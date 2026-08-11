@@ -523,6 +523,29 @@ async def test_routing_experiment_does_not_override_pinned_model(
 
 
 @pytest.mark.asyncio
+async def test_routing_experiment_honors_manual_selection_of_routed_model(
+    config_dir: Path,
+) -> None:
+    config_path = config_dir / "config.toml"
+    config_path.write_text(f'active_model = "{_ROUTED_TEST_ALIAS}"\n', encoding="utf-8")
+    orchestrator = await build_default_orchestrator(require_api_key=False)
+    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
+    layer.set_variants(
+        _manager_with_routing({
+            "active_model": _ROUTED_TEST_ALIAS,
+            "model_config": _ROUTING_MODEL_CONFIG,
+        }).config_variants()
+    )
+
+    await orchestrator.reload()
+
+    config = orchestrator.config
+    assert config.active_model == _ROUTED_TEST_ALIAS
+    assert _ROUTED_TEST_ALIAS in config.models
+    assert config.get_active_model().alias == _ROUTED_TEST_ALIAS
+
+
+@pytest.mark.asyncio
 async def test_copied_orchestrator_keeps_growthbook_variant_after_reload() -> None:
     orchestrator = await build_default_orchestrator(require_api_key=False)
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))

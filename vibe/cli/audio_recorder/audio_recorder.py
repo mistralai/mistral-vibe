@@ -20,12 +20,15 @@ from vibe.cli.audio_recorder.audio_recorder_port import (
 from vibe.observability.logging import logger
 
 # sounddevice raises OSError on import when no audio driver is available.
+_SD_IMPORT_ERROR: OSError | None = None
 try:
     import sounddevice as sd
 
     if TYPE_CHECKING:
         from sounddevice import CallbackFlags, RawInputStream
-except OSError:
+except OSError as e:
+    logger.warning("sounddevice unavailable, voice disabled: %r", e)
+    _SD_IMPORT_ERROR = e
     sd = None  # type: ignore[assignment]
 
 DEFAULT_SAMPLE_RATE = 48_000
@@ -34,6 +37,9 @@ DTYPE = "int16"
 DEFAULT_BLOCKSIZE = 4096
 DEFAULT_SAMPLE_WIDTH = 2  # 16-bit = 2 bytes
 INT16_ABS_MAX = 2**15 - 1
+# A denied or muted microphone returns pure-silence buffers,
+# so any block peak above this floor means a real signal reached us.
+SILENCE_PEAK_THRESHOLD = 0.001
 DRAIN_TIMEOUT = 5.0
 DEFAULT_MAX_DURATION = 300.0  # 5 min
 
@@ -48,9 +54,11 @@ class AudioRecorder:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._mode: RecordingMode = RecordingMode.BUFFER
+        self._sample_rate: int = 0
         self._stream: RawInputStream | None = None
         self._frames: list[bytes] = []
         self._peak: float = 0.0
+        self._signal_detected: bool = False
         self._recording: bool = False
         self._start_time: float = 0.0
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -72,6 +80,11 @@ class AudioRecorder:
         """Current audio peak level normalized to [0.0, 1.0], updated per audio block."""
         return self._peak
 
+    @property
+    def has_signal(self) -> bool:
+        """Whether any block since ``start`` exceeded the silence floor."""
+        return self._signal_detected
+
     def start(
         self,
         mode: RecordingMode,
@@ -87,8 +100,10 @@ class AudioRecorder:
 
             if not sd:
                 error_message = "sounddevice is not available, audio recording disabled"
+                if _SD_IMPORT_ERROR is not None:
+                    error_message = f"{error_message}: {_SD_IMPORT_ERROR}"
                 logger.error(error_message)
-                raise AudioBackendUnavailableError(error_message)
+                raise AudioBackendUnavailableError(error_message) from _SD_IMPORT_ERROR
 
             try:
                 sample_rate = self._guard_audio_input(sample_rate, channels)
@@ -107,6 +122,7 @@ class AudioRecorder:
             self._sample_rate = sample_rate
             self._channels = channels
             self._peak = 0.0
+            self._signal_detected = False
             self._start_time = time.monotonic()
             self._frames = []
 
@@ -208,6 +224,8 @@ class AudioRecorder:
         if n_samples > 0:
             samples = struct.unpack(f"<{n_samples}h", raw)
             self._peak = min(max(abs(s) for s in samples) / INT16_ABS_MAX, 1.0)
+            if self._peak > SILENCE_PEAK_THRESHOLD:
+                self._signal_detected = True
 
         if self._mode == RecordingMode.BUFFER:
             self._frames.append(raw)

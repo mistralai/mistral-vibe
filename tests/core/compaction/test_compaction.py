@@ -7,6 +7,7 @@ from vibe.core.compaction import (
     parse_previous_user_messages,
     render_compaction_context,
     render_teleport_summary_request,
+    select_model_context,
 )
 from vibe.core.teleport.types import TELEPORT_MESSAGE_CONTEXT_MAX_LENGTH
 from vibe.core.types import LLMMessage, Role
@@ -163,7 +164,12 @@ def test_compaction_context_merges_previous_and_new_user_messages() -> None:
     )
     messages = [
         LLMMessage(role=Role.system, content="sys"),
-        _user(context, injected=True),
+        LLMMessage(
+            role=Role.user,
+            content=context,
+            injected=True,
+            context_boundary="compaction",
+        ),
         _user("third ask"),
         _user("middleware reminder", injected=True),
     ]
@@ -172,6 +178,33 @@ def test_compaction_context_merges_previous_and_new_user_messages() -> None:
 
     assert [m.content for m in out] == ["first ask", "second ask", "third ask"]
     assert all(m.injected for m in out)
+
+
+def test_legacy_compaction_context_merges_previous_and_new_user_messages() -> None:
+    legacy_context = render_compaction_context(
+        [_user("first ask", injected=True), _user("second ask", injected=True)],
+        "summary one",
+    )
+    legacy_compaction = LLMMessage(
+        role=Role.user, content=legacy_context, injected=True
+    )
+    messages = [
+        _msg(Role.system, "sys"),
+        _user("message before compaction"),
+        legacy_compaction,
+        _user("third ask"),
+    ]
+
+    selected_context = select_model_context(messages)
+    assert selected_context == [messages[0], legacy_compaction, messages[-1]]
+
+    out = collect_prior_user_messages(selected_context, _PREFIX)
+
+    assert [message.content for message in out] == [
+        "first ask",
+        "second ask",
+        "third ask",
+    ]
 
 
 def test_compaction_context_preserves_normal_angle_brackets() -> None:
@@ -271,8 +304,8 @@ def test_spillover_message_middle_truncated() -> None:
 
 
 def test_fresh_message_ids() -> None:
-    # Returned messages must have new message_ids — they'll live in a fresh
-    # session and reusing the source ids would cause collisions.
+    # Returned messages must have new message_ids because they are embedded as
+    # preserved context rather than reused as the original user messages.
     original = _user("hello")
     out = collect_prior_user_messages([original], _PREFIX)
     assert len(out) == 1
@@ -290,3 +323,38 @@ def test_only_assistant_and_system_around_users() -> None:
     out = collect_prior_user_messages(messages, _PREFIX)
     assert [m.content for m in out] == ["u1", "u2"]
     assert all(m.role == Role.user for m in out)
+
+
+def test_select_model_context_returns_everything_without_boundary() -> None:
+    messages = [
+        _msg(Role.system, "sys"),
+        _user("question"),
+        _msg(Role.assistant, "answer"),
+    ]
+
+    assert select_model_context(messages) == messages
+
+
+def test_select_model_context_starts_at_latest_compaction() -> None:
+    first = LLMMessage(
+        role=Role.user,
+        content="first compacted context",
+        injected=True,
+        context_boundary="compaction",
+    )
+    second = LLMMessage(
+        role=Role.user,
+        content="second compacted context",
+        injected=True,
+        context_boundary="compaction",
+    )
+    messages = [
+        _msg(Role.system, "sys"),
+        _user("before"),
+        first,
+        _user("between"),
+        second,
+        _user("after"),
+    ]
+
+    assert select_model_context(messages) == [messages[0], second, messages[-1]]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing, suppress
+from datetime import UTC, datetime
 from pathlib import Path
 import signal
 import sys
@@ -444,7 +445,7 @@ class VibeAcpAgent(AcpAgent):
         session_id = acp_session_id or app_server.session_id
         client_tool_handler.bind_session(session_id)
         commands = AcpCommandRegistry(
-            vibe_code_enabled=app_server.resources.config.base.vibe_code_enabled
+            vibe_code_enabled=app_server.resources.config.current.vibe_code_enabled
         )
         session = AcpSession(
             session_id=session_id,
@@ -460,11 +461,11 @@ class VibeAcpAgent(AcpAgent):
 
     @staticmethod
     async def _load_complete_history(session: AcpSession) -> None:
-        while before := session.app_server.state.history.cursor.before:
+        while before := session.app_server.resources.sessions.history_before_cursor:
             page = await session.app_server.resources.sessions.load_before(
                 before, limit=500
             )
-            if page.cursor.before == before:
+            if not page.data:
                 raise RuntimeError("History pagination did not advance")
 
     def _client_descriptor(self) -> ClientDescriptor:
@@ -606,7 +607,7 @@ class VibeAcpAgent(AcpAgent):
             )
             raise InternalError(str(exc)) from exc
         self._send_usage_update(session)
-        turn = session.app_server.state.latest_turn
+        turn = next(reversed(session.app_server.state.turns or []), None)
         if turn is not None and turn.status is PublicTurnStatus.INTERRUPTED:
             return PromptResponse(stop_reason="cancelled", usage=self._usage(session))
         if turn is not None and turn.stop_reason is PublicTurnStopReason.LIMIT:
@@ -709,10 +710,12 @@ class VibeAcpAgent(AcpAgent):
         return ListSessionsResponse(
             sessions=[
                 SessionInfo(
-                    session_id=item.session_id,
-                    cwd=item.cwd,
+                    session_id=item.id,
+                    cwd=item.cwd or "",
                     title=item.title,
-                    updated_at=item.end_time,
+                    updated_at=datetime.fromtimestamp(
+                        item.updated_at / 1000, UTC
+                    ).isoformat(),
                 )
                 for item in saved
             ]

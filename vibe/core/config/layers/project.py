@@ -68,33 +68,6 @@ class ProjectConfigLayer(BaseTomlConfigLayer):
 
         return bool(self._trust_store.is_trusted(self._config_file_path.parent))
 
-    async def _on_trust_changed(self, old: bool | None, new: bool | None) -> None:
-        if new is None or self._config_file_path is None:
-            return
-
-        if new:
-            await asyncio.to_thread(
-                self._trust_store.add_trusted, self._config_file_path.parent
-            )
-        else:
-            await asyncio.to_thread(
-                self._trust_store.add_untrusted, self._config_file_path.parent
-            )
-
-    async def grant_trust(self) -> None:
-        await self._find_config_file()
-        if self._config_file_path is None:
-            return
-
-        await super().grant_trust()
-
-    async def revoke_trust(self) -> None:
-        await self._find_config_file()
-        if self._config_file_path is None:
-            return
-
-        await super().revoke_trust()
-
     async def _find_config_file(self) -> None:
         async with self._find_lock:
             if self._is_set:

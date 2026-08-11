@@ -258,7 +258,6 @@ async def test_account_read_uses_latest_server_config_and_key(
             [runtime_provider.model_copy(update={"api_key_env_var": "SECOND_KEY"})],
             target_layer=OverridesLayer.NAME,
         )
-        agent_loop.agent_manager.invalidate_config()
         account = await controller.read()
     finally:
         await agent_loop.aclose()

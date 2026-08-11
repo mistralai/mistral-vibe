@@ -28,12 +28,11 @@ from vibe.app_server._connection_protocol import (
     ClientToolWriteTextFileParams as ClientToolWriteTextFileParams,
     InitializeParams as InitializeParams,
     InitializeResponse as InitializeResponse,
-    ServerCapabilities as ServerCapabilities,
     ServerInfo as ServerInfo,
     TransportKind as TransportKind,
 )
 from vibe.app_server._model import ProtocolModel
-from vibe.app_server.config import ConfigView, ProxySettingsView, ThinkingLevel
+from vibe.app_server.config import ConfigView, ProxySettingsView
 from vibe.app_server.models import (
     AccountView,
     AgentStatsSnapshot,
@@ -51,11 +50,10 @@ from vibe.app_server.models import (
     PublicCallbackEntry,
     PublicError,
     PublicHistoryEntry,
-    PublicHistoryPage,
     PublicRetryCategory,
+    PublicSession,
     PublicSessionState,
     PublicTurn,
-    SavedSessionSummary,
     ScheduledLoop,
     SessionLogSummary,
     SkillSummary,
@@ -84,23 +82,22 @@ SERVER_METHODS: tuple[str, ...] = (
     "agents/install",
     "agents/list",
     "agents/uninstall",
-    "callback/respond",
+    "callback/result",
     "config/fields/read",
-    "config/patch",
     "config/proxy/read",
     "config/proxy/write",
     "config/read",
     "config/reload",
     "config/schema",
-    "config/thinking/write",
+    "config/write",
     "connectors/auth/read",
     "connectors/read",
     "connectors/refresh",
     "diagnostics/list",
     "diagnostics/logs/read",
+    "events/read",
     "feedback/record",
     "feedback/shouldShow",
-    "history/list",
     "identity/read",
     "loops/clear",
     "loops/create",
@@ -113,6 +110,8 @@ SERVER_METHODS: tuple[str, ...] = (
     "mcp/refresh",
     "mcp/toggle",
     "narration/summarize",
+    "plugin/info",
+    "plugin/reload",
     "projectLinks/create",
     "projectLinks/inspectRoot",
     "projectLinks/link",
@@ -130,26 +129,28 @@ SERVER_METHODS: tuple[str, ...] = (
     "review/turnDiff",
     "runtime/read",
     "session/agent/update",
-    "session/close",
-    "session/compact/start",
+    "session/archive",
+    "session/compact",
     "session/continue",
     "session/context/inject",
     "session/delete",
     "session/fork",
     "session/history/clear",
+    "session/history/list",
     "session/list",
     "session/log/read",
     "session/read",
     "session/ready/read",
     "session/ready/wait",
+    "session/rename",
     "session/resume",
     "session/rewind",
     "session/rewind/read",
     "session/settings/update",
+    "session/shellCommand",
     "session/start",
-    "session/title/update",
-    "shell/interrupt",
-    "shell/run",
+    "session/stop",
+    "session/turns/list",
     "skills/list",
     "stats/read",
     "telemetry/record",
@@ -169,6 +170,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "vibeCode/teleport/start",
     "workspace/prompt/prepare",
     "workspace/trust/decision",
+    "workspace/trust/untrustedConfig",
     "workspace/trust/status",
     "workspace/worktrees/list",
 )
@@ -176,6 +178,10 @@ SERVER_METHODS: tuple[str, ...] = (
 
 class EmptyResponse(ProtocolModel):
     pass
+
+
+class EventWatermarkResponse(ProtocolModel):
+    last_event_id: int = 0
 
 
 class SessionMCPHttpServer(ProtocolModel):
@@ -199,27 +205,83 @@ type SessionMCPServer = Annotated[
 ]
 
 
-class ExistingLocalWorkspaceSelection(ProtocolModel):
+class PageRequest(ProtocolModel):
+    cursor: str | None = None
+    limit: int = Field(default=200, ge=1, le=500)
+    direction: Literal["forward", "backward"] = "backward"
+
+
+class EventsFilter(ProtocolModel):
+    session_ids: list[str] = Field(default_factory=list)
+    root_session_ids: list[str] = Field(default_factory=list)
+    parent_session_ids: list[str] = Field(default_factory=list)
+    event_types: list[str] = Field(default_factory=list)
+
+
+class EventsReadParams(ProtocolModel):
+    after_event_id: int | None = None
+    filters: EventsFilter = Field(default_factory=EventsFilter)
+    batch_size: int = Field(default=100, ge=1)
+
+
+class EventBatch(ProtocolModel):
+    type: Literal["events"] = "events"
+    events: list[JsonValue] = Field(default_factory=list)
+
+
+class CompletionConfig(ProtocolModel):
+    type: str = "mistral"
+    model: str = "mistral-small-latest"
+
+
+class ToolDefinition(ProtocolModel):
+    type: Literal["client_tool"] = "client_tool"
+    name: str
+    description: str = ""
+    input_schema: dict[str, JsonValue] = Field(default_factory=dict)
+    output_schema: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class HookDefinition(ProtocolModel):
+    type: str
+    name: str
+    matcher: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class ExistingWorktreeInput(ProtocolModel):
     kind: Literal["existing"] = "existing"
     cwd: str = Field(min_length=1)
 
 
-class CreateLocalWorkspaceSelection(ProtocolModel):
+class NewWorktreeInput(ProtocolModel):
     kind: Literal["create"] = "create"
     branch: str = Field(min_length=1)
     name: str = Field(min_length=1)
 
 
-type LocalWorkspaceSelection = Annotated[
-    ExistingLocalWorkspaceSelection | CreateLocalWorkspaceSelection,
+class AutoWorktreeInput(ProtocolModel):
+    kind: Literal["auto"] = "auto"
+    prompt: str | None = None
+
+
+type WorktreeInput = Annotated[
+    ExistingWorktreeInput | NewWorktreeInput | AutoWorktreeInput,
     Field(discriminator="kind"),
 ]
 
 
-class SessionOptions(ProtocolModel):
+class AgentConfig(ProtocolModel):
+    """App-server configuration plus Vibe's runtime launch options."""
+
+    completion: CompletionConfig | None = None
+    sandbox: dict[str, JsonValue] | None = None
+    instructions: str = ""
+    workdir: str | None = None
+    tools: list[ToolDefinition] = Field(default_factory=list)
+    hooks: list[HookDefinition] = Field(default_factory=list)
     cwd: str | None = None
     workspace_roots: list[str] = Field(default_factory=list)
-    local_workspace_selection: LocalWorkspaceSelection | None = None
+    worktree: WorktreeInput | None = None
     agent: str | None = None
     auto_approve: bool = False
     enabled_tools: list[str] | None = None
@@ -232,24 +294,49 @@ class SessionOptions(ProtocolModel):
     mcp_servers: list[SessionMCPServer] = Field(default_factory=list)
 
 
-class SessionOpenParams(SessionOptions):
+SessionOptions = AgentConfig
+
+
+class SessionOpenParams(ProtocolModel):
+    agent_config: AgentConfig = Field(default_factory=AgentConfig)
     history_limit: int = Field(default=200, ge=1, le=500)
+
+    @property
+    def cwd(self) -> str | None:
+        return self.agent_config.cwd or self.agent_config.workdir
 
 
 class SessionStartParams(SessionOpenParams):
-    pass
+    idempotency_key: str | None = None
 
 
-class SessionStartResponse(ProtocolModel):
+class SessionStartResponse(EventWatermarkResponse):
     state: PublicSessionState
 
 
 class SessionReadParams(ProtocolModel):
     session_id: str
-    history_limit: int = Field(default=200, ge=1, le=500)
+    history: PageRequest | None = Field(default_factory=PageRequest)
+    turns: PageRequest | None = Field(default_factory=PageRequest)
+
+    @property
+    def include_history(self) -> bool:
+        return self.history is not None
+
+    @property
+    def include_turns(self) -> bool:
+        return self.turns is not None
+
+    @property
+    def history_limit(self) -> int:
+        return self.history.limit if self.history is not None else 1
+
+    @property
+    def turns_limit(self) -> int:
+        return self.turns.limit if self.turns is not None else 1
 
 
-class SessionReadResponse(ProtocolModel):
+class SessionReadResponse(EventWatermarkResponse):
     state: PublicSessionState
 
 
@@ -257,28 +344,40 @@ class SessionResumeParams(SessionOpenParams):
     session_id: str
 
 
-class SessionResumeResponse(ProtocolModel):
+class SessionResumeResponse(EventWatermarkResponse):
     state: PublicSessionState
 
 
 class SessionContinueParams(SessionOpenParams):
-    pass
+    """Vibe extension that resumes the latest eligible session."""
 
 
-class SessionContinueResponse(ProtocolModel):
+class SessionContinueResponse(EventWatermarkResponse):
     state: PublicSessionState
 
 
 class SessionForkParams(ProtocolModel):
+    idempotency_key: str | None = None
     source_session_id: str
     entry_id: str | None = None
+    agent_config: AgentConfig | None = None
+    after_turn_id: str | None = None
     history_limit: int = Field(default=200, ge=1, le=500)
     attach: bool = True
 
 
-class SessionForkResponse(ProtocolModel):
+class SessionForkResponse(EventWatermarkResponse):
     source_session_id: str
     state: PublicSessionState
+
+
+class SessionStopParams(ProtocolModel):
+    session_id: str
+    reason: str | None = None
+
+
+class SessionStopResponse(ProtocolModel):
+    closed: bool = True
 
 
 class SessionCloseParams(ProtocolModel):
@@ -290,11 +389,22 @@ class SessionCloseResponse(ProtocolModel):
 
 
 class SessionListParams(ProtocolModel):
+    cursor: str | None = None
+    limit: int = Field(default=50, ge=1, le=500)
+    include_archived: bool = False
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
     cwd: str | None = None
 
 
 class SessionListResponse(ProtocolModel):
-    sessions: list[SavedSessionSummary]
+    items: list[PublicSession] = Field(default_factory=list)
+    next_cursor: str | None = None
+    previous_cursor: str | None = None
+
+    @property
+    def data(self) -> list[PublicSession]:
+        return self.items
 
 
 class SessionDeleteParams(ProtocolModel):
@@ -309,18 +419,92 @@ class SessionTitleUpdateParams(ProtocolModel):
 class SessionTitleUpdateResponse(ProtocolModel):
     title: str
     updated_at: str | None = None
+    last_event_id: int | None = None
 
 
-class HistoryListParams(ProtocolModel):
+class SessionHistoryListParams(ProtocolModel):
     session_id: str
     turn_id: str | None = None
-    before: str | None = None
-    after: str | None = None
-    limit: int = Field(default=200, ge=1, le=500)
+    page: PageRequest = Field(default_factory=PageRequest)
+
+    @property
+    def cursor(self) -> str | None:
+        return self.page.cursor
+
+    @property
+    def limit(self) -> int:
+        return self.page.limit
+
+    @property
+    def sort_direction(self) -> Literal["forward", "backward"]:
+        return self.page.direction
 
 
-class HistoryListResponse(ProtocolModel):
-    history: PublicHistoryPage
+class SessionHistoryListResponse(ProtocolModel):
+    items: list[PublicHistoryEntry] = Field(default_factory=list)
+    next_cursor: str | None = None
+    previous_cursor: str | None = None
+
+    @property
+    def data(self) -> list[PublicHistoryEntry]:
+        return self.items
+
+    @property
+    def backwards_cursor(self) -> str | None:
+        return self.previous_cursor
+
+
+class SessionTurnsListParams(ProtocolModel):
+    session_id: str
+    page: PageRequest = Field(default_factory=PageRequest)
+
+    @property
+    def cursor(self) -> str | None:
+        return self.page.cursor
+
+    @property
+    def limit(self) -> int:
+        return self.page.limit
+
+    @property
+    def sort_direction(self) -> Literal["forward", "backward"]:
+        return self.page.direction
+
+
+class SessionTurnsListResponse(ProtocolModel):
+    items: list[PublicTurn] = Field(default_factory=list)
+    next_cursor: str | None = None
+    previous_cursor: str | None = None
+
+    @property
+    def data(self) -> list[PublicTurn]:
+        return self.items
+
+    @property
+    def backwards_cursor(self) -> str | None:
+        return self.previous_cursor
+
+
+class SessionShellCommandParams(ProtocolModel):
+    session_id: str
+    command: str | None = None
+    cwd: str | None = None
+    timeout_seconds: float | None = Field(default=None, gt=0, le=600)
+    operation_id: str | None = None
+    action: Literal["run", "interrupt"] = "run"
+
+    @model_validator(mode="after")
+    def validate_action(self) -> SessionShellCommandParams:
+        if self.action == "run" and (self.command is None or not self.command.strip()):
+            raise ValueError("command is required for action='run'")
+        if self.action == "interrupt" and self.operation_id is None:
+            raise ValueError("operation_id is required for action='interrupt'")
+        return self
+
+
+class SessionShellCommandResponse(ProtocolModel):
+    accepted: Literal[True] = True
+    last_event_id: int
 
 
 class SessionReadyWaitParams(ProtocolModel):
@@ -426,17 +610,6 @@ class ReviewMutationParams(ProtocolModel):
     target: ReviewTarget
 
 
-class ConfigReadParams(ProtocolModel):
-    session_id: str | None = None
-    cwd: str | None = None
-
-
-class ConfigReadResponse(ProtocolModel):
-    config: ConfigView
-    base_config: ConfigView
-    stripped_history_images: int = 0
-
-
 class ConfigSchemaReadParams(ProtocolModel):
     pass
 
@@ -449,11 +622,6 @@ class ConfigSchemaReadResponse(ProtocolModel):
 class ConfigReloadParams(ProtocolModel):
     session_id: str
     reload_runtime: bool = True
-
-
-class ConfigThinkingWriteParams(ProtocolModel):
-    session_id: str
-    level: ThinkingLevel
 
 
 class ConfigProxyReadParams(ProtocolModel):
@@ -500,7 +668,6 @@ class SessionSettingsUpdateParams(ProtocolModel):
 
 class RuntimeSnapshot(ProtocolModel):
     config: ConfigView
-    base_config: ConfigView
     active_agent: AgentSummary
     agents: list[AgentSummary]
     skills: list[SkillSummary]
@@ -592,23 +759,33 @@ class ConfigFieldsReadResponse(ProtocolModel):
     targets: list[str]
 
 
-class ConfigPatchOpWire(ProtocolModel):
+class ConfigWriteOpWire(ProtocolModel):
     op: Literal["set", "remove"]
     path: str
     value: JsonValue = None
     target_layer: str | None = None
 
 
-class ConfigPatchParams(ProtocolModel):
+class ConfigWriteParams(ProtocolModel):
     session_id: str
-    ops: list[ConfigPatchOpWire]
-    reason: str = "config screen edit"
+    ops: list[ConfigWriteOpWire]
+    reason: str = "config write"
     reload_runtime: bool = False
 
 
-class ConfigPatchResponse(ConfigMutationResponse):
+class ConfigWriteResponse(ConfigMutationResponse):
     rejected: bool = False
     failures: list[str] = Field(default_factory=list)
+
+
+class ConfigReadParams(ProtocolModel):
+    session_id: str | None = None
+    cwd: str | None = None
+
+
+class ConfigReadResponse(ProtocolModel):
+    config: ConfigView
+    stripped_history_images: int = 0
 
 
 class AgentInstallParams(ProtocolModel):
@@ -838,13 +1015,18 @@ class MCPAuthUrlParams(ProtocolModel):
 
 
 class ShellRunParams(ProtocolModel):
+    """Internal DTO driving ``ShellController.run`` (no longer a wire model)."""
+
     session_id: str
     operation_id: str
     command: str
     timeout_seconds: float = Field(default=30.0, gt=0, le=600)
+    cwd: str | None = None
 
 
 class ShellRunResponse(ProtocolModel):
+    """Internal DTO carrying a shell result to the effect/context builders."""
+
     operation_id: str
     command: str
     cwd: str
@@ -853,15 +1035,6 @@ class ShellRunResponse(ProtocolModel):
     exit_code: int
     timed_out: bool = False
     interrupted: bool = False
-
-
-class ShellInterruptParams(ProtocolModel):
-    session_id: str
-    operation_id: str
-
-
-class ShellInterruptResponse(ProtocolModel):
-    interrupted: bool
 
 
 class SessionLogReadParams(ProtocolModel):
@@ -911,6 +1084,15 @@ class WorkspaceTrustDecisionParams(ProtocolModel):
     decision: WorkspaceTrustDecision
     cwd: str | None = None
     session_id: str | None = None
+
+
+class WorkspaceUntrustedConfigParams(ProtocolModel):
+    cwd: str | None = None
+
+
+class WorkspaceUntrustedConfigResponse(ProtocolModel):
+    dirs: list[str] = Field(default_factory=list)
+    settings_path: str = ""
 
 
 class ProjectLinksListParams(ProtocolModel):
@@ -1109,30 +1291,40 @@ class FeedbackRecordParams(ProtocolModel):
 
 
 class TurnStartParams(ProtocolModel):
+    idempotency_key: str | None = None
     session_id: str
-    input: list[ContentBlock]
+    message: list[ContentBlock]
     injected: bool = False
     client_user_message_id: str | None = None
     auto_title: str | None = None
     user_display_content: UserDisplayContent | None = None
     mention_stats: MentionStats | None = None
 
+    @property
+    def input(self) -> list[ContentBlock]:
+        return self.message
 
-class TurnStartResponse(ProtocolModel):
+
+class TurnStartResponse(EventWatermarkResponse):
     turn: PublicTurn
 
 
 class TurnSteerParams(ProtocolModel):
+    idempotency_key: str | None = None
     session_id: str
     expected_turn_id: str
-    input: list[ContentBlock]
+    message: list[ContentBlock]
     client_user_message_id: str | None = None
     inject_invoked_skill: bool = True
     mention_stats: MentionStats | None = None
 
+    @property
+    def input(self) -> list[ContentBlock]:
+        return self.message
 
-class TurnSteerResponse(ProtocolModel):
-    turn_id: str
+
+class TurnSteerResponse(EventWatermarkResponse):
+    accepted: Literal[True] = True
 
 
 class TurnInterruptParams(ProtocolModel):
@@ -1140,8 +1332,8 @@ class TurnInterruptParams(ProtocolModel):
     expected_turn_id: str
 
 
-class TurnInterruptResponse(ProtocolModel):
-    interrupted: bool
+class TurnInterruptResponse(EventWatermarkResponse):
+    accepted: Literal[True] = True
 
 
 class ContextInjectParams(ProtocolModel):
@@ -1174,6 +1366,31 @@ class CallbackRespondParams(ProtocolModel):
 
 class CallbackRespondResponse(ProtocolModel):
     status: Literal["accepted", "duplicate"]
+
+
+class CallbackResultError(ProtocolModel):
+    message: str
+    code: str | None = None
+    details: JsonValue = None
+
+
+class CallbackResult(ProtocolModel):
+    callback_id: str
+    output: JsonValue = None
+    error: CallbackResultError | None = None
+
+
+class CallbackResultParams(ProtocolModel):
+    session_id: str
+    result: CallbackResult
+
+    @property
+    def callback_id(self) -> str:
+        return self.result.callback_id
+
+
+class CallbackResultResponse(EventWatermarkResponse):
+    accepted: Literal[True] = True
 
 
 class SessionHistoryClearParams(ProtocolModel):
@@ -1273,6 +1490,8 @@ class ProtocolErrorCode(StrEnum):
     UNAUTHORIZED = auto()
     FORBIDDEN = auto()
     METHOD_NOT_FOUND = auto()
+    NOT_IMPLEMENTED = auto()
+    STALE_CURSOR = auto()
     INTERNAL_ERROR = auto()
 
 

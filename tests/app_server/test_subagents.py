@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -22,7 +23,6 @@ from tests.stubs.app_server import (
 )
 from tests.stubs.fake_backend import FakeBackend
 from vibe.app_server._model import validate_wire
-from vibe.app_server._projector import ProjectedUpdate
 from vibe.app_server._runtime import AgentRuntimeFactory
 from vibe.app_server._sessions import SessionRuntimeRegistry
 from vibe.app_server._turns import TurnController
@@ -32,6 +32,7 @@ from vibe.app_server.models import (
     ApprovalDecision,
     ApprovalDecisionType,
     CompletedEffectState,
+    PublicCheckpointEntry,
     PublicEffectEntry,
     PublicMessageEntry,
     PublicSessionState,
@@ -42,7 +43,6 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import (
     AppServerResponseError,
-    HistoryEntryUpdatedParams,
     ProtocolErrorCode,
     SessionReadParams,
     SessionReadResponse,
@@ -237,7 +237,7 @@ async def test_task_creates_independently_readable_child_session(monkeypatch) ->
         assert child.event_id > 0
         messages = [
             entry.text
-            for entry in child.history.entries
+            for entry in child.history or []
             if isinstance(entry, PublicMessageEntry)
         ]
         assert messages[0].endswith("Inspect the project")
@@ -247,9 +247,8 @@ async def test_task_creates_independently_readable_child_session(monkeypatch) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fail_projection", [False, True])
-async def test_child_auto_compaction_replaces_live_and_persisted_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_projection: bool
+async def test_child_auto_compaction_keeps_live_and_persisted_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     logging = SessionLoggingConfig(
         enabled=True, save_dir=str(tmp_path / "sessions"), session_prefix="session"
@@ -292,34 +291,10 @@ async def test_child_auto_compaction_replaces_live_and_persisted_session(
         config=_config(logging), backend=parent_backend, enable_streaming=True
     )
     client = start_test_app_server(parent)
-    run_peer = client._run_peer
-    assert run_peer is not None
-    server = cast(AppServer, cast(Any, run_peer).__self__)
     session = await attach_test_app_server_session(client)
-    projection_failed = False
-
-    if fail_projection:
-        emit_projected = server._turns._emit_projected
-
-        async def fail_after_replacement(update: ProjectedUpdate) -> None:
-            nonlocal projection_failed
-            await emit_projected(update)
-            if not isinstance(update.params, HistoryEntryUpdatedParams):
-                return
-            if not any(
-                operation.path == "/detail/childSessionId"
-                and operation.value not in original_child_ids
-                for operation in update.params.patch
-            ):
-                return
-            projection_failed = True
-            raise RuntimeError("projection failed")
-
-        monkeypatch.setattr(server._turns, "_emit_projected", fail_after_replacement)
 
     try:
         _ = [event async for event in session.act("Delegate this")]
-        assert projection_failed is fail_projection
         assert len(original_child_ids) == 1
         original_child_id = original_child_ids[0]
         effect = next(
@@ -329,30 +304,27 @@ async def test_child_auto_compaction_replaces_live_and_persisted_session(
             and entry.detail.kind is ToolEffectKind.SUBAGENT
         )
         assert isinstance(effect.detail, SubagentEffectDetail)
-        replacement_child_id = effect.detail.child_session_id
-        assert replacement_child_id is not None
-        assert replacement_child_id != original_child_id
+        child_session_id = effect.detail.child_session_id
+        assert child_session_id is not None
+        assert child_session_id == original_child_id
         assert isinstance(effect.state, CompletedEffectState)
 
-        replacement = await _read_child(session, replacement_child_id)
-        assert replacement.session.parent_session_id == session.session_id
-        assert replacement.session.root_session_id == session.session_id
-        if not fail_projection:
-            assert any(
-                isinstance(entry, PublicMessageEntry)
-                and entry.text == "Child completed"
-                for entry in replacement.history.entries
-            )
-        with pytest.raises(AppServerResponseError) as exc_info:
-            await _read_child(session, original_child_id)
-        assert exc_info.value.error.code is ProtocolErrorCode.NOT_FOUND
-
-        assert replacement_child_id in server._sessions._children
-        assert original_child_id not in server._sessions._children
+        child_state = await _read_child(session, child_session_id)
+        assert child_state.session.parent_session_id == session.session_id
+        assert child_state.session.root_session_id == session.session_id
+        assert child_state.history is not None
+        assert any(
+            isinstance(entry, PublicCheckpointEntry) and entry.kind == "compaction"
+            for entry in child_state.history
+        )
+        assert any(
+            isinstance(entry, PublicMessageEntry) and entry.text == "Child completed"
+            for entry in child_state.history
+        )
         metadata = parent.session_logger.session_metadata
         assert metadata is not None
         assert len(metadata.child_sessions) == 1
-        assert metadata.child_sessions[0].session_id == replacement_child_id
+        assert metadata.child_sessions[0].session_id == child_session_id
         parent_session_id = session.session_id
     finally:
         await session.close()
@@ -371,10 +343,15 @@ async def test_child_auto_compaction_replaces_live_and_persisted_session(
             and entry.detail.kind is ToolEffectKind.SUBAGENT
         )
         assert isinstance(resumed_effect.detail, SubagentEffectDetail)
-        assert resumed_effect.detail.child_session_id == replacement_child_id
-        replacement = await _read_child(resumed, replacement_child_id)
-        assert replacement.session.parent_session_id == parent_session_id
-        assert replacement.session.root_session_id == parent_session_id
+        assert resumed_effect.detail.child_session_id == child_session_id
+        child_state = await _read_child(resumed, child_session_id)
+        assert child_state.session.parent_session_id == parent_session_id
+        assert child_state.session.root_session_id == parent_session_id
+        assert child_state.history is not None
+        assert any(
+            isinstance(entry, PublicCheckpointEntry) and entry.kind == "compaction"
+            for entry in child_state.history
+        )
     finally:
         await resumed.close()
 
@@ -512,7 +489,7 @@ async def test_child_callbacks_round_trip_using_child_session_id(
         child = await _read_child(session, child_session_id)
         child_effects = [
             entry
-            for entry in child.history.entries
+            for entry in child.history or []
             if isinstance(entry, PublicEffectEntry)
         ]
         assert {effect.detail.tool_name for effect in child_effects} == {
@@ -611,7 +588,7 @@ async def test_resuming_parent_restores_child_link_and_public_history(
         assert child.session.parent_session_id == parent_session_id
         assert any(
             isinstance(entry, PublicMessageEntry) and entry.text == "Child completed"
-            for entry in child.history.entries
+            for entry in child.history or []
         )
     finally:
         await resumed.close()
@@ -661,10 +638,46 @@ async def test_corrupt_child_log_does_not_fail_parent_resume(
 
 
 @pytest.mark.asyncio
+async def test_repeated_reads_of_broken_child_stay_not_found(
+    tmp_path, monkeypatch
+) -> None:
+    logging, parent_session_id, child_session_id, child_dir = await _persist_child(
+        tmp_path, monkeypatch
+    )
+
+    (child_dir / MESSAGES_FILENAME).write_text("{not-json", encoding="utf-8")
+    resumed_loop = build_test_agent_loop(
+        config=_config(logging), backend=FakeBackend(), enable_streaming=True
+    )
+    created_children: list[AgentLoop] = []
+    create_child = AgentRuntimeFactory.create_child
+
+    async def track_child(
+        factory: AgentRuntimeFactory, loop: AgentLoop, agent_name: str, **kwargs
+    ) -> AgentLoop:
+        child = await create_child(factory, loop, agent_name, **kwargs)
+        created_children.append(child)
+        return child
+
+    monkeypatch.setattr(AgentRuntimeFactory, "create_child", track_child)
+    resumed = await attach_test_app_server_session(
+        start_test_app_server(resumed_loop), resume_session_id=parent_session_id
+    )
+    try:
+        for _ in range(3):
+            with pytest.raises(AppServerResponseError) as exc_info:
+                await _read_child(resumed, child_session_id)
+            assert exc_info.value.error.code is ProtocolErrorCode.NOT_FOUND
+        assert created_children == []
+    finally:
+        await resumed.close()
+
+
+@pytest.mark.asyncio
 async def test_invalid_child_projection_is_closed_and_skipped_on_resume(
     tmp_path, monkeypatch
 ) -> None:
-    logging, parent_session_id, _, child_dir = await _persist_child(
+    logging, parent_session_id, child_session_id, child_dir = await _persist_child(
         tmp_path, monkeypatch
     )
 
@@ -707,6 +720,8 @@ async def test_invalid_child_projection_is_closed_and_skipped_on_resume(
         start_test_app_server(resumed_loop), resume_session_id=parent_session_id
     )
     try:
+        with suppress(Exception):
+            await _read_child(resumed, child_session_id)
         assert len(close_calls) == 1
         close, telemetry_close = close_calls[0]
         close.assert_awaited_once_with()

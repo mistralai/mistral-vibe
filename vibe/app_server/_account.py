@@ -173,9 +173,8 @@ class AccountController:
 
     async def _read(self) -> AccountView:
         runtime_config = self._agent_loop.config
-        base_config = self._agent_loop.base_config
-        vibe_base_url = base_config.vibe_base_url
-        console_base_url = base_config.console_base_url
+        vibe_base_url = runtime_config.vibe_base_url
+        console_base_url = runtime_config.console_base_url
         self._agent_loop.set_user_plan(None)
         upgrade = _account_action(AccountActionKind.UPGRADE_TO_PRO, vibe_base_url)
 

@@ -114,7 +114,7 @@ def replay_session_updates(state: PublicSessionState) -> list[SessionUpdate]:
         updates.append(
             _session_info_update(state.session.title, state.session.updated_at)
         )
-    for entry in state.history.entries:
+    for entry in state.history or []:
         if isinstance(entry, PublicNoticeEntry) and isinstance(
             entry.detail, SessionTitleUpdatedNoticeDetail
         ):

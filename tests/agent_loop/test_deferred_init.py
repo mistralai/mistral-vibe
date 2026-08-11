@@ -379,7 +379,7 @@ class TestStartInitializeExperiments:
             await task
 
     @pytest.mark.asyncio
-    async def test_refreshes_system_prompt_when_experiments_update(self) -> None:
+    async def test_does_not_refresh_live_session_when_experiments_update(self) -> None:
         loop = build_test_agent_loop(
             launch_context=LaunchContext(
                 agent_entrypoint="cli",
@@ -402,8 +402,8 @@ class TestStartInitializeExperiments:
         ):
             await loop.initialize_experiments()
 
-        refresh_config_mock.assert_awaited_once()
-        refresh_mock.assert_awaited_once()
+        refresh_config_mock.assert_not_awaited()
+        refresh_mock.assert_not_awaited()
         init_mock.assert_awaited_once()
         init_args = init_mock.await_args
         assert init_args is not None
@@ -411,6 +411,46 @@ class TestStartInitializeExperiments:
             init_args.kwargs["launch_context"].terminal_emulator
             is TerminalEmulator.VSCODE
         )
+
+    @pytest.mark.asyncio
+    async def test_hot_swaps_live_session_on_cold_cache_first_launch(self) -> None:
+        loop = build_test_agent_loop(await_experiment_model=True)
+        refresh_mock = AsyncMock()
+        refresh_config_mock = AsyncMock()
+        init_mock = AsyncMock(return_value=True)
+
+        with (
+            patch.object(
+                agent_loop_module, "session_initialize_experiments", new=init_mock
+            ),
+            patch.object(loop, "refresh_config", new=refresh_config_mock),
+            patch.object(loop, "refresh_system_prompt", new=refresh_mock),
+        ):
+            await loop.initialize_experiments()
+
+        refresh_config_mock.assert_awaited_once()
+        refresh_mock.assert_awaited_once()
+        init_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_hot_swap_on_cold_cache_when_eval_unchanged(self) -> None:
+        loop = build_test_agent_loop(await_experiment_model=True)
+        refresh_mock = AsyncMock()
+        refresh_config_mock = AsyncMock()
+
+        with (
+            patch.object(
+                agent_loop_module,
+                "session_initialize_experiments",
+                new=AsyncMock(return_value=False),
+            ),
+            patch.object(loop, "refresh_config", new=refresh_config_mock),
+            patch.object(loop, "refresh_system_prompt", new=refresh_mock),
+        ):
+            await loop.initialize_experiments()
+
+        refresh_config_mock.assert_not_awaited()
+        refresh_mock.assert_not_awaited()
 
     def test_new_session_telemetry_uses_provided_terminal_emulator(self) -> None:
         loop = build_test_agent_loop(
@@ -544,6 +584,54 @@ class TestWaitUntilReadyJoinsExperiments:
 
         emit_ready.assert_not_called()
         emit_new_session.assert_not_called()
+
+
+class TestHydrateExperimentsOnResume:
+    @pytest.mark.asyncio
+    async def test_skips_prompt_refresh_but_restores_local_state(self) -> None:
+        loop = build_test_agent_loop()
+        refresh_prompt = AsyncMock()
+        refresh_config = AsyncMock()
+        sync_variants = MagicMock()
+
+        with (
+            patch.object(
+                agent_loop_module,
+                "session_hydrate_experiments_from_session",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(loop, "refresh_system_prompt", new=refresh_prompt),
+            patch.object(loop, "refresh_config", new=refresh_config),
+            patch.object(loop, "_sync_growthbook_layer_variants", new=sync_variants),
+        ):
+            await loop.hydrate_experiments_from_session(refresh_prompt=False)
+
+        refresh_prompt.assert_not_called()
+        refresh_config.assert_awaited_once()
+        sync_variants.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_default_refreshes_prompt(self) -> None:
+        loop = build_test_agent_loop()
+        refresh_prompt = AsyncMock()
+        refresh_config = AsyncMock()
+        sync_variants = MagicMock()
+
+        with (
+            patch.object(
+                agent_loop_module,
+                "session_hydrate_experiments_from_session",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(loop, "refresh_system_prompt", new=refresh_prompt),
+            patch.object(loop, "refresh_config", new=refresh_config),
+            patch.object(loop, "_sync_growthbook_layer_variants", new=sync_variants),
+        ):
+            await loop.hydrate_experiments_from_session()
+
+        refresh_prompt.assert_awaited_once()
+        refresh_config.assert_awaited_once()
+        sync_variants.assert_called_once()
 
 
 class TestInitDurationMsProperty:

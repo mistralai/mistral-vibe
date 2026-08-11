@@ -17,7 +17,7 @@ class PathDisplay(NoMarkupStatic):
         try:
             home = Path.home()
             if self._path.is_relative_to(home):
-                path_str = f"~/{self._path.relative_to(home)}"
+                path_str = str(Path("~") / self._path.relative_to(home))
         except (ValueError, OSError):
             pass
 

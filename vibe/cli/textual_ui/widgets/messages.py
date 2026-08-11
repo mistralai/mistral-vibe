@@ -103,7 +103,7 @@ def _format_display_path(path: Path) -> str:
         return str(path)
     if str(relative) == ".":
         return "~"
-    return f"~/{relative}"
+    return str(Path("~") / relative)
 
 
 class UserMessageAttachment(Horizontal):

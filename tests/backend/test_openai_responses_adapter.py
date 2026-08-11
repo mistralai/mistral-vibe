@@ -9,6 +9,7 @@ Tests cover:
 
 from __future__ import annotations
 
+from http import HTTPStatus
 import json
 
 import httpx
@@ -28,7 +29,11 @@ from tests.backend.data.openai_responses import (
 from tests.constants import OPENAI_BASE_URL, OPENAI_RESPONSES_PATH
 from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.llm.backend.generic import GenericBackend
-from vibe.core.llm.backend.openai_responses import OpenAIResponsesAdapter
+from vibe.core.llm.backend.openai_responses import (
+    OpenAIResponsesAdapter,
+    OpenAIResponsesStreamError,
+)
+from vibe.core.llm.exceptions import BackendError
 from vibe.core.types import (
     AvailableFunction,
     AvailableTool,
@@ -123,6 +128,7 @@ class TestPrepareRequest:
         assert payload["input"] == [{"role": "user", "content": "Hello"}]
         assert "instructions" not in payload
         assert payload["store"] is False
+        assert payload["include"] == ["reasoning.encrypted_content"]
 
     def test_system_message_becomes_system_input_item(self, adapter, provider):
         payload = _prepare(
@@ -209,19 +215,40 @@ class TestPrepareRequest:
                 ),
             ],
         )
-        # input[0] = user, input[1] = assistant message, input[2] = function_call,
-        # input[3] = function_call_output
-        assert len(payload["input"]) == 4
-        fc = payload["input"][2]
+        # The assistant produced no text, so no message item is invented for it:
+        # input[0] = user, input[1] = function_call, input[2] = function_call_output
+        assert len(payload["input"]) == 3
+        assert all(item.get("role") != "assistant" for item in payload["input"])
+        fc = payload["input"][1]
         assert fc["type"] == "function_call"
         assert fc["call_id"] == "call_abc"
         assert fc["name"] == "get_weather"
         assert fc["arguments"] == '{"location": "Paris"}'
-        fco = payload["input"][3]
+        fco = payload["input"][2]
         assert fco["type"] == "function_call_output"
         assert fco["call_id"] == "call_abc"
 
-    def test_assistant_reasoning_state_becomes_reasoning_input_items(
+    def test_reasoning_items_replayed_verbatim(self, adapter, provider):
+        item = {
+            "type": "reasoning",
+            "id": "rs_abc",
+            "encrypted_content": "enc:abc",
+            "summary": [{"type": "summary_text", "text": "Comparing options."}],
+            "status": "completed",
+        }
+        payload = _prepare(
+            adapter,
+            provider,
+            [
+                LLMMessage(
+                    role=Role.assistant, content="Answer", reasoning_payloads=[item]
+                )
+            ],
+        )
+
+        assert payload["input"][0] == item
+
+    def test_reasoning_payloads_from_another_backend_is_dropped(
         self, adapter, provider
     ):
         payload = _prepare(
@@ -231,18 +258,18 @@ class TestPrepareRequest:
                 LLMMessage(
                     role=Role.assistant,
                     content="Answer",
-                    reasoning_state=["enc:abc", "enc:def"],
+                    reasoning_payloads=[
+                        {"type": "thinking", "thinking": "hmm", "signature": "sig"}
+                    ],
                 )
             ],
         )
 
         assert payload["input"] == [
-            {"type": "reasoning", "encrypted_content": "enc:abc", "summary": []},
-            {"type": "reasoning", "encrypted_content": "enc:def", "summary": []},
             {
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": "Answer"}],
-            },
+            }
         ]
 
     def test_tools_converted_to_flat_format(self, adapter, provider):
@@ -596,17 +623,17 @@ class TestParseNonStreamingResponse:
     def test_reasoning_summary_preserved_without_exposing_encrypted_content(
         self, adapter, provider
     ):
+        reasoning_item = {
+            "type": "reasoning",
+            "id": "rs_abc",
+            "encrypted_content": "enc:abc",
+            "summary": [{"type": "summary_text", "text": "Need to compare options."}],
+        }
         data = {
             "id": "resp_reasoning",
             "object": "response",
             "output": [
-                {
-                    "type": "reasoning",
-                    "encrypted_content": "enc:abc",
-                    "summary": [
-                        {"type": "summary_text", "text": "Need to compare options."}
-                    ],
-                },
+                reasoning_item,
                 {
                     "type": "message",
                     "phase": "final_answer",
@@ -619,14 +646,10 @@ class TestParseNonStreamingResponse:
         chunk = adapter.parse_response(data, provider)
         assert chunk.message.content == "Done."
         assert chunk.message.reasoning_content == "Need to compare options."
-        assert chunk.message.reasoning_state == ["enc:abc"]
+        assert chunk.message.reasoning_payloads == [reasoning_item]
 
         payload = _prepare(adapter, provider, [chunk.message])
-        assert payload["input"][0] == {
-            "type": "reasoning",
-            "encrypted_content": "enc:abc",
-            "summary": [],
-        }
+        assert payload["input"][0] == reasoning_item
 
     def test_invalid_reasoning_item_schema_raises(self, adapter, provider):
         data = {
@@ -1100,9 +1123,13 @@ class TestParseStreamingEvents:
         # Streaming completed event only carries usage; content was already
         # delivered via delta events, so message should be empty.
         assert chunk.message.content == ""
-        assert chunk.message.reasoning_state == ["enc:streamed"]
+        assert chunk.message.reasoning_payloads == [
+            {"type": "reasoning", "encrypted_content": "enc:streamed", "summary": []}
+        ]
         assert chunk.usage.prompt_tokens == 50
         assert chunk.usage.completion_tokens == 25
+        assert chunk.stop is not None
+        assert chunk.stop.reason == "completed"
 
     def test_response_incomplete_uses_terminal_usage(self, adapter, provider):
         data = {
@@ -1118,6 +1145,8 @@ class TestParseStreamingEvents:
         assert chunk.message.content == ""
         assert chunk.usage.prompt_tokens == 50
         assert chunk.usage.completion_tokens == 25
+        assert chunk.stop is not None
+        assert chunk.stop.reason == "incomplete"
 
     def test_commentary_deltas_become_reasoning_content(self, adapter, provider):
         adapter.parse_response(
@@ -1226,15 +1255,33 @@ class TestParseStreamingEvents:
         assert chunk.message.content == ""
         assert chunk.usage.prompt_tokens == 0
 
-    def test_error_event_raises_runtime_error(self, adapter, provider):
-        with pytest.raises(RuntimeError, match="OpenAI Responses stream error"):
+    @pytest.mark.parametrize(
+        ("error_type", "expected_status"),
+        [
+            ("authentication_error", HTTPStatus.UNAUTHORIZED),
+            ("invalid_api_key", HTTPStatus.UNAUTHORIZED),
+            ("too_many_requests", HTTPStatus.TOO_MANY_REQUESTS),
+            ("rate_limit_error", HTTPStatus.TOO_MANY_REQUESTS),
+            ("rate_limit_exceeded", HTTPStatus.TOO_MANY_REQUESTS),
+            ("server_error", HTTPStatus.INTERNAL_SERVER_ERROR),
+            ("unknown_error", None),
+        ],
+    )
+    def test_error_event_raises_structured_stream_error(
+        self, adapter, provider, error_type, expected_status
+    ):
+        with pytest.raises(OpenAIResponsesStreamError) as exc_info:
             adapter.parse_response(
                 {
                     "type": "error",
-                    "error": {"type": "server_error", "message": "backend failed"},
+                    "error": {"type": error_type, "message": "backend failed"},
                 },
                 provider,
             )
+
+        assert exc_info.value.error_type == error_type
+        assert exc_info.value.message == "backend failed"
+        assert exc_info.value.status == expected_status
 
     def test_invalid_error_payload_schema_raises(self, adapter, provider):
         with pytest.raises(ValidationError):
@@ -1314,6 +1361,40 @@ class TestGenericBackendIntegration:
 
             for result, expected_result in zip(results, result_data, strict=True):
                 _assert_chunk_matches(result, expected_result)
+
+    @pytest.mark.asyncio
+    async def test_streaming_rate_limit_event_surfaces_without_transport_retry(self):
+        base_url = OPENAI_BASE_URL
+        with respx.mock(base_url=base_url) as mock_api:
+            route = mock_api.post(OPENAI_RESPONSES_PATH).mock(
+                return_value=httpx.Response(
+                    status_code=200,
+                    stream=httpx.ByteStream(
+                        b'data: {"type":"error","error":{"type":"too_many_requests","message":"Rate limit exceeded"}}\n\n'
+                    ),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            )
+            backend = _make_backend(base_url)
+            messages = [LLMMessage(role=Role.user, content="Just say hi")]
+
+            with pytest.raises(BackendError) as exc_info:
+                async for _ in backend.complete_streaming(
+                    model=_make_model(),
+                    messages=messages,
+                    temperature=0.2,
+                    tools=None,
+                    max_tokens=None,
+                    tool_choice=None,
+                    extra_headers=None,
+                ):
+                    pass
+
+        error = exc_info.value
+        assert error.status == HTTPStatus.TOO_MANY_REQUESTS
+        assert error.reason == "too_many_requests"
+        assert error.parsed_error == "Rate limit exceeded"
+        assert route.call_count == 1
 
     @pytest.mark.asyncio
     async def test_streaming_payload_includes_stream_flag(self):

@@ -44,7 +44,7 @@ class SessionCoordinator(Protocol):
         current_history: list[PublicHistoryEntry],
         callbacks: list[PublicCallbackEntry],
         active_turn: PublicTurn,
-        last_turn: PublicTurn | None = None,
+        completed_turns: list[PublicTurn],
         history_limit: int = 200,
     ) -> SessionHandoff: ...
 
@@ -116,8 +116,11 @@ class RootSessionCoordinator:
         current_history: list[PublicHistoryEntry],
         callbacks: list[PublicCallbackEntry],
         active_turn: PublicTurn | None,
-        last_turn: PublicTurn | None,
+        completed_turns: list[PublicTurn],
         history_limit: int,
+        turns_limit: int | None = None,
+        include_history: bool = True,
+        include_turns: bool = True,
     ) -> PublicSessionState:
         state = build_public_state(
             self._agent_loop,
@@ -125,8 +128,11 @@ class RootSessionCoordinator:
             current_history=current_history,
             callbacks=callbacks,
             active_turn=active_turn,
-            last_turn=last_turn,
+            completed_turns=completed_turns,
             history_limit=history_limit,
+            turns_limit=turns_limit,
+            include_history=include_history,
+            include_turns=include_turns,
         )
         return state.model_copy(
             update={"event_id": self._event_watermark(state.session.id)}
@@ -139,7 +145,7 @@ class RootSessionCoordinator:
         current_history: list[PublicHistoryEntry],
         callbacks: list[PublicCallbackEntry],
         active_turn: PublicTurn,
-        last_turn: PublicTurn | None = None,
+        completed_turns: list[PublicTurn],
         history_limit: int = 200,
     ) -> SessionHandoff:
         new_session_id = self._begin_handoff(old_session_id)
@@ -148,7 +154,7 @@ class RootSessionCoordinator:
             current_history=current_history,
             callbacks=callbacks,
             active_turn=active_turn,
-            last_turn=last_turn,
+            completed_turns=completed_turns,
             history_limit=history_limit,
         )
         return SessionHandoff(
@@ -274,7 +280,7 @@ class RootSessionCoordinator:
             current_history=[],
             callbacks=[],
             active_turn=None,
-            last_turn=None,
+            completed_turns=[],
             history_limit=history_limit,
         )
 

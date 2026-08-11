@@ -63,15 +63,16 @@ class AppServerConnection:
                 self._initialized = True
             if self._attached_session_id != self._state.session_id:
                 previous = self._state.projection.state
+                session_id = self._state.session_id
                 response = validate_wire(
                     SessionResumeResponse,
                     await client.request(
-                        "session/resume",
-                        SessionResumeParams(session_id=self._state.session_id),
+                        "session/resume", SessionResumeParams(session_id=session_id)
                     ),
                 )
-                self._state.projection.replace_state(response.state)
-                self._snapshot = ConnectionSnapshot(previous, response.state)
+                current = response.state
+                self._state.projection.replace_state(current)
+                self._snapshot = ConnectionSnapshot(previous, current)
                 self._attached_session_id = self._state.session_id
             return client
 

@@ -166,7 +166,7 @@ async def test_session_fork_can_persist_a_detached_public_session(
     assert response.source_session_id == agent_loop.session_id
     assert response.state.session.id != response.source_session_id
     assert response.state.session.parent_session_id == response.source_session_id
-    assert [entry.id for entry in response.state.history.entries] == [
+    assert [entry.id for entry in response.state.history or []] == [
         "user-1",
         "assistant-1",
     ]

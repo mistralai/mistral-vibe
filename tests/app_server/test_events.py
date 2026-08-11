@@ -27,7 +27,6 @@ from vibe.app_server.models import (
     PublicEffectEntry,
     PublicEntryGenerationStatus,
     PublicError,
-    PublicHistoryPage,
     PublicMessageEntry,
     PublicReasoningEntry,
     PublicSession,
@@ -64,9 +63,9 @@ def _projection() -> ClientProjection:
             session=PublicSession(
                 id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
             ),
-            history=PublicHistoryPage(),
+            history=[],
+            turns=[],
             active_callbacks=[],
-            latest_turn=None,
         )
     )
 
@@ -124,9 +123,7 @@ def test_snapshot_reconciliation_replays_missing_stream_updates() -> None:
         created_at=1,
         updated_at=1,
     )
-    previous = _projection().state.model_copy(
-        update={"history": PublicHistoryPage(entries=[entry])}, deep=True
-    )
+    previous = _projection().state.model_copy(update={"history": [entry]}, deep=True)
     completed = entry.model_copy(
         update={
             "content": [TextContentBlock(text="hello")],
@@ -135,8 +132,7 @@ def test_snapshot_reconciliation_replays_missing_stream_updates() -> None:
         }
     )
     current = previous.model_copy(
-        update={"history": PublicHistoryPage(entries=[completed]), "event_id": 4},
-        deep=True,
+        update={"history": [completed], "event_id": 4}, deep=True
     )
 
     events = reconcile_snapshot(previous, current)
@@ -261,7 +257,7 @@ def test_paged_history_and_callback_redelivery_share_one_identity_index() -> Non
     assert projection.ensure_callback(callback)
     assert projection.state.active_callbacks == [callback]
 
-    projection.prepend_history_page(PublicHistoryPage(entries=[callback]))
+    projection.prepend_history_page([callback])
 
     assert projection.history == [callback]
     assert not projection.ensure_callback(callback)
@@ -278,13 +274,13 @@ def test_paged_history_rejects_conflicting_duplicate_identity() -> None:
         updated_at=1,
     )
     projection = _projection()
-    projection.prepend_history_page(PublicHistoryPage(entries=[entry]))
+    projection.prepend_history_page([entry])
     conflicting = entry.model_copy(
         update={"content": [TextContentBlock(text="different")]}
     )
 
     with pytest.raises(ValueError, match="Conflicting paged history entry"):
-        projection.prepend_history_page(PublicHistoryPage(entries=[conflicting]))
+        projection.prepend_history_page([conflicting])
 
 
 def test_preview_and_title_updates_reduce_to_snapshot_metadata() -> None:
@@ -460,9 +456,9 @@ def test_session_handoff_atomically_replaces_projection_and_watermark() -> None:
         session=PublicSession(
             id="session-2", status=IdleSessionStatus(), created_at=2, updated_at=2
         ),
-        history=PublicHistoryPage(),
+        history=[],
+        turns=[],
         active_callbacks=[],
-        latest_turn=None,
     )
 
     event = projection.consume(

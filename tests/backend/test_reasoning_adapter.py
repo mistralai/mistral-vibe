@@ -95,26 +95,6 @@ class TestThinkingBlocksConversion:
         payload = _prepare(adapter, provider, messages)
         assert payload["messages"][1]["content"] == "Hello"
 
-    def test_assistant_with_reasoning_signature_to_content_block(
-        self, adapter, provider
-    ):
-        messages = [
-            LLMMessage(role=Role.user, content="Hi"),
-            LLMMessage(
-                role=Role.assistant,
-                reasoning_content="",
-                reasoning_signature="signed-thinking",
-            ),
-        ]
-        payload = _prepare(adapter, provider, messages, thinking="high")
-        assert payload["messages"][1]["content"] == [
-            {
-                "type": "thinking",
-                "thinking": [{"type": "text", "text": ""}],
-                "signature": "signed-thinking",
-            }
-        ]
-
     def test_assistant_with_reasoning_and_tool_calls(self, adapter, provider):
         messages = [
             LLMMessage(role=Role.user, content="Hi"),
@@ -208,68 +188,6 @@ class TestParseThinkingBlocks:
         chunk = adapter.parse_response(data, provider)
         assert chunk.message.content == "Final answer"
         assert chunk.message.reasoning_content == "Let me reason..."
-
-    def test_signed_thinking_round_trip_with_empty_text(self, adapter, provider):
-        data = {
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "thinking",
-                                "thinking": [{"type": "text", "text": ""}],
-                                "signature": "signed-thinking",
-                            }
-                        ],
-                        "tool_calls": [
-                            {
-                                "id": "tc_1",
-                                "index": 0,
-                                "function": {
-                                    "name": "search",
-                                    "arguments": '{"q": "test"}',
-                                },
-                            }
-                        ],
-                    }
-                }
-            ],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-        }
-
-        chunk = adapter.parse_response(data, provider)
-
-        assert chunk.message.reasoning_content is None
-        assert chunk.message.reasoning_signature == "signed-thinking"
-        payload = _prepare(
-            adapter,
-            provider,
-            [
-                LLMMessage(role=Role.user, content="Hi"),
-                chunk.message,
-                LLMMessage(
-                    role=Role.tool, content="result", tool_call_id="tc_1", name="search"
-                ),
-            ],
-            thinking="high",
-        )
-        assert payload["messages"][1]["content"] == [
-            {
-                "type": "thinking",
-                "thinking": [{"type": "text", "text": ""}],
-                "signature": "signed-thinking",
-            }
-        ]
-        assert payload["messages"][1]["tool_calls"] == [
-            {
-                "id": "tc_1",
-                "type": "function",
-                "function": {"name": "search", "arguments": '{"q": "test"}'},
-                "index": 0,
-            }
-        ]
-        assert payload["messages"][2]["tool_call_id"] == "tc_1"
 
     def test_multiple_thinking_inner_blocks(self, adapter, provider):
         data = {

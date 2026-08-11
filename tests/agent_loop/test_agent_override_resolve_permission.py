@@ -118,7 +118,7 @@ class TestAcceptEditsAgentResolvePermission:
 class TestAgentOverrideNotLeakedAcrossSwitches:
     """Switching agents must change what resolve_permission returns."""
 
-    def test_switch_from_plan_to_default_restores_write_permission(self) -> None:
+    def test_switch_from_plan_to_ask_restores_write_permission(self) -> None:
         config = build_test_vibe_config()
         agent = build_test_agent_loop(config=config, agent_name=BuiltinAgentName.PLAN)
 
@@ -132,10 +132,10 @@ class TestAgentOverrideNotLeakedAcrossSwitches:
         assert ctx_plan is not None
         assert ctx_plan.permission == ToolPermission.NEVER
 
-        # Switch to default
-        agent.agent_manager.switch_profile(BuiltinAgentName.DEFAULT)
+        # Switch to ask
+        agent.agent_manager.switch_profile(BuiltinAgentName.ASK)
 
-        # In default mode: should NOT be NEVER
-        ctx_default = tool.resolve_permission(args)
-        assert ctx_default is not None
-        assert ctx_default.permission != ToolPermission.NEVER
+        # In ask mode: should NOT be NEVER
+        ctx_ask = tool.resolve_permission(args)
+        assert ctx_ask is not None
+        assert ctx_ask.permission != ToolPermission.NEVER

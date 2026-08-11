@@ -60,7 +60,7 @@ class TestAgentManager:
         names = [a.name for a in subagents]
 
         # These are AGENT type
-        assert "default" not in names
+        assert "ask" not in names
         assert "plan" not in names
         assert "auto-approve" not in names
 
@@ -76,11 +76,10 @@ class TestAgentManager:
         with pytest.raises(ValueError, match="not found"):
             manager.get_agent("nonexistent-agent")
 
-    def test_get_default_agent(self, manager: AgentManager) -> None:
-        """Test getting the default agent."""
-        agent = manager.get_agent("default")
+    def test_get_ask_agent(self, manager: AgentManager) -> None:
+        agent = manager.get_agent("ask")
 
-        assert agent.name == "default"
+        assert agent.name == "ask"
         assert agent.agent_type == AgentType.AGENT
 
     def test_initial_agent_rejects_subagent(
@@ -132,7 +131,7 @@ class TestAgentManager:
         build_config: ConfigBuilder,
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        config = build_config(enabled_agents=["default"])
+        config = build_config(enabled_agents=["ask"])
         with pytest.raises(ValueError, match="enabled_agents") as exc_info:
             AgentManager(load_orchestrator(config), initial_agent="plan")
         message = str(exc_info.value)
@@ -157,7 +156,7 @@ class TestAgentManager:
         with pytest.raises(ValueError, match="enabled_agents") as exc_info:
             AgentManager(load_orchestrator(config))
         message = str(exc_info.value)
-        assert "default" in message
+        assert "accept-edits" in message
         assert "default_agent" in message
 
     def test_default_agent_excluded_by_disabled_agents_raises_config_contradiction(
@@ -165,7 +164,7 @@ class TestAgentManager:
         build_config: ConfigBuilder,
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        config = build_config(disabled_agents=["default"])
+        config = build_config(disabled_agents=["accept-edits"])
         with pytest.raises(ValueError, match="disabled_agents") as exc_info:
             AgentManager(load_orchestrator(config))
         assert "default_agent" in str(exc_info.value)

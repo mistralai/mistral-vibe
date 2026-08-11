@@ -8,6 +8,7 @@ from vibe.core.compaction.context import (
     drop_oldest_round,
     extract_summary,
     render_compaction_context,
+    select_model_context,
 )
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.types import ContextTooLongError, LLMMessage, Role
@@ -55,9 +56,9 @@ class CompactionManager:
 
     Every model call goes through the injected ``complete`` callable (so usage
     is always accounted), and the summary is generated on a local copy of the
-    messages — the live ``MessageList`` is only mutated by the final
-    ``reset([system, envelope])`` on success, so a failure never leaves a
-    partially trimmed conversation behind.
+    messages — the live ``MessageList`` is only mutated by appending the final
+    compaction boundary on success, so a failure never leaves a partially
+    trimmed conversation behind.
     """
 
     def __init__(
@@ -70,7 +71,6 @@ class CompactionManager:
         available_tools: Callable[[], list[AvailableTool]],
         tool_choice: Callable[[], StrToolChoice | AvailableTool],
         save: Callable[[], Awaitable[None]],
-        reset_session: Callable[[], Awaitable[None]],
         telemetry_client: TelemetryClient,
         session_ids: Callable[[], tuple[str, str | None]],
     ) -> None:
@@ -81,13 +81,12 @@ class CompactionManager:
         self._available_tools = available_tools
         self._tool_choice = tool_choice
         self._save = save
-        self._reset_session = reset_session
         self._telemetry = telemetry_client
         self._session_ids = session_ids
 
     async def compact(self, extra_instructions: str = "") -> str:
         summary_prefix = UtilityPrompt.COMPACT_SUMMARY_PREFIX.read()
-        snapshot = list(self._messages)
+        snapshot = select_model_context(self._messages)
         prior_user_messages = collect_prior_user_messages(snapshot, summary_prefix)
 
         summary = await self._summarize(snapshot, extra_instructions)
@@ -95,14 +94,13 @@ class CompactionManager:
             # _summarize already reported the failure; substitute a placeholder.
             summary = "(no summary available)"
 
-        system_message = snapshot[0]
         envelope = LLMMessage(
             role=Role.user,
             content=render_compaction_context(prior_user_messages, summary),
             injected=True,
+            context_boundary="compaction",
         )
-        self._messages.reset([system_message, envelope])
-        await self._reset_session()
+        self._messages.append(envelope)
         # Context size is unknown without an API call; the next LLM turn
         # recomputes it accurately from real usage.
         self._stats().context_tokens = 0

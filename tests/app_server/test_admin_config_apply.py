@@ -20,7 +20,7 @@ async def _build_handler(monkeypatch) -> ResourceRequestHandler:
     orchestrator = await build_default_orchestrator(require_api_key=False)
     loop = AgentLoop(
         config_orchestrator=orchestrator,
-        agent_name="default",
+        agent_name="ask",
         backend=FakeBackend(),
         mcp_registry=FakeMCPRegistry(),
     )
@@ -69,7 +69,7 @@ async def test_apply_admin_config_no_api_key_emits_no_telemetry(
     orchestrator = await build_default_orchestrator(require_api_key=False)
     loop = AgentLoop(
         config_orchestrator=orchestrator,
-        agent_name="default",
+        agent_name="ask",
         backend=FakeBackend(),
         mcp_registry=FakeMCPRegistry(),
     )

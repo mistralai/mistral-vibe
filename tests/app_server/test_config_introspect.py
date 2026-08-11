@@ -69,6 +69,17 @@ def test_build_field_wires_covers_schema_and_defaults(
     assert all(wire.origin == DEFAULT_ORIGIN for wire in by_name.values())
 
 
+def test_tracing_settings_are_public_and_described(
+    make_config: Callable[..., VibeConfigSchema],
+) -> None:
+    config = make_config()
+    by_name = {wire.name: wire for wire in build_field_wires(config, {})}
+
+    for name in ("enable_otel", "otel_endpoint", "otel_redaction"):
+        assert name in by_name
+        assert by_name[name].description
+
+
 def test_build_field_wires_resolves_layers(
     make_config: Callable[..., VibeConfigSchema],
 ) -> None:

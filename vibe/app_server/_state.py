@@ -18,6 +18,7 @@ from vibe.app_server.models import (
     PublicSession,
     PublicSessionState,
     PublicTurn,
+    PublicTurnStatus,
     RunningSessionStatus,
     TokenUsage,
 )
@@ -32,8 +33,11 @@ def build_public_state(
     current_history: list[PublicHistoryEntry],
     callbacks: list[PublicCallbackEntry],
     active_turn: PublicTurn | None,
-    last_turn: PublicTurn | None,
+    completed_turns: list[PublicTurn],
     history_limit: int,
+    turns_limit: int | None = None,
+    include_history: bool = True,
+    include_turns: bool = True,
 ) -> PublicSessionState:
     all_history = [*history, *current_history]
     open_callbacks = [
@@ -78,9 +82,20 @@ def build_public_state(
     return PublicSessionState(
         event_id=0,
         session=session,
-        history=history_page(all_history, limit=history_limit),
+        history=all_history[-history_limit:] if include_history else None,
+        history_before_cursor=(
+            all_history[-history_limit].id
+            if include_history and len(all_history) > history_limit
+            else None
+        ),
+        turns=(
+            [*completed_turns, *([active_turn] if active_turn is not None else [])][
+                -(turns_limit or history_limit) :
+            ]
+            if include_turns
+            else None
+        ),
         active_callbacks=open_callbacks,
-        latest_turn=active_turn or last_turn,
     )
 
 
@@ -90,6 +105,9 @@ def build_stored_public_state(
     metadata: SessionMetadata,
     *,
     history_limit: int,
+    turns_limit: int | None = None,
+    include_history: bool = True,
+    include_turns: bool = True,
 ) -> PublicSessionState:
     history = project_message_history(session_id, messages, metadata)
     cwd = metadata.environment.get("working_directory")
@@ -110,10 +128,37 @@ def build_stored_public_state(
             ),
             cwd=cwd,
         ),
-        history=history_page(history, limit=history_limit),
+        history=history[-history_limit:] if include_history else None,
+        history_before_cursor=(
+            history[-history_limit].id
+            if include_history and len(history) > history_limit
+            else None
+        ),
+        turns=(
+            _turns_from_history(history, session_id)[-(turns_limit or history_limit) :]
+            if include_turns
+            else None
+        ),
         active_callbacks=[],
-        latest_turn=None,
     )
+
+
+def _turns_from_history(
+    history: Sequence[PublicHistoryEntry], session_id: str
+) -> list[PublicTurn]:
+    turns: dict[str, PublicTurn] = {}
+    for entry in history:
+        if entry.turn_id is None:
+            continue
+        previous = turns.get(entry.turn_id)
+        turns[entry.turn_id] = PublicTurn(
+            id=entry.turn_id,
+            session_id=session_id,
+            status=PublicTurnStatus.COMPLETED,
+            started_at=entry.created_at if previous is None else previous.started_at,
+            completed_at=entry.updated_at,
+        )
+    return list(turns.values())
 
 
 def history_page(

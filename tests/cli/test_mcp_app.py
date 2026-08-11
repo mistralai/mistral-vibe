@@ -272,3 +272,92 @@ def test_unknown_source_falls_back_to_overview() -> None:
     app._refresh_view("missing")
 
     app._show_list_view.assert_called_once_with(option_list)
+
+
+def test_unavailable_server_with_no_tools_shows_discovery_failed_label() -> None:
+    source = _source("broken", status=MCPSourceStatus.UNAVAILABLE, tools=[])
+    app = MCPApp(_state(source))
+    option_list = MagicMock()
+
+    app._add_source_group(option_list, "Local MCP Servers", [source])
+
+    calls = option_list.add_option.call_args_list
+    # First call is the group title; second is the source row
+    source_label = calls[1].args[0].prompt
+    assert "tool discovery failed" in source_label.plain
+
+
+def test_unavailable_server_with_tools_does_not_show_discovery_failed_label() -> None:
+    source = _source(
+        "partial",
+        status=MCPSourceStatus.UNAVAILABLE,
+        tools=[MCPToolSummary(name="search")],
+    )
+    app = MCPApp(_state(source))
+    option_list = MagicMock()
+
+    app._add_source_group(option_list, "Local MCP Servers", [source])
+
+    calls = option_list.add_option.call_args_list
+    source_label = calls[1].args[0].prompt
+    assert "tool discovery failed" not in source_label.plain
+
+
+def test_unavailable_connector_with_no_tools_keeps_tool_count_label() -> None:
+    source = _source(
+        "gmail",
+        kind=MCPSourceKind.CONNECTOR,
+        status=MCPSourceStatus.UNAVAILABLE,
+        tools=[],
+    )
+    app = MCPApp(_state(source))
+    option_list = MagicMock()
+
+    app._add_source_group(option_list, "Workspace Connectors", [source])
+
+    calls = option_list.add_option.call_args_list
+    source_label = calls[1].args[0].prompt
+    assert "tool discovery failed" not in source_label.plain
+
+
+def test_detail_view_unavailable_server_shows_discovery_failed() -> None:
+    source = _source("broken", status=MCPSourceStatus.UNAVAILABLE, tools=[])
+    app = MCPApp(_state(source))
+    app.query_one = MagicMock()
+    app._set_help_text = MagicMock()
+    option_list = MagicMock()
+
+    app._show_detail_view(option_list, source)
+
+    calls = option_list.add_option.call_args_list
+    assert "Tool discovery failed" in calls[0].args[0].prompt
+
+
+def test_detail_view_unavailable_server_shows_discovery_error_message() -> None:
+    source = _source("broken", status=MCPSourceStatus.UNAVAILABLE, tools=[])
+    state = MCPState(
+        sources=[source], discovery_errors={"broken": "spawn nonexistent-binary ENOENT"}
+    )
+    app = MCPApp(state)
+    app.query_one = MagicMock()
+    app._set_help_text = MagicMock()
+    option_list = MagicMock()
+
+    app._show_detail_view(option_list, source)
+
+    calls = option_list.add_option.call_args_list
+    assert "Tool discovery failed" in calls[0].args[0].prompt
+    assert "spawn nonexistent-binary ENOENT" in str(calls[1].args[0].prompt)
+
+
+def test_detail_view_connected_server_shows_no_tools_discovered() -> None:
+    source = _source("empty", status=MCPSourceStatus.CONNECTED, tools=[])
+    app = MCPApp(_state(source))
+    app.query_one = MagicMock()
+    app._set_help_text = MagicMock()
+    option_list = MagicMock()
+
+    app._show_detail_view(option_list, source)
+
+    calls = option_list.add_option.call_args_list
+    assert "No tools discovered" in calls[0].args[0].prompt
