@@ -24,6 +24,7 @@ def build_test_app_config(
         active_model_pinned=True,
         default_model_alias="test-model",
         theme="textual-dark",
+        log_level=None,
         disable_welcome_banner_animation=False,
         autocopy_to_clipboard=True,
         file_watcher_for_autocomplete=False,

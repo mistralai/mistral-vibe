@@ -130,6 +130,7 @@ autocopy_to_clipboard = true  # Enable automatic copying of selected text to cli
 file_watcher_for_autocomplete = false
 ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
 show_greeting = true  # Show "Hello {name}" greeting below the banner at startup (Mistral providers, once per 24h)
+log_level = "WARNING"  # Optional. DEBUG | INFO | WARNING | ERROR | CRITICAL — log level for ~/.vibe/logs/vibe.log
 ```
 
 ### Copy and Text Selection
@@ -690,6 +691,11 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/reload` - Reload configuration, agent instructions, and skills from disk
 - `/clear`, `/new` - Clear conversation history
 - `/log` - Show path to current interaction log file
+- `/log-level` - Show or set the log level. `/log-level` prints the full chain
+  (session, env, config, effective); `/log-level set <LEVEL>` sets a
+  process-lifetime override; `/log-level set-global <LEVEL>` also persists to
+  config.toml; `/log-level unset` clears the session override. LEVEL is one of
+  DEBUG, INFO, WARNING, ERROR, CRITICAL.
 - `/debug` - Toggle debug console
 - `/compact` - Compact conversation history by summarizing
 - `/retry [additional instructions]` - Continue a model response interrupted by
@@ -843,9 +849,9 @@ prompt). The model can still load them via the `skill` tool.
 - `MISTRAL_API_KEY` - API key for Mistral provider
 - `VIBE_ACTIVE_MODEL` - Override active model
 - `VIBE_*` - Any config field can be overridden with the `VIBE_` prefix
-- `LOG_LEVEL` - Logging level for `$VIBE_HOME/logs/vibe.log`. One of `DEBUG`,
-  `INFO`, `WARNING` (default), `ERROR`, `CRITICAL`. Invalid values fall back
-  to `WARNING`.
+- `LOG_LEVEL` - Overrides `log_level` config for `$VIBE_HOME/logs/vibe.log`.
+  One of `DEBUG`, `INFO`, `WARNING` (default), `ERROR`, `CRITICAL`. Invalid values
+  fall back to `WARNING`. Use `/log-level` to change at runtime.
 - `LOG_MAX_BYTES` - Max size in bytes of `vibe.log` before rotation
   (default: `10485760`, i.e. 10 MiB).
 - `DEBUG_MODE` - When `true`, forces `DEBUG`-level logging. Under `vibe-acp`

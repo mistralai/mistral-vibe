@@ -224,7 +224,15 @@ from vibe.cli.vscode_extension_promo import (
     VscodeExtensionPromoState,
     should_show_promo,
 )
-from vibe.observability.logging import logger
+from vibe.observability.logging import (
+    LOG_LEVELS,
+    get_log_level_chain,
+    get_session_override,
+    logger,
+    set_config_log_level,
+    set_log_level,
+    set_session_override,
+)
 from vibe.observability.sentry import capture_sentry_exception
 from vibe.utils.cache_store import FileSystemCacheStore
 from vibe.utils.data_retention import DATA_RETENTION_MESSAGE
@@ -843,6 +851,7 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_mount(self) -> None:
         await self._apply_theme(self.config.theme)
         self.app_server.resources.config.subscribe(self._on_config_changed)
+        set_config_log_level(self.config.log_level)
         self._terminal_notifier.restore()
         self._feedback_bar = self.query_one(FeedbackBar)
         self.run_worker(self._complete_mount(), exclusive=False)
@@ -850,6 +859,7 @@ class VibeApp(App):  # noqa: PLR0904
     def _on_config_changed(self, config: ConfigView) -> None:
         if resolve_theme_name(config.theme) != self.theme:
             self.run_worker(self._apply_theme(config.theme))
+        set_config_log_level(config.log_level)
 
     async def _complete_mount(self) -> None:
         self.event_handler = EventHandler(
@@ -2766,6 +2776,90 @@ class VibeApp(App):  # noqa: PLR0904
 
         await self._mount_and_scroll(
             UserCommandMessage(f'Session renamed to "{renamed_title}".')
+        )
+
+    async def _log_level_command(self, cmd_args: str = "", **kwargs: Any) -> None:
+        args = cmd_args.strip()
+        parts = args.split(None, 1) if args else []
+
+        if not parts:
+            await self._mount_and_scroll(
+                UserCommandMessage(self._format_log_level_status())
+            )
+            return
+
+        verb = parts[0].lower()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if verb == "unset":
+            previous = get_session_override()
+            if previous is None:
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        self._format_log_level_status()
+                        + "\nNo session override was set."
+                    )
+                )
+                return
+            set_session_override(None)
+            await self._mount_and_scroll(
+                UserCommandMessage(self._format_log_level_status())
+            )
+            return
+
+        if verb in {"set", "set-global"}:
+            if not rest:
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        f"Usage: /log-level {verb} <LEVEL>  "
+                        f"(one of {', '.join(sorted(LOG_LEVELS))})",
+                        collapsed=self._tools_collapsed,
+                    )
+                )
+                return
+            try:
+                canonical = set_log_level(rest)
+            except ValueError:
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        f"Invalid level {rest!r}; expected one of "
+                        f"{', '.join(sorted(LOG_LEVELS))}",
+                        collapsed=self._tools_collapsed,
+                    )
+                )
+                return
+            set_session_override(canonical)
+
+            if verb == "set-global":
+                await self._persist_config_changes({"log_level": canonical})
+
+            note = ""
+            chain = get_log_level_chain()
+            if verb == "set-global" and chain.env and chain.env != canonical:
+                note = (
+                    f"\nNote: LOG_LEVEL env ({chain.env}) overrides config.toml; "
+                    f"config updated to {canonical}."
+                )
+            await self._mount_and_scroll(
+                UserCommandMessage(self._format_log_level_status() + note)
+            )
+            return
+
+        await self._mount_and_scroll(
+            ErrorMessage(
+                "Usage: /log-level [set|set-global|unset] [LEVEL]  "
+                f"(levels: {', '.join(sorted(LOG_LEVELS))})",
+                collapsed=self._tools_collapsed,
+            )
+        )
+
+    def _format_log_level_status(self) -> str:
+        chain = get_log_level_chain()
+        return (
+            f"Session: {chain.session or '(none)'}\n"
+            f"Env: {chain.env or '(none)'}\n"
+            f"Config: {chain.config or '(none)'}\n"
+            f"Effective: {chain.effective}"
         )
 
     def _build_picker(self, sessions: list[SavedSessionSummary]) -> SessionPickerApp:

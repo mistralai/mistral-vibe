@@ -229,6 +229,20 @@ def _coerce_routed_model_config(v: str) -> ModelConfig | None:
         return None
 
 
+_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+
+
+def _normalize_log_level(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    normalized = value.strip().upper()
+    if normalized not in _LOG_LEVELS:
+        raise ValueError(
+            f"Invalid log level {value!r}; expected one of {sorted(_LOG_LEVELS)}"
+        )
+    return normalized
+
+
 class VibeConfigSchema(ConfigSchema):
     _validation_warnings: list[str] = PrivateAttr(default_factory=list)
 
@@ -458,6 +472,9 @@ class VibeConfigSchema(ConfigSchema):
     vibe_code_sessions_base_url: Annotated[str, WithReplaceMerge()] = (
         "https://chat.mistral.ai"
     )
+    log_level: Annotated[
+        str | None, WithReplaceMerge(), BeforeValidator(_normalize_log_level)
+    ] = None
 
     # Nested configs (REPLACE — simple nested models, no merge semantics)
     project_context: Annotated[ProjectContextConfig, WithReplaceMerge()] = Field(

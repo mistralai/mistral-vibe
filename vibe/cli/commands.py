@@ -101,6 +101,15 @@ class CommandRegistry:
                 description="Show path to current interaction log file",
                 handler="_show_log_path",
             ),
+            "log-level": Command(
+                aliases=frozenset(["/log-level"]),
+                description=(
+                    "Show or set the log level. "
+                    "Usage: `/log-level`, `/log-level set <LEVEL>`, "
+                    "`/log-level set-global <LEVEL>`, `/log-level unset`"
+                ),
+                handler="_log_level_command",
+            ),
             "debug": Command(
                 aliases=frozenset(["/debug"]),
                 description="Toggle debug console",

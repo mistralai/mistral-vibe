@@ -182,6 +182,7 @@ from vibe.core.utils import (
     get_user_cancellation_message,
     is_user_cancellation_event,
 )
+from vibe.observability.logging import logger
 from vibe.user_content import UserDisplayContent, UserResource
 from vibe.utils import VIBE_WARNING_TAG
 from vibe.utils.api_keys import resolve_api_key
@@ -330,6 +331,46 @@ def _refusal_error(provider: str, model: str, chunk: LLMChunk) -> RefusalError:
         category=stop.category if stop else None,
         explanation=stop.explanation if stop else None,
     )
+
+
+def _log_model_call_success(alias: str, duration_ms: int, usage: LLMUsage) -> None:
+    logger.info(
+        "Model call completed model=%s duration_ms=%d prompt_tokens=%d completion_tokens=%d cached_tokens=%d",
+        alias,
+        duration_ms,
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.cached_tokens,
+    )
+
+
+def _log_model_call_failure(
+    alias: str, provider: str, error: Exception, duration_ms: int
+) -> None:
+    backend_error = _extract_backend_error(error)
+    if backend_error is not None:
+        logger.warning(
+            "Model call failed model=%s duration_ms=%d\n%s",
+            alias,
+            duration_ms,
+            backend_error._fmt(),
+        )
+    else:
+        logger.info(
+            "Model call failed model=%s provider=%s error=%s duration_ms=%d",
+            alias,
+            provider,
+            type(error).__name__,
+            duration_ms,
+        )
+
+
+def _extract_backend_error(error: BaseException) -> BackendError | None:
+    if isinstance(error, BackendError):
+        return error
+    if isinstance(error, RuntimeError) and isinstance(error.__cause__, BackendError):
+        return error.__cause__
+    return None
 
 
 def _should_raise_rate_limit_error(e: Exception) -> bool:
@@ -2126,6 +2167,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             cancel = str(
                 get_user_cancellation_message(CancellationReason.TOOL_INTERRUPTED)
             )
+            logger.info(
+                "Tool call cancelled tool=%s tool_call_id=%s outcome=cancelled",
+                tool_call.tool_name,
+                tool_call.call_id,
+            )
             self.stats.tool_calls_failed += 1
             yield ToolResultEvent(
                 tool_name=tool_call.tool_name,
@@ -2147,6 +2193,19 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         except Exception as exc:
             error_msg = f"<{TOOL_ERROR_TAG}>{tool_instance.get_name()} failed: {exc}</{TOOL_ERROR_TAG}>"
+            if isinstance(exc, ToolPermissionError):
+                logger.info(
+                    "Tool call denied tool=%s tool_call_id=%s outcome=denied",
+                    tool_call.tool_name,
+                    tool_call.call_id,
+                )
+            else:
+                logger.warning(
+                    "Tool call failed tool=%s tool_call_id=%s outcome=error error=%s",
+                    tool_call.tool_name,
+                    tool_call.call_id,
+                    exc,
+                )
             if isinstance(exc, ToolPermissionError):
                 self.stats.tool_calls_agreed -= 1
                 self.stats.tool_calls_rejected += 1
@@ -2190,6 +2249,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             self.checkpoint_recorder.add_snapshot(snapshot)
 
         start_time = time.perf_counter()
+        logger.debug(
+            "Tool call starting tool=%s tool_call_id=%s",
+            tool_call.tool_name,
+            tool_call.call_id,
+        )
         result_model = None
         async for item in tool_instance.invoke(
             ctx=InvokeContext(
@@ -2264,6 +2328,12 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         ):
             yield ev
         self.stats.tool_calls_succeeded += 1
+        logger.info(
+            "Tool call completed tool=%s tool_call_id=%s duration_ms=%d outcome=success",
+            tool_call.tool_name,
+            tool_call.call_id,
+            int(duration * 1000),
+        )
 
     async def _should_execute_tool(
         self, tool: BaseTool, args: BaseModel, tool_call_id: str
@@ -2438,8 +2508,16 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             ),
         )
 
+        start_time = time.perf_counter()
         try:
-            start_time = time.perf_counter()
+            logger.debug(
+                "Model call starting model=%s provider=%s messages=%d tools=%d thinking=%s",
+                model.alias,
+                provider.name,
+                len(messages),
+                len(tools) if tools else 0,
+                model.thinking,
+            )
             result = await self.backend.complete(
                 model=model,
                 messages=self._messages_for_backend(messages, model),
@@ -2464,11 +2542,20 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             processed_message = self.format_handler.process_api_response_message(
                 result.message
             )
+            _log_model_call_success(
+                model.alias, int((end_time - start_time) * 1000), result.usage
+            )
             return LLMChunk(
                 message=processed_message, usage=result.usage, stop=result.stop
             )
 
         except Exception as e:
+            _log_model_call_failure(
+                model.alias,
+                provider.name,
+                e,
+                int((time.perf_counter() - start_time) * 1000),
+            )
             if isinstance(e, RefusalError):
                 raise
             if _should_raise_rate_limit_error(e):
@@ -2528,8 +2615,16 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         )
 
         chunk_agg: LLMChunk | None = None
+        start_time = time.perf_counter()
         try:
-            start_time = time.perf_counter()
+            logger.debug(
+                "Model call starting model=%s provider=%s messages=%d tools=%d streaming=%s",
+                active_model.alias,
+                provider.name,
+                len(self.messages),
+                len(available_tools) if available_tools else 0,
+                True,
+            )
             usage = LLMUsage()
             async for chunk in self.backend.complete_streaming(
                 model=active_model,
@@ -2568,7 +2663,17 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             if chunk_agg.stop and chunk_agg.stop.is_refusal:
                 raise _refusal_error(provider.name, active_model.name, chunk_agg)
 
+            _log_model_call_success(
+                active_model.alias, int((end_time - start_time) * 1000), usage
+            )
+
         except Exception as e:
+            _log_model_call_failure(
+                active_model.alias,
+                provider.name,
+                e,
+                int((time.perf_counter() - start_time) * 1000),
+            )
             if isinstance(e, RefusalError):
                 raise
             if isinstance(e, BackendError):

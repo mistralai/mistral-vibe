@@ -109,6 +109,7 @@ def project_config_view(
         active_model_pinned=active_model_pinned,
         default_model_alias=default_model_alias,
         theme=config.theme,
+        log_level=config.log_level,
         disable_welcome_banner_animation=config.disable_welcome_banner_animation,
         show_greeting=config.show_greeting,
         autocopy_to_clipboard=config.autocopy_to_clipboard,

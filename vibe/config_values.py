@@ -5,6 +5,7 @@ from typing import Literal
 AUTO_THEME = "auto"
 FALLBACK_THEME = "ansi-dark"
 DEFAULT_THEME = AUTO_THEME
+DEFAULT_LOG_LEVEL = "WARNING"
 
 type AudioClient = Literal["mistral"]
 type ThinkingLevel = Literal["off", "low", "medium", "high", "max"]

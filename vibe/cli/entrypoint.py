@@ -33,6 +33,7 @@ def parse_arguments() -> argparse.Namespace:
             "Environment variables:\n"
             "  VIBE_HOME       Override the Vibe home directory (default: ~/.vibe)\n"
             "  LOG_LEVEL       Logging level: DEBUG, INFO, WARNING (default), ERROR, CRITICAL.\n"
+            "                  Also set via log_level in config.toml or /log-level at runtime.\n"
             "                  Logs are written to $VIBE_HOME/logs/vibe.log.\n"
             "  LOG_MAX_BYTES   Max size of vibe.log before rotation (default: 10485760).\n"
             "  VIBE_*          Override any config field (e.g. VIBE_ACTIVE_MODEL=local)."

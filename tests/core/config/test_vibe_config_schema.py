@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import keyring
+from pydantic import ValidationError
 import pytest
 
 from vibe.core.config import MissingAPIKeyError, ModelConfig, ProviderConfig
@@ -291,3 +292,23 @@ def test_check_api_key_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> N
 def test_theme_is_preserved_for_the_client_to_interpret() -> None:
     config = VibeConfigSchema(theme="totally-unknown-theme")
     assert config.theme == "totally-unknown-theme"
+
+
+def test_log_level_defaults_to_none() -> None:
+    schema = VibeConfigSchema()
+    assert schema.log_level is None
+
+
+def test_log_level_normalizes_case() -> None:
+    schema = VibeConfigSchema(log_level="debug")
+    assert schema.log_level == "DEBUG"
+
+
+def test_log_level_rejects_invalid() -> None:
+    with pytest.raises(ValidationError):
+        VibeConfigSchema(log_level="VERBOSE")
+
+
+@pytest.mark.parametrize("level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+def test_log_level_accepts_canonical_levels(level: str) -> None:
+    assert VibeConfigSchema(log_level=level).log_level == level
