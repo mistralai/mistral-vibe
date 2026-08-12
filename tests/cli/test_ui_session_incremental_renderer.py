@@ -75,6 +75,7 @@ def _load_more_remaining(app: VibeApp) -> int:
     return int(remainder.rstrip(")"))
 
 
+@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_ui_mount_defers_history_resume(
     vibe_config: VibeConfigSchema, monkeypatch: pytest.MonkeyPatch
@@ -134,6 +135,7 @@ async def test_ui_session_incremental_loader_shows_tail_and_load_more(
         assert "(" in str(label)
 
 
+@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_ui_session_incremental_loader_load_more_shows_remaining_count(
     vibe_config: VibeConfigSchema,
@@ -167,6 +169,7 @@ async def test_ui_session_incremental_loader_load_more_shows_remaining_count(
         )
 
 
+@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_ui_session_incremental_loader_load_more_batches_until_done(
     vibe_config: VibeConfigSchema,
@@ -260,6 +263,7 @@ async def test_ui_session_incremental_loader_keeps_top_alignment_when_not_scroll
         assert chat.scroll_y == 0
 
 
+@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_chat_scroll_does_not_reanchor_during_text_selection(
     vibe_config: VibeConfigSchema,

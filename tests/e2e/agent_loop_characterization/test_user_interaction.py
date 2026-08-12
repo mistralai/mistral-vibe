@@ -60,6 +60,7 @@ def _ask_user_question_factory(
     return assistant_text_chunks("The selected mode was Fast.", created=80)
 
 
+@pytest.mark.terminal
 @pytest.mark.timeout(25)
 @pytest.mark.parametrize(
     "streaming_mock_server",

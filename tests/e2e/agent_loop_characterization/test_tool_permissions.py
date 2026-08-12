@@ -81,6 +81,7 @@ def _session_permission_factory(
     )
 
 
+@pytest.mark.terminal
 @pytest.mark.timeout(35)
 @pytest.mark.parametrize(
     "streaming_mock_server",
@@ -154,6 +155,7 @@ def test_write_file_approval_creates_file_and_rejection_leaves_file_absent(
     )
 
 
+@pytest.mark.terminal
 @pytest.mark.timeout(40)
 @pytest.mark.parametrize(
     "streaming_mock_server",

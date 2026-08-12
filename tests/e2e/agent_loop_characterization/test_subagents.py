@@ -43,6 +43,7 @@ def _explore_subagent_factory(
     return assistant_text_chunks("Parent used the subagent result.", created=110)
 
 
+@pytest.mark.terminal
 @pytest.mark.timeout(30)
 @pytest.mark.parametrize(
     "streaming_mock_server",
