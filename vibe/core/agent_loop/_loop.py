@@ -61,6 +61,7 @@ from vibe.core.llm.format import (
     FailedToolCall,
     ResolvedMessage,
     ResolvedToolCall,
+    normalize_messages_for_chat_template,
 )
 from vibe.core.llm.types import BackendLike
 from vibe.core.middleware import (
@@ -2394,7 +2395,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def _messages_for_backend(
         self, messages: Sequence[LLMMessage], active_model: ModelConfig
     ) -> Sequence[LLMMessage]:
-        messages = select_model_context(messages)
+        messages = normalize_messages_for_chat_template(select_model_context(messages))
         if active_model.supports_images:
             return messages
         if not any(m.images for m in messages):

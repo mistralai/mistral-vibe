@@ -1,12 +1,116 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.tools.base import BaseTool
 from vibe.core.types import AvailableTool, LLMMessage, Role, StrToolChoice
+
+_BRIDGE_ASSISTANT_CONTENT = "."
+
+
+def _is_empty_assistant(message: LLMMessage) -> bool:
+    return (
+        message.role == Role.assistant
+        and not (message.content or "").strip()
+        and not message.tool_calls
+        and not (message.reasoning_content or "").strip()
+    )
+
+
+def normalize_messages_for_chat_template(
+    messages: Sequence[LLMMessage],
+) -> list[LLMMessage]:
+    """Normalize history for strict chat templates (Mistral Jinja / llama.cpp).
+
+    Middleware and synthetic tool-call rounds can leave consecutive user turns
+    or a user message immediately after tool results. Those shapes break
+    templates that require alternating user/assistant roles.
+    """
+    normalized = [
+        message.model_copy(deep=True)
+        for message in messages
+        if not _is_empty_assistant(message)
+    ]
+
+    merged: list[LLMMessage] = []
+    for message in normalized:
+        if (
+            merged
+            and message.role == Role.user
+            and merged[-1].role == Role.user
+        ):
+            merged[-1] = merged[-1] + message
+            continue
+        if (
+            merged
+            and message.role == Role.assistant
+            and merged[-1].role == Role.assistant
+            and not merged[-1].tool_calls
+            and not message.tool_calls
+        ):
+            merged[-1] = merged[-1] + message
+            continue
+        merged.append(message)
+
+    bridged: list[LLMMessage] = []
+    index = 0
+    while index < len(merged):
+        message = merged[index]
+        if message.role != Role.tool:
+            bridged.append(message)
+            index += 1
+            continue
+
+        while index < len(merged) and merged[index].role == Role.tool:
+            bridged.append(merged[index])
+            index += 1
+
+        if index < len(merged) and merged[index].role == Role.user:
+            bridged.append(
+                LLMMessage(
+                    role=Role.assistant,
+                    content=_BRIDGE_ASSISTANT_CONTENT,
+                    injected=True,
+                )
+            )
+
+    return bridged
+
+
+def roles_satisfy_chat_template_alternation(messages: Sequence[LLMMessage]) -> bool:
+    """Return True when history satisfies strict chat-template role ordering."""
+    saw_user = False
+    after_tool_block = False
+
+    for message in messages:
+        if message.role == Role.system:
+            continue
+
+        if message.role == Role.tool:
+            after_tool_block = True
+            continue
+
+        if message.role == Role.user:
+            if after_tool_block:
+                return False
+            if saw_user:
+                return False
+            saw_user = True
+            after_tool_block = False
+            continue
+
+        if message.role == Role.assistant:
+            saw_user = False
+            after_tool_block = False
+            continue
+
+        return False
+
+    return True
 
 if TYPE_CHECKING:
     from vibe.core.tools.manager import ToolManager
