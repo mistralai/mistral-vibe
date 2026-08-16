@@ -25,8 +25,7 @@ def _assistant_tool_call(call_id: str, *, name: str = "read_file") -> LLMMessage
                 id=call_id,
                 index=0,
                 function=FunctionCall(
-                    name=name,
-                    arguments='{"file_path": "README.md"}',
+                    name=name, arguments='{"file_path": "README.md"}'
                 ),
             )
         ],
@@ -53,10 +52,7 @@ def test_normalize_merges_consecutive_user_messages() -> None:
     normalized = normalize_messages_for_chat_template(messages)
 
     assert roles_satisfy_chat_template_alternation(normalized) is True
-    assert [message.role for message in normalized] == [
-        Role.system,
-        Role.user,
-    ]
+    assert [message.role for message in normalized] == [Role.system, Role.user]
     assert "hello" in (normalized[1].content or "")
     assert "plan reminder" in (normalized[1].content or "")
 
@@ -90,6 +86,24 @@ def test_normalize_bridges_user_after_tool_results() -> None:
     ]
 
 
+def test_normalize_fills_missing_tool_responses_before_user() -> None:
+    messages = [
+        LLMMessage(role=Role.system, content="system"),
+        LLMMessage(role=Role.user, content="run tool"),
+        _assistant_tool_call("call_missing"),
+        LLMMessage(role=Role.user, content="follow up", injected=True),
+    ]
+
+    assert roles_satisfy_chat_template_alternation(messages) is False
+
+    normalized = normalize_messages_for_chat_template(messages)
+
+    assert roles_satisfy_chat_template_alternation(normalized) is True
+    tool_messages = [message for message in normalized if message.role == Role.tool]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].tool_call_id == "call_missing"
+
+
 def test_normalize_drops_empty_assistant_messages() -> None:
     messages = [
         LLMMessage(role=Role.system, content="system"),
@@ -108,9 +122,7 @@ def test_normalize_drops_empty_assistant_messages() -> None:
 async def test_plan_agent_middleware_injection_normalizes_for_backend() -> None:
     agent_loop = build_test_agent_loop(
         config=build_test_vibe_config(
-            include_model_info=False,
-            include_commit_signature=False,
-            enabled_tools=[],
+            include_model_info=False, include_commit_signature=False, enabled_tools=[]
         ),
         agent_name=BuiltinAgentName.PLAN,
     )

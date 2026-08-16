@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
+import json
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.tools.base import BaseTool
 from vibe.core.types import AvailableTool, LLMMessage, Role, StrToolChoice
+from vibe.core.utils.tags import CancellationReason, get_user_cancellation_message
+
+if TYPE_CHECKING:
+    from vibe.core.tools.manager import ToolManager
 
 _BRIDGE_ASSISTANT_CONTENT = "."
 
@@ -21,29 +25,70 @@ def _is_empty_assistant(message: LLMMessage) -> bool:
     )
 
 
+def _fill_missing_tool_responses(messages: list[LLMMessage]) -> list[LLMMessage]:
+    filled = list(messages)
+    index = 0
+    while index < len(filled):
+        message = filled[index]
+        if message.role != Role.assistant or not message.tool_calls:
+            index += 1
+            continue
+
+        responded_ids: set[str] = set()
+        next_index = index + 1
+        while next_index < len(filled) and filled[next_index].role == Role.tool:
+            tool_call_id = filled[next_index].tool_call_id
+            if tool_call_id is not None:
+                responded_ids.add(tool_call_id)
+            next_index += 1
+
+        insertion_point = next_index
+        for tool_call in message.tool_calls:
+            if (tool_call.id or "") in responded_ids:
+                continue
+            filled.insert(
+                insertion_point,
+                LLMMessage(
+                    role=Role.tool,
+                    tool_call_id=tool_call.id or "",
+                    name=(
+                        (tool_call.function.name or "")
+                        if tool_call.function
+                        else ""
+                    ),
+                    content=str(
+                        get_user_cancellation_message(
+                            CancellationReason.TOOL_NO_RESPONSE
+                        )
+                    ),
+                ),
+            )
+            insertion_point += 1
+
+        index = index + 1 + len(message.tool_calls)
+    return filled
+
+
 def normalize_messages_for_chat_template(
     messages: Sequence[LLMMessage],
 ) -> list[LLMMessage]:
     """Normalize history for strict chat templates (Mistral Jinja / llama.cpp).
 
-    Middleware and synthetic tool-call rounds can leave consecutive user turns
-    or a user message immediately after tool results. Those shapes break
-    templates that require alternating user/assistant roles.
+    Middleware and synthetic tool-call rounds can leave consecutive user turns,
+    missing tool responses, or a user message immediately after tool results.
+    Those shapes break templates that require alternating user/assistant roles.
     """
     normalized = [
         message.model_copy(deep=True)
         for message in messages
         if not _is_empty_assistant(message)
     ]
+    normalized = _fill_missing_tool_responses(normalized)
 
     merged: list[LLMMessage] = []
     for message in normalized:
-        if (
-            merged
-            and message.role == Role.user
-            and merged[-1].role == Role.user
-        ):
-            merged[-1] = merged[-1] + message
+        if merged and message.role == Role.user and merged[-1].role == Role.user:
+            merged[-1] += message
             continue
         if (
             merged
@@ -52,7 +97,7 @@ def normalize_messages_for_chat_template(
             and not merged[-1].tool_calls
             and not message.tool_calls
         ):
-            merged[-1] = merged[-1] + message
+            merged[-1] += message
             continue
         merged.append(message)
 
@@ -83,37 +128,47 @@ def normalize_messages_for_chat_template(
 
 def roles_satisfy_chat_template_alternation(messages: Sequence[LLMMessage]) -> bool:
     """Return True when history satisfies strict chat-template role ordering."""
-    saw_user = False
-    after_tool_block = False
-
-    for message in messages:
+    index = 0
+    while index < len(messages):
+        message = messages[index]
         if message.role == Role.system:
-            continue
-
-        if message.role == Role.tool:
-            after_tool_block = True
+            index += 1
             continue
 
         if message.role == Role.user:
-            if after_tool_block:
+            if index > 0 and messages[index - 1].role == Role.user:
                 return False
-            if saw_user:
-                return False
-            saw_user = True
-            after_tool_block = False
+            index += 1
             continue
 
         if message.role == Role.assistant:
-            saw_user = False
-            after_tool_block = False
+            if not message.tool_calls:
+                index += 1
+                continue
+            next_index = index + 1
+            while next_index < len(messages) and messages[next_index].role == Role.tool:
+                next_index += 1
+            if next_index < len(messages) and messages[next_index].role == Role.user:
+                return False
+            index = next_index
+            continue
+
+        if message.role == Role.tool:
+            next_index = index
+            while next_index < len(messages) and messages[next_index].role == Role.tool:
+                next_index += 1
+            if (
+                next_index < len(messages)
+                and messages[next_index].role == Role.user
+                and messages[next_index - 1].role == Role.tool
+            ):
+                return False
+            index = next_index
             continue
 
         return False
 
     return True
-
-if TYPE_CHECKING:
-    from vibe.core.tools.manager import ToolManager
 
 
 class ParsedToolCall(BaseModel):
