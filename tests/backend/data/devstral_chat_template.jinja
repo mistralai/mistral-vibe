@@ -10,7 +10,7 @@
     {{- '[SYSTEM_PROMPT]' -}}
     {%- if messages[0]['content'] is string %}
         {{- messages[0]['content'] -}}
-    {%- else %}        
+    {%- else %}
         {%- for block in messages[0]['content'] %}
             {%- if block['type'] == 'text' %}
                 {{- block['text'] }}
@@ -94,7 +94,7 @@
                 {%- endif %}
             {%- endfor %}
         {%- endif %}
-        
+
         {%- if message['tool_calls'] is defined and message['tool_calls'] is not none and message['tool_calls']|length > 0 %}
             {%- for tool in message['tool_calls'] %}
                 {%- set arguments = tool['function']['arguments'] %}
