@@ -52,9 +52,7 @@ def _fill_missing_tool_responses(messages: list[LLMMessage]) -> list[LLMMessage]
                     role=Role.tool,
                     tool_call_id=tool_call.id or "",
                     name=(
-                        (tool_call.function.name or "")
-                        if tool_call.function
-                        else ""
+                        (tool_call.function.name or "") if tool_call.function else ""
                     ),
                     content=str(
                         get_user_cancellation_message(

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from jinja2 import Template
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.config import ProviderConfig
+from vibe.core.llm.backend.generic import OpenAIAdapter
 from vibe.core.llm.format import (
     normalize_messages_for_chat_template,
     roles_satisfy_chat_template_alternation,
@@ -14,6 +19,43 @@ from vibe.core.middleware import (
     make_plan_agent_reminder,
 )
 from vibe.core.types import FunctionCall, LLMMessage, Role, ToolCall
+
+DEVSTRAL_TEMPLATE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "backend"
+    / "data"
+    / "devstral_chat_template.jinja"
+)
+READ_FILE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": "Read a file",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+
+def _to_provider_messages(messages: list[LLMMessage]) -> list[dict]:
+    provider = ProviderConfig(
+        name="llamacpp", api_base="http://127.0.0.1:11434/v1", api_key_env_var="API_KEY"
+    )
+    return OpenAIAdapter()._convert_messages(messages, provider)
+
+
+def _render_devstral_template(messages: list[dict]) -> str:
+    template = Template(DEVSTRAL_TEMPLATE_PATH.read_text(encoding="utf-8"))
+
+    def raise_exception(message: str) -> None:
+        raise ValueError(message)
+
+    return template.render(
+        messages=messages,
+        bos_token="",
+        eos_token="",
+        tools=[READ_FILE_TOOL],
+        raise_exception=raise_exception,
+    )
 
 
 def _assistant_tool_call(call_id: str, *, name: str = "read_file") -> LLMMessage:
@@ -151,3 +193,90 @@ async def test_plan_agent_middleware_injection_normalizes_for_backend() -> None:
     )
 
     assert roles_satisfy_chat_template_alternation(backend_messages) is True
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        pytest.param(
+            [
+                LLMMessage(role=Role.system, content="system"),
+                LLMMessage(role=Role.user, content="hello"),
+                LLMMessage(role=Role.user, content="plan reminder", injected=True),
+            ],
+            id="middleware-consecutive-users",
+        ),
+        pytest.param(
+            [
+                LLMMessage(role=Role.system, content="system"),
+                LLMMessage(role=Role.user, content="read README"),
+                _assistant_tool_call("call_read"),
+                LLMMessage(
+                    role=Role.tool,
+                    tool_call_id="call_read",
+                    name="read_file",
+                    content="file contents",
+                ),
+                LLMMessage(role=Role.user, content="plan reminder", injected=True),
+            ],
+            id="tool-results-then-injected-user",
+        ),
+        pytest.param(
+            [
+                LLMMessage(role=Role.system, content="system"),
+                LLMMessage(role=Role.user, content="run tool"),
+                _assistant_tool_call("call_missing"),
+                LLMMessage(role=Role.user, content="follow up", injected=True),
+            ],
+            id="missing-tool-response-then-user",
+        ),
+    ],
+)
+def test_devstral_template_rejects_broken_sequences(messages: list[LLMMessage]) -> None:
+    with pytest.raises(ValueError, match="conversation roles must alternate"):
+        _render_devstral_template(_to_provider_messages(messages))
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        pytest.param(
+            [
+                LLMMessage(role=Role.system, content="system"),
+                LLMMessage(role=Role.user, content="hello"),
+                LLMMessage(role=Role.user, content="plan reminder", injected=True),
+            ],
+            id="middleware-consecutive-users",
+        ),
+        pytest.param(
+            [
+                LLMMessage(role=Role.system, content="system"),
+                LLMMessage(role=Role.user, content="read README"),
+                _assistant_tool_call("call_read"),
+                LLMMessage(
+                    role=Role.tool,
+                    tool_call_id="call_read",
+                    name="read_file",
+                    content="file contents",
+                ),
+                LLMMessage(role=Role.user, content="plan reminder", injected=True),
+            ],
+            id="tool-results-then-injected-user",
+        ),
+        pytest.param(
+            [
+                LLMMessage(role=Role.system, content="system"),
+                LLMMessage(role=Role.user, content="run tool"),
+                _assistant_tool_call("call_missing"),
+                LLMMessage(role=Role.user, content="follow up", injected=True),
+            ],
+            id="missing-tool-response-then-user",
+        ),
+    ],
+)
+def test_devstral_template_accepts_normalized_sequences(
+    messages: list[LLMMessage],
+) -> None:
+    normalized = normalize_messages_for_chat_template(messages)
+    rendered = _render_devstral_template(_to_provider_messages(normalized))
+    assert rendered
