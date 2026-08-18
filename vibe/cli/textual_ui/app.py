@@ -21,6 +21,7 @@ from rich import print as rprint
 from textual.app import WINDOWS, App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalGroup, VerticalScroll
+from textual.css.query import NoMatches
 from textual.dom import NoScreen
 from textual.driver import Driver
 from textual.events import AppBlur, AppFocus, MouseScrollDown, MouseScrollUp, MouseUp
@@ -594,6 +595,8 @@ class VibeApp(App):  # noqa: PLR0904
     CSS_PATH = "app.tcss"
     PAUSE_GC_ON_SCROLL: ClassVar[bool] = True
 
+    _exiting: bool = False
+
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+c", "interrupt_or_quit", "Quit", show=False),
         Binding("ctrl+d", "delete_right_or_quit", "Quit", show=False, priority=True),
@@ -999,6 +1002,12 @@ class VibeApp(App):  # noqa: PLR0904
             self._cached_messages_area = self.query_one("#messages")
         return self._cached_messages_area
 
+    def _mounted_messages_area(self) -> Widget | None:
+        with suppress(NoMatches):
+            messages_area = self._messages_area
+            return messages_area if messages_area.is_attached else None
+        return None
+
     @property
     def _chat_widget(self) -> ChatScroll:
         if self._cached_chat is None:
@@ -1332,8 +1341,15 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_chat_input_container_submitted(
         self, event: ChatInputContainer.Submitted
     ) -> None:
+        # A submit already in the message queue is still delivered while Textual
+        # tears the UI down, so both the input and the chat DOM can be gone.
+        if self._exiting:
+            return
+        input_widget = self._get_chat_input()
+        if input_widget is None:
+            return
+
         value = event.value.strip()
-        input_widget = self.query_one(ChatInputContainer)
 
         if not value and not self._input_queue.paused:
             return
@@ -1375,6 +1391,8 @@ class VibeApp(App):  # noqa: PLR0904
         self.notify(message, severity="warning", markup=False)
 
     async def _dispatch_idle_input(self, value: str) -> None:
+        if self._exiting:
+            return
         # Plain prompts are guarded by the readiness await in
         # _prepare_prompt_or_abort. classify() and the slash/skill/bash branches
         # below touch app_server directly, so those can still hit the unbound
@@ -1980,7 +1998,8 @@ class VibeApp(App):  # noqa: PLR0904
                 else cmd_name
             )
             command_message = SlashCommandMessage(display)
-            await self._mount_and_scroll(command_message)
+            if not command.exits:
+                await self._mount_and_scroll(command_message)
             handler = getattr(self, command.handler)
             if asyncio.iscoroutinefunction(handler):
                 await handler(cmd_args=cmd_args, command_message=command_message)
@@ -3689,6 +3708,7 @@ class VibeApp(App):  # noqa: PLR0904
         return self.app_server.exit_summary()
 
     async def _exit_app(self, **kwargs: Any) -> None:
+        self._exiting = True
         try:
             await self._begin_shutdown()
             if self._agent_task and not self._agent_task.done():
@@ -4629,6 +4649,7 @@ class VibeApp(App):  # noqa: PLR0904
     def _force_quit(self) -> None:
         if self._force_quit_task is not None and not self._force_quit_task.done():
             return
+        self._exiting = True
         self._force_quit_task = asyncio.create_task(self._force_quit_async())
 
     async def _force_quit_async(self) -> None:
@@ -4856,7 +4877,10 @@ class VibeApp(App):  # noqa: PLR0904
         *,
         container: Widget | None = None,
     ) -> None:
-        messages_area = self._messages_area
+        messages_area = self._mounted_messages_area()
+        if messages_area is None:
+            logger.debug("Dropped a %s mount: no chat DOM", type(widget).__name__)
+            return
         is_user_initiated = isinstance(widget, (UserMessage, UserCommandMessage))
         should_anchor = is_user_initiated or self._chat_widget.is_at_bottom
 
@@ -4866,6 +4890,16 @@ class VibeApp(App):  # noqa: PLR0904
 
         before_parent = before.parent if before is not None else None
         after_parent = after.parent if after is not None else None
+        target = messages_area
+        if isinstance(before_parent, Widget):
+            target = before_parent
+        elif isinstance(after_parent, Widget):
+            target = after_parent
+        elif container is not None:
+            target = container
+        if not target.is_attached:
+            logger.debug("Dropped a %s mount: target detached", type(widget).__name__)
+            return
         with self.batch_update():
             if isinstance(before_parent, Widget):
                 await before_parent.mount(widget, before=before)
