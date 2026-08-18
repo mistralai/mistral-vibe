@@ -31,16 +31,20 @@ async def spawn_shell_command(
                 env=env,
                 cwd=cwd,
             )
-        return await asyncio.create_subprocess_exec(
-            shell.executable or "cmd.exe",
-            "/d",
-            "/c",
+        # cmd.exe must receive the command as one raw command-line tail, not as
+        # an argv entry: exec mode routes it through subprocess.list2cmdline,
+        # which escapes inner quotes as \" — a form cmd.exe does not undo, so
+        # `git commit -m "a b"` reaches git as three broken pathspecs. Shell
+        # mode passes it verbatim, and pinning `executable` keeps CPython from
+        # consulting COMSPEC to pick the interpreter.
+        return await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL,
             env=env,
             cwd=cwd,
+            executable=shell.executable or "cmd.exe",
         )
 
     return await asyncio.create_subprocess_shell(
