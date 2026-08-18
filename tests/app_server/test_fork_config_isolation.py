@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_backend import FakeBackend
+from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.app_server._runtime import AgentRuntimeFactory
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import VibeConfigSchema
+from vibe.core.config import SessionLoggingConfig, VibeConfigSchema
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.experiments.active import ExperimentName
 from vibe.core.experiments.models import EvalResponse
+from vibe.core.session.session_lease import SessionBusyError, SessionLease
 
 
 async def _real_orchestrator() -> ConfigOrchestrator[VibeConfigSchema]:
@@ -87,6 +91,39 @@ async def test_derived_runtime_inherits_experiment_state(derived_kind: str) -> N
     finally:
         await derived.aclose()
         await agent.aclose()
+
+
+@pytest.mark.parametrize("derived_kind", ["fork", "child"])
+@pytest.mark.asyncio
+async def test_derived_runtime_holds_the_shared_session_lease(
+    derived_kind: str, tmp_path: Path
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    agent = AgentLoop(
+        FakeConfigOrchestrator(config),
+        agent_name=BuiltinAgentName.ASK,
+        backend=FakeBackend(),
+        mcp_registry=FakeMCPRegistry(),
+    )
+    factory = AgentRuntimeFactory()
+    derived = (
+        await factory.fork(agent, None)
+        if derived_kind == "fork"
+        else await factory.create_child(agent, "explore")
+    )
+
+    try:
+        with pytest.raises(SessionBusyError):
+            SessionLease(tmp_path, derived.session_id).acquire()
+    finally:
+        await derived.aclose()
+        await agent.aclose()
+
+    SessionLease(tmp_path, derived.session_id).acquire().release()
 
 
 @pytest.mark.asyncio

@@ -95,6 +95,21 @@ class ChatInputBody(VoiceManagerListener, Widget):
         if self._voice_manager:
             self._voice_manager.remove_listener(self)
 
+    def replace_voice_manager(self, voice_manager: VoiceManagerPort | None) -> None:
+        # Compose binds the noop voice manager on the cold mount-first path; the
+        # real manager arrives later via _initialize_client_dependencies. Re-bind
+        # the listener and the text-area's manager reference so Ctrl+R and
+        # transcribe callbacks reach the real manager.
+        if self._voice_manager is voice_manager:
+            return
+        if self._voice_manager:
+            self._voice_manager.remove_listener(self)
+        self._voice_manager = voice_manager
+        if voice_manager:
+            voice_manager.add_listener(self)
+        if self.input_widget:
+            self.input_widget.replace_voice_manager(voice_manager)
+
     def _parse_mode_and_text(self, text: str) -> tuple[InputMode, str]:
         if text.startswith("!"):
             return "!", text[1:]

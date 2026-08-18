@@ -48,6 +48,7 @@ from vibe.app_server.models import (
     UserQuestionResult,
 )
 from vibe.app_server.protocol import (
+    AppServerResponseError,
     CallbackCallParams,
     CallbackCallResponse,
     CallbackResult,
@@ -71,6 +72,7 @@ from vibe.app_server.protocol import (
     ServerRequest,
     SessionContinueParams,
     SessionContinueResponse,
+    SessionKind,
     SessionOptions,
     SessionReadParams,
     SessionReadResponse,
@@ -191,6 +193,7 @@ class AppServerSession:
         session_options: SessionOptions | None = None,
         resume_session_id: str | None = None,
         continue_session: bool = False,
+        session_kind: SessionKind = SessionKind.NORMAL,
         client_tool_handler: ClientToolHandler | None = None,
         client_factory: Callable[[], AppServerClient] | None = None,
     ) -> AppServerSession:
@@ -208,7 +211,8 @@ class AppServerSession:
             state = validate_wire(
                 SessionStartResponse,
                 await client.request(
-                    "session/start", SessionStartParams(agent_config=agent_config)
+                    "session/start",
+                    SessionStartParams(agent_config=agent_config, kind=session_kind),
                 ),
             ).state
         else:
@@ -395,15 +399,21 @@ class AppServerSession:
         if active_turn_id is None:
             return
         client = await self._ensure_attached()
-        validate_wire(
-            TurnInterruptResponse,
-            await client.request(
-                "turn/interrupt",
-                TurnInterruptParams(
-                    session_id=self.session_id, expected_turn_id=active_turn_id
+        try:
+            validate_wire(
+                TurnInterruptResponse,
+                await client.request(
+                    "turn/interrupt",
+                    TurnInterruptParams(
+                        session_id=self.session_id, expected_turn_id=active_turn_id
+                    ),
+                    wait_for_incoming=True,
                 ),
-            ),
-        )
+            )
+        except AppServerResponseError as exc:
+            if self._interrupt_already_settled(exc):
+                return
+            raise
 
     def _active_public_turn_id(self) -> str | None:
         return next(
@@ -414,6 +424,15 @@ class AppServerSession:
             ),
             self._consumed_turn_id,
         )
+
+    @staticmethod
+    def _interrupt_already_settled(exc: AppServerResponseError) -> bool:
+        error = exc.error
+        if error.code is ProtocolErrorCode.STALE_TURN:
+            return True
+        if error.code is not ProtocolErrorCode.CONFLICT:
+            return False
+        return error.message in {"No active turn", "No matching active turn"}
 
     async def respond_to_callback(
         self, callback_id: str, output: CallbackOutput

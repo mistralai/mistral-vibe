@@ -7,11 +7,14 @@ from typing import cast
 import pytest
 
 from tests.conftest import build_test_agent_loop
-from tests.stubs.app_server import build_test_app_server
+from tests.stubs.app_server import build_test_app_server, legacy_backend
+from vibe.app_server._model import ProtocolModel
+from vibe.app_server._runtime import AgentRuntimeFactory
 from vibe.app_server._tool_io import ClientToolIO
-from vibe.app_server.models import ProtocolModel
+from vibe.app_server.client import AppServerClient
 from vibe.app_server.protocol import (
     ClientCapabilities,
+    ClientInfo,
     ClientToolReadTextFileParams,
     ClientToolReadTextFileResponse,
     ClientToolTerminalCreateParams,
@@ -21,6 +24,7 @@ from vibe.app_server.protocol import (
     EmptyResponse,
     JsonRpcSuccessResponse,
 )
+from vibe.app_server.session import AppServerSession
 from vibe.app_server.transport import memory_transport_pair
 from vibe.core.tools.io_port import ShellCommandRequest
 
@@ -58,13 +62,36 @@ class FakeClientRequester:
         return response_type.model_validate(response.model_dump(mode="json"))
 
 
+class FakeClientToolBridge:
+    def __init__(
+        self,
+        requester: FakeClientRequester,
+        capabilities: ClientCapabilities,
+        session_id: str = "root",
+    ) -> None:
+        self._requester = requester
+        self._capabilities = capabilities
+        self._session_id = session_id
+
+    def client_capabilities(self) -> ClientCapabilities:
+        return self._capabilities
+
+    def current_session_id(self) -> str:
+        return self._session_id
+
+    async def request_client_result[ResultT: ProtocolModel](
+        self, method: str, params: ProtocolModel, response_type: type[ResultT]
+    ) -> ResultT:
+        return await self._requester(method, params, response_type)
+
+
 @pytest.mark.asyncio
 async def test_client_tool_io_projects_typed_filesystem_and_terminal_requests() -> None:
     requester = FakeClientRequester()
     capabilities = ClientCapabilities(
         client_tools=["filesystem/read", "filesystem/write", "terminal"]
     )
-    tool_io = ClientToolIO(requester, lambda: capabilities, lambda: "root")
+    tool_io = ClientToolIO(FakeClientToolBridge(requester, capabilities))
 
     bounded = await tool_io.read_lines(
         Path("/workspace/file.txt"), start_line=1, limit=2, max_bytes=100
@@ -114,7 +141,7 @@ async def test_client_tool_io_projects_typed_filesystem_and_terminal_requests() 
 async def test_client_terminal_signal_is_not_reported_as_success() -> None:
     requester = FakeClientRequester(ClientToolTerminalWaitResponse(signal="SIGTERM"))
     tool_io = ClientToolIO(
-        requester, lambda: ClientCapabilities(client_tools=["terminal"]), lambda: "root"
+        FakeClientToolBridge(requester, ClientCapabilities(client_tools=["terminal"]))
     )
 
     result = await tool_io.run_shell(
@@ -160,12 +187,21 @@ async def test_child_sessions_share_the_server_owned_tool_io_port() -> None:
     client_transport, server_transport = memory_transport_pair()
     agent_loop = build_test_agent_loop()
     server = build_test_app_server(agent_loop, server_transport)
-    child = await server._runtime_factory.create_child(agent_loop, "explore")
-    child_runtime = server._sessions._build_child_runtime(child)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    session = await AppServerSession.start(
+        client,
+        client_info=ClientInfo(name="test", version="1"),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        children = legacy_backend(server).children
+        child = await AgentRuntimeFactory().create_child(agent_loop, "explore")
+        child_runtime = children._build_child_runtime(child)
 
-    assert child_runtime.turns._tool_io is server._tool_io
+        assert child_runtime.turns._tool_io is children._tool_io
 
-    await child_runtime.close()
-    await server.close()
+        await child_runtime.close()
+    finally:
+        await session.close()
     await client_transport.close()
     await agent_loop.aclose()

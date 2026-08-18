@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from vibe.core.subagents import SubagentRunAccumulator, TaskResult
-from vibe.core.tools.builtins.bash import Bash, BashResult
+from vibe.core.tools.builtins.bash import Bash, CapturedShellResult
 from vibe.core.types import AssistantEvent, ToolResultEvent
 
 
@@ -18,7 +18,7 @@ def test_subagent_run_accumulates_response_and_tool_progress() -> None:
         ToolResultEvent(
             tool_name="bash",
             tool_class=Bash,
-            result=BashResult(command="pwd", stdout="/repo", stderr="", returncode=0),
+            result=CapturedShellResult(command="pwd", stdout="/repo", stderr=""),
             tool_call_id="bash-1",
         ),
         tool_call_id="task-1",

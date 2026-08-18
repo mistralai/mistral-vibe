@@ -5,6 +5,7 @@ Usage:
 - Each command runs independently in a fresh, stateless PowerShell process.
 - Vibe resolves `pwsh.exe`, then `powershell.exe`, unless a PowerShell `shell` override is provided.
 - `cmd.exe` is not used by this tool.
+- Separate streams: this shell captures two pipes and reports them as `stdout` and `stderr`, so they are not interleaved. Read `exit_code` to tell success from failure.
 - Use the `timeout` or `timeout_seconds` parameter to control how long a command may run.
 - Prefer the dedicated tools over their shell equivalents:
   - reading files -> `read_file`

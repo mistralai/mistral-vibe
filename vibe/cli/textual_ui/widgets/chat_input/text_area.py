@@ -485,6 +485,11 @@ class ChatTextArea(TextArea):
 
     feedback_active: bool = False
 
+    def replace_voice_manager(self, voice_manager: VoiceManagerPort | None) -> None:
+        # The text area holds the manager reference for Ctrl+R and stop/cancel;
+        # swap in the real one after the session is ready (cold mount-first path).
+        self._voice_manager = voice_manager
+
     async def _handle_voice_key(self, event: events.Key) -> bool:
         if not self._voice_manager:
             return False

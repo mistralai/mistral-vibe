@@ -776,3 +776,77 @@ class TestActGatesOnExperiments:
 
             assert finished_init is True
             assert any(getattr(event, "content", None) == "hello" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_start_initialize_experiments_arms_new_session_telemetry_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = build_test_agent_loop()
+    monkeypatch.setattr(loop, "initialize_experiments", AsyncMock())
+    try:
+        loop.start_initialize_experiments()
+        assert loop._pending_new_session_telemetry is True
+        assert loop._deferred_new_session_telemetry is False
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_deferred_new_session_telemetry_emitted_once_on_first_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = build_test_agent_loop()
+    monkeypatch.setattr(loop, "initialize_experiments", AsyncMock())
+    emit = MagicMock()
+    monkeypatch.setattr(loop, "emit_new_session_telemetry", emit)
+    try:
+        loop.start_initialize_experiments(defer_new_session_telemetry=True)
+        assert loop._pending_new_session_telemetry is False
+        assert loop._deferred_new_session_telemetry is True
+        emit.assert_not_called()
+
+        loop._emit_deferred_new_session_telemetry()
+        loop._emit_deferred_new_session_telemetry()
+        emit.assert_called_once_with()
+        assert loop._deferred_new_session_telemetry is False
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resume_drops_deferred_new_session_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = build_test_agent_loop()
+    monkeypatch.setattr(loop, "initialize_experiments", AsyncMock())
+    emit = MagicMock()
+    monkeypatch.setattr(loop, "emit_new_session_telemetry", emit)
+    try:
+        loop.start_initialize_experiments(defer_new_session_telemetry=True)
+        loop._reset_session_scoped_state()
+        assert loop._deferred_new_session_telemetry is False
+        loop._emit_deferred_new_session_telemetry()
+        emit.assert_not_called()
+    finally:
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_direct_new_session_emit_consumes_deferred_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = build_test_agent_loop()
+    monkeypatch.setattr(loop, "initialize_experiments", AsyncMock())
+    send = MagicMock()
+    monkeypatch.setattr(loop.telemetry_client, "send_new_session", send)
+    try:
+        loop.start_initialize_experiments(defer_new_session_telemetry=True)
+        # A direct emit (e.g. /new or /clear via _reset_session) consumes the
+        # deferred flag, so act()'s later flush cannot double-emit.
+        loop.emit_new_session_telemetry()
+        assert loop._deferred_new_session_telemetry is False
+        loop._emit_deferred_new_session_telemetry()
+        send.assert_called_once()
+    finally:
+        await loop.aclose()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -26,42 +25,43 @@ from vibe.utils.io import BoundedReadResult, ReadSafeResult, normalize_newlines
 _TERMINAL_CLEANUP_TIMEOUT = 10.0
 
 
-class RequestClientResult(Protocol):
-    async def __call__[ResultT: ProtocolModel](
+class _ClientToolBridge(Protocol):
+    def client_capabilities(self) -> ClientCapabilities: ...
+
+    def current_session_id(self) -> str: ...
+
+    async def request_client_result[ResultT: ProtocolModel](
         self, method: str, params: ProtocolModel, response_type: type[ResultT]
     ) -> ResultT: ...
 
 
 class ClientToolIO(ToolIOPort):
-    def __init__(
-        self,
-        request_client: RequestClientResult,
-        capabilities: Callable[[], ClientCapabilities],
-        root_session_id: Callable[[], str],
-    ) -> None:
-        self._request_client = request_client
-        self._capabilities = capabilities
-        self._root_session_id = root_session_id
+    def __init__(self, client_bridge: _ClientToolBridge) -> None:
+        self._client_bridge = client_bridge
 
     @property
     def supports_read(self) -> bool:
-        return "filesystem/read" in self._capabilities().client_tools
+        return (
+            "filesystem/read" in self._client_bridge.client_capabilities().client_tools
+        )
 
     @property
     def supports_write(self) -> bool:
-        return "filesystem/write" in self._capabilities().client_tools
+        return (
+            "filesystem/write" in self._client_bridge.client_capabilities().client_tools
+        )
 
     @property
     def supports_terminal(self) -> bool:
-        return "terminal" in self._capabilities().client_tools
+        return "terminal" in self._client_bridge.client_capabilities().client_tools
 
     async def read_lines(
         self, path: Path, *, start_line: int, limit: int, max_bytes: int
     ) -> BoundedReadResult:
-        response = await self._request_client(
+        response = await self._client_bridge.request_client_result(
             ClientToolMethod.READ_TEXT_FILE,
             ClientToolReadTextFileParams(
-                session_id=self._root_session_id(),
+                session_id=self._client_bridge.current_session_id(),
                 path=str(path),
                 line=start_line if start_line != 1 else None,
                 limit=limit + 1,
@@ -81,10 +81,10 @@ class ClientToolIO(ToolIOPort):
         return BoundedReadResult(lines[:limit], total_lines, was_truncated)
 
     async def read_text(self, path: Path) -> ReadSafeResult:
-        response = await self._request_client(
+        response = await self._client_bridge.request_client_result(
             ClientToolMethod.READ_TEXT_FILE,
             ClientToolReadTextFileParams(
-                session_id=self._root_session_id(), path=str(path)
+                session_id=self._client_bridge.current_session_id(), path=str(path)
             ),
             ClientToolReadTextFileResponse,
         )
@@ -102,17 +102,19 @@ class ClientToolIO(ToolIOPort):
         del encoding
         if newline is not None:
             content = content.replace("\n", newline)
-        await self._request_client(
+        await self._client_bridge.request_client_result(
             ClientToolMethod.WRITE_TEXT_FILE,
             ClientToolWriteTextFileParams(
-                session_id=self._root_session_id(), path=str(path), content=content
+                session_id=self._client_bridge.current_session_id(),
+                path=str(path),
+                content=content,
             ),
             EmptyResponse,
         )
 
     async def run_shell(self, request: ShellCommandRequest) -> ShellCommandResult:
-        root_session_id = self._root_session_id()
-        created = await self._request_client(
+        root_session_id = self._client_bridge.current_session_id()
+        created = await self._client_bridge.request_client_result(
             ClientToolMethod.TERMINAL_CREATE,
             ClientToolTerminalCreateParams(
                 session_id=root_session_id,
@@ -135,7 +137,7 @@ class ClientToolIO(ToolIOPort):
         try:
             try:
                 exit_status = await asyncio.wait_for(
-                    self._request_client(
+                    self._client_bridge.request_client_result(
                         ClientToolMethod.TERMINAL_WAIT,
                         terminal,
                         ClientToolTerminalWaitResponse,
@@ -148,7 +150,7 @@ class ClientToolIO(ToolIOPort):
             except BaseException:
                 await self._cleanup(ClientToolMethod.TERMINAL_KILL, terminal)
                 raise
-            output = await self._request_client(
+            output = await self._client_bridge.request_client_result(
                 ClientToolMethod.TERMINAL_OUTPUT,
                 terminal,
                 ClientToolTerminalOutputResponse,
@@ -172,7 +174,9 @@ class ClientToolIO(ToolIOPort):
     async def _cleanup(self, method: str, params: ClientToolTerminalParams) -> None:
         try:
             await asyncio.wait_for(
-                self._request_client(method, params, EmptyResponse),
+                self._client_bridge.request_client_result(
+                    method, params, EmptyResponse
+                ),
                 timeout=_TERMINAL_CLEANUP_TIMEOUT,
             )
         except Exception as exc:

@@ -14,7 +14,23 @@ from vibe.setup.auth import (
     BrowserSignInError,
     BrowserSignInErrorCode,
 )
+from vibe.setup.auth.api_key_persistence import (
+    ProviderCredentialsPersistRequest,
+    ProviderCredentialsPersistResult,
+)
 from vibe.setup.onboarding.context import OnboardingContext
+
+
+async def _noop_tenant_domain_resolver(
+    provider: ProviderConfig,
+    console_base_url: str,
+    api_key: str,
+    current_vibe_base_url: str,
+) -> tuple[ProviderConfig, str]:
+    """Tests skip tenant-domain discovery by default so ``_persist_credentials``
+    doesn't try to reach real hosts.
+    """
+    return provider, current_vibe_base_url
 
 
 def build_browser_sign_in_attempt(
@@ -117,14 +133,33 @@ class InMemoryApiKeyPersister:
         return self.result
 
 
-class InMemoryProviderPersister:
-    def __init__(self, result: bool = True) -> None:
-        self.result = result
-        self.saved: list[ProviderConfig] = []
+class InMemoryCredentialsPersister:
+    def __init__(
+        self,
+        provider_result: bool = True,
+        console_base_url_result: bool = True,
+        vibe_base_url_result: bool = True,
+    ) -> None:
+        self.provider_result = provider_result
+        self.console_base_url_result = console_base_url_result
+        self.vibe_base_url_result = vibe_base_url_result
+        self.saved: list[ProviderCredentialsPersistRequest] = []
 
-    def persist(self, provider: ProviderConfig) -> bool:
-        self.saved.append(provider)
-        return self.result
+    async def persist(
+        self, request: ProviderCredentialsPersistRequest
+    ) -> ProviderCredentialsPersistResult:
+        self.saved.append(request)
+        return ProviderCredentialsPersistResult(
+            provider=self.provider_result,
+            console_base_url=(
+                self.console_base_url_result
+                if request.console_base_url is not None
+                else None
+            ),
+            vibe_base_url=(
+                self.vibe_base_url_result if request.vibe_base_url is not None else None
+            ),
+        )
 
 
 def build_acp_agent(
@@ -133,30 +168,32 @@ def build_acp_agent(
     browser_sign_in: FakeBrowserSignInService | None = None,
     api_key_persister: InMemoryApiKeyPersister | None = None,
 ) -> tuple[VibeAcpAgentLoop, MutableOnboardingContextLoader, InMemoryApiKeyPersister]:
-    agent, context_loader, key_persister, _ = build_acp_agent_with_provider_persister(
-        provider=provider,
-        browser_sign_in=browser_sign_in,
-        api_key_persister=api_key_persister,
+    agent, context_loader, key_persister, _ = (
+        build_acp_agent_with_credentials_persister(
+            provider=provider,
+            browser_sign_in=browser_sign_in,
+            api_key_persister=api_key_persister,
+        )
     )
     return agent, context_loader, key_persister
 
 
-def build_acp_agent_with_provider_persister(
+def build_acp_agent_with_credentials_persister(
     *,
     provider: ProviderConfig | None = None,
     browser_sign_in: FakeBrowserSignInService | None = None,
     api_key_persister: InMemoryApiKeyPersister | None = None,
-    provider_persister: InMemoryProviderPersister | None = None,
+    credentials_persister: InMemoryCredentialsPersister | None = None,
 ) -> tuple[
     VibeAcpAgentLoop,
     MutableOnboardingContextLoader,
     InMemoryApiKeyPersister,
-    InMemoryProviderPersister,
+    InMemoryCredentialsPersister,
 ]:
     provider = provider or build_mistral_provider()
     browser_sign_in = browser_sign_in or FakeBrowserSignInService()
     api_key_persister = api_key_persister or InMemoryApiKeyPersister()
-    provider_persister = provider_persister or InMemoryProviderPersister()
+    credentials_persister = credentials_persister or InMemoryCredentialsPersister()
     context_loader = MutableOnboardingContextLoader(provider)
 
     return (
@@ -164,11 +201,12 @@ def build_acp_agent_with_provider_persister(
             onboarding_context_loader=context_loader,
             browser_sign_in_service_factory=lambda _provider: browser_sign_in,
             api_key_persister=api_key_persister.persist,
-            provider_persister=provider_persister.persist,
+            credentials_persister=credentials_persister.persist,
+            tenant_domain_resolver=_noop_tenant_domain_resolver,
         ),
         context_loader,
         api_key_persister,
-        provider_persister,
+        credentials_persister,
     )
 
 
@@ -526,8 +564,8 @@ class TestACPAuthenticateCustomDomain:
     async def test_completion_persists_provider_when_domain_was_overridden(
         self,
     ) -> None:
-        (acp_agent_loop, _, api_key_persister, provider_persister) = (
-            build_acp_agent_with_provider_persister()
+        (acp_agent_loop, _, api_key_persister, credentials_persister) = (
+            build_acp_agent_with_credentials_persister()
         )
         start_response = await acp_agent_loop.authenticate(
             "browser-auth-delegated",
@@ -547,19 +585,20 @@ class TestACPAuthenticateCustomDomain:
             "attemptId": attempt_id,
             "persistResult": "completed",
             "persistProviderResult": "completed",
+            "persistConsoleBaseUrlResult": "completed",
             "status": "completed",
         }
-        assert len(provider_persister.saved) == 1
-        assert (
-            provider_persister.saved[0].browser_auth_base_url
-            == "https://console.acme.internal"
-        )
+        assert len(credentials_persister.saved) == 1
+        request = credentials_persister.saved[0]
+        assert request.provider.browser_auth_base_url == "https://console.acme.internal"
+        assert request.console_base_url == "https://console.acme.internal"
+        assert request.vibe_base_url is None
         assert api_key_persister.custom_domain_flags == [True]
 
     @pytest.mark.asyncio
     async def test_completion_does_not_persist_provider_without_override(self) -> None:
-        (acp_agent_loop, _, api_key_persister, provider_persister) = (
-            build_acp_agent_with_provider_persister()
+        (acp_agent_loop, _, api_key_persister, credentials_persister) = (
+            build_acp_agent_with_credentials_persister()
         )
         start_response = await acp_agent_loop.authenticate("browser-auth-delegated")
         attempt_id = require_auth_meta(start_response, "browser-auth-delegated")[
@@ -573,7 +612,7 @@ class TestACPAuthenticateCustomDomain:
         assert "persistProviderResult" not in require_auth_meta(
             response, "browser-auth-delegated"
         )
-        assert provider_persister.saved == []
+        assert credentials_persister.saved == []
         assert api_key_persister.custom_domain_flags == [False]
 
     @pytest.mark.asyncio
@@ -582,8 +621,8 @@ class TestACPAuthenticateCustomDomain:
             browser_auth_base_url="https://console.acme.internal",
             browser_auth_api_base_url="https://console.acme.internal/api",
         )
-        (acp_agent_loop, _, api_key_persister, provider_persister) = (
-            build_acp_agent_with_provider_persister(provider=provider)
+        (acp_agent_loop, _, api_key_persister, credentials_persister) = (
+            build_acp_agent_with_credentials_persister(provider=provider)
         )
         start_response = await acp_agent_loop.authenticate(
             "browser-auth-delegated", action="start", signInTarget="mistral"
@@ -596,9 +635,9 @@ class TestACPAuthenticateCustomDomain:
             "browser-auth-delegated", action="complete", attemptId=attempt_id
         )
 
-        assert len(provider_persister.saved) == 1
+        assert len(credentials_persister.saved) == 1
         assert (
-            provider_persister.saved[0].browser_auth_base_url
+            credentials_persister.saved[0].provider.browser_auth_base_url
             == "https://console.mistral.ai"
         )
         assert api_key_persister.custom_domain_flags == [False]
@@ -607,8 +646,8 @@ class TestACPAuthenticateCustomDomain:
     async def test_completion_reports_failed_provider_persistence_without_failing(
         self,
     ) -> None:
-        (acp_agent_loop, _, _, _) = build_acp_agent_with_provider_persister(
-            provider_persister=InMemoryProviderPersister(result=False)
+        (acp_agent_loop, _, _, _) = build_acp_agent_with_credentials_persister(
+            credentials_persister=InMemoryCredentialsPersister(provider_result=False)
         )
         start_response = await acp_agent_loop.authenticate(
             "browser-auth-delegated",
@@ -628,6 +667,78 @@ class TestACPAuthenticateCustomDomain:
         assert meta["persistResult"] == "completed"
         assert meta["persistProviderResult"] == "failed"
         assert meta["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_completion_applies_tenant_domains_from_whoami(self) -> None:
+        provider = build_mistral_provider()
+        credentials_persister = InMemoryCredentialsPersister()
+
+        async def _resolver(
+            _provider: ProviderConfig, _console: str, _key: str, _current_vibe: str
+        ) -> tuple[ProviderConfig, str]:
+            return (
+                _provider.model_copy(
+                    update={"api_base": "https://api.acme.internal/v1"}
+                ),
+                "https://chat.acme.internal",
+            )
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(provider),
+            browser_sign_in_service_factory=lambda _: FakeBrowserSignInService(),
+            api_key_persister=InMemoryApiKeyPersister().persist,
+            credentials_persister=credentials_persister.persist,
+            tenant_domain_resolver=_resolver,
+        )
+        start_response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated",
+            action="start",
+            signInTarget="custom",
+            domain="console.acme.internal",
+        )
+        attempt_id = require_auth_meta(start_response, "browser-auth-delegated")[
+            "attemptId"
+        ]
+
+        response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="complete", attemptId=attempt_id
+        )
+
+        meta = require_auth_meta(response, "browser-auth-delegated")
+        assert meta["persistProviderResult"] == "completed"
+        assert meta["persistConsoleBaseUrlResult"] == "completed"
+        assert meta["persistVibeBaseUrlResult"] == "completed"
+        assert len(credentials_persister.saved) == 1
+        request = credentials_persister.saved[0]
+        assert request.provider.api_base == "https://api.acme.internal/v1"
+        assert request.console_base_url == "https://console.acme.internal"
+        assert request.vibe_base_url == "https://chat.acme.internal"
+
+    @pytest.mark.asyncio
+    async def test_completion_skips_tenant_resolver_for_public_console(self) -> None:
+        provider = build_mistral_provider()
+        credentials_persister = InMemoryCredentialsPersister()
+        resolver_calls: list[str] = []
+
+        async def _resolver(
+            _provider: ProviderConfig, console: str, _key: str, current_vibe: str
+        ) -> tuple[ProviderConfig, str]:
+            resolver_calls.append(console)
+            return _provider, current_vibe
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(provider),
+            browser_sign_in_service_factory=lambda _: FakeBrowserSignInService(),
+            api_key_persister=InMemoryApiKeyPersister().persist,
+            credentials_persister=credentials_persister.persist,
+            tenant_domain_resolver=_resolver,
+        )
+        # No custom sign-in target → provider matches context, whole persist
+        # branch is skipped.
+        await acp_agent_loop.authenticate("browser-auth")
+
+        assert resolver_calls == []
+        assert credentials_persister.saved == []
 
 
 class TestACPAuthStatusCustomDomain:

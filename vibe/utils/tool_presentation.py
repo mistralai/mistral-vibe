@@ -28,6 +28,7 @@ class ToolEffectKind(StrEnum):
     WEB_FETCH = auto()
     SKILL = auto()
     SUBAGENT = auto()
+    WORKTREE = auto()
 
 
 class EffectCallDisplay(PresentationModel):

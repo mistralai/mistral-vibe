@@ -55,8 +55,9 @@ and destructive behavior must remain explicit.
 ## Agent Guidance
 
 - Persist messages and metadata through the session layer, not directly from UI code.
-- Route list, read, resume, continue, fork, rewind, clear, compact, rename,
-  delete, and history operations through app-server session resources.
+- Route list, stored reads, resume, continue, and fork through the app-server
+  session backend Host. Route live reads, rewind, clear, compact, and history
+  mutations through the bound session backend.
 - Keep session data serializable and migration-friendly.
 - Treat old transcript formats as real inputs unless a migration intentionally drops support.
 - Do not store surface-only widget state in core session transcripts.

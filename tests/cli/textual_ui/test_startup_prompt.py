@@ -92,6 +92,89 @@ async def test_startup_teleport_waits_for_account_read_after_session_selection(
     run_worker.assert_called_once_with(handle_teleport.return_value, exclusive=False)
 
 
+@pytest.mark.asyncio
+async def test_failed_resume_restores_transcript_when_previewing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = build_test_vibe_app()
+    await app.prepare()
+    app._picker.previewing = True
+    app._cached_messages_area = MagicMock(remove_children=AsyncMock())
+
+    reset_ui = Mock()
+    resume_history = AsyncMock()
+    mount = AsyncMock()
+    monkeypatch.setattr(app, "_switch_to_input_app", AsyncMock())
+    monkeypatch.setattr(
+        app, "_resume_local_session", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    monkeypatch.setattr(app, "_reset_ui_state", reset_ui)
+    monkeypatch.setattr(app, "_resume_history_from_messages", resume_history)
+    monkeypatch.setattr(app, "_mount_and_scroll", mount)
+    monkeypatch.setattr(app, "_load_more", MagicMock(hide=AsyncMock()))
+
+    await app.on_session_picker_app_session_selected(
+        SessionPickerApp.SessionSelected("local:session-1", "session-1")
+    )
+
+    # The previewed transcript is rebuilt from the still-current session so the
+    # failed session's preview is not left on screen desynced from session_id.
+    reset_ui.assert_called_once_with()
+    resume_history.assert_awaited_once_with()
+    assert mount.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_failed_resume_skips_restore_when_not_previewing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = build_test_vibe_app()
+    await app.prepare()
+    app._picker.previewing = False
+
+    reset_ui = Mock()
+    resume_history = AsyncMock()
+    monkeypatch.setattr(app, "_switch_to_input_app", AsyncMock())
+    monkeypatch.setattr(
+        app, "_resume_local_session", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    monkeypatch.setattr(app, "_reset_ui_state", reset_ui)
+    monkeypatch.setattr(app, "_resume_history_from_messages", resume_history)
+    monkeypatch.setattr(app, "_mount_and_scroll", AsyncMock())
+
+    await app.on_session_picker_app_session_selected(
+        SessionPickerApp.SessionSelected("local:session-1", "session-1")
+    )
+
+    # No preview was shown, so there is nothing to rebuild.
+    reset_ui.assert_not_called()
+    resume_history.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exit_picker_to_input_clears_preview_and_startup_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = build_test_vibe_app()
+    await app.prepare()
+    app._show_resume_picker = True
+    app._startup_prompt_processed = False
+    app._picker.previewing = True
+    app._picker.preview_session_id = "session-1"
+
+    rebuild = AsyncMock()
+    monkeypatch.setattr(app, "_switch_to_input_app", AsyncMock())
+    monkeypatch.setattr(app, "_rebuild_transcript_from_current_session", rebuild)
+
+    await app._exit_picker_to_input()
+
+    assert app._picker.preview_session_id is None
+    assert app._show_resume_picker is False
+    assert app._startup_prompt_processed is True
+    assert app._picker.previewing is False
+    rebuild.assert_awaited_once_with()
+
+
 @pytest.mark.parametrize("theme", [AUTO_THEME, "dracula"])
 def test_run_textual_ui_warms_auto_theme_before_app_server_start(
     theme: str, tmp_path

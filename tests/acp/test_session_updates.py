@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TypedDict
 
+from acp.helpers import ToolCallContentVariant
 from acp.schema import (
     AgentMessageChunk,
     AgentPlanUpdate,
@@ -16,7 +18,11 @@ from acp.schema import (
     UserMessageChunk,
 )
 
-from vibe.acp.session_updates import replay_history_entry, session_updates_for_event
+from vibe.acp.session_updates import (
+    _TOOL_KINDS,
+    replay_history_entry,
+    session_updates_for_event,
+)
 from vibe.acp.user_display_content import USER_DISPLAY_CONTENT_META_KEY
 from vibe.app_server.events import (
     HistoryEntryAdded,
@@ -27,6 +33,7 @@ from vibe.app_server.models import (
     CompletedEffectState,
     EffectCallDisplay,
     EffectResultDisplay,
+    FailedEffectState,
     FileEditEffectDetail,
     FileEditEffectInput,
     FileReadEffectDetail,
@@ -41,12 +48,16 @@ from vibe.app_server.models import (
     PublicCheckpointEntry,
     PublicEffectEntry,
     PublicEntryGenerationStatus,
+    PublicError,
     PublicMessageEntry,
     PublicNoticeEntry,
     PublicReasoningEntry,
     PublicSession,
     RunningEffectState,
     SessionTitleUpdatedNoticeDetail,
+    ShellEffectDetail,
+    ShellEffectInput,
+    ShellEffectOutput,
     SkillEffectDetail,
     SkillEffectInput,
     SkillEffectOutput,
@@ -65,6 +76,7 @@ from vibe.app_server.models import (
     WebSearchEffectOutput,
     WebSearchEffectSource,
 )
+from vibe.utils.tool_presentation import ToolEffectKind
 
 
 class _EntryFields(TypedDict):
@@ -275,13 +287,351 @@ def test_effect_projection_uses_semantic_kind_for_arbitrary_tool_names() -> None
         "effect_kind": "file_read",
     }
     assert progress.content is not None
-    texts = [
+    texts = _content_texts(progress.content)
+    assert texts == [" second", "Read 2 lines"]
+
+
+def _content_texts(content: Sequence[ToolCallContentVariant]) -> list[str]:
+    return [
         item.content.text
-        for item in progress.content
+        for item in content
         if isinstance(item, ContentToolCallContent)
         and isinstance(item.content, AcpTextContentBlock)
     ]
-    assert texts == [" second", "Read 2 lines"]
+
+
+def _shell_completion(
+    entry_id: str, *, streamed: str, stdout: str, truncated: bool = False
+) -> tuple[PublicEffectEntry, PublicEffectEntry]:
+    running = PublicEffectEntry(
+        **_entry_fields(entry_id, PublicEntryGenerationStatus.IN_PROGRESS),
+        title="bash",
+        detail=ShellEffectDetail(
+            tool_name="bash",
+            input=ShellEffectInput(command="ls"),
+            display=_display("bash: ls"),
+        ),
+        state=RunningEffectState(output_text=streamed),
+    )
+    completed = running.model_copy(
+        update={
+            "generation_status": PublicEntryGenerationStatus.COMPLETED,
+            "updated_at": 3_000,
+            "state": CompletedEffectState(
+                output=ShellEffectOutput(
+                    stdout=stdout, stderr="", truncated=truncated
+                ).model_dump(mode="json", by_alias=True),
+                output_text=streamed,
+                display=EffectResultDisplay(success=True, verb="Ran", message="ls"),
+            ),
+        }
+    )
+    return running, completed
+
+
+def test_replayed_shell_effect_does_not_repeat_arrival_ordered_output() -> None:
+    streamed = "step 1\nwarning: slow\nstep 2\n"
+    completed = PublicEffectEntry(
+        **_entry_fields("shell-12", PublicEntryGenerationStatus.COMPLETED),
+        title="shell",
+        detail=ShellEffectDetail(
+            tool_name="shell",
+            input=ShellEffectInput(command="build"),
+            display=_display("shell: build"),
+        ),
+        state=CompletedEffectState(
+            output=ShellEffectOutput(
+                stdout="step 1\nstep 2\n", stderr="warning: slow\n", output=streamed
+            ).model_dump(mode="json", by_alias=True),
+            output_text=streamed,
+            display=EffectResultDisplay(success=True, verb="Ran", message="build"),
+        ),
+    )
+
+    start = replay_history_entry(completed)[0]
+
+    assert isinstance(start, ToolCallStart)
+    assert start.content is not None
+    assert _content_texts(start.content) == [streamed]
+
+
+def test_shell_effect_flags_output_the_tool_had_to_truncate() -> None:
+    running, completed = _shell_completion(
+        "shell-10", streamed="capped", stdout="capped", truncated=True
+    )
+
+    progress = session_updates_for_event(
+        HistoryEntryUpdated(
+            previous=running,
+            entry=completed,
+            patch=[JsonPatchOperation(op="replace", path="/state", value=None)],
+        )
+    )[0]
+
+    assert isinstance(progress, ToolCallProgress)
+    assert progress.field_meta is not None
+    assert progress.field_meta["output_truncated"] is True
+
+
+def test_shell_effect_does_not_flag_output_that_fitted() -> None:
+    running, completed = _shell_completion("shell-11", streamed="short", stdout="short")
+
+    progress = session_updates_for_event(
+        HistoryEntryUpdated(
+            previous=running,
+            entry=completed,
+            patch=[JsonPatchOperation(op="replace", path="/state", value=None)],
+        )
+    )[0]
+
+    assert isinstance(progress, ToolCallProgress)
+    assert progress.field_meta is not None
+    assert "output_truncated" not in progress.field_meta
+
+
+def test_shell_effect_streams_output_without_a_result_trailer() -> None:
+    running = PublicEffectEntry(
+        **_entry_fields("shell-1", PublicEntryGenerationStatus.IN_PROGRESS),
+        title="bash",
+        detail=ShellEffectDetail(
+            tool_name="git_bash",
+            input=ShellEffectInput(command="npm test"),
+            display=_display("bash: npm test"),
+        ),
+        state=RunningEffectState(output_text="first"),
+    )
+    completed = running.model_copy(
+        update={
+            "generation_status": PublicEntryGenerationStatus.COMPLETED,
+            "updated_at": 3_000,
+            "state": CompletedEffectState(
+                output=ShellEffectOutput(stdout="first second", stderr="").model_dump(
+                    mode="json", by_alias=True
+                ),
+                output_text="first second",
+                display=EffectResultDisplay(
+                    success=True, verb="Ran", message="npm test"
+                ),
+            ),
+        }
+    )
+
+    progress = session_updates_for_event(
+        HistoryEntryUpdated(
+            previous=running,
+            entry=completed,
+            patch=[JsonPatchOperation(op="replace", path="/state", value=None)],
+        )
+    )[0]
+
+    assert isinstance(progress, ToolCallProgress)
+    assert progress.kind == "execute"
+    assert progress.status == "completed"
+    assert progress.content is not None
+    texts = _content_texts(progress.content)
+    assert texts == [" second"]
+
+
+def test_completed_shell_effect_adds_no_result_trailer() -> None:
+    running, completed = _shell_completion(
+        "shell-5", streamed="first second", stdout="first second"
+    )
+
+    progress = session_updates_for_event(
+        HistoryEntryUpdated(
+            previous=running,
+            entry=completed,
+            patch=[JsonPatchOperation(op="replace", path="/state", value=None)],
+        )
+    )[0]
+
+    assert isinstance(progress, ToolCallProgress)
+    assert progress.content is None
+
+
+def test_non_streaming_shell_effect_surfaces_its_result_output_once() -> None:
+    running = PublicEffectEntry(
+        **_entry_fields("shell-3", PublicEntryGenerationStatus.IN_PROGRESS),
+        title="bash",
+        detail=ShellEffectDetail(
+            tool_name="bash",
+            input=ShellEffectInput(command="ls"),
+            display=_display("bash: ls"),
+        ),
+        state=RunningEffectState(output_text=""),
+    )
+    completed = running.model_copy(
+        update={
+            "generation_status": PublicEntryGenerationStatus.COMPLETED,
+            "updated_at": 3_000,
+            "state": CompletedEffectState(
+                output=ShellEffectOutput(stdout="src\n", stderr="warn\n").model_dump(
+                    mode="json", by_alias=True
+                ),
+                # The projection recovers the transcript a tool never streamed.
+                output_text="src\nwarn\n",
+                display=EffectResultDisplay(success=True, verb="Ran", message="ls"),
+            ),
+        }
+    )
+
+    progress = session_updates_for_event(
+        HistoryEntryUpdated(
+            previous=running,
+            entry=completed,
+            patch=[JsonPatchOperation(op="replace", path="/state", value=None)],
+        )
+    )[0]
+
+    assert isinstance(progress, ToolCallProgress)
+    assert progress.content is not None
+    texts = _content_texts(progress.content)
+    assert texts == ["src\nwarn\n"]
+
+
+def test_replayed_shell_effect_sends_the_whole_output_once() -> None:
+    completed = PublicEffectEntry(
+        **_entry_fields("shell-8", PublicEntryGenerationStatus.COMPLETED),
+        title="bash",
+        detail=ShellEffectDetail(
+            tool_name="bash",
+            input=ShellEffectInput(command="ls"),
+            display=_display("bash: ls"),
+        ),
+        state=CompletedEffectState(
+            output=ShellEffectOutput(stdout="first second", stderr="").model_dump(
+                mode="json", by_alias=True
+            ),
+            output_text="first second",
+            display=EffectResultDisplay(success=True, verb="Ran", message="ls"),
+        ),
+    )
+
+    start = replay_history_entry(completed)[0]
+
+    assert isinstance(start, ToolCallStart)
+    assert start.content is not None
+    assert _content_texts(start.content) == ["first second"]
+
+
+def test_failed_shell_effect_keeps_the_error_alongside_the_streamed_output() -> None:
+    running = PublicEffectEntry(
+        **_entry_fields("shell-2", PublicEntryGenerationStatus.IN_PROGRESS),
+        title="bash",
+        detail=ShellEffectDetail(
+            tool_name="bash",
+            input=ShellEffectInput(command="false"),
+            display=_display("bash: false"),
+        ),
+        state=RunningEffectState(output_text="boom"),
+    )
+    failed = running.model_copy(
+        update={
+            "generation_status": PublicEntryGenerationStatus.COMPLETED,
+            "updated_at": 3_000,
+            "state": FailedEffectState(
+                error=PublicError(message="Command failed: 'false'\nReturn code: 1"),
+                output_text="boom",
+                display=EffectResultDisplay(
+                    success=False, message="Command failed: 'false'\nReturn code: 1"
+                ),
+            ),
+        }
+    )
+
+    progress = session_updates_for_event(
+        HistoryEntryUpdated(
+            previous=running,
+            entry=failed,
+            patch=[JsonPatchOperation(op="replace", path="/state", value=None)],
+        )
+    )[0]
+
+    assert isinstance(progress, ToolCallProgress)
+    assert progress.status == "failed"
+    assert progress.content is not None
+    texts = _content_texts(progress.content)
+    assert texts == ["Command failed: 'false'\nReturn code: 1"]
+
+
+def test_failed_shell_effect_reports_the_reason_the_tool_chose_to_display() -> None:
+    streamed = "boom\nbang\n"
+    running = PublicEffectEntry(
+        **_entry_fields("shell-8", PublicEntryGenerationStatus.IN_PROGRESS),
+        title="bash",
+        detail=ShellEffectDetail(
+            tool_name="bash",
+            input=ShellEffectInput(command="make"),
+            display=_display("bash: make"),
+        ),
+        state=RunningEffectState(output_text=streamed),
+    )
+    # The tool displays the reason only; the model-facing error repeats the output.
+    reason = "Command failed: 'make'\nReturn code: 2"
+    failed = running.model_copy(
+        update={
+            "generation_status": PublicEntryGenerationStatus.COMPLETED,
+            "updated_at": 3_000,
+            "state": FailedEffectState(
+                error=PublicError(message=f"{reason}\n\nOutput:\n{streamed}"),
+                output_text=streamed,
+                display=EffectResultDisplay(success=False, message=reason),
+            ),
+        }
+    )
+
+    progress = session_updates_for_event(
+        HistoryEntryUpdated(
+            previous=running,
+            entry=failed,
+            patch=[JsonPatchOperation(op="replace", path="/state", value=None)],
+        )
+    )[0]
+
+    assert isinstance(progress, ToolCallProgress)
+    assert progress.status == "failed"
+    assert progress.content is not None
+    texts = _content_texts(progress.content)
+    assert texts == ["Command failed: 'make'\nReturn code: 2"]
+
+
+def test_failed_shell_effect_without_streamed_output_keeps_the_error_text() -> None:
+    running = PublicEffectEntry(
+        **_entry_fields("shell-4", PublicEntryGenerationStatus.IN_PROGRESS),
+        title="bash",
+        detail=ShellEffectDetail(
+            tool_name="bash",
+            input=ShellEffectInput(command="false"),
+            display=_display("bash: false"),
+        ),
+        state=RunningEffectState(output_text=""),
+    )
+    failed = running.model_copy(
+        update={
+            "generation_status": PublicEntryGenerationStatus.COMPLETED,
+            "updated_at": 3_000,
+            "state": FailedEffectState(
+                error=PublicError(message="Command failed: 'false'"),
+                output_text="",
+                display=EffectResultDisplay(
+                    success=False, message="Command failed: 'false'"
+                ),
+            ),
+        }
+    )
+
+    progress = session_updates_for_event(
+        HistoryEntryUpdated(
+            previous=running,
+            entry=failed,
+            patch=[JsonPatchOperation(op="replace", path="/state", value=None)],
+        )
+    )[0]
+
+    assert isinstance(progress, ToolCallProgress)
+    assert progress.content is not None
+    texts = _content_texts(progress.content)
+    assert texts == ["Command failed: 'false'"]
 
 
 def test_file_effects_and_todos_keep_rich_acp_semantics() -> None:
@@ -659,3 +1009,10 @@ def test_checkpoints_and_session_titles_use_public_identity_and_metadata() -> No
     assert live_notice_updates == []
     assert isinstance(live_title, SessionInfoUpdate)
     assert live_title.title == "New title"
+
+
+def test_every_effect_kind_maps_to_an_acp_tool_kind() -> None:
+    # _TOOL_KINDS is indexed, not looked up, so a kind added to the enum without
+    # a mapping here raises KeyError the first time ACP replays or streams an
+    # entry carrying it - on session/load of a session another frontend made.
+    assert [kind for kind in ToolEffectKind if kind not in _TOOL_KINDS] == []

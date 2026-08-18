@@ -18,7 +18,7 @@ class ExperimentAttributes(BaseModel):
     the org's Settings → Attributes).
     """
 
-    userId: str
+    userId: str | None = None
     entrypoint: AgentEntrypoint
     agent_version: str
     client_name: str | None = None
@@ -27,6 +27,9 @@ class ExperimentAttributes(BaseModel):
     terminal_emulator: TerminalEmulator | None = None
     custom_system_prompt: bool = False
     organizationId: str | None = None
+    organizationKind: str | None = None
+    workspaceId: str | None = None
+    customerId: str | None = None
 
 
 class TrackedExperiment(BaseModel):

@@ -47,6 +47,8 @@ from vibe.app_server._effect_models import (
     WebSearchEffectInput as WebSearchEffectInput,
     WebSearchEffectOutput as WebSearchEffectOutput,
     WebSearchEffectSource as WebSearchEffectSource,
+    WorktreeEffectDetail as WorktreeEffectDetail,
+    WorktreeEffectInput as WorktreeEffectInput,
     effect_input_json as effect_input_json,
 )
 from vibe.app_server._model import ProtocolModel
@@ -487,11 +489,12 @@ class SkillSummary(ProtocolModel):
 
 class ToolSummary(ProtocolModel):
     name: str
+    is_custom: bool = False
 
 
 class ConnectorCounts(ProtocolModel):
     connected: int = 0
-    total: int = 0
+    total: int | None = None
 
 
 class MCPSourceKind(StrEnum):
@@ -849,16 +852,11 @@ class FailedSessionStatus(ProtocolModel):
     message: str
 
 
-class ArchivedSessionStatus(ProtocolModel):
-    type: Literal["archived"] = "archived"
-
-
 PublicSessionStatus = Annotated[
     IdleSessionStatus
     | RunningSessionStatus
     | BlockedSessionStatus
-    | FailedSessionStatus
-    | ArchivedSessionStatus,
+    | FailedSessionStatus,
     Field(discriminator="type"),
 ]
 

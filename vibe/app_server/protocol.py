@@ -98,6 +98,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "events/read",
     "feedback/record",
     "feedback/shouldShow",
+    "session/history/get",
     "identity/read",
     "loops/clear",
     "loops/create",
@@ -129,7 +130,6 @@ SERVER_METHODS: tuple[str, ...] = (
     "review/turnDiff",
     "runtime/read",
     "session/agent/update",
-    "session/archive",
     "session/compact",
     "session/continue",
     "session/context/inject",
@@ -173,6 +173,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "workspace/trust/untrustedConfig",
     "workspace/trust/status",
     "workspace/worktrees/list",
+    "workspace/worktrees/remove",
 )
 
 
@@ -306,8 +307,24 @@ class SessionOpenParams(ProtocolModel):
         return self.agent_config.cwd or self.agent_config.workdir
 
 
+class SessionKind(StrEnum):
+    """Lifecycle role of a session as seen by the server.
+
+    ``NORMAL`` — a genuine user-initiated session; emits new-session telemetry
+    and is persisted to disk as soon as a turn runs.
+
+    ``EPHEMERAL`` — a throwaway session used to warm up the runtime while the
+    in-app picker is shown; it is discarded on resume and must not emit
+    new-session telemetry or be counted as a new session.
+    """
+
+    NORMAL = auto()
+    EPHEMERAL = auto()
+
+
 class SessionStartParams(SessionOpenParams):
     idempotency_key: str | None = None
+    kind: SessionKind = SessionKind.NORMAL
 
 
 class SessionStartResponse(EventWatermarkResponse):
@@ -391,7 +408,6 @@ class SessionCloseResponse(ProtocolModel):
 class SessionListParams(ProtocolModel):
     cursor: str | None = None
     limit: int = Field(default=50, ge=1, le=500)
-    include_archived: bool = False
     root_session_id: str | None = None
     parent_session_id: str | None = None
     cwd: str | None = None
@@ -401,6 +417,10 @@ class SessionListResponse(ProtocolModel):
     items: list[PublicSession] = Field(default_factory=list)
     next_cursor: str | None = None
     previous_cursor: str | None = None
+    # The session `--continue` would resume: the tty-scoped last-session
+    # pointer when it still exists, else the most recently updated session.
+    # Resolved server-side so the pointer stays behind the app-server boundary.
+    continue_session_id: str | None = None
 
     @property
     def data(self) -> list[PublicSession]:
@@ -452,6 +472,15 @@ class SessionHistoryListResponse(ProtocolModel):
     @property
     def backwards_cursor(self) -> str | None:
         return self.previous_cursor
+
+
+class SessionHistoryGetParams(ProtocolModel):
+    session_id: str
+    history_limit: int = Field(default=200, ge=1, le=500)
+
+
+class SessionHistoryGetResponse(ProtocolModel):
+    history: list[PublicHistoryEntry]
 
 
 class SessionTurnsListParams(ProtocolModel):
@@ -786,6 +815,10 @@ class ConfigReadParams(ProtocolModel):
 class ConfigReadResponse(ProtocolModel):
     config: ConfigView
     stripped_history_images: int = 0
+    skills_count: int = 0
+    hooks_count: int = 0
+    mcp_servers_total: int = 0
+    mcp_servers_enabled: int = 0
 
 
 class AgentInstallParams(ProtocolModel):
@@ -1078,6 +1111,37 @@ class WorkspaceLinkedWorktree(ProtocolModel):
 
 class WorkspaceWorktreeListResponse(ProtocolModel):
     worktrees: list[WorkspaceLinkedWorktree]
+
+
+# No session_id on the wire: the caller is deleting a session that has already
+# closed and dropped its holder, and accepting one would let a client name an
+# arbitrary holder file to unlink.
+class WorkspaceWorktreeRemoveParams(ProtocolModel):
+    cwd: str = Field(min_length=1)
+
+
+# Spelled out here rather than imported from vibe.core.git.worktree: the protocol
+# is the wire contract and must not pull core into the app-server clients.
+type WorktreeRemoveOutcome = Literal[
+    "removed",
+    "kept_dirty",
+    "kept_in_use",
+    "kept_unmanaged",
+    # Distinct from kept_unmanaged: the worktree is Vibe's and the removal
+    # itself failed. Collapsing the two would report a failure as "not ours".
+    "kept_error",
+    "not_found",
+]
+
+
+class WorkspaceWorktreeRemoveResponse(ProtocolModel):
+    # A kept worktree is a normal outcome the caller has to render, not a fault,
+    # so every case answers with a result rather than a JSON-RPC error.
+    outcome: WorktreeRemoveOutcome
+    root: str | None = None
+    branch: str | None = None
+    branch_deleted: bool = False
+    reasons: list[str] = Field(default_factory=list)
 
 
 class WorkspaceTrustDecisionParams(ProtocolModel):
@@ -1486,6 +1550,7 @@ class ProtocolErrorCode(StrEnum):
     CONFLICT = auto()
     STALE_TURN = auto()
     NOT_STEERABLE = auto()
+    CALLBACK_CLOSED = auto()
     COMPACTION_FAILED = auto()
     UNAUTHORIZED = auto()
     FORBIDDEN = auto()

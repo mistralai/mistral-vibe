@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -9,12 +10,13 @@ from pydantic import ValidationError
 import pytest
 
 from tests.mock.utils import collect_result
-from vibe.core.tools.base import BaseToolState, ToolError, ToolPermission
+from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError, ToolPermission
 import vibe.core.tools.builtins.bash as bash_module
 from vibe.core.tools.builtins.bash import (
     Bash,
     BashArgs,
     BashToolConfig,
+    CapturedShellResult,
     _get_default_denylist,
     _get_default_denylist_standalone,
     default_read_only_commands,
@@ -38,19 +40,24 @@ from vibe.core.tools.builtins.experimental_bash import (
     BashStdinResult,
     ExperimentalBash,
     ExperimentalBashArgs,
+    ExperimentalBashResult,
     ExperimentalBashToolConfig,
     ManagedShellError,
+    OutputChunk,
+    SessionInfo,
     TerminalSession,
     TerminalSessionManager,
+    _ForegroundStream,
 )
 from vibe.core.tools.builtins.managed_shell.backend import (
+    UNKNOWN_EXIT_CODE,
     ManagedShellBackend,
     ManagedShellBackendError,
 )
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.terminal_runtime import TerminalRuntime
 from vibe.core.tools.ui import ToolUIDataAdapter
-from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows
 
 
@@ -67,11 +74,29 @@ def _hide_standard_git_installs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
 
 
+def test_shell_results_keep_a_returncode_alias_for_post_tool_hooks():
+    # The verbatim result dump is the `tool_output` payload handed to hooks.
+    managed = ExperimentalBashResult(command="x", exit_code=3).model_dump(mode="json")
+    assert managed["exit_code"] == 3
+    assert managed["returncode"] == 3
+
+    captured = CapturedShellResult(command="x", exit_code=2).model_dump(mode="json")
+    assert captured["exit_code"] == 2
+    assert captured["returncode"] == 2
+
+
+def test_managed_shell_returncode_alias_is_zero_while_the_exit_code_is_unknown():
+    dumped = ExperimentalBashResult(command="x").model_dump(mode="json")
+
+    assert dumped["exit_code"] is None
+    assert dumped["returncode"] == 0
+
+
 @pytest.mark.asyncio
 async def test_runs_echo_successfully(bash):
     result = await collect_result(bash.run(BashArgs(command="echo hello")))
 
-    assert result.returncode == 0
+    assert result.exit_code == 0
     assert result.stdout == "hello\n"
     assert result.stderr == ""
 
@@ -157,12 +182,12 @@ async def test_truncates_output_to_max_bytes(bash):
 
     assert result.stdout == "abcde"
     assert result.stderr == ""
-    assert result.returncode == 0
+    assert result.exit_code == 0
 
 
 @pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
 @pytest.mark.asyncio
-async def test_experimental_bash_keeps_compatibility_stderr_empty():
+async def test_experimental_bash_projects_merged_pty_stream_as_stdout():
     tool = ExperimentalBash(
         config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
     )
@@ -171,9 +196,283 @@ async def test_experimental_bash_keeps_compatibility_stderr_empty():
         tool.run(ExperimentalBashArgs(command="printf err >&2"))
     )
 
-    assert result.stdout == "err"
     assert result.output == "err"
-    assert result.stderr == ""
+    assert ExperimentalBash.project_result(result) == {
+        "stdout": "err",
+        "stderr": "",
+        "output": "err",
+        "truncated": False,
+    }
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
+@pytest.mark.asyncio
+async def test_experimental_bash_serializes_command_output_only_once():
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+
+    # Split so the echoed command line does not itself contain the payload.
+    result = await collect_result(
+        tool.run(ExperimentalBashArgs(command="printf 'MARKER%s' PAYLOAD"))
+    )
+
+    dumped = result.model_dump(mode="json")
+    assert dumped["output"] == "MARKERPAYLOAD"
+    assert [key for key, value in dumped.items() if value == "MARKERPAYLOAD"] == [
+        "output"
+    ]
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
+@pytest.mark.asyncio
+async def test_experimental_bash_streams_foreground_output_before_the_result():
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+
+    streamed: list[str] = []
+    result = None
+    async for item in tool.run(
+        ExperimentalBashArgs(command="printf first; sleep 0.5; printf second"),
+        InvokeContext(tool_call_id="call-1"),
+    ):
+        if isinstance(item, ToolStreamEvent):
+            assert item.tool_name == "bash"
+            assert item.tool_call_id == "call-1"
+            streamed.append(item.message)
+        else:
+            result = item
+
+    assert result is not None
+    assert len(streamed) > 1
+    assert "first" in "".join(streamed)
+    assert "second" in "".join(streamed)
+    assert "first" in result.output
+    assert "second" in result.output
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
+@pytest.mark.asyncio
+async def test_experimental_bash_keeps_carriage_return_redraws_in_the_result():
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+
+    # The PTY rewrites the trailing \n as \r\n; both survive to the result.
+    result = await collect_result(
+        tool.run(ExperimentalBashArgs(command="printf '10%%\\r100%%\\n'"))
+    )
+
+    assert result.output == "10%\r100%\r\n"
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
+@pytest.mark.asyncio
+async def test_streamed_chunks_reassemble_into_the_result_output():
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+    command = "printf 'a\\r\\nb'; sleep 0.5; printf '\\r\\n10%%\\r100%%\\n'"
+
+    streamed: list[str] = []
+    result = None
+    async for item in tool.run(
+        ExperimentalBashArgs(command=command), InvokeContext(tool_call_id="call-1")
+    ):
+        if isinstance(item, ToolStreamEvent):
+            streamed.append(item.message)
+        else:
+            result = item
+
+    assert result is not None
+    assert len(streamed) > 1
+    # A CRLF landing across two reads must not shift the len(delivered) offset.
+    assert "".join(streamed) == result.output
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
+@pytest.mark.asyncio
+async def test_soft_timeout_streams_the_whole_output_before_handing_over():
+    terminal_runtime = TerminalRuntime()
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
+    )
+
+    streamed: list[str] = []
+    result = None
+    async for item in tool.run(
+        ExperimentalBashArgs(command="printf first; sleep 30", timeout_seconds=0.5),
+        InvokeContext(tool_call_id="call-2"),
+    ):
+        if isinstance(item, ToolStreamEvent):
+            streamed.append(item.message)
+        else:
+            result = item
+
+    assert result is not None
+    assert result.background is True
+    assert "".join(streamed) == result.output
+    terminal_runtime.get().kill(result.session_id)
+
+
+def _fake_session_info(status):
+    return SessionInfo(
+        session_id="s",
+        command="printf accents",
+        cwd=".",
+        shell="/bin/bash",
+        status=status,
+        exit_code=0 if status == "completed" else None,
+        output_path="/tmp/s.log",
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+
+
+class _ChunkedManager:
+    def __init__(self, chunks, tail=""):
+        self._chunks = list(chunks)
+        self._log = "".join(chunks) + tail
+        self.reads = 0
+
+    def read_output(self, *, session_id, cursor, wait_seconds, max_bytes):
+        self.reads += 1
+        output = (
+            self._chunks.pop(0)
+            if self._chunks
+            else self._log.encode()[cursor:].decode()
+        )
+        status = "running" if self._chunks else "completed"
+        return (
+            _fake_session_info(status),
+            OutputChunk(
+                output=output,
+                next_cursor=cursor + len(output.encode()),
+                truncated=False,
+            ),
+        )
+
+
+def _foreground_stream(
+    manager, *, tool_call_id: str | None = "call-1", max_bytes: int = 1_000
+):
+    return _ForegroundStream(
+        cast(TerminalSessionManager, manager),
+        session_id="s",
+        tool_name="bash",
+        tool_call_id=tool_call_id,
+        max_bytes=max_bytes,
+    )
+
+
+@pytest.mark.asyncio
+async def test_experimental_bash_caps_streamed_output_by_encoded_bytes():
+    manager = _ChunkedManager(["é" * 8, "é" * 8, "é" * 8])
+    # Odd cap against 2-byte characters forces the second clip to cut mid-character.
+    max_bytes = 21
+    stream = _foreground_stream(manager, max_bytes=max_bytes)
+
+    events = [event async for event in stream.pump(timeout=5)]
+
+    streamed = "".join(event.message for event in events)
+    assert [event.message for event in events] == ["é" * 8, "é" * 2]
+    assert len(streamed.encode()) <= max_bytes
+    assert "\ufffd" not in streamed
+    assert manager.reads == 3
+
+
+@pytest.mark.asyncio
+async def test_experimental_bash_streams_every_byte_when_under_the_cap():
+    manager = _ChunkedManager(["héllo ", "wörld"])
+    stream = _foreground_stream(manager)
+
+    events = [event async for event in stream.pump(timeout=5)]
+
+    assert "".join(event.message for event in events) == "héllo wörld"
+    assert stream.completed is True
+
+
+@pytest.mark.asyncio
+async def test_draining_resumes_where_the_pump_stopped():
+    manager = _ChunkedManager(["first ", "second "], tail="third")
+    stream = _foreground_stream(manager)
+
+    pumped = [event async for event in stream.pump(timeout=5)]
+    drained = await stream.drain()
+
+    assert [event.message for event in pumped] == ["first ", "second "]
+    assert drained is not None
+    assert drained.message == "third"
+    # A second drain has nothing left to send: the cursor moved with the first.
+    assert await stream.drain() is None
+
+
+@pytest.mark.asyncio
+async def test_draining_notices_an_exit_the_pump_timed_out_on():
+    manager = _ChunkedManager(["done"])
+    stream = _foreground_stream(manager)
+
+    pumped = [event async for event in stream.pump(timeout=0)]
+    assert pumped == []
+    assert stream.completed is False
+
+    drained = await stream.drain()
+
+    assert drained is not None
+    assert drained.message == "done"
+    assert stream.completed is True
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
+@pytest.mark.asyncio
+async def test_experimental_bash_keeps_failure_output_out_of_the_display():
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+
+    with pytest.raises(ToolError) as err:
+        async for _ in tool.run(
+            ExperimentalBashArgs(command="echo boom; exit 3"),
+            InvokeContext(tool_call_id="call-1"),
+        ):
+            pass
+
+    assert "boom" in str(err.value)
+    assert err.value.display == "Command failed: 'echo boom; exit 3'\nReturn code: 3"
+    # What the client shows is always the head of what the model reads.
+    assert str(err.value).startswith(err.value.display)
+
+
+@pytest.mark.asyncio
+async def test_foreground_stream_emits_nothing_without_a_tool_call():
+    manager = _ChunkedManager(["héllo ", "wörld"])
+    stream = _foreground_stream(manager, tool_call_id=None)
+
+    events = [event async for event in stream.pump(timeout=5)]
+
+    assert events == []
+    assert stream.completed is True
+    assert stream._cursor == len("héllo wörld".encode())
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
+@pytest.mark.asyncio
+async def test_experimental_bash_skips_streaming_without_an_invoke_context():
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+
+    items = [item async for item in tool.run(ExperimentalBashArgs(command="echo hi"))]
+
+    assert not any(isinstance(item, ToolStreamEvent) for item in items)
+    assert len(items) == 1
+    result = items[0]
+    assert isinstance(result, ExperimentalBashResult)
+    # A PTY turns the newline into CRLF and the decoder keeps it verbatim.
+    assert result.output == "hi\r\n"
 
 
 @pytest.mark.asyncio
@@ -183,7 +482,7 @@ async def test_cat_preserves_accents_from_latin1_encoded_file(bash, tmp_path):
 
     result = await collect_result(bash.run(BashArgs(command=f"cat {file.name}")))
 
-    assert result.returncode == 0
+    assert result.exit_code == 0
     assert "\ufffd" not in result.stdout
     assert result.stdout == "café au lait\nthé glacé\n"
 
@@ -271,6 +570,33 @@ class _RunningTerminal:
 
     def read(self, size: int) -> bytes:
         return b""
+
+    def write(self, data: bytes) -> int:
+        return len(data)
+
+    def close(self) -> None:
+        pass
+
+
+class _UnreapableTerminal:
+    pid = 1
+    pty_backend = "fake"
+
+    @property
+    def returncode(self) -> int | None:
+        return None
+
+    def poll(self) -> int | None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        return None
+
+    def wait_readable(self, timeout_seconds: float) -> bool:
+        return True
+
+    def read(self, size: int) -> bytes:
+        raise OSError("pty vanished")
 
     def write(self, data: bytes) -> int:
         return len(data)
@@ -487,6 +813,29 @@ def test_reader_loop_preserves_multibyte_split_across_chunks(tmp_path):
     assert "\ufffd" not in chunk.output
 
 
+def test_reader_loop_reports_an_exit_code_when_the_terminal_cannot_be_reaped(tmp_path):
+    manager = TerminalSessionManager(
+        backend=cast(ManagedShellBackend, _UnusedBackend())
+    )
+    output_path = tmp_path / "out.log"
+    output_path.touch()
+    session = TerminalSession(
+        session_id="unreapable",
+        command="cmd",
+        cwd=tmp_path,
+        shell="/bin/sh",
+        terminal=_UnreapableTerminal(),
+        output_path=output_path,
+        manifest_path=tmp_path / "unreapable.json",
+        created_at=0.0,
+    )
+
+    manager._reader_loop(session)
+
+    assert session.status == "completed"
+    assert session.exit_code == UNKNOWN_EXIT_CODE
+
+
 def test_read_file_chunk_does_not_split_multibyte_at_page_boundary(tmp_path):
     manager = TerminalSessionManager()
     output_path = tmp_path / "out.log"
@@ -542,6 +891,126 @@ def test_running_read_output_defers_incomplete_utf8_at_current_eof(tmp_path):
     assert "\ufffd" not in second.output
     assert second.next_cursor == output_path.stat().st_size
     assert second.truncated is False
+
+
+def test_read_file_chunk_keeps_every_carriage_return(tmp_path):
+    manager = TerminalSessionManager()
+    output_path = tmp_path / "out.log"
+    output_path.write_bytes(b"10%\r55%\r100%\r\ndone\r\n")
+
+    chunk = manager._read_file_chunk(output_path, cursor=0, max_bytes=64)
+
+    assert chunk.output == "10%\r55%\r100%\r\ndone\r\n"
+
+
+_CRLF_PAYLOAD = b"one\r\ntwo\r\n50%\rdone\r\n"
+
+
+@pytest.mark.parametrize("max_bytes", range(1, len(_CRLF_PAYLOAD) + 1))
+def test_read_file_chunk_reassembles_the_file_at_every_split_boundary(
+    tmp_path, max_bytes
+):
+    manager = TerminalSessionManager()
+    output_path = tmp_path / "out.log"
+    output_path.write_bytes(_CRLF_PAYLOAD)
+
+    cursor = 0
+    parts: list[str] = []
+    while cursor < len(_CRLF_PAYLOAD):
+        chunk = manager._read_file_chunk(
+            output_path, cursor=cursor, max_bytes=max_bytes, more_output_expected=True
+        )
+        assert chunk.next_cursor > cursor
+        cursor = chunk.next_cursor
+        parts.append(chunk.output)
+
+    assert "".join(parts) == _CRLF_PAYLOAD.decode()
+
+
+def _running_session(tmp_path, output_path) -> TerminalSession:
+    return TerminalSession(
+        session_id="running",
+        command="cmd",
+        cwd=tmp_path,
+        shell="/bin/sh",
+        terminal=_RunningTerminal(),
+        output_path=output_path,
+        manifest_path=tmp_path / "running.json",
+        created_at=0.0,
+    )
+
+
+def test_running_read_output_hands_back_a_lone_carriage_return(tmp_path):
+    # A progress bar writes `Progress: 50%\r` and pauses; the next poll is empty.
+    manager = TerminalSessionManager()
+    output_path = tmp_path / "out.log"
+    output_path.write_bytes(b"Progress: 50%\r")
+    session = _running_session(tmp_path, output_path)
+    manager._sessions[session.session_id] = session
+
+    _info, first = manager.read_output(
+        session_id="running", cursor=0, wait_seconds=0, max_bytes=64
+    )
+
+    assert first.output == "Progress: 50%\r"
+    assert first.next_cursor == output_path.stat().st_size
+    assert first.truncated is False
+
+    _info, second = manager.read_output(
+        session_id="running", cursor=first.next_cursor, wait_seconds=0, max_bytes=64
+    )
+
+    assert second.output == ""
+    assert second.next_cursor == first.next_cursor
+
+
+def test_running_read_output_splits_a_crlf_without_losing_a_byte(tmp_path):
+    manager = TerminalSessionManager()
+    output_path = tmp_path / "out.log"
+    output_path.write_bytes(b"a\r")
+    session = _running_session(tmp_path, output_path)
+    manager._sessions[session.session_id] = session
+
+    _info, first = manager.read_output(
+        session_id="running", cursor=0, wait_seconds=0, max_bytes=64
+    )
+
+    assert first.output == "a\r"
+
+    output_path.write_bytes(b"a\r\nb")
+    _info, second = manager.read_output(
+        session_id="running", cursor=first.next_cursor, wait_seconds=0, max_bytes=64
+    )
+
+    assert second.output == "\nb"
+    assert first.output + second.output == "a\r\nb"
+
+
+def test_completed_read_output_keeps_a_final_carriage_return(tmp_path):
+    manager = TerminalSessionManager()
+    output_path = tmp_path / "out.log"
+    output_path.write_bytes(b"50%\r")
+    session = TerminalSession(
+        session_id="done",
+        command="cmd",
+        cwd=tmp_path,
+        shell="/bin/sh",
+        terminal=_CompletedTerminal(),
+        output_path=output_path,
+        manifest_path=tmp_path / "done.json",
+        created_at=0.0,
+        status="completed",
+        exit_code=0,
+    )
+    manager._sessions[session.session_id] = session
+
+    _info, chunk = manager.read_output(
+        session_id="done", cursor=0, wait_seconds=0, max_bytes=64
+    )
+
+    assert chunk.output == "50%\r"
+    assert chunk.next_cursor == output_path.stat().st_size
+    assert chunk.truncated is False
 
 
 def test_inspect_session_does_not_split_multibyte_at_tail_boundary(tmp_path):
@@ -798,9 +1267,99 @@ async def test_foreground_killed_session_is_reported_as_failure():
     )
 
     with pytest.raises(ToolError):
-        tool._result_from_session(
+        await tool._result_from_session(
             started.session_id, background=False, max_bytes=1000, enforce_success=True
         )
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
+@pytest.mark.asyncio
+async def test_cancelling_foreground_run_kills_the_session():
+    terminal_runtime = TerminalRuntime()
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
+    )
+    streamed = asyncio.Event()
+
+    async def consume() -> None:
+        async for _ in tool.run(
+            ExperimentalBashArgs(command="printf ready; sleep 30"),
+            InvokeContext(tool_call_id="call-cancel"),
+        ):
+            streamed.set()
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(streamed.wait(), timeout=10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    sessions = terminal_runtime.get().list_sessions()
+    assert [info.status for info in sessions] == ["killed"]
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
+@pytest.mark.asyncio
+async def test_closing_the_generator_mid_stream_kills_the_session():
+    terminal_runtime = TerminalRuntime()
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
+    )
+    gen = tool.run(
+        ExperimentalBashArgs(command="printf ready; sleep 30"),
+        InvokeContext(tool_call_id="call-aclose"),
+    )
+
+    assert isinstance(await anext(gen), ToolStreamEvent)
+    await gen.aclose()
+
+    sessions = terminal_runtime.get().list_sessions()
+    assert [info.status for info in sessions] == ["killed"]
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
+@pytest.mark.asyncio
+async def test_closing_the_generator_keeps_a_background_session_running():
+    terminal_runtime = TerminalRuntime()
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
+    )
+    manager = terminal_runtime.get()
+    gen = tool.run(ExperimentalBashArgs(command="sleep 30", background=True))
+
+    result = await anext(gen)
+    await gen.aclose()
+
+    assert not isinstance(result, ToolStreamEvent)
+    assert manager.info(result.session_id).status == "running"
+    manager.kill(result.session_id)
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
+@pytest.mark.asyncio
+async def test_closing_the_generator_keeps_a_soft_timeout_session_running():
+    terminal_runtime = TerminalRuntime()
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
+    )
+    manager = terminal_runtime.get()
+    gen = tool.run(ExperimentalBashArgs(command="sleep 30", timeout_seconds=0.5))
+
+    result = await anext(gen)
+    await gen.aclose()
+
+    assert not isinstance(result, ToolStreamEvent)
+    assert result.status == "running"
+    assert manager.info(result.session_id).status == "running"
+    manager.kill(result.session_id)
 
 
 @pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")

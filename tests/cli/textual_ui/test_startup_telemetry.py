@@ -7,6 +7,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tests.conftest import build_test_vibe_app
+from vibe.app_server.protocol import (
+    AppServerResponseError,
+    ProtocolError,
+    ProtocolErrorCode,
+)
 from vibe.app_server.session import AppServerSession
 from vibe.cli.textual_ui.app import StartupOptions
 
@@ -108,6 +113,56 @@ async def test_watch_init_completion_emits_startup_telemetry_once() -> None:
     assert payload["first_frame_duration_ms"] == 250
     assert payload["agent_ready_duration_ms"] == 500
     assert payload["agent_ready_duration_ms"] >= payload["first_frame_duration_ms"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code", [ProtocolErrorCode.CONFLICT, ProtocolErrorCode.NOT_FOUND]
+)
+async def test_superseded_watch_defers_post_init_notices_to_resume(
+    code: ProtocolErrorCode,
+) -> None:
+    app = build_test_vibe_app()
+
+    runtime = MagicMock()
+    runtime.ready = False
+    runtime.wait_until_ready = AsyncMock(
+        side_effect=AppServerResponseError(
+            ProtocolError(code=code, message="superseded by resume")
+        )
+    )
+    app_server = object.__new__(AppServerSession)
+    app_server.resources = MagicMock()
+    app_server.resources.runtime = runtime
+    app._app_server = app_server
+
+    with (
+        patch.object(app, "_show_mcp_discovery_failures", MagicMock()) as discovery,
+        patch.object(app, "_show_mcp_auth_required_notice", AsyncMock()) as auth,
+        patch.object(app, "_send_startup_telemetry_once", MagicMock()),
+        patch.object(app, "_ensure_loading_widget", AsyncMock()),
+        patch.object(app, "_remove_loading_widget", AsyncMock()),
+        patch.object(app, "_refresh_banner", MagicMock()),
+        patch.object(app, "_mount_and_scroll", AsyncMock()) as mount,
+    ):
+        # A resume supersedes the fresh session's readiness watch — CONFLICT while
+        # the reservation is held, or NOT_FOUND once the root is rebound. Either way
+        # the watch returns early: no fatal-init state, no error mounted, notices
+        # deferred to the resume path.
+        await app._watch_init_completion()
+        assert app._fatal_init_error is False
+        mount.assert_not_awaited()
+        assert app._post_init_notices_shown is False
+        discovery.assert_not_called()
+        auth.assert_not_awaited()
+
+        # The resume path surfaces them instead, exactly once even if called twice.
+        await app._show_post_init_notices_once()
+        await app._show_post_init_notices_once()
+
+    assert app._post_init_notices_shown is True
+    discovery.assert_called_once_with()
+    auth.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

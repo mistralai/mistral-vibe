@@ -104,6 +104,10 @@ class CallbackConflictError(RuntimeError):
     pass
 
 
+class CallbackClosedError(RuntimeError):
+    pass
+
+
 class CallbackRejectedError(RuntimeError):
     pass
 
@@ -297,9 +301,14 @@ class TurnController:
 
     async def complete_effect(self, entry_id: str, state: EffectState) -> None:
         projector = self._require_harness_effect(entry_id)
-        await self._emit_projected(projector.complete_effect(entry_id, state))
+        events = projector.complete_effect(entry_id, state)
+        # Retired before the emit, which can fail. The effect is already finished
+        # in the projector's own history, so a registration left behind would
+        # make `history` report it as still running for the rest of the session
+        # - a worse account of a finished effect than a dropped notification.
         self._history.extend(projector.history)
         self._harness_effects.pop(entry_id, None)
+        await self._emit_projected(events)
 
     async def steer(self, params: TurnSteerParams) -> TurnSteerResponse:
         self._require_active_turn(params.expected_turn_id)
@@ -364,6 +373,8 @@ class TurnController:
         if record is None:
             raise CallbackNotFoundError(f"Callback not found: {callback_id}")
         async with record.resolution_lock:
+            if record.core_resolved and record.resolution is None:
+                raise CallbackClosedError(f"Callback is closed: {callback_id}")
             if record.resolution is not None:
                 if record.resolution.model_dump(mode="json") == output.model_dump(
                     mode="json"
@@ -393,6 +404,8 @@ class TurnController:
         if record is None:
             raise CallbackNotFoundError(f"Callback not found: {callback_id}")
         async with record.resolution_lock:
+            if record.core_resolved and record.resolution is None:
+                raise CallbackClosedError(f"Callback is closed: {callback_id}")
             if record.resolution is not None:
                 if record.resolution.model_dump(mode="json") == error.model_dump(
                     mode="json"

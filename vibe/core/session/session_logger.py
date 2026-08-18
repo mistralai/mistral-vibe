@@ -19,7 +19,13 @@ from vibe.core.session.session_loader import (
     SessionLoader,
 )
 from vibe.core.session.title_format import MAX_TITLE_LENGTH
-from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
+from vibe.core.types import (
+    AgentStats,
+    LLMMessage,
+    Role,
+    SessionMetadata,
+    WorktreeContext,
+)
 from vibe.core.utils import is_windows, utc_now
 from vibe.utils.io import read_safe, read_safe_async
 from vibe.utils.session_id import shorten_session_id
@@ -496,6 +502,21 @@ class SessionLogger:
             response.model_dump(mode="json") if response is not None else None,
         )
 
+    async def persist_created_worktree(self, worktree: WorktreeContext) -> None:
+        session_info = self._get_session_info()
+        if session_info is None:
+            return
+        _, session_metadata = session_info
+        # Both halves are load-bearing. At session start the metadata file does
+        # not exist yet - only the in-memory object does - so setting the field
+        # here is what the first full save writes out; on a resume the file is
+        # already there and the next full save may be a whole turn away, so the
+        # patch below is what reaches disk in time.
+        session_metadata.created_worktree = worktree
+        await self._persist_metadata_field(
+            "created_worktree", worktree.model_dump(mode="json")
+        )
+
     async def persist_child_sessions(self) -> None:
         session_info = self._get_session_info()
         if session_info is None:
@@ -543,15 +564,29 @@ class SessionLogger:
     def resume_existing_session(self, session_id: str, session_dir: Path) -> None:
         if not self.enabled:
             return
+        self.apply_resumed_session(
+            session_id, session_dir, SessionLoader.load_metadata(session_dir)
+        )
+
+    def apply_resumed_session(
+        self, session_id: str, session_dir: Path, metadata: SessionMetadata
+    ) -> None:
+        """Bind to an already-loaded session. Infallible: no disk reads.
+
+        Used by the in-place resume commit, where the metadata was loaded during
+        the (fallible) prepare step so the commit itself cannot raise.
+        """
+        if not self.enabled:
+            return
 
         self.session_id = session_id
         self.session_dir = session_dir
-        self.session_metadata = SessionLoader.load_metadata(session_dir)
-        self._title = self.session_metadata.title
+        self.session_metadata = metadata
+        self._title = metadata.title
         self._persisted = True
 
-        if self.session_metadata.start_time:
-            self.session_start_time = self.session_metadata.start_time
+        if metadata.start_time:
+            self.session_start_time = metadata.start_time
 
     def cleanup_tmp_files(self) -> None:
         """Delete temporary files created more than 5 minutes ago"""

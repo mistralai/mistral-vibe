@@ -13,6 +13,7 @@ from vibe.app_server._config_introspect import (
     build_field_wires,
     collect_layer_values,
 )
+from vibe.app_server._config_write import config_write_ops_to_patches
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._execution import SessionExecution
 from vibe.app_server._identity import IdentityController, IdentityGateway
@@ -100,6 +101,7 @@ from vibe.app_server.protocol import (
 )
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.config.admin_config import (
+    MANAGED_CONFIG_TIMEOUT,
     AdminConfigApplyResult,
     AdminConfigOutcome,
     fetch_managed_config,
@@ -108,7 +110,6 @@ from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.mcp_servers import MCPServerAddError, persist_oauth_mcp_server
 from vibe.core.config.orchestrator import ConfigPatchValidationError
-from vibe.core.config.patch import AddOperationPatch, PatchOp, RemoveOperationPatch
 from vibe.core.config.types import ConcurrencyConflictError
 from vibe.core.feedback import (
     record_feedback_asked,
@@ -529,25 +530,32 @@ class ResourceRequestHandler:
     def _config_read(self, params: ConfigReadParams) -> ConfigReadResponse:
         if params.session_id is not None:
             self._require_session(params.session_id)
-        return ConfigReadResponse(config=project_config(self._agent_loop))
+        config = project_config(self._agent_loop)
+        skills_count = sum(
+            1 for skill in project_skills(self._agent_loop) if skill.source != "builtin"
+        )
+        _, hooks_count = project_diagnostics(self._agent_loop)
+        mcp_servers_total = len(self._agent_loop.config.mcp_servers)
+        mcp_servers_enabled = sum(
+            1 for server in self._agent_loop.config.mcp_servers if not server.disabled
+        )
+        return ConfigReadResponse(
+            config=config,
+            skills_count=skills_count,
+            hooks_count=hooks_count,
+            mcp_servers_total=mcp_servers_total,
+            mcp_servers_enabled=mcp_servers_enabled,
+        )
 
     async def _config_write(self, params: ConfigWriteParams) -> ConfigWriteResponse:
         self._execution.require_idle()
         self._require_session(params.session_id)
-        operations: list[PatchOp] = []
-        for op in params.ops:
-            if op.op == "set":
-                operations.append(
-                    AddOperationPatch(
-                        path=op.path, value=op.value, target_layer_name=op.target_layer
-                    )
-                )
-            else:
-                operations.append(
-                    RemoveOperationPatch(
-                        path=op.path, target_layer_name=op.target_layer
-                    )
-                )
+        durable_aliases = (
+            await self._agent_loop.config_orchestrator.durable_model_aliases()
+        )
+        operations = config_write_ops_to_patches(
+            self._agent_loop.config, params.ops, durable_model_aliases=durable_aliases
+        )
         try:
             failures = await self._agent_loop.config_orchestrator.apply_patch(
                 operations, reason=params.reason
@@ -575,8 +583,11 @@ class ResourceRequestHandler:
         self._execution.require_idle()
         self._require_session(params.session_id)
         # Best-effort: an admin-fetch failure must never break the user's reload.
+        # asyncio.timeout caps the full retry budget so /reload stays responsive;
+        # startup still uses the uncapped retry policy via apply_admin_config().
         try:
-            self._report_admin_config_outcome(await self._refresh_admin_layer())
+            async with asyncio.timeout(MANAGED_CONFIG_TIMEOUT * 1.5):
+                self._report_admin_config_outcome(await self._refresh_admin_layer())
         except Exception as exc:
             logger.debug("Admin config refresh failed on reload", exc_info=exc)
         if params.reload_runtime:

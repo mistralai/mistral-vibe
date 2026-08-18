@@ -27,6 +27,11 @@ class PermissionStore:
         self._tool_permissions: dict[str, ToolPermission] = {}
         self.lock = asyncio.Lock()
 
+    def reset(self) -> None:
+        """Drop all session-scoped approvals so they never leak across sessions."""
+        self._rules.clear()
+        self._tool_permissions.clear()
+
     def add_rule(self, rule: ApprovedRule) -> None:
         self._rules.append(rule)
 

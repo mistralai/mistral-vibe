@@ -52,6 +52,8 @@ from vibe.app_server.protocol import (
     ProjectLinksUnlinkResponse,
     ProtocolErrorCode,
     SessionDeleteParams,
+    SessionHistoryGetParams,
+    SessionHistoryGetResponse,
     SessionHistoryListParams,
     SessionHistoryListResponse,
     SessionListParams,
@@ -66,10 +68,25 @@ from vibe.app_server.protocol import (
     WorkspaceUntrustedConfigParams,
     WorkspaceWorktreeListParams,
     WorkspaceWorktreeListResponse,
+    WorkspaceWorktreeRemoveParams,
+    WorkspaceWorktreeRemoveResponse,
+    WorktreeRemoveOutcome,
 )
 from vibe.core.config import VibeConfigSchema, build_default_orchestrator
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.git.errors import (
+    GitError,
+    GitRepositoryNotFoundError,
+    GitUnavailableError,
+)
+from vibe.core.git.worktree import (
+    ManagedWorktree,
+    WorktreeReleaseOutcome,
+    WorktreeRepository,
+)
+from vibe.core.hooks.config import load_hooks_from_fs
+from vibe.core.session import last_session_pointer
 from vibe.core.session.resume_sessions import (
     ResumeSessionInfo,
     list_local_resume_sessions,
@@ -79,13 +96,9 @@ from vibe.core.session.saved_sessions import (
     update_saved_session_title,
 )
 from vibe.core.session.session_loader import SessionLoader
+from vibe.core.skills.manager import SkillManager
+from vibe.core.skills.models import SkillSource
 from vibe.core.types import LLMMessage, SessionMetadata
-from vibe.core.worktree import (
-    GitUnavailableError,
-    WorktreeError,
-    WorktreeNotFoundError,
-    list_linked_worktrees,
-)
 from vibe.observability.logging import logger
 
 _HOST_METHODS = frozenset({
@@ -109,6 +122,7 @@ _HOST_METHODS = frozenset({
     "workspace/trust/untrustedConfig",
     "workspace/trust/status",
     "workspace/worktrees/list",
+    "workspace/worktrees/remove",
 })
 
 
@@ -125,7 +139,7 @@ class HostRequestHandler:
             response = await self._dispatch(method, raw_params)
         except WorkspaceTrustError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
-        except WorktreeError as exc:
+        except GitError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
         except ProjectLinksAuthError as exc:
             raise RequestFailure(ProtocolErrorCode.UNAUTHORIZED, str(exc)) from exc
@@ -186,6 +200,12 @@ class HostRequestHandler:
                 params = validate_wire(SessionHistoryListParams, raw_params)
                 config = await self._load_config(None)
                 response = await asyncio.to_thread(self._history_list, params, config)
+            case "session/history/get":
+                params = validate_wire(SessionHistoryGetParams, raw_params)
+                config = await self._load_config(None)
+                response = await asyncio.to_thread(
+                    self._get_session_history, params, config
+                )
             case _ if method.startswith("workspace/"):
                 response = await self._dispatch_workspace(method, raw_params)
             case _ if method.startswith("projectLinks/"):
@@ -200,11 +220,33 @@ class HostRequestHandler:
                 ProtocolErrorCode.NOT_FOUND, f"Session not found: {params.session_id}"
             )
         orchestrator = await self._load_orchestrator(params.cwd)
+        config = orchestrator.config
         view = project_config_view(
-            orchestrator.config,
-            active_model_pinned=bool(orchestrator.persisted_active_model()),
+            config, active_model_pinned=bool(orchestrator.persisted_active_model())
         )
-        return ConfigReadResponse(config=view)
+        session_files = self._harness_files.for_session(self._cwd(params.cwd))
+
+        skill_mgr = SkillManager(
+            config_getter=lambda: config, harness_files=session_files
+        )
+        skills_count = sum(
+            1
+            for skill in skill_mgr.available_skills.values()
+            if skill.source is not SkillSource.BUILTIN
+        )
+        hooks_count = len(load_hooks_from_fs(harness_files=session_files).hooks)
+        mcp_servers_total = len(config.mcp_servers)
+        mcp_servers_enabled = sum(
+            1 for server in config.mcp_servers if not server.disabled
+        )
+
+        return ConfigReadResponse(
+            config=view,
+            skills_count=skills_count,
+            hooks_count=hooks_count,
+            mcp_servers_total=mcp_servers_total,
+            mcp_servers_enabled=mcp_servers_enabled,
+        )
 
     async def _dispatch_project_links(
         self, method: str, raw_params: dict[str, Any]
@@ -306,6 +348,11 @@ class HostRequestHandler:
                 response = await asyncio.to_thread(
                     worktree_list_response, self._cwd(params.cwd)
                 )
+            case "workspace/worktrees/remove":
+                params = validate_wire(WorkspaceWorktreeRemoveParams, raw_params)
+                response = await asyncio.to_thread(
+                    worktree_remove_response, self._cwd(params.cwd)
+                )
             case _:
                 raise method_not_found(method)
         return response
@@ -350,6 +397,18 @@ class HostRequestHandler:
                 else page.cursor.before
             ),
         )
+
+    def _get_session_history(
+        self, params: SessionHistoryGetParams, config: VibeConfigSchema
+    ) -> SessionHistoryGetResponse:
+        messages, metadata = self._load_session(params.session_id, config)
+        # Project the full transcript then take the tail: one history entry can
+        # span multiple messages (e.g. assistant + tool results), so pre-slicing
+        # raw messages would give wrong entry counts. The limit is capped at 500
+        # in the protocol, keeping this O(n) scan bounded.
+        history = project_message_history(params.session_id, messages, metadata)
+        limit = params.history_limit
+        return SessionHistoryGetResponse(history=history[-limit:])
 
     def _load_session(
         self, session_id: str, config: VibeConfigSchema
@@ -433,7 +492,21 @@ def project_session_list(
             if start + len(page) < len(filtered) and page
             else None
         ),
+        continue_session_id=_continue_session_id(config, filtered),
     )
+
+
+def _continue_session_id(
+    config: VibeConfigSchema, filtered: list[ResumeSessionInfo]
+) -> str | None:
+    """The session ``--continue`` resumes: pointer-first, else most recent."""
+    if not filtered:
+        return None
+    candidate_ids = {session.session_id for session in filtered}
+    pointer_id = last_session_pointer.load(config.session_logging)
+    if pointer_id is not None and pointer_id in candidate_ids:
+        return pointer_id
+    return filtered[0].session_id
 
 
 def _session_roots(sessions: list[ResumeSessionInfo]) -> dict[str, str]:
@@ -486,8 +559,9 @@ def _time_ms(value: str) -> int:
 
 def worktree_list_response(cwd: Path) -> WorkspaceWorktreeListResponse:
     try:
-        worktrees = list_linked_worktrees(cwd)
-    except WorktreeNotFoundError:
+        with WorktreeRepository.open(cwd) as repository:
+            worktrees = repository.linked()
+    except GitRepositoryNotFoundError:
         logger.debug("Skipping worktree listing for non-git path=%s", cwd)
         worktrees = ()
     except GitUnavailableError:
@@ -507,4 +581,36 @@ def worktree_list_response(cwd: Path) -> WorkspaceWorktreeListResponse:
             )
             for worktree in worktrees
         ]
+    )
+
+
+# The wire vocabulary is spelled out in protocol.py so the app-server clients
+# do not depend on core, which leaves this as the one place the two meet.
+_WORKTREE_REMOVE_OUTCOMES: dict[WorktreeReleaseOutcome, WorktreeRemoveOutcome] = {
+    WorktreeReleaseOutcome.REMOVED: "removed",
+    WorktreeReleaseOutcome.KEPT_DIRTY: "kept_dirty",
+    WorktreeReleaseOutcome.KEPT_IN_USE: "kept_in_use",
+    WorktreeReleaseOutcome.KEPT_UNMANAGED: "kept_unmanaged",
+    WorktreeReleaseOutcome.NOT_FOUND: "not_found",
+}
+
+
+def worktree_remove_response(cwd: Path) -> WorkspaceWorktreeRemoveResponse:
+    managed = ManagedWorktree.at(cwd)
+    if managed is None:
+        return WorkspaceWorktreeRemoveResponse(outcome="kept_unmanaged")
+    try:
+        release = managed.release()
+    except (GitError, OSError) as e:
+        # Keeping a worktree is never a fault the caller can act on, and a
+        # failed removal leaves the work intact, so report it as kept.
+        logger.warning("Failed to remove worktree cwd=%s: %s", cwd, e)
+        return WorkspaceWorktreeRemoveResponse(outcome="kept_error", reasons=[str(e)])
+
+    return WorkspaceWorktreeRemoveResponse(
+        outcome=_WORKTREE_REMOVE_OUTCOMES[release.outcome],
+        root=None if release.root is None else str(release.root),
+        branch=release.branch,
+        branch_deleted=release.branch_deleted,
+        reasons=list(release.reasons),
     )

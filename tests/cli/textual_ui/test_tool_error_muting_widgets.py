@@ -173,7 +173,7 @@ async def test_non_collapsible_error_updates_visible_call_display() -> None:
         assert call_widget._verb_widget is not None
         assert call_widget._text_widget is not None
         assert _rendered(call_widget._verb_widget).plain == "Edited"
-        assert _rendered(call_widget._text_widget).plain == "example.py"
+        assert _rendered(call_widget._text_widget).plain == file_path
 
 
 @pytest.mark.asyncio
@@ -236,3 +236,29 @@ async def test_folded_error_detail_colors_only_the_error_word() -> None:
         assert any(
             span.start == 0 and span.end == len("Error") for span in content.spans
         )
+
+
+@pytest.mark.asyncio
+async def test_error_strips_escape_sequences_from_failed_command_output() -> None:
+    raw_output = (
+        "Command failed: 'bad-cmd'\n"
+        "Return code: 1\n"
+        "Stdout: \x1b[?25l\x1b[H\x1b[2J\x1b[6n\x1b[?9001h\x1b]0;title\x07"
+        "\x1b[31merror text\x1b[0m\rredraw"
+    )
+    app = _ToolApp(_error_result(raw_output))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        result_widget = app.result_widget
+        assert result_widget is not None
+
+        result_widget.query_one(CollapsibleSection).set_collapsed(False)
+        await pilot.pause()
+
+        detail = result_widget.query_one(".tool-result-content").children[0]
+        assert isinstance(detail, Static)
+        content = _rendered(detail)
+        assert "\x1b" not in content.plain
+        assert "\r" not in content.plain
+        assert "redraw" in content.plain
+        assert "Command failed" in content.plain

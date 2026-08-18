@@ -14,6 +14,8 @@ from vibe.app_server.models import (
 from vibe.app_server.protocol import (
     ClientCapabilities,
     ClientInfo,
+    ConfigReadParams,
+    ConfigReadResponse,
     ConfigSchemaReadParams,
     ConfigSchemaReadResponse,
     EmptyResponse,
@@ -21,6 +23,7 @@ from vibe.app_server.protocol import (
     SessionDeleteParams,
     SessionHistoryListParams,
     SessionHistoryListResponse,
+    SessionKind,
     SessionListParams,
     SessionListResponse,
     SessionOptions,
@@ -101,7 +104,9 @@ class AppServerHost:
         return await self._open_session(self._resume_session_id, self._continue_session)
 
     async def start_session(self) -> AppServerSession:
-        return await self._open_session(None, False)
+        # Backs the --resume picker; the throwaway session must not emit
+        # new-session telemetry since it is discarded on resume.
+        return await self._open_session(None, False, session_kind=SessionKind.EPHEMERAL)
 
     async def resume_session(self, session_id: str) -> AppServerSession:
         return await self._open_session(session_id, False)
@@ -110,7 +115,11 @@ class AppServerHost:
         return await self._open_session(None, True)
 
     async def _open_session(
-        self, resume_session_id: str | None, continue_session: bool
+        self,
+        resume_session_id: str | None,
+        continue_session: bool,
+        *,
+        session_kind: SessionKind = SessionKind.NORMAL,
     ) -> AppServerSession:
         from vibe.app_server.session import AppServerSession
 
@@ -123,6 +132,7 @@ class AppServerHost:
             session_options=self._session_options,
             resume_session_id=resume_session_id,
             continue_session=continue_session,
+            session_kind=session_kind,
             client_tool_handler=self._client_tool_handler,
             client_factory=self._client_factory,
         )
@@ -215,6 +225,13 @@ class AppServerHost:
         return validate_wire(
             ConfigSchemaReadResponse,
             await self._client.request("config/schema", ConfigSchemaReadParams()),
+        )
+
+    async def read_config(self) -> ConfigReadResponse:
+        self._require_host()
+        return validate_wire(
+            ConfigReadResponse,
+            await self._client.request("config/read", ConfigReadParams()),
         )
 
     async def trust_status(

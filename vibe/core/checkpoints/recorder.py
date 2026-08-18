@@ -34,6 +34,10 @@ class CheckpointRecorder:
         self._messages = messages
         self._files = files or FileStore()
 
+    def reset(self) -> None:
+        """Drop recorded checkpoints so rewind state never crosses sessions."""
+        self._checkpointer.clear()
+
     def create_checkpoint(self) -> None:
         """Start a new turn, re-reading known files so those mutated by tools
         that produce no snapshot are still captured.

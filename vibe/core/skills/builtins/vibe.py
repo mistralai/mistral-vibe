@@ -56,6 +56,10 @@ When in a trusted folder, Vibe also looks for project-local configuration:
 - `.vibe/prompts/` - Project-specific prompts
 - `.agents/skills/` - Standard agent skills directory
 
+Custom Python tools will be deprecated in a future release. Recommend skills
+for new extensions. When a user asks for migration help, inspect the custom
+tool's behavior and replace it with an equivalent skill.
+
 ### AGENTS.md Discovery
 
 `AGENTS.md` files provide directory-scoped instructions to the model. At startup,
@@ -130,6 +134,7 @@ autocopy_to_clipboard = true  # Enable automatic copying of selected text to cli
 file_watcher_for_autocomplete = false
 ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
 show_greeting = true  # Show "Hello {name}" greeting below the banner at startup (Mistral providers, once per 24h)
+log_level = "WARNING"  # Optional. DEBUG | INFO | WARNING | ERROR | CRITICAL — log level for ~/.vibe/logs/vibe.log
 ```
 
 ### Copy and Text Selection
@@ -169,8 +174,8 @@ active_tts_model = "voxtral-tts"
 
 Set `enable_otel = true` to export traces for agent, model, and tool operations
 over OTLP/HTTP. `enable_telemetry` must also be enabled. With no explicit
-endpoint, Vibe uses the configured Mistral provider's telemetry endpoint and API
-key.
+endpoint, Vibe derives the telemetry endpoint and API key from the configured
+Mistral provider, except public regional API hosts that do not serve telemetry.
 
 To use another collector, set `otel_endpoint` to its base URL; Vibe appends
 `/v1/traces`. Configure custom-collector authentication through the standard
@@ -562,7 +567,7 @@ discriminated by `hook_event_name`:
  "tool_name": "bash", "tool_call_id": "call_42",
  "tool_input": {"command": "ls"},
  "tool_status": "success",         // success | failure | cancelled
- "tool_output": {"stdout": "..."},  // structured result (success/cancelled); null otherwise
+ "tool_output": {"output": "..."},  // the tool's serialized result (success/cancelled); null otherwise
  "tool_output_text": "...",         // current text the LLM will see; mutable by prior hooks
  "tool_error": null,                // populated on failure/skipped
  "duration_ms": 42.5}
@@ -716,6 +721,11 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/reload` - Reload configuration, agent instructions, and skills from disk
 - `/clear`, `/new` - Start a new conversation. Optionally pass a prompt to seed it
 - `/log` - Show path to current interaction log file
+- `/log-level` - Show or set the log level. `/log-level` prints the full chain
+  (session, env, config, effective); `/log-level set <LEVEL>` sets a
+  process-lifetime override; `/log-level set-global <LEVEL>` also persists to
+  config.toml; `/log-level unset` clears the session override. LEVEL is one of
+  DEBUG, INFO, WARNING, ERROR, CRITICAL.
 - `/debug` - Toggle debug console
 - `/compact` - Compact model context by summarizing. The session ID and visible
   conversation stay intact.
@@ -875,9 +885,9 @@ offered inline, and no popup is shown.
 - `MISTRAL_API_KEY` - API key for Mistral provider
 - `VIBE_ACTIVE_MODEL` - Override active model
 - `VIBE_*` - Any config field can be overridden with the `VIBE_` prefix
-- `LOG_LEVEL` - Logging level for `$VIBE_HOME/logs/vibe.log`. One of `DEBUG`,
-  `INFO`, `WARNING` (default), `ERROR`, `CRITICAL`. Invalid values fall back
-  to `WARNING`.
+- `LOG_LEVEL` - Overrides `log_level` config for `$VIBE_HOME/logs/vibe.log`.
+  One of `DEBUG`, `INFO`, `WARNING` (default), `ERROR`, `CRITICAL`. Invalid values
+  fall back to `WARNING`. Use `/log-level` to change at runtime.
 - `LOG_MAX_BYTES` - Max size in bytes of `vibe.log` before rotation
   (default: `10485760`, i.e. 10 MiB).
 - `DEBUG_MODE` - When `true`, forces `DEBUG`-level logging. Under `vibe-acp`

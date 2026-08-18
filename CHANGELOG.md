@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.24.2] - 2026-08-18
+
+### Added
+
+- In-app session picker with live preview
+- `/log-level` command for runtime log-level control
+- `/retry` is exposed to ACP clients
+- Created worktrees are shown in the transcript
+- Worktrees are cleaned up when their local session is deleted
+
+### Changed
+
+- Faster startup: the TUI renders before session initialization and imports are deferred
+- Faster session resume
+- Edit and read tool headers show paths relative to the current directory
+- Admin config fetch retries with exponential backoff
+- Custom tools are flagged as deprecated
+
+### Fixed
+
+- New worktrees branch from the remote default instead of local HEAD
+- Configured temperature is respected for reasoning models
+- Thinking setting updates correctly for routed models
+- Path picker stays open on `/` and supports `../` traversal
+- Escape sequences in command output no longer flood the input box
+- Live tool-permission bypass propagates to child agent loops
+- Managed shell output is no longer sent to the LLM twice
+- Adding a tool to the allowlist keeps the default allowlist
+- OpenTelemetry traces are sent to the correct endpoint
+
+
 ## [2.24.1] - 2026-08-11
 
 ### Added

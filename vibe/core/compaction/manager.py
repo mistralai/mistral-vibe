@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
+import time
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from vibe.core.compaction.context import (
@@ -12,6 +13,7 @@ from vibe.core.compaction.context import (
 )
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.types import ContextTooLongError, LLMMessage, Role
+from vibe.observability.logging import log_model_call_success
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, VibeConfigSchema
@@ -190,12 +192,21 @@ class CompactionManager:
         tries_left = _COMPACTION_PTL_RETRIES
         while True:
             try:
+                start_time = time.perf_counter()
                 result = await self._complete(
                     model=model,
                     messages=build_messages(working),
                     tools=tools,
                     tool_choice=tool_choice,
                     call_type="secondary_call",
+                )
+                _usage = result.usage
+                log_model_call_success(
+                    model.alias,
+                    int((time.perf_counter() - start_time) * 1000),
+                    prompt_tokens=_usage.prompt_tokens if _usage else 0,
+                    completion_tokens=_usage.completion_tokens if _usage else 0,
+                    cached_tokens=_usage.cached_tokens if _usage else 0,
                 )
                 return result, working
             except ContextTooLongError:

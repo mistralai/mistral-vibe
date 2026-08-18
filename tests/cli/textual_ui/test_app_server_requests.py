@@ -39,7 +39,6 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import WorkspaceTrustStatusResponse
 from vibe.app_server.session import AppServerTurnError
-from vibe.cli.commands import build_retry_prompt
 from vibe.cli.textual_ui import startup
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
@@ -56,6 +55,7 @@ from vibe.core.config import SessionLoggingConfig
 from vibe.core.types import Role, ScheduledLoop, UserMessageEvent
 from vibe.setup.trusted_folders.trust_folder_dialog import TrustFolderApp
 from vibe.utils import VIBE_WARNING_TAG
+from vibe.utils.retry_prompt import build_retry_prompt
 
 
 def _callback(detail: ApprovalCallbackDetail | UserInputCallbackDetail):

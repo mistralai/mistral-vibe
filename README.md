@@ -901,6 +901,18 @@ Automatic cleanup only applies to worktrees Vibe created this run, and only afte
 
 Sessions are scoped per directory, so `-c`/`--continue` and the `--resume` picker only see sessions started inside that worktree. To carry a session across worktrees, resume it explicitly by ID with `--resume <ID>`.
 
+#### Worktree ownership
+
+Whichever way a worktree is created, Vibe writes an ownership record beside it under `$VIBE_HOME/worktrees/.claims/<repo-name>-<repo-hash>/<name>/`, recording the branch, the commit the session started from, and whether Vibe created the branch. Nothing is ever removed without one: a worktree you made yourself, or one whose record is missing or unreadable, is left alone.
+
+The record directory also holds a marker per session currently working in the worktree. Sessions from different clients run in separate processes with nothing shared between them, so a marker is the only evidence that someone else is still in there. A worktree with any marker left is kept. A process killed outright leaves its marker behind and the worktree survives, which is the direction worth failing in.
+
+The app-server never removes a worktree on its own. Closing a session does not count: the desktop app releases an idle session's process a second after each turn to reclaim it, and the session stays live and resumable, so its worktree outlives that. A worktree that exists is removed in exactly one situation — **you delete its session**. It still has to be one Vibe created, held by nobody else, and free of uncommitted changes, untracked files, and commits made since the session began; anything else is kept and logged.
+
+Two things are cleaned up without asking, neither of which is a worktree you could have worked in. A session whose very first turn never completed has its worktree rolled back, because such a session is never published and leaves no session file — there is nothing to return to. And a reservation that never became a worktree, an empty directory left by a claim whose `git worktree add` did not land, is discarded the next time a session starts in that repo.
+
+The cost of that conservatism is that a worktree whose app-server was killed outright stays on disk, holding a marker for a session that no longer exists. Removing it is a judgement about whether you are finished with the work, which only you can make.
+
 ### Update Settings
 
 Vibe checks PyPI at most once per day during a session. When a newer version is found, the next launch shows an update prompt before opening the chat, offering to either update immediately (via `uv tool upgrade mistral-vibe` or `brew upgrade mistral-vibe`) or continue with the current version.
@@ -940,6 +952,19 @@ This affects where Vibe looks for:
 - `prompts/` - Custom system and compaction prompts
 - `tools/` - Custom tools
 - `logs/` - Session logs
+
+Custom tools will be deprecated in a future release. Prefer skills for new
+extensions; Vibe can help migrate existing custom tools to skills.
+
+### Logging
+
+Vibe writes structured logs to `~/.vibe/logs/vibe.log`. Use `/log-level` to open an interactive picker that lets you set the session override and/or persist a level to `config.toml`. You can also set `log_level` directly in `config.toml` or via the `/config` screen.
+
+Valid levels: `DEBUG`, `INFO`, `WARNING` (default), `ERROR`, `CRITICAL`.
+
+Precedence: session override > `LOG_LEVEL` env var > `log_level` in config.toml > default.
+
+The `LOG_LEVEL` environment variable overrides the config value at startup. Use `DEBUG_MODE=true` to force `DEBUG` at startup (also enables `debugpy` under `vibe-acp`).
 
 ## Editors/IDEs
 

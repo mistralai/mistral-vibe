@@ -62,7 +62,7 @@ async def test_resumed_tool_uses_typed_terminal_result(
         session_logging=logging,
     )
     agent_loop = build_test_agent_loop(
-        config=config, backend=backend, enable_streaming=True
+        config=config, backend=backend, enable_streaming=True, cwd=tmp_path
     )
     session = await create_test_app_server_session(agent_loop)
     session_id = session.session_id
@@ -94,7 +94,9 @@ async def test_resumed_tool_uses_typed_terminal_result(
         await session.close()
 
     messages, _ = SessionLoader.load_session(session_dir)
-    resumed_loop = build_test_agent_loop(config=config, backend=FakeBackend())
+    resumed_loop = build_test_agent_loop(
+        config=config, backend=FakeBackend(), cwd=tmp_path
+    )
     resumed_loop.session_id = session_id
     resumed_loop.session_logger.resume_existing_session(session_id, session_dir)
     system_messages = [

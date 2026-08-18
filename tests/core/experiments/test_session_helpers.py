@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from vibe.app_server.models import AccountPlanKind
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
@@ -14,12 +15,20 @@ from vibe.core.experiments.session import (
 )
 from vibe.core.identity import IdentityResult
 from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
+from vibe.setup.auth.whoami import WhoAmIResult
 
 
 @pytest.fixture(autouse=True)
 def _stub_fetch_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "vibe.core.experiments.session.fetch_identity", AsyncMock(return_value=None)
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_fetch_whoami(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.fetch_whoami", AsyncMock(return_value=None)
     )
 
 
@@ -249,6 +258,7 @@ async def test_initialize_includes_organization_id_from_identity(
     assert result is True
     assert client.attributes is not None
     assert client.attributes.organizationId == "org-123"
+    assert client.attributes.userId == "user-1"
 
 
 @pytest.mark.asyncio
@@ -279,6 +289,7 @@ async def test_initialize_omits_organization_id_when_identity_unavailable(
     assert result is True
     assert client.attributes is not None
     assert client.attributes.organizationId is None
+    assert client.attributes.userId is None
 
 
 @pytest.mark.asyncio
@@ -298,6 +309,147 @@ async def test_hydrate_returns_false_when_telemetry_disabled() -> None:
 
     assert result is False
     assert manager.export_state() is None
+
+
+@pytest.mark.asyncio
+async def test_initialize_includes_organization_kind_from_whoami(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.fetch_whoami",
+        AsyncMock(
+            return_value=WhoAmIResult(
+                plan_type=AccountPlanKind.MISTRAL_CODE,
+                plan_name="E",
+                organization_kind="S",
+                prompt_switching_to_pro_plan=False,
+            )
+        ),
+    )
+    session_logger = MagicMock()
+    session_logger.persist_experiments = AsyncMock()
+    response = EvalResponse.model_validate({
+        "features": {"vibe_cli_system_prompt": {"defaultValue": "cli"}}
+    })
+    client = _StubClient(response)
+    manager = ExperimentManager(client=client)
+
+    result = await initialize_experiments(
+        config=_make_config(),
+        manager=manager,
+        session_logger=session_logger,
+        launch_context=None,
+    )
+
+    assert result is True
+    assert client.attributes is not None
+    assert client.attributes.organizationKind == "S"
+
+
+@pytest.mark.asyncio
+async def test_initialize_omits_organization_kind_when_whoami_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    # _stub_fetch_whoami autouse fixture already returns None — no override needed.
+    session_logger = MagicMock()
+    session_logger.persist_experiments = AsyncMock()
+    response = EvalResponse.model_validate({
+        "features": {"vibe_cli_system_prompt": {"defaultValue": "cli"}}
+    })
+    client = _StubClient(response)
+    manager = ExperimentManager(client=client)
+
+    result = await initialize_experiments(
+        config=_make_config(),
+        manager=manager,
+        session_logger=session_logger,
+        launch_context=None,
+    )
+
+    assert result is True
+    assert client.attributes is not None
+    assert client.attributes.organizationKind is None
+
+
+@pytest.mark.asyncio
+async def test_initialize_includes_workspace_id_from_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.fetch_identity",
+        AsyncMock(
+            return_value=IdentityResult.model_validate({
+                "id": "user-1",
+                "workspace": {"id": "ws-456", "name": "My Workspace"},
+            })
+        ),
+    )
+    session_logger = MagicMock()
+    session_logger.persist_experiments = AsyncMock()
+    response = EvalResponse.model_validate({
+        "features": {"vibe_cli_system_prompt": {"defaultValue": "cli"}}
+    })
+    client = _StubClient(response)
+    manager = ExperimentManager(client=client)
+
+    result = await initialize_experiments(
+        config=_make_config(),
+        manager=manager,
+        session_logger=session_logger,
+        launch_context=None,
+    )
+
+    assert result is True
+    assert client.attributes is not None
+    assert client.attributes.workspaceId == "ws-456"
+
+
+@pytest.mark.asyncio
+async def test_initialize_uses_resolve_whoami_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    whoami_result = WhoAmIResult(
+        plan_type=AccountPlanKind.MISTRAL_CODE,
+        plan_name="E",
+        organization_kind="P",
+        prompt_switching_to_pro_plan=False,
+    )
+    resolve_whoami = AsyncMock(return_value=whoami_result)
+    session_logger = MagicMock()
+    session_logger.persist_experiments = AsyncMock()
+    response = EvalResponse.model_validate({
+        "features": {"vibe_cli_system_prompt": {"defaultValue": "cli"}}
+    })
+    client = _StubClient(response)
+    manager = ExperimentManager(client=client)
+
+    await initialize_experiments(
+        config=_make_config(),
+        manager=manager,
+        session_logger=session_logger,
+        launch_context=None,
+        resolve_whoami=resolve_whoami,
+    )
+
+    resolve_whoami.assert_awaited_once()
+    assert client.attributes is not None
+    assert client.attributes.organizationKind == "P"
 
 
 @pytest.mark.asyncio

@@ -154,6 +154,7 @@ def _run_programmatic_mode(args: argparse.Namespace, stdin_prompt: str | None) -
         session_intent = _session_intent(args, allow_picker=False)
         final_response = run_programmatic(
             harness_options=LocalHarnessOptions(
+                experimental_harness=args.experimental_harness,
                 client=ClientDescriptor(
                     info=ClientInfo(
                         name="vibe_programmatic",
@@ -226,6 +227,7 @@ def _run_interactive_mode(
 
     harness = LocalHarness(
         LocalHarnessOptions(
+            experimental_harness=args.experimental_harness,
             client=ClientDescriptor(
                 info=ClientInfo(
                     name="vibe_tui",
@@ -263,6 +265,10 @@ def _run_interactive_mode(
                     args.continue_session or isinstance(args.resume, str)
                 ),
                 prompt_for_workspace_trust=True,
+                resume_session_id=(
+                    args.resume if isinstance(args.resume, str) else None
+                ),
+                continue_latest=bool(args.continue_session),
             ),
         )
     except AppServerResponseError as exc:

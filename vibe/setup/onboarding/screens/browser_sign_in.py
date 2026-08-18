@@ -297,7 +297,7 @@ class BrowserSignInScreen(OnboardingScreen):
         if api_key is None:
             msg = "Browser sign-in finished without returning an API key."
             raise AssertionError(msg)
-        result = self.onboarding_app.persist_credentials(api_key)
+        result = await self.onboarding_app.persist_credentials(api_key)
         self._cancel_sign_in_url_help_timer()
         if result != "completed":
             self._active_attempt_number = None

@@ -106,10 +106,12 @@ async def test_resume_picker_shows_renamed_session_title(
     )
 
     captured_picker = None
+    original_switch_from_input = app._switch_from_input
 
-    async def capture_picker(picker):
+    async def capture_picker(picker, scroll: bool = False):
         nonlocal captured_picker
         captured_picker = picker
+        await original_switch_from_input(picker, scroll)
 
     monkeypatch.setattr(app, "_switch_from_input", capture_picker)
 

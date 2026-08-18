@@ -7,6 +7,7 @@ from acp import RequestPermissionResponse
 from acp.schema import (
     AgentMessageChunk,
     AllowedOutcome,
+    AvailableCommandsUpdate,
     ContentToolCallContent,
     TextContentBlock,
     ToolCallProgress,
@@ -15,6 +16,7 @@ from acp.schema import (
 )
 import pytest
 
+from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.agent import VibeAcpAgent
 from vibe.acp.commands.registry import AcpCommandContext
@@ -35,6 +37,7 @@ from vibe.app_server.protocol import (
     ProtocolError,
     ProtocolErrorCode,
 )
+from vibe.utils.retry_prompt import build_retry_prompt
 
 
 def _texts(agent: VibeAcpAgent) -> list[str]:
@@ -431,3 +434,191 @@ async def test_proxy_setup_normalizes_key_and_matches_main_success_message(
         "Set `HTTPS_PROXY=https://proxy.test` in ~/.vibe/.env\n\n"
         "Please start a new chat for changes to take effect."
     )
+
+
+@pytest.mark.asyncio
+async def test_retry_command_is_advertised_to_clients(
+    acp_agent_loop: VibeAcpAgent,
+) -> None:
+    created = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+    client = acp_agent_loop.client
+    assert isinstance(client, FakeClient)
+
+    await acp_agent_loop._command_controller.send_commands(
+        acp_agent_loop.sessions[created.session_id]
+    )
+
+    advertised = [
+        command.name
+        for update in client._session_updates
+        if isinstance(update.update, AvailableCommandsUpdate)
+        for command in update.update.available_commands
+    ]
+
+    assert "retry" in advertised
+
+
+@pytest.mark.asyncio
+async def test_retry_command_continues_the_last_response_as_an_injected_turn(
+    acp_agent_loop: VibeAcpAgent, backend: FakeBackend
+) -> None:
+    created = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+    await acp_agent_loop.prompt(
+        session_id=created.session_id,
+        prompt=[TextContentBlock(type="text", text="Hello")],
+    )
+
+    response = await acp_agent_loop.prompt(
+        session_id=created.session_id,
+        prompt=[TextContentBlock(type="text", text="/retry stay brief")],
+    )
+
+    assert response.stop_reason == "end_turn"
+    retry_message = backend.requests_messages[-1][-1]
+    assert retry_message.injected is True
+    assert retry_message.content == build_retry_prompt("stay brief")
+
+
+@pytest.mark.asyncio
+async def test_retry_instructions_never_attach_workspace_files(
+    acp_agent_loop: VibeAcpAgent, backend: FakeBackend, tmp_working_directory: Path
+) -> None:
+    (tmp_working_directory / "shot.png").write_bytes(b"not really an image")
+    created = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+    await acp_agent_loop.prompt(
+        session_id=created.session_id,
+        prompt=[TextContentBlock(type="text", text="Hello")],
+    )
+
+    response = await acp_agent_loop.prompt(
+        session_id=created.session_id,
+        prompt=[TextContentBlock(type="text", text="/retry compare @shot.png closely")],
+    )
+
+    assert response.stop_reason == "end_turn"
+    retry_message = backend.requests_messages[-1][-1]
+    assert retry_message.content == build_retry_prompt("compare @shot.png closely")
+    assert retry_message.images is None
+    assert retry_message.resources is None
+
+
+@pytest.mark.asyncio
+async def test_retry_command_without_history_does_not_start_a_turn(
+    acp_agent_loop: VibeAcpAgent, backend: FakeBackend
+) -> None:
+    created = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+
+    response = await acp_agent_loop.prompt(
+        session_id=created.session_id,
+        prompt=[TextContentBlock(type="text", text="/retry")],
+    )
+
+    assert response.stop_reason == "end_turn"
+    assert backend.requests_messages == []
+    assert _texts(acp_agent_loop)[-1] == "No interrupted response to continue."
+
+
+@pytest.mark.asyncio
+async def test_command_arguments_survive_any_whitespace_separator(
+    acp_agent_loop: VibeAcpAgent, backend: FakeBackend
+) -> None:
+    created = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+    await acp_agent_loop.prompt(
+        session_id=created.session_id,
+        prompt=[TextContentBlock(type="text", text="Hello")],
+    )
+
+    await acp_agent_loop.prompt(
+        session_id=created.session_id,
+        prompt=[TextContentBlock(type="text", text="/retry\tstay brief")],
+    )
+
+    retry_message = backend.requests_messages[-1][-1]
+    assert retry_message.content == build_retry_prompt("stay brief")
+
+
+@pytest.mark.parametrize(
+    ("prompt_text", "expected_reply"),
+    [
+        ("/mcp", "No MCP servers configured."),
+        ("/mcp status", "No MCP servers configured."),
+        ("/mcp STATUS", "No MCP servers configured."),
+        ("/mcp   status", "No MCP servers configured."),
+        ("/mcp\tstatus", "No MCP servers configured."),
+        ("/mcp status extra", "Usage: `/mcp status`"),
+        ("/mcp login", "Usage: `/mcp login <alias>`"),
+        ("/mcp logout", "Usage: `/mcp logout <alias>`"),
+        ("/mcp login srv", "Unknown MCP server: `srv`"),
+        ("/mcp login   srv", "Unknown MCP server: `srv`"),
+        ("/mcp login\tsrv", "Unknown MCP server: `srv`"),
+        ("/mcp\tlogin srv", "Unknown MCP server: `srv`"),
+        ("/mcp Login SRV", "Unknown MCP server: `SRV`"),
+        ("  /mcp   login   srv  ", "Unknown MCP server: `srv`"),
+        (
+            "/mcp bogus",
+            "Usage: `/mcp status`, `/mcp login <alias>`, or `/mcp logout <alias>`",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mcp_command_argument_parsing(
+    acp_agent_loop: VibeAcpAgent, prompt_text: str, expected_reply: str
+) -> None:
+    created = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+
+    await acp_agent_loop.prompt(
+        session_id=created.session_id,
+        prompt=[TextContentBlock(type="text", text=prompt_text)],
+    )
+
+    assert _texts(acp_agent_loop)[-1] == expected_reply
+
+
+@pytest.mark.parametrize(
+    ("prompt_text", "expected_update"),
+    [
+        (
+            "/proxy-setup https_proxy https://proxy.test",
+            {"HTTPS_PROXY": "https://proxy.test"},
+        ),
+        (
+            "/proxy-setup HTTPS_PROXY https://proxy.test",
+            {"HTTPS_PROXY": "https://proxy.test"},
+        ),
+        (
+            "/proxy-setup https_proxy   https://proxy.test",
+            {"HTTPS_PROXY": "https://proxy.test"},
+        ),
+        (
+            "/proxy-setup https_proxy\thttps://proxy.test",
+            {"HTTPS_PROXY": "https://proxy.test"},
+        ),
+        (
+            "/proxy-setup\thttps_proxy https://proxy.test",
+            {"HTTPS_PROXY": "https://proxy.test"},
+        ),
+        (
+            "  /proxy-setup   https_proxy   https://proxy.test  ",
+            {"HTTPS_PROXY": "https://proxy.test"},
+        ),
+        ("/proxy-setup https_proxy", {"HTTPS_PROXY": None}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_proxy_setup_command_argument_parsing(
+    acp_agent_loop: VibeAcpAgent,
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_text: str,
+    expected_update: dict[str, str | None],
+) -> None:
+    created = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+    config = acp_agent_loop.sessions[created.session_id].app_server.resources.config
+    update_proxy = AsyncMock()
+    monkeypatch.setattr(config, "update_proxy", update_proxy)
+
+    await acp_agent_loop.prompt(
+        session_id=created.session_id,
+        prompt=[TextContentBlock(type="text", text=prompt_text)],
+    )
+
+    update_proxy.assert_awaited_once_with(expected_update)

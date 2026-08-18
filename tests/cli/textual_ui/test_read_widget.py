@@ -15,15 +15,15 @@ from vibe.cli.textual_ui.widgets.collapsible import CollapsibleSection
 from vibe.cli.textual_ui.widgets.tool_widgets import (
     GenericToolResultWidget,
     ToolResultWidget,
-    _clean_output,
     _fenced_code_block,
     _strip_line_numbers,
+    clean_output,
     get_result_widget,
 )
 
 
 def test_clean_output_strips_ansi_and_control_bytes() -> None:
-    out = _clean_output("a\x1b[33mwarn\x1b[0mb\x1b[2Kc\x07d")
+    out = clean_output("a\x1b[33mwarn\x1b[0mb\x1b[2Kc\x07d")
     assert "\x1b" not in out and "\x07" not in out
     assert out == "awarnbcd"
 
@@ -31,15 +31,21 @@ def test_clean_output_strips_ansi_and_control_bytes() -> None:
 def test_clean_output_collapses_carriage_return_redraws() -> None:
     # uv-style in-place progress: keep only the final drawn state per line.
     content = "Preparing... (0/0)\rPreparing... (0/1)\rPreparing... (1/1)\ndone"
-    assert _clean_output(content) == "Preparing... (1/1)\ndone"
+    assert clean_output(content) == "Preparing... (1/1)\ndone"
 
 
 def test_clean_output_preserves_crlf_lines() -> None:
-    assert _clean_output("hello\r\nworld\r\n") == "hello\nworld\n"
+    assert clean_output("hello\r\nworld\r\n") == "hello\nworld\n"
+
+
+def test_clean_output_keeps_a_line_parked_on_a_trailing_carriage_return() -> None:
+    # Matches the webview: a trailing CR has not overwritten anything yet.
+    assert clean_output("Progress: 50%\r") == "Progress: 50%"
+    assert clean_output("10%\r100%\r") == "100%"
 
 
 def test_clean_output_keeps_tabs_and_newlines() -> None:
-    assert _clean_output("a\tb\nc\td") == "a\tb\nc\td"
+    assert clean_output("a\tb\nc\td") == "a\tb\nc\td"
 
 
 @pytest.mark.parametrize(
@@ -55,7 +61,7 @@ def test_clean_output_keeps_tabs_and_newlines() -> None:
 def test_clean_output_strips_complete_osc_sequences(
     content: str, expected: str
 ) -> None:
-    assert _clean_output(content) == expected
+    assert clean_output(content) == expected
 
 
 def test_shell_result_widget_sanitizes_projected_output() -> None:

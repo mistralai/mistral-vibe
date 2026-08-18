@@ -3,8 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from threading import Event, Thread
+from typing import TYPE_CHECKING
 
-from watchfiles import Change, watch
+if TYPE_CHECKING:
+    from watchfiles import Change
 
 
 class WatchController:
@@ -58,6 +60,8 @@ class WatchController:
             thread.join(timeout=1)
 
     def _watch_loop(self, root: Path, stop_event: Event, ready_event: Event) -> None:
+        from watchfiles import watch
+
         try:
             watcher = watch(
                 str(root), stop_event=stop_event, step=200, yield_on_timeout=True

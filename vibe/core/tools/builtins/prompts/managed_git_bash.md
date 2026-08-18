@@ -9,7 +9,6 @@ tool call.
 - Git Bash only: Vibe resolves a usable `bash.exe` from PATH, Git for Windows, or standard Git install locations unless a `bash.exe` `shell` override is provided.
 - This tool uses POSIX shell syntax and Unix-style command chaining, redirects, variables, and quoting.
 - Stateful sessions: each command gets a `session_id`, a PTY, and a durable log file.
-- Merged terminal stream: PTY sessions combine stdout and stderr in the captured output; use `output`/`stdout` as the terminal stream and expect compatibility `stderr` to be empty.
 - Background handling: use `git_bash(background=true)` for dev servers, watchers, and long builds that should keep running.
 - Soft foreground timeout: `git_bash(background=false, hard_timeout=false)` waits for `timeout_seconds`, then returns a live session if the command is still running.
 - Hard foreground timeout: `git_bash(..., hard_timeout=true)` terminates the process tree when `timeout_seconds` expires and reports a timeout error.

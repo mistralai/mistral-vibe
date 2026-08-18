@@ -23,6 +23,7 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import (
     DEFAULT_SENSITIVE_PATTERNS,
     ToolPath,
+    display_file_path,
     resolve_file_tool_permission,
     resolve_tool_path,
 )
@@ -62,14 +63,15 @@ class WriteFile(
     @classmethod
     def format_call_display(cls, args: WriteFileArgs) -> ToolCallDisplay:
         suffix = "(scratchpad)" if is_scratchpad_display_path(args.file_path) else ""
+        shown = display_file_path(args.file_path)
         return ToolCallDisplay(
-            summary=f"Writing {args.file_path}",
+            summary=f"Writing {shown}",
             content=args.content,
             suffix=suffix,
             verb="Creating",
-            message=args.file_path,
+            message=shown,
             settled_verb="Created",
-            settled_message=args.file_path,
+            settled_message=shown,
         )
 
     @classmethod
@@ -83,7 +85,7 @@ class WriteFile(
             return ToolResultDisplay(
                 success=True,
                 verb="Created",
-                message=Path(event.result.file_path).name,
+                message=display_file_path(event.result.file_path),
                 suffix=suffix,
             )
 

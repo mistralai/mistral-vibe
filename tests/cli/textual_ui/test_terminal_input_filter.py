@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+import importlib
+import sys
+import types
+
 import pytest
 from textual import events
+from textual._xterm_parser import XTermParser
 
 from vibe.cli.textual_ui import terminal_input_filter
 from vibe.cli.textual_ui.terminal_input_filter import (
+    _DRIVER_MODULE_PREFIX,
     _ENABLE_SGR_MOUSE,
     FilteringXTermParser,
     filter_input,
@@ -150,15 +157,63 @@ def test_no_sgr_re_request_for_ordinary_input(sent: list[str]) -> None:
     assert sent == []
 
 
-def test_patch_driver_parser_rebinds_module_global() -> None:
-    import sys
+def _driver_modules() -> dict[str, types.ModuleType]:
+    return {
+        name: module
+        for name, module in list(sys.modules.items())
+        if name.startswith(_DRIVER_MODULE_PREFIX)
+    }
 
-    from textual.drivers.linux_driver import LinuxDriver
 
-    namespace = sys.modules[LinuxDriver.__module__].__dict__
-    original = namespace["XTermParser"]
-    try:
-        patch_driver_parser(LinuxDriver)
-        assert namespace["XTermParser"] is FilteringXTermParser
-    finally:
-        namespace["XTermParser"] = original
+@pytest.fixture
+def restore_driver_parsers() -> Iterator[None]:
+    yield
+    for module in _driver_modules().values():
+        if module.__dict__.get("XTermParser") is FilteringXTermParser:
+            module.__dict__["XTermParser"] = XTermParser
+
+
+@pytest.mark.usefixtures("restore_driver_parsers")
+def test_patch_driver_parser_leaves_no_driver_module_unfiltered() -> None:
+    for name in ("linux_driver", "linux_inline_driver", "web_driver"):
+        importlib.import_module(_DRIVER_MODULE_PREFIX + name)
+
+    patch_driver_parser()
+
+    patched = {
+        name: module.__dict__["XTermParser"]
+        for name, module in _driver_modules().items()
+        if "XTermParser" in module.__dict__
+    }
+    assert set(patched.values()) == {FilteringXTermParser}
+    assert patched.keys() >= {
+        _DRIVER_MODULE_PREFIX + name
+        for name in ("linux_driver", "linux_inline_driver", "web_driver")
+    }
+
+
+@pytest.mark.usefixtures("restore_driver_parsers")
+def test_patch_driver_parser_rebinds_module_no_driver_class_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = types.ModuleType(_DRIVER_MODULE_PREFIX + "_fake_win32")
+    helper.__dict__["XTermParser"] = XTermParser
+    monkeypatch.setitem(sys.modules, helper.__name__, helper)
+
+    patch_driver_parser()
+
+    assert helper.__dict__["XTermParser"] is FilteringXTermParser
+
+
+@pytest.mark.usefixtures("restore_driver_parsers")
+def test_patch_driver_parser_ignores_unrelated_xterm_parser_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = object()
+    helper = types.ModuleType(_DRIVER_MODULE_PREFIX + "_fake_unrelated")
+    helper.__dict__["XTermParser"] = sentinel
+    monkeypatch.setitem(sys.modules, helper.__name__, helper)
+
+    patch_driver_parser()
+
+    assert helper.__dict__["XTermParser"] is sentinel

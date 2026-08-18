@@ -392,8 +392,6 @@ class MistralBackend:
     ) -> LLMChunk:
         try:
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
-            if reasoning_effort is not None:
-                temperature = 1.0
             response = await self._get_client().chat.complete_async(
                 model=model.name,
                 messages=[
@@ -482,8 +480,6 @@ class MistralBackend:
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
-            if reasoning_effort is not None:
-                temperature = 1.0
 
             stream = await self._get_client().chat.stream_async(
                 model=model.name,

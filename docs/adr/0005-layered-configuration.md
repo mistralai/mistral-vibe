@@ -13,6 +13,11 @@ Textual, ACP, and programmatic clients use typed app-server resources. They do
 not read or edit `config.toml`, receive the orchestrator, or mutate a live config
 object.
 
+The selected `SessionBackend` is the application boundary for changes to that
+live runtime. Agent switches, session-limit updates, config writes, and reloads
+use distinct typed backend methods after Host-side validation and persistence;
+resource handlers do not reach into an implementation-specific runtime object.
+
 ## Current layer stack
 
 The effective order is:

@@ -28,7 +28,7 @@ from vibe.core.tools.utils import (
 )
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils import kill_async_subprocess
-from vibe.utils.io import decode_safe, read_safe
+from vibe.utils.io import decode_console_safe, read_safe
 from vibe.utils.tool_presentation import ToolEffectKind
 
 if TYPE_CHECKING:
@@ -328,16 +328,8 @@ class Grep(
                     f"Search timed out after {self.config.default_timeout}s"
                 )
 
-            stdout = (
-                decode_safe(stdout_bytes, from_subprocess=True).text
-                if stdout_bytes
-                else ""
-            )
-            stderr = (
-                decode_safe(stderr_bytes, from_subprocess=True).text
-                if stderr_bytes
-                else ""
-            )
+            stdout = decode_console_safe(stdout_bytes) if stdout_bytes else ""
+            stderr = decode_console_safe(stderr_bytes) if stderr_bytes else ""
 
             if proc.returncode not in {0, 1}:
                 error_msg = stderr or f"Process exited with code {proc.returncode}"

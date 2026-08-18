@@ -50,6 +50,20 @@ from vibe.utils import keyring as keyring_utils
 from vibe.utils.platform import resolve_windows_shell
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--experimental-harness",
+        action="store_true",
+        default=False,
+        help="Run backend contract tests with the experimental Unified Harness backend.",
+    )
+
+
+@pytest.fixture
+def experimental_harness(pytestconfig: pytest.Config) -> bool:
+    return bool(pytestconfig.getoption("--experimental-harness"))
+
+
 class _EmptyKeyring(KeyringBackend):
     """A keyring backend that stores nothing, used to keep tests off the real OS keyring."""
 

@@ -388,3 +388,38 @@ def test_agents_md_returns_none_when_not_initialized(tmp_path: Path) -> None:
     )
     assert tool.get_result_extra(result) is None
     reset_harness_files_manager()
+
+
+@pytest.mark.usefixtures("_setup_manager")
+def test_get_result_display_relative_to_cwd(tmp_path: Path) -> None:
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    target = pkg / "config.py"
+    target.write_text("hello", encoding="utf-8")
+
+    result = ReadFileResult(
+        file_path=str(target), content="hello", num_lines=1, start_line=1, total_lines=1
+    )
+    event = ToolResultEvent(
+        tool_call_id="test", tool_name="read", tool_class=None, result=result
+    )
+    display = ReadFile.get_result_display(event)
+
+    assert display.success is True
+    assert "pkg/config.py" in display.message
+    assert display.message != "1 line from config.py"
+
+
+@pytest.mark.usefixtures("_setup_manager")
+def test_format_call_display_relative_to_cwd(tmp_path: Path) -> None:
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    target = pkg / "config.py"
+    target.write_text("hello", encoding="utf-8")
+
+    args = ReadFileArgs(file_path=str(target))
+    display = ReadFile.format_call_display(args)
+
+    assert display.summary == "Reading pkg/config.py"
+    assert display.message == "pkg/config.py"
+    assert display.settled_message == "pkg/config.py"

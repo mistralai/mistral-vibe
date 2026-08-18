@@ -20,7 +20,9 @@ class FakeAccountGateway:
         self.unavailable = unavailable
         self.calls: list[tuple[str, str]] = []
 
-    async def read(self, *, base_url: str, api_key: str) -> WhoAmIResult:
+    async def read(
+        self, *, base_url: str, api_key: str, timeout: float | None = None
+    ) -> WhoAmIResult:
         self.calls.append((base_url, api_key))
         if self.unauthorized:
             raise AccountGatewayUnauthorized()

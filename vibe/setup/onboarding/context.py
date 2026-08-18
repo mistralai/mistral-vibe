@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, HttpUrl, TypeAdapter, ValidationError
 
 from vibe.core.config import (
     DEFAULT_ACTIVE_MODEL_CONFIG,
+    DEFAULT_CONSOLE_BASE_URL,
     DEFAULT_MODELS,
     DEFAULT_PROVIDERS,
     DEFAULT_THEME,
@@ -82,6 +83,7 @@ class _OnboardingSnapshot(BaseModel):
     active_model: str = DEFAULT_ACTIVE_MODEL_CONFIG.alias
     theme: str = DEFAULT_THEME
     vibe_base_url: str = DEFAULT_VIBE_BASE_URL
+    console_base_url: str = DEFAULT_CONSOLE_BASE_URL
     providers: list[Any] = Field(default_factory=_default_provider_payloads)
     models: list[Any] = Field(default_factory=_default_model_payloads)
 
@@ -165,6 +167,11 @@ def _load_onboarding_env_payload_for_fields(
         and (vibe_base_url := _find_env_value("VIBE_VIBE_BASE_URL")) is not None
     ):
         payload["vibe_base_url"] = vibe_base_url
+    if (
+        "console_base_url" in field_names
+        and (console_base_url := _find_env_value("VIBE_CONSOLE_BASE_URL")) is not None
+    ):
+        payload["console_base_url"] = console_base_url
     if "theme" in field_names and (theme := _find_env_value("VIBE_THEME")) is not None:
         payload["theme"] = theme
 
@@ -252,6 +259,7 @@ def _resolve_provider(
 class OnboardingContext:
     provider: ProviderConfig
     vibe_base_url: str = DEFAULT_VIBE_BASE_URL
+    console_base_url: str = DEFAULT_CONSOLE_BASE_URL
     theme: str = DEFAULT_THEME
 
     @property
@@ -263,6 +271,7 @@ class OnboardingContext:
         return cls(
             provider=config.get_active_provider(),
             vibe_base_url=config.vibe_base_url,
+            console_base_url=config.console_base_url,
             theme=config.theme,
         )
 
@@ -277,6 +286,7 @@ class OnboardingContext:
                     active_model=snapshot.active_model, snapshot=snapshot
                 ),
                 vibe_base_url=snapshot.vibe_base_url,
+                console_base_url=snapshot.console_base_url,
                 theme=snapshot.theme,
             )
         except (RuntimeError, ValidationError, ValueError):

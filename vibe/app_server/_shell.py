@@ -70,7 +70,11 @@ def shell_effect_state(
             display=display,
         )
     return CompletedEffectState(
-        output={"stdout": result.stdout, "stderr": result.stderr},
+        output={
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "output": output_text,
+        },
         output_text=output_text,
         duration_ms=duration_ms,
         display=display,

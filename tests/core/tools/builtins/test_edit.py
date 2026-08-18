@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from tests.mock.utils import collect_result
+from vibe.core.config.harness_files import (
+    init_harness_files_manager,
+    reset_harness_files_manager,
+)
 from vibe.core.tools.base import BaseToolState, ToolError
 from vibe.core.tools.builtins.edit import Edit, EditArgs, EditConfig, EditResult
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
+from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.types import ToolResultEvent
 
 
@@ -210,11 +216,11 @@ def test_format_call_display() -> None:
     display = Edit.format_call_display(args)
 
     assert isinstance(display, ToolCallDisplay)
-    assert display.summary == "Editing foo.py"
+    assert display.summary == "Editing /abs/foo.py"
     assert display.verb == "Editing"
-    assert display.message == "foo.py"
+    assert display.message == "/abs/foo.py"
     assert display.settled_verb == "Edited"
-    assert display.settled_message == "foo.py"
+    assert display.settled_message == "/abs/foo.py"
 
 
 def test_get_result_display() -> None:
@@ -369,3 +375,54 @@ async def test_ui_occurrences_use_per_occurrence_lines_for_replace_all(
         (2, "y = bar - 2", "y = qux - 2"),
         (3, "z = bar", "z = qux"),
     ]
+
+
+@pytest.fixture()
+def _setup_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
+    monkeypatch.setattr(
+        trusted_folders_manager, "find_trust_root", lambda _: tmp_path.resolve()
+    )
+    reset_harness_files_manager()
+    init_harness_files_manager("user", "project")
+    yield
+    reset_harness_files_manager()
+
+
+@pytest.mark.usefixtures("_setup_manager")
+def test_format_call_display_relative_to_cwd(tmp_path: Path) -> None:
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    target = pkg / "config.py"
+    target.write_text("x", encoding="utf-8")
+
+    args = EditArgs(file_path=str(target), old_string="x", new_string="y")
+    display = Edit.format_call_display(args)
+
+    assert display.summary == "Editing pkg/config.py"
+    assert display.message == "pkg/config.py"
+    assert display.settled_message == "pkg/config.py"
+
+
+@pytest.mark.usefixtures("_setup_manager")
+def test_get_result_display_relative_to_cwd(tmp_path: Path) -> None:
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    target = pkg / "config.py"
+    target.write_text("x", encoding="utf-8")
+
+    result = EditResult(
+        file=str(target),
+        message="The file has been updated successfully.",
+        old_string="x",
+        new_string="y",
+    )
+    event = ToolResultEvent(
+        tool_call_id="test", tool_name="edit", tool_class=None, result=result
+    )
+    display = Edit.get_result_display(event)
+
+    assert display.success is True
+    assert display.message == "pkg/config.py"
+    assert display.message != "config.py"

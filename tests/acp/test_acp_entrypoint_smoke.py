@@ -188,6 +188,7 @@ async def _connect_and_initialize(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(30)
 async def test_vibe_acp_initialize_and_new_session(vibe_home_dir: Path) -> None:
     proc, initialize_response, conn = await _connect_and_initialize(
         vibe_home_dir=vibe_home_dir, include_api_key=True
@@ -214,6 +215,7 @@ async def test_vibe_acp_initialize_and_new_session(vibe_home_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(30)
 async def test_vibe_acp_bootstraps_default_files(vibe_home_dir: Path) -> None:
     proc, _initialize_response, conn = await _connect_and_initialize(
         vibe_home_dir=vibe_home_dir, include_api_key=True
@@ -230,6 +232,7 @@ async def test_vibe_acp_bootstraps_default_files(vibe_home_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(30)
 async def test_vibe_acp_initialize_exposes_browser_auth(vibe_home_dir: Path) -> None:
     proc, initialize_response, _conn = await _connect_and_initialize(
         vibe_home_dir=vibe_home_dir, include_api_key=True
@@ -247,6 +250,7 @@ async def test_vibe_acp_initialize_exposes_browser_auth(vibe_home_dir: Path) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(30)
 async def test_vibe_acp_initialize_exposes_delegated_browser_auth_when_supported(
     vibe_home_dir: Path,
 ) -> None:
@@ -272,6 +276,7 @@ async def test_vibe_acp_initialize_exposes_delegated_browser_auth_when_supported
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(30)
 async def test_vibe_acp_initialize_exposes_terminal_auth_when_supported(
     vibe_home_dir: Path,
 ) -> None:
@@ -380,6 +385,7 @@ def test_acp_agent_import_does_not_load_gitpython() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(30)
 async def test_vibe_acp_new_session_fails_without_api_key(vibe_home_dir: Path) -> None:
     proc, _initialize_response, conn = await _connect_and_initialize(
         vibe_home_dir=vibe_home_dir, include_api_key=False

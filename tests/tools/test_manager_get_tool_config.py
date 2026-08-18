@@ -616,6 +616,49 @@ class FileTool(BaseTool[FileToolArgs, FileToolResult, BaseToolConfig, BaseToolSt
         assert "dir_tool" in tools
         assert "file_tool" in tools
 
+    def test_custom_tool_names_include_only_available_custom_tools(
+        self, tmp_path: Path
+    ):
+        tool_dir = tmp_path / "tools"
+        tool_dir.mkdir()
+        (tool_dir / "weather.py").write_text("""
+from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
+from pydantic import BaseModel
+
+class WeatherArgs(BaseModel):
+    pass
+
+class WeatherResult(BaseModel):
+    pass
+
+class WeatherTool(BaseTool[WeatherArgs, WeatherResult, BaseToolConfig, BaseToolState]):
+    async def run(self, args, ctx=None):
+        yield WeatherResult()
+""")
+
+        vibe_config = build_test_vibe_config(tool_paths=[tool_dir])
+        holder = {"config": vibe_config}
+        manager = ToolManager(lambda: holder["config"])
+
+        assert manager.custom_tool_names == {"weather_tool"}
+
+        holder["config"] = vibe_config.model_copy(
+            update={"disabled_tools": ["weather_tool"]}
+        )
+        assert manager.custom_tool_names == set()
+
+    def test_reexported_builtin_counts_as_a_custom_tool_override(self, tmp_path: Path):
+        tools_dir = tmp_path / "tools"
+        tools_dir.mkdir()
+        (tools_dir / "reexport.py").write_text(
+            "from vibe.core.tools.builtins.todo import Todo\n"
+        )
+
+        vibe_config = build_test_vibe_config(tool_paths=[tools_dir])
+        manager = ToolManager(lambda: vibe_config)
+
+        assert "todo" in manager.custom_tool_names
+
 
 class TestToolRuntimeAvailability:
     """Tests for is_available() filtering in ToolManager."""

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import httpx
+from typing import TYPE_CHECKING
 
 from vibe.cli.update_notifier.ports.update_gateway import (
     Update,
@@ -8,7 +8,9 @@ from vibe.cli.update_notifier.ports.update_gateway import (
     UpdateGatewayCause,
     UpdateGatewayError,
 )
-from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
+
+if TYPE_CHECKING:
+    from vibe.utils.http import VibeAsyncHTTPClient
 
 
 class GitHubUpdateGateway(UpdateGateway):
@@ -30,6 +32,10 @@ class GitHubUpdateGateway(UpdateGateway):
         self._base_url = base_url.rstrip("/")
 
     async def fetch_update(self) -> Update | None:
+        import httpx
+
+        from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
+
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": "mistral-vibe-update-notifier",

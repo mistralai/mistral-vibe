@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, RLock
+from typing import TYPE_CHECKING
 
 from vibe.cli.autocompletion.file_indexer.ignore_rules import IgnoreRules
 from vibe.cli.autocompletion.file_indexer.store import (
@@ -13,7 +14,10 @@ from vibe.cli.autocompletion.file_indexer.store import (
     FileIndexStore,
     IndexEntry,
 )
-from vibe.cli.autocompletion.file_indexer.watcher import Change, WatchController
+from vibe.cli.autocompletion.file_indexer.watcher import WatchController
+
+if TYPE_CHECKING:
+    from watchfiles import Change
 
 
 @dataclass(slots=True)
@@ -172,6 +176,8 @@ class FileIndexer:
     def _handle_watch_changes(
         self, root: Path, raw_changes: Iterable[tuple[Change, str]]
     ) -> None:
+        from watchfiles import Change
+
         normalized: list[tuple[Change, Path]] = []
         for change, path_str in raw_changes:
             if change not in {Change.added, Change.deleted, Change.modified}:

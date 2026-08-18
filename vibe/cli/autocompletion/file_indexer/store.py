@@ -4,9 +4,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from vibe.cli.autocompletion.file_indexer.ignore_rules import IgnoreRules
-from vibe.cli.autocompletion.file_indexer.watcher import Change
+
+if TYPE_CHECKING:
+    from watchfiles import Change
 
 ASCII_CODEPOINT_LIMIT = 128
 
@@ -83,6 +86,8 @@ class FileIndexStore:
         return list(self._ordered_entries)
 
     def apply_changes(self, changes: list[tuple[Change, Path]]) -> None:
+        from watchfiles import Change
+
         if self._root is None:
             return
 

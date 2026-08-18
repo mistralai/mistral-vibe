@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import platform
 
 from vibe.cli.constants import CLIPBOARD_IMAGE_PASTE_SUPPORTED_SYSTEM
-from vibe.utils import VIBE_WARNING_TAG
 
 
 @dataclass(frozen=True)
@@ -14,20 +13,6 @@ class CommandContext:
 
 
 CommandAvailability = Callable[[CommandContext], bool]
-
-
-def build_retry_prompt(additional_instructions: str) -> str:
-    message = (
-        "The previous model stream ended before reaching its end. Continue the "
-        "response exactly where it stopped without repeating text already produced. "
-        "If no response text was produced, answer the pending user request normally."
-    )
-    if instructions := additional_instructions.strip():
-        message += (
-            "\n\nFollow these additional instructions from the user while "
-            f"continuing:\n{instructions}"
-        )
-    return f"<{VIBE_WARNING_TAG}>{message}</{VIBE_WARNING_TAG}>"
 
 
 @dataclass
@@ -102,6 +87,13 @@ class CommandRegistry:
                 aliases=frozenset(["/log"]),
                 description="Show path to current interaction log file",
                 handler="_show_log_path",
+            ),
+            "log-level": Command(
+                aliases=frozenset(["/log-level"]),
+                description=(
+                    "Change the log level for this session or persist it to config.toml."
+                ),
+                handler="_log_level_command",
             ),
             "debug": Command(
                 aliases=frozenset(["/debug"]),

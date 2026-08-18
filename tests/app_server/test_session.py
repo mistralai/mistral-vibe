@@ -6,6 +6,7 @@ from contextlib import suppress
 import json
 from pathlib import Path
 import time
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
@@ -17,15 +18,20 @@ from tests.stubs.app_server import (
     attach_test_app_server_session,
     build_test_app_server,
     create_test_app_server_session,
+    legacy_backend,
     start_test_app_server,
 )
 from tests.stubs.fake_backend import FakeBackend, FakeInterruptedStreamingBackend
+from vibe.app_server._legacy_composition import create_legacy_app_server
+from vibe.app_server._legacy_session_backend import LegacySessionBackend
 from vibe.app_server._model import validate_wire
 from vibe.app_server._projection import project_history
 from vibe.app_server._runtime import (
     AgentRuntimeFactory,
     HarnessProcess,
     RootOpenRequest,
+    RuntimeSessionNotFoundError,
+    _apply_stored_stats,
 )
 from vibe.app_server.client import AppServerClient, AppServerConnectionClosed
 from vibe.app_server.events import (
@@ -42,12 +48,12 @@ from vibe.app_server.models import (
     ApprovalCallbackOutput,
     ApprovalDecision,
     ApprovalDecisionType,
-    CancelledCallbackState,
     CompletedEffectState,
     FileReadEffectDetail,
     PublicCallbackEntry,
     PublicCheckpointEntry,
     PublicEffectEntry,
+    PublicHistoryEntry,
     PublicMessageEntry,
     PublicNoticeEntry,
     ResourceContentBlock,
@@ -66,9 +72,12 @@ from vibe.app_server.protocol import (
     ConfigWriteOpWire,
     ConfigWriteParams,
     Notification,
+    PageRequest,
+    ProtocolError,
     ProtocolErrorCode,
     RuntimeUpdatedParams,
     ServerRequest,
+    SessionHistoryClearParams,
     SessionOptions,
     SessionReadParams,
     SessionReadResponse,
@@ -76,6 +85,8 @@ from vibe.app_server.protocol import (
     SessionReadyWaitResponse,
     SessionResumeParams,
     SessionStartParams,
+    SessionTurnsListParams,
+    SessionTurnsListResponse,
     SessionUpdatedParams,
     validate_callback_acknowledgement,
 )
@@ -86,6 +97,7 @@ from vibe.core.agent_loop import AgentLoop
 from vibe.core.compaction import CompactionFailedError, select_model_context
 from vibe.core.config import ModelConfig, SessionLoggingConfig
 from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.session.session_lease import SessionBusyError, SessionLease
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.tools.models import ToolPermission
 from vibe.core.types import (
@@ -228,37 +240,6 @@ async def test_session_close_does_not_wait_for_full_event_queues() -> None:
 
     assert session._events.qsize() == 1
     assert session._unsolicited_events.qsize() == 1
-
-
-@pytest.mark.asyncio
-async def test_turn_streams_public_events_over_json_rpc() -> None:
-    backend = FakeBackend([mock_llm_chunk(content="hell"), mock_llm_chunk(content="o")])
-    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
-    session = await create_test_app_server_session(agent_loop)
-
-    try:
-        events = [event async for event in session.act("hi", client_message_id="u1")]
-    finally:
-        await session.close()
-        await agent_loop.aclose()
-
-    assert any(isinstance(event, StatsUpdated) for event in events)
-    user = next(
-        event.entry
-        for event in events
-        if isinstance(event, HistoryEntryAdded)
-        and isinstance(event.entry, PublicMessageEntry)
-        and event.entry.role == "user"
-    )
-    assert user.id == "u1"
-    assert user.text == "hi"
-    assistant = next(
-        entry
-        for entry in session.history
-        if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
-    )
-    assert assistant.text == "hello"
-    assert all(entry.generation_status == "completed" for entry in session.history)
 
 
 @pytest.mark.asyncio
@@ -428,7 +409,7 @@ async def test_session_start_initializes_experiments_server_side(
 
     session = await create_test_app_server_session(agent_loop)
     try:
-        initialize.assert_called_once_with()
+        initialize.assert_called_once_with(defer_new_session_telemetry=False)
     finally:
         await session.close()
 
@@ -458,6 +439,306 @@ async def test_persisted_session_resume_appends_checkpoint(tmp_path: Path) -> No
 
     assert len(checkpoints) == 1
     assert checkpoints[0].message == "Session resumed"
+
+
+@pytest.mark.asyncio
+async def test_in_place_resume_clears_previous_turn_state(tmp_path: Path) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    backend = FakeBackend([[mock_llm_chunk(content="first answer")]])
+    client = start_test_app_server(
+        build_test_agent_loop(config=config, backend=backend, enable_streaming=True)
+    )
+    session = await attach_test_app_server_session(client)
+    try:
+        await _consume(session.act("first question"))
+        # Resuming a different session rebinds the loop in place; the reused turn
+        # controller must be reset so the previous session's turns do not leak.
+        await session.resume(saved_session_id)
+        result = await client.request(
+            "session/turns/list",
+            SessionTurnsListParams(
+                session_id=saved_session_id, page=PageRequest(limit=10)
+            ),
+        )
+    finally:
+        await session.close()
+
+    assert SessionTurnsListResponse.model_validate(result).items == []
+
+
+@pytest.mark.asyncio
+async def test_in_place_resume_rehydrates_experiments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    source = build_test_agent_loop(config=config)
+    hydrated_for: list[str] = []
+
+    async def fake_hydrate() -> None:
+        # Runs only after the rebind, so it observes the resumed session id and
+        # thus hydrates from the resumed session's persisted experiment state.
+        hydrated_for.append(source.session_id)
+
+    monkeypatch.setattr(source, "hydrate_experiments_from_session", fake_hydrate)
+    try:
+        factory = AgentRuntimeFactory()
+        await factory.resume_root(source, saved_session_id)
+        await factory.finish_resume_root(source, saved_session_id)
+    finally:
+        await source.aclose()
+
+    assert hydrated_for == [saved_session_id]
+
+
+@pytest.mark.asyncio
+async def test_in_place_resume_resets_permissions_and_scratchpad(
+    tmp_path: Path,
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    source = build_test_agent_loop(config=config)
+    source._permission_store.set_tool_permission("bash", ToolPermission.ALWAYS)
+    scratchpad_before = source.scratchpad_dir
+    try:
+        await AgentRuntimeFactory().resume_root(source, saved_session_id)
+        # Prior session's approvals must not carry over, the scratchpad must be
+        # re-derived for the resumed session, and the fresh session's experiment
+        # task must be cancelled so it cannot clobber the hydrated variants.
+        assert source._permission_store.get_tool_permission("bash") is None
+        assert source.scratchpad_dir != scratchpad_before
+        assert source._experiments_task is None
+    finally:
+        await source.aclose()
+
+
+@pytest.mark.asyncio
+async def test_in_place_resume_leaves_source_untouched_when_session_missing(
+    tmp_path: Path,
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    source = build_test_agent_loop(config=config)
+    original_session_id = source.session_id
+    try:
+        with pytest.raises(RuntimeSessionNotFoundError):
+            await AgentRuntimeFactory().resume_root(source, "missing-session")
+        # The fallible load happens before any mutation, so a failed resume must
+        # leave the live loop bound to its original session.
+        assert source.session_id == original_session_id
+    finally:
+        await source.aclose()
+
+
+@pytest.mark.asyncio
+async def test_in_place_resume_releases_lease_when_metadata_preparation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    def fail_stats(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("invalid persisted stats")
+
+    monkeypatch.setattr("vibe.app_server._runtime._build_stats", fail_stats)
+    source = build_test_agent_loop(config=config)
+    try:
+        with pytest.raises(RuntimeError, match="invalid persisted stats"):
+            await AgentRuntimeFactory().resume_root(source, saved_session_id)
+        with SessionLease(tmp_path, saved_session_id):
+            pass
+    finally:
+        await source.aclose()
+
+
+@pytest.mark.asyncio
+async def test_in_place_resume_rebinds_before_waiting_for_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    source = build_test_agent_loop(config=config)
+    session_id_when_awaited: list[str] = []
+
+    async def fake_await_deferred_init() -> None:
+        session_id_when_awaited.append(source.session_id)
+
+    monkeypatch.setattr(source, "_await_deferred_init", fake_await_deferred_init)
+    try:
+        factory = AgentRuntimeFactory()
+        await factory.resume_root(source, saved_session_id)
+        # The rebind happens before wait_until_ready so the transcript is
+        # visible immediately; the session is already the resumed one.
+        assert source.session_id == saved_session_id
+        await factory.finish_resume_root(source, saved_session_id)
+    finally:
+        await source.aclose()
+
+    # Deferred init is awaited after the rebind, so it observes the resumed
+    # session id — the init thread's update_system_prompt inserts at
+    # position 0, landing correctly on top of the resumed messages.
+    assert session_id_when_awaited == [saved_session_id]
+    assert source.session_id == saved_session_id
+
+
+@pytest.mark.asyncio
+async def test_resume_records_init_duration(tmp_path: Path) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config, defer_heavy_init=True)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    source = build_test_agent_loop(config=config, defer_heavy_init=True)
+    try:
+        factory = AgentRuntimeFactory()
+        await factory.resume_root(source, saved_session_id)
+        await factory.finish_resume_root(source, saved_session_id)
+        await source.wait_until_ready()
+    finally:
+        await source.aclose()
+
+    assert source.init_duration_ms is not None
+    assert isinstance(source.init_duration_ms, int)
+    assert source.init_duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_wait_until_ready_records_init_duration_on_resume_without_finish_resume(
+    tmp_path: Path,
+) -> None:
+    # session/ready/wait reads via wait_until_ready, which must record the
+    # duration itself even if the background finish_resume_root hasn't run.
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config, defer_heavy_init=True)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    source = build_test_agent_loop(config=config, defer_heavy_init=True)
+    try:
+        await AgentRuntimeFactory().resume_root(source, saved_session_id)
+        assert source._ready_telemetry_pending is False
+        await source.wait_until_ready()
+    finally:
+        await source.aclose()
+
+    assert source.init_duration_ms is not None
+    assert isinstance(source.init_duration_ms, int)
+    assert source.init_duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_emit_ready_or_new_session_telemetry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config, defer_heavy_init=True)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    source = build_test_agent_loop(config=config, defer_heavy_init=True)
+    emit_ready = Mock()
+    emit_new_session = Mock()
+    monkeypatch.setattr(source, "emit_ready_telemetry", emit_ready)
+    monkeypatch.setattr(source, "emit_new_session_telemetry", emit_new_session)
+    try:
+        await AgentRuntimeFactory().resume_root(source, saved_session_id)
+        await source.wait_until_ready()
+    finally:
+        await source.aclose()
+
+    emit_ready.assert_not_called()
+    emit_new_session.assert_not_called()
+    assert source.init_duration_ms is not None
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_leak_picker_init_duration(tmp_path: Path) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config, defer_heavy_init=True)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    source = build_test_agent_loop(config=config, defer_heavy_init=True)
+    try:
+        await source.wait_until_ready()
+        assert source.init_duration_ms is not None
+        picker_duration = source.init_duration_ms
+
+        await AgentRuntimeFactory().resume_root(source, saved_session_id)
+        # Rebind clears the picker's duration so it doesn't leak; _init_start_time
+        # is kept, so the resumed session re-measures from __init__.
+        assert source.init_duration_ms is None
+
+        await source.wait_until_ready()
+        assert source.init_duration_ms is not None
+        assert source.init_duration_ms >= picker_duration
+    finally:
+        await source.aclose()
+
+
+@pytest.mark.asyncio
+async def test_non_deferred_resume_stays_none(tmp_path: Path) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config, defer_heavy_init=False)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    source = build_test_agent_loop(config=config, defer_heavy_init=False)
+    try:
+        factory = AgentRuntimeFactory()
+        await factory.resume_root(source, saved_session_id)
+        await factory.finish_resume_root(source, saved_session_id)
+        await source.wait_until_ready()
+    finally:
+        await source.aclose()
+
+    assert source.init_duration_ms is None
 
 
 @pytest.mark.asyncio
@@ -579,6 +860,33 @@ async def test_in_process_resume_rebases_exit_usage(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_in_place_resume_resets_stats_when_target_has_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    source = build_test_agent_loop(config=config)
+    source.stats.session_prompt_tokens = 123
+    source.stats.session_completion_tokens = 45
+    monkeypatch.setattr("vibe.app_server._runtime._build_stats", lambda *a, **k: None)
+    try:
+        await AgentRuntimeFactory().resume_root(source, saved_session_id)
+        assert source.stats.session_prompt_tokens == 0
+        assert source.stats.session_completion_tokens == 0
+        active_model = source.config.get_active_model()
+        assert source.stats.input_price_per_million == active_model.input_price
+        assert source.stats.output_price_per_million == active_model.output_price
+    finally:
+        await source.aclose()
+
+
+@pytest.mark.asyncio
 async def test_resume_backfills_cached_price_for_legacy_stats() -> None:
     config = build_test_vibe_config(
         models=[
@@ -602,11 +910,9 @@ async def test_resume_backfills_cached_price_for_legacy_stats() -> None:
                 "output_price_per_million": 2.0,
             }
         }
-        result = await AgentRuntimeFactory._hydrate_resumed(
-            replacement, loaded_messages=[], metadata=legacy_metadata
-        )
-        assert result.stats.session_prompt_tokens == 100
-        assert result.stats.cached_input_price_per_million == 0.1
+        _apply_stored_stats(replacement, legacy_metadata)
+        assert replacement.stats.session_prompt_tokens == 100
+        assert replacement.stats.cached_input_price_per_million == 0.1
     finally:
         await replacement.aclose()
 
@@ -697,7 +1003,7 @@ async def test_detached_fork_transfers_live_runtime_without_session_logging() ->
         return source_loop
 
     source_client_transport, source_server_transport = memory_transport_pair()
-    source_server = AppServer(
+    source_server = create_legacy_app_server(
         source_server_transport,
         open_root=open_source,
         runtime_factory=process.runtime_factory,
@@ -715,7 +1021,7 @@ async def test_detached_fork_transfers_live_runtime_without_session_logging() ->
         fork = await source.resources.sessions.fork(attach=False)
 
         child_client_transport, child_server_transport = memory_transport_pair()
-        child_server = AppServer(
+        child_server = create_legacy_app_server(
             child_server_transport,
             open_root=process.open_root,
             runtime_factory=process.runtime_factory,
@@ -730,8 +1036,9 @@ async def test_detached_fork_transfers_live_runtime_without_session_logging() ->
 
         assert child.session_id == fork.state.session.id
         assert child.resources.agents.active.name == "plan"
-        assert child_server._agent_loop.runtime_policy.max_turns == 7
-        assert child_server._agent_loop.runtime_policy.max_tokens == 4096
+        runtime_policy = legacy_backend(child_server).session.agent_loop.runtime_policy
+        assert runtime_policy.max_turns == 7
+        assert runtime_policy.max_tokens == 4096
     finally:
         if child is not None:
             await child.close()
@@ -773,7 +1080,7 @@ async def test_detached_fork_reserves_source_session(
         return source_loop
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(
+    server = create_legacy_app_server(
         server_transport,
         open_root=open_source,
         runtime_factory=process.runtime_factory,
@@ -855,60 +1162,57 @@ async def test_due_loop_runs_as_an_unsolicited_server_turn(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_history_list_can_filter_by_turn() -> None:
-    backend = FakeBackend([
-        [mock_llm_chunk(content="first answer")],
-        [mock_llm_chunk(content="second answer")],
-    ])
-    session = await create_test_app_server_session(
-        build_test_agent_loop(backend=backend, enable_streaming=True)
-    )
+async def test_session_history_get_is_reachable_while_root_active() -> None:
+    # `session/history/get` loads from disk via the host handler, so with a
+    # root attached a missing session must surface NOT_FOUND, not
+    # METHOD_NOT_FOUND.
+    session = await create_test_app_server_session(build_test_agent_loop())
     try:
-        await _consume(session.act("first question"))
-        first_turn = session.state.latest_turn
-        assert first_turn is not None
-
-        await _consume(session.act("second question"))
-        page = await session.resources.sessions.list_history(turn_id=first_turn.id)
+        with pytest.raises(AppServerResponseError) as excinfo:
+            await session.resources.sessions.get_session_history("does-not-exist")
     finally:
         await session.close()
 
-    assert page.data
-    assert all(entry.turn_id == first_turn.id for entry in page.data)
-    assert not any(
-        isinstance(entry, PublicMessageEntry) and entry.text == "second question"
-        for entry in page.data
-    )
+    assert excinfo.value.error.code is ProtocolErrorCode.NOT_FOUND
 
 
 @pytest.mark.asyncio
-async def test_history_list_uses_next_cursor_to_load_older_entries() -> None:
-    backend = FakeBackend([
-        [mock_llm_chunk(content=f"answer {index}")] for index in range(3)
+async def test_session_history_get_returns_projected_entries_and_respects_limit() -> (
+    None
+):
+    # No custom save_dir: session/history/get loads config from cwd via the
+    # host handler, so the stored session must live in the default
+    # (test-isolated) dir.
+    config = build_test_vibe_config(session_logging=SessionLoggingConfig(enabled=True))
+    saved = build_test_agent_loop(config=config)
+    saved.messages.reset([
+        LLMMessage(role=Role.system, content="system"),
+        LLMMessage(role=Role.user, content="first question"),
+        LLMMessage(role=Role.assistant, content="first answer"),
+        LLMMessage(role=Role.user, content="second question"),
+        LLMMessage(role=Role.assistant, content="second answer"),
     ])
-    session = await create_test_app_server_session(
-        build_test_agent_loop(backend=backend, enable_streaming=True)
-    )
-    try:
-        for index in range(3):
-            await _consume(session.act(f"question {index}"))
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
 
-        history_ids = [entry.id for entry in session.resources.sessions.history]
-        latest = await session.resources.sessions.list_history(limit=2)
-        assert latest.next_cursor is not None
-        older = await session.resources.sessions.list_history(
-            before=latest.next_cursor, limit=2
-        )
-        forward = await session.resources.sessions.list_history(
-            after=older.items[-1].id, limit=2
+    session = await create_test_app_server_session(build_test_agent_loop(config=config))
+    try:
+        full = await session.resources.sessions.get_session_history(saved_session_id)
+        limited = await session.resources.sessions.get_session_history(
+            saved_session_id, history_limit=1
         )
     finally:
         await session.close()
 
-    assert [entry.id for entry in latest.items] == history_ids[-2:]
-    assert latest.previous_cursor is None
-    assert [entry.id for entry in older.items] == history_ids[-4:-2]
-    assert [entry.id for entry in forward.items] == history_ids[-2:]
+    roles = [e.role for e in full if isinstance(e, PublicMessageEntry)]
+    assert Role.user in roles
+    assert Role.assistant in roles
+    dumped = " ".join(e.model_dump_json() for e in full)
+    assert "first question" in dumped
+    assert "second question" in dumped
+    assert "second answer" in dumped
+    assert 0 < len(limited) < len(full)
 
 
 @pytest.mark.asyncio
@@ -954,8 +1258,6 @@ async def test_concurrent_resumes_replace_roots_serially(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     initial = build_test_agent_loop(session_id="initial")
-    first = build_test_agent_loop(session_id="first")
-    second = build_test_agent_loop(session_id="second")
     factory = AgentRuntimeFactory()
     first_entered = asyncio.Event()
     release_first = asyncio.Event()
@@ -966,8 +1268,7 @@ async def test_concurrent_resumes_replace_roots_serially(
         if session_id == "first":
             first_entered.set()
             await release_first.wait()
-            return first
-        return second
+        source.session_id = session_id  # simulate in-place rebind
 
     monkeypatch.setattr(factory, "resume_root", resume_root)
 
@@ -975,7 +1276,9 @@ async def test_concurrent_resumes_replace_roots_serially(
         return initial
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, open_root=open_root, runtime_factory=factory)
+    server = create_legacy_app_server(
+        server_transport, open_root=open_root, runtime_factory=factory
+    )
     client = AppServerClient(client_transport, run_peer=server.serve)
     await client.initialize(ClientInfo(name="resume-test", version="1"))
     await client.notify("initialized")
@@ -989,11 +1292,18 @@ async def test_concurrent_resumes_replace_roots_serially(
         client.request("session/resume", _wire_resume_request("second"))
     )
     await asyncio.sleep(0)
+    # The second resume waits behind the lifecycle lock; only the first has
+    # started, and both always share the same loop object (in-place mutation).
     assert sources == [initial]
     release_first.set()
     try:
         await asyncio.gather(first_resume, second_resume)
-        assert sources == [initial, first]
+        # Second resume runs against the already-rebounded loop (still initial).
+        assert len(sources) == 2
+        assert sources[0] is initial
+        assert sources[1] is initial
+        assert isinstance(server._root, LegacySessionBackend)
+        assert server._root.session.agent_loop.session_id == "second"
     finally:
         await client.close()
 
@@ -1019,7 +1329,9 @@ async def test_resume_reserves_session_before_loading_replacement(
         return initial
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, open_root=open_root, runtime_factory=factory)
+    server = create_legacy_app_server(
+        server_transport, open_root=open_root, runtime_factory=factory
+    )
     client = AppServerClient(client_transport, run_peer=server.serve)
     await client.initialize(ClientInfo(name="resume-test", version="1"))
     await client.notify("initialized")
@@ -1073,34 +1385,223 @@ async def test_compaction_reserves_session_before_awaiting_core(
 
 
 @pytest.mark.asyncio
-async def test_failed_root_close_discards_staged_replacement(
+async def test_resume_returns_before_init_completes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     initial = build_test_agent_loop(session_id="initial")
-    replacement = build_test_agent_loop(session_id="replacement")
-    initial.aclose = AsyncMock(side_effect=RuntimeError("close failed"))
-    replacement_close = AsyncMock(wraps=replacement.aclose)
-    replacement.aclose = replacement_close
+    waiting = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_wait_until_ready() -> None:
+        waiting.set()
+        await release.wait()
+
     factory = AgentRuntimeFactory()
-    monkeypatch.setattr(factory, "resume_root", AsyncMock(return_value=replacement))
+
+    async def fake_resume_root(source: object, session_id: str) -> None:
+        source.session_id = session_id  # type: ignore[attr-defined]
+
+    async def fake_finish_resume_root(
+        source: object, session_id: str, **kwargs: object
+    ) -> None:
+        await source.wait_until_ready()  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(factory, "resume_root", fake_resume_root)
+    monkeypatch.setattr(factory, "finish_resume_root", fake_finish_resume_root)
 
     async def open_root(_request: RootOpenRequest):
         return initial
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, open_root=open_root, runtime_factory=factory)
+    server = create_legacy_app_server(
+        server_transport, open_root=open_root, runtime_factory=factory
+    )
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(ClientInfo(name="resume-test", version="1"))
+    await client.notify("initialized")
+    await client.request("session/start", SessionStartParams())
+
+    monkeypatch.setattr(initial, "wait_until_ready", blocking_wait_until_ready)
+    resume = asyncio.create_task(
+        client.request("session/resume", SessionResumeParams(session_id="replacement"))
+    )
+    await waiting.wait()
+    # The resume RPC must return before deferred init finishes — that is the
+    # whole point of fast resume. finish_resume_root is still blocked on
+    # wait_until_ready, so the resume task should already be done.
+    assert resume.done()
+    try:
+        await resume
+    finally:
+        release.set()
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_rebinds_session_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    initial = build_test_agent_loop(session_id="initial")
+    initial_close = AsyncMock(wraps=initial.aclose)
+    initial.aclose = initial_close
+    factory = AgentRuntimeFactory()
+
+    async def fake_resume_root(source: object, session_id: str) -> None:
+        # Simulate in-place rebind: only session_id changes, same object.
+        source.session_id = session_id  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(factory, "resume_root", fake_resume_root)
+
+    async def open_root(_request: RootOpenRequest):
+        return initial
+
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(
+        server_transport, open_root=open_root, runtime_factory=factory
+    )
     client = AppServerClient(client_transport, run_peer=server.serve)
     await client.initialize(ClientInfo(name="resume-test", version="1"))
     await client.notify("initialized")
     await client.request("session/start", SessionStartParams())
 
     try:
-        with pytest.raises(AppServerResponseError, match="close failed"):
-            await client.request("session/resume", _wire_resume_request("replacement"))
-        replacement_close.assert_awaited_once_with()
-        assert server._root is None
+        await client.request(
+            "session/resume", SessionResumeParams(session_id="replacement")
+        )
+        # The same loop object stays active — no new loop was built or swapped in.
+        assert isinstance(server._root, LegacySessionBackend)
+        assert server._root.session.agent_loop is initial
+        assert server._root.session.agent_loop.session_id == "replacement"
+        # The runtime is never closed — it's still the active root.
+        initial_close.assert_not_awaited()
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_resume_keeps_previous_root_and_reports_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial = build_test_agent_loop(session_id="initial")
+    factory = AgentRuntimeFactory()
+    monkeypatch.setattr(
+        factory,
+        "resume_root",
+        AsyncMock(side_effect=RuntimeError("boom while rebuilding")),
+    )
+
+    async def open_root(_request: RootOpenRequest):
+        return initial
+
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(
+        server_transport, open_root=open_root, runtime_factory=factory
+    )
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(ClientInfo(name="resume-test", version="1"))
+    await client.notify("initialized")
+    await client.request("session/start", SessionStartParams())
+
+    try:
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await client.request(
+                "session/resume", SessionResumeParams(session_id="replacement")
+            )
+        # The failure surfaces the underlying reason rather than a generic
+        # "Invalid request parameters", and the previous root stays active.
+        assert "Failed to resume session replacement" in exc_info.value.error.message
+        assert "boom while rebuilding" in exc_info.value.error.message
+        assert isinstance(server._root, LegacySessionBackend)
+        assert server._root.session.agent_loop.session_id == "initial"
+        # The still-attached root keeps serving requests instead of bricking.
+        await client.request(
+            "session/history/clear", SessionHistoryClearParams(session_id="initial")
+        )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_busy_resume_reports_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    initial = build_test_agent_loop(session_id="initial")
+    factory = AgentRuntimeFactory()
+    monkeypatch.setattr(
+        factory, "resume_root", AsyncMock(side_effect=SessionBusyError("replacement"))
+    )
+
+    async def open_root(_request: RootOpenRequest):
+        return initial
+
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(
+        server_transport, open_root=open_root, runtime_factory=factory
+    )
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(ClientInfo(name="resume-test", version="1"))
+    await client.notify("initialized")
+    await client.request("session/start", SessionStartParams())
+
+    try:
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await client.request(
+                "session/resume", SessionResumeParams(session_id="replacement")
+            )
+        assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT
+        assert exc_info.value.error.message == "Session is already open: replacement"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_reports_success_when_post_rebind_refresh_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    backend = FakeBackend([[mock_llm_chunk(content="first answer")]])
+    client = start_test_app_server(
+        build_test_agent_loop(config=config, backend=backend, enable_streaming=True)
+    )
+    session = await attach_test_app_server_session(client)
+    try:
+        await _consume(session.act("first question"))
+
+        # The rebind commits before root state is refreshed. A malformed stored
+        # transcript can make project_history raise something other than the
+        # ValidationError the projection already tolerates (e.g. KeyError). That
+        # must not fail the resume nor leave the previous session's history behind.
+        def boom(_loop: object) -> list[PublicHistoryEntry]:
+            raise KeyError("unexpected stored shape")
+
+        monkeypatch.setattr("vibe.app_server._root_session.project_history", boom)
+        await session.resume(saved_session_id)
+
+        checkpoints = [
+            entry
+            for entry in session.history
+            if isinstance(entry, PublicCheckpointEntry) and entry.kind == "resume"
+        ]
+        # Resume still succeeds: the checkpoint is appended and the view is rebound
+        # to the resumed session with a degraded (empty) projected history rather
+        # than the previous session's stale transcript.
+        assert len(checkpoints) == 1
+        assert not any(
+            isinstance(entry, PublicMessageEntry) for entry in session.history
+        )
+        # The root is attached to the resumed session, so it keeps serving RPCs.
+        result = await client.request(
+            "session/turns/list",
+            SessionTurnsListParams(
+                session_id=saved_session_id, page=PageRequest(limit=10)
+            ),
+        )
+        assert SessionTurnsListResponse.model_validate(result).items == []
+    finally:
+        await session.close()
 
 
 @pytest.mark.asyncio
@@ -1202,44 +1703,6 @@ async def test_callback_round_trips_approval() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_switches_during_approval_and_remains_selected() -> None:
-    tool_call = ToolCall(
-        id="todo-1",
-        index=0,
-        function=FunctionCall(name="todo", arguments='{"action":"read"}'),
-    )
-    backend = FakeBackend([
-        [mock_llm_chunk(content="", tool_calls=[tool_call])],
-        [mock_llm_chunk(content="Done")],
-    ])
-    config = build_test_vibe_config(
-        enabled_tools=["todo"], tools={"todo": {"permission": ToolPermission.ASK.value}}
-    )
-    agent_loop = build_test_agent_loop(
-        config=config, backend=backend, enable_streaming=True
-    )
-    session = await create_test_app_server_session(agent_loop)
-
-    try:
-        async for event in session.act("read todos"):
-            if not isinstance(event, CallbackRequested):
-                continue
-            assert (await session.resources.agents.switch("plan")).name == "plan"
-            assert (await session.resources.agents.switch("ask")).name == "ask"
-            assert (await session.resources.agents.switch("plan")).name == "plan"
-            await session.respond_to_callback(
-                event.callback.callback_id,
-                ApprovalCallbackOutput(
-                    decision=ApprovalDecision(type=ApprovalDecisionType.APPROVE)
-                ),
-            )
-        assert session.resources.agents.active.name == "plan"
-    finally:
-        await session.close()
-        await agent_loop.aclose()
-
-
-@pytest.mark.asyncio
 async def test_reconnect_resumes_live_turn_and_redelivers_open_callback() -> None:
     tool_call = ToolCall(
         id="todo-1",
@@ -1290,59 +1753,6 @@ async def test_reconnect_resumes_live_turn_and_redelivers_open_callback() -> Non
         isinstance(entry, PublicCheckpointEntry) and entry.kind == "resume"
         for entry in session.history
     )
-
-
-@pytest.mark.asyncio
-async def test_reconnect_replays_turn_output_emitted_while_detached() -> None:
-    backend_started = asyncio.Event()
-    release_backend = asyncio.Event()
-    allow_reconnect = asyncio.Event()
-
-    class GatedBackend(FakeBackend):
-        async def complete_streaming(self, **kwargs):
-            backend_started.set()
-            await release_backend.wait()
-            async for chunk in super().complete_streaming(**kwargs):
-                yield chunk
-
-    agent_loop = build_test_agent_loop(
-        backend=GatedBackend([mock_llm_chunk(content="Recovered output")]),
-        enable_streaming=True,
-    )
-    session = await _create_reconnectable_session(
-        agent_loop, reconnect_gate=allow_reconnect
-    )
-    stream = session.act("finish while detached")
-    consume = asyncio.create_task(_consume(stream))
-
-    try:
-        await asyncio.wait_for(backend_started.wait(), timeout=1)
-        disconnected_client = session._connection.current
-        assert disconnected_client is not None
-        await disconnected_client.close()
-        release_backend.set()
-        await asyncio.sleep(0.05)
-        allow_reconnect.set()
-        events = await asyncio.wait_for(consume, timeout=1)
-    finally:
-        allow_reconnect.set()
-        release_backend.set()
-        if not consume.done():
-            consume.cancel()
-            with suppress(asyncio.CancelledError):
-                await consume
-        await stream.aclose()
-        await session.close()
-
-    assert any(isinstance(event, SessionSnapshot) for event in events)
-    recovered = [
-        event.entry
-        for event in events
-        if isinstance(event, HistoryEntryAdded)
-        and isinstance(event.entry, PublicMessageEntry)
-        and event.entry.role == "assistant"
-    ]
-    assert [entry.text for entry in recovered] == ["Recovered output"]
 
 
 @pytest.mark.asyncio
@@ -1409,45 +1819,6 @@ async def test_callback_opened_while_detached_is_delivered_after_reconnect() -> 
         entry for entry in session.history if isinstance(entry, PublicEffectEntry)
     )
     assert isinstance(effect.state, CompletedEffectState)
-
-
-@pytest.mark.asyncio
-async def test_callback_response_is_retry_safe_and_rejects_conflicts() -> None:
-    tool_call = ToolCall(
-        id="todo-1",
-        index=0,
-        function=FunctionCall(name="todo", arguments='{"action":"read"}'),
-    )
-    backend = FakeBackend([
-        [mock_llm_chunk(content="", tool_calls=[tool_call])],
-        [mock_llm_chunk(content="Done")],
-    ])
-    config = build_test_vibe_config(
-        enabled_tools=["todo"], tools={"todo": {"permission": ToolPermission.ASK.value}}
-    )
-    agent_loop = build_test_agent_loop(
-        config=config, backend=backend, enable_streaming=True
-    )
-    session = await create_test_app_server_session(agent_loop)
-    approved = ApprovalCallbackOutput(
-        decision=ApprovalDecision(type=ApprovalDecisionType.APPROVE)
-    )
-    denied = ApprovalCallbackOutput(
-        decision=ApprovalDecision(type=ApprovalDecisionType.DENY)
-    )
-
-    try:
-        async for event in session.act("read todos"):
-            if not isinstance(event, CallbackRequested):
-                continue
-            await session.respond_to_callback(event.callback.callback_id, approved)
-            await session.respond_to_callback(event.callback.callback_id, approved)
-            with pytest.raises(AppServerResponseError) as exc_info:
-                await session.respond_to_callback(event.callback.callback_id, denied)
-            assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT
-    finally:
-        await session.close()
-        await agent_loop.aclose()
 
 
 @pytest.mark.asyncio
@@ -1528,7 +1899,7 @@ def test_callback_delivery_acknowledgement_has_no_semantic_output() -> None:
 
 
 @pytest.mark.asyncio
-async def test_interrupt_cancels_open_callback(monkeypatch) -> None:
+async def test_legacy_interrupt_rejects_the_open_callback_in_core(monkeypatch) -> None:
     tool_call = ToolCall(
         id="todo-1",
         index=0,
@@ -1555,17 +1926,50 @@ async def test_interrupt_cancels_open_callback(monkeypatch) -> None:
         await session.close()
         await agent_loop.aclose()
 
-    callback = next(
-        entry
-        for entry in session.history
-        if isinstance(entry, PublicCallbackEntry) and entry.callback_id == callback_id
-    )
-    assert isinstance(callback.state, CancelledCallbackState)
-    assert callback.generation_status == "completed"
-    assert session.state.active_callbacks == []
+    assert callback_id is not None
     assert reject_request.call_count == 1
     assert reject_request.call_args.args[0] == callback_id
     assert isinstance(reject_request.call_args.args[1], RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_waits_for_pending_turn_events() -> None:
+    session = _interrupt_session()
+    client = _InterruptClient({"accepted": True, "lastEventId": 1})
+    session._ensure_attached = AsyncMock(return_value=client)
+
+    await session.interrupt()
+
+    assert client.requests == [
+        {
+            "method": "turn/interrupt",
+            "session_id": "session-1",
+            "expected_turn_id": "turn-1",
+            "wait_for_incoming": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProtocolError(code=ProtocolErrorCode.STALE_TURN, message="Stale turn"),
+        ProtocolError(code=ProtocolErrorCode.CONFLICT, message="No active turn"),
+        ProtocolError(
+            code=ProtocolErrorCode.CONFLICT, message="No matching active turn"
+        ),
+    ],
+)
+async def test_interrupt_ignores_already_settled_turn_errors(
+    error: ProtocolError,
+) -> None:
+    session = _interrupt_session()
+    session._ensure_attached = AsyncMock(
+        return_value=_InterruptClient(AppServerResponseError(error))
+    )
+
+    await session.interrupt()
 
 
 @pytest.mark.asyncio
@@ -1688,7 +2092,7 @@ async def test_completed_turn_does_not_retain_callback_for_redelivery() -> None:
                     ),
                 )
 
-        assert server._turns.callbacks == []
+        assert legacy_backend(server).session.turns.callbacks == []
     finally:
         await session.close()
         await agent_loop.aclose()
@@ -1901,93 +2305,6 @@ async def test_ready_wait_response_carries_init_duration_ms() -> None:
     finally:
         await session.close()
         await client.close()
-        await agent_loop.aclose()
-
-
-@pytest.mark.asyncio
-async def test_runtime_resource_exposes_init_duration_ms() -> None:
-    agent_loop = build_test_agent_loop(defer_heavy_init=True)
-    session = await create_test_app_server_session(agent_loop)
-    try:
-        assert session.resources.runtime.session_init_duration_ms is None
-
-        await session.resources.runtime.wait_until_ready()
-
-        assert session.resources.runtime.session_init_duration_ms is not None
-        assert isinstance(session.resources.runtime.session_init_duration_ms, int)
-        assert session.resources.runtime.session_init_duration_ms >= 0
-    finally:
-        await session.close()
-        await agent_loop.aclose()
-
-
-@pytest.mark.asyncio
-async def test_interrupt_completes_active_turn() -> None:
-    agent_loop = build_test_agent_loop()
-    session = await create_test_app_server_session(agent_loop)
-    started = asyncio.Event()
-
-    async def blocking_act(msg: str, **_kwargs):
-        yield UserMessageEvent(content=msg, message_id="blocked-user")
-        started.set()
-        await asyncio.Event().wait()
-
-    agent_loop.act = blocking_act
-
-    task = asyncio.create_task(_consume(session.act("wait")))
-    try:
-        await started.wait()
-        await session.interrupt()
-        await task
-    finally:
-        task.cancel()
-        await session.close()
-        await agent_loop.aclose()
-
-    user = next(
-        entry
-        for entry in session.history
-        if isinstance(entry, PublicMessageEntry) and entry.role == "user"
-    )
-    assert user.text == "wait"
-    assert session.state.session.status.type == "idle"
-
-
-@pytest.mark.asyncio
-async def test_steer_adds_a_public_user_message_to_the_active_turn() -> None:
-    agent_loop = build_test_agent_loop()
-    session = await create_test_app_server_session(agent_loop)
-    started = asyncio.Event()
-    finish = asyncio.Event()
-
-    async def blocking_act(msg: str, **_kwargs):
-        yield UserMessageEvent(content=msg, message_id="initial-user")
-        started.set()
-        await finish.wait()
-
-    agent_loop.act = blocking_act
-    task = asyncio.create_task(_consume(session.act("wait")))
-    try:
-        await started.wait()
-        active_turn = session.state.latest_turn
-        assert active_turn is not None
-        await session.inject_user_context(
-            "follow up", as_message=True, client_message_id="steer-user"
-        )
-        for _ in range(20):
-            if any(entry.id == "steer-user" for entry in session.history):
-                break
-            await asyncio.sleep(0)
-
-        steered = next(entry for entry in session.history if entry.id == "steer-user")
-        assert isinstance(steered, PublicMessageEntry)
-        assert steered.text == "follow up"
-        assert steered.source == "turn_steer"
-        assert steered.turn_id == active_turn.id
-    finally:
-        finish.set()
-        await task
-        await session.close()
         await agent_loop.aclose()
 
 
@@ -2355,3 +2672,92 @@ async def _create_reconnectable_session(
         capabilities=ClientCapabilities(callback_kinds=["approval", "user_input"]),
         client_factory=reconnect,
     )
+
+
+@pytest.mark.asyncio
+async def test_install_root_keeps_replacement_serving_when_previous_shutdown_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_loop = build_test_agent_loop()
+    session = await create_test_app_server_session(agent_loop)
+
+    # Monkeypatch shutdown to fail on the *first* call (the previous root being
+    # retired by _install_root) but succeed on subsequent calls (server close).
+    original_shutdown = LegacySessionBackend.shutdown
+    call_count = 0
+
+    async def failing_first_shutdown(self: LegacySessionBackend) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("disk full — shutdown failed")
+        await original_shutdown(self)
+
+    monkeypatch.setattr(LegacySessionBackend, "shutdown", failing_first_shutdown)
+
+    try:
+        # session/fork with attach=True drives _adopt_root → _install_root, which
+        # calls previous.shutdown() and must swallow the failure to never go rootless.
+        await session.resources.sessions.fork(attach=True)
+        await session.resources.refresh()
+
+        # The replacement is now the active root and keeps serving requests.
+        assert session.session_id != agent_loop.session_id
+        # A history/clear proves the session is still functional after the failed shutdown.
+        await session.clear_history()
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_install_root_restores_previous_backend_when_replacement_setup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_loop = build_test_agent_loop()
+    session = await create_test_app_server_session(agent_loop)
+    original_initialize = type(agent_loop).start_initialize_experiments
+
+    def fail_replacement_initialize(self, **kwargs: Any) -> None:
+        if self is not agent_loop:
+            raise RuntimeError("replacement setup failed")
+        original_initialize(self, **kwargs)
+
+    monkeypatch.setattr(
+        type(agent_loop), "start_initialize_experiments", fail_replacement_initialize
+    )
+
+    try:
+        with pytest.raises(AppServerResponseError):
+            await session.resources.sessions.fork(attach=True)
+
+        await session.resources.refresh()
+        assert session.session_id == agent_loop.session_id
+        await session.clear_history()
+    finally:
+        await session.close()
+
+
+def _interrupt_session() -> AppServerSession:
+    session = object.__new__(AppServerSession)
+    session._state = cast(Any, SimpleNamespace(session_id="session-1"))
+    session._active_public_turn_id = Mock(return_value="turn-1")
+    return cast(AppServerSession, session)
+
+
+class _InterruptClient:
+    def __init__(self, result: dict[str, Any] | Exception) -> None:
+        self._result = result
+        self.requests: list[dict[str, Any]] = []
+
+    async def request(
+        self, method: str, params: Any, *, wait_for_incoming: bool = False
+    ) -> dict[str, Any]:
+        self.requests.append({
+            "method": method,
+            "session_id": params.session_id,
+            "expected_turn_id": params.expected_turn_id,
+            "wait_for_incoming": wait_for_incoming,
+        })
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result

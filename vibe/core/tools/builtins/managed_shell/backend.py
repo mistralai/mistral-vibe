@@ -11,6 +11,10 @@ class ManagedShellBackendError(Exception):
     pass
 
 
+# Stands in for a terminal that was killed but never reaped.
+UNKNOWN_EXIT_CODE = 1
+
+
 @dataclass(frozen=True)
 class ManagedShellBackendCapabilities:
     interactive_tty: bool

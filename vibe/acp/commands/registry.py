@@ -21,6 +21,7 @@ class AcpCommandKind(StrEnum):
     MCP = auto()
     TELEPORT = auto()
     PROXY_SETUP = auto()
+    RETRY = auto()
     LEANSTALL = auto()
     UNLEANSTALL = auto()
     DATA_RETENTION = auto()
@@ -109,6 +110,15 @@ def _build_commands() -> dict[str, AcpCommand]:
             description="Configure proxy and SSL certificate settings",
             kind=AcpCommandKind.PROXY_SETUP,
             input_hint="KEY value to set, KEY to unset, or empty for help",
+        ),
+        "retry": AcpCommand(
+            name="retry",
+            description=(
+                "Continue an interrupted model response; optionally pass "
+                "additional instructions"
+            ),
+            kind=AcpCommandKind.RETRY,
+            input_hint="Optional additional instructions for the continuation",
         ),
         "leanstall": AcpCommand(
             name="leanstall",

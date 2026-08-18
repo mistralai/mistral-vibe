@@ -348,3 +348,105 @@ def test_non_ascii_queries_still_match_when_ascii_prefilter_is_disabled(
     results = PathCompleter().get_completions("@café", cursor_pos=5)
 
     assert results == ["@café.txt"]
+
+
+def test_trailing_slash_on_nonexistent_prefix_keeps_picker_alive(
+    file_tree: Path,
+) -> None:
+    # "cor" is not a real directory (the real dir is "core"), but fuzzy-matches
+    # paths under "core/". The trailing slash is kept as a literal anchor so
+    # only paths where "cor" precedes a directory boundary survive.
+    results = PathCompleter().get_completions("@cor/", cursor_pos=5)
+
+    assert results
+    assert "@src/core/logger.py" in results
+    assert all(result.startswith("@src/core/") for result in results)
+
+
+def test_trailing_slash_on_real_prefix_still_lists_immediate_children(
+    file_tree: Path,
+) -> None:
+    results = PathCompleter().get_completions("@src/", cursor_pos=5)
+
+    assert "@src/main.py" in results
+    assert "@src/core/" in results
+
+
+def test_slash_only_partial_does_not_flood_picker(file_tree: Path) -> None:
+    # "@/" has no non-slash content to anchor on; the fuzzy fallback must skip
+    # it instead of matching every indexed path that contains a separator.
+    results = PathCompleter().get_completions("@/", cursor_pos=2)
+
+    assert results == []
+
+
+def test_trailing_slash_on_empty_real_dir_returns_empty_not_fuzzy_noise(
+    file_tree: Path,
+) -> None:
+    # src/utils is a real indexed directory with no children. The picker must
+    # return an empty list rather than falling back to fuzzy and surfacing
+    # unrelated paths that happen to contain "utils" as a substring.
+    results = PathCompleter().get_completions("@src/utils/", cursor_pos=11)
+
+    assert results == []
+
+
+@pytest.fixture()
+def nested_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "README.md").write_text("", encoding="utf-8")
+    (tmp_path / "sibling").mkdir()
+    (tmp_path / "sibling" / "note.txt").write_text("", encoding="utf-8")
+    (tmp_path / "sibling" / "nested").mkdir()
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    monkeypatch.chdir(project)
+    return tmp_path
+
+
+def test_parent_directory_traversal_lists_siblings(nested_project: Path) -> None:
+    results = PathCompleter().get_completions("@../", cursor_pos=4)
+
+    assert "@../sibling/" in results
+    assert "@../project/" in results
+
+
+def test_parent_directory_segment_drills_into_sibling(nested_project: Path) -> None:
+    results = PathCompleter().get_completions("@../sibling/", cursor_pos=12)
+
+    assert "@../sibling/note.txt" in results
+    assert "@../sibling/nested/" in results
+
+
+def test_grandparent_traversal_lists_entries(nested_project: Path) -> None:
+    results = PathCompleter().get_completions("@../../", cursor_pos=7)
+
+    assert results
+    assert all(result.startswith("@../../") for result in results)
+
+
+def test_parent_dot_suffix_lists_hidden_files(nested_project: Path) -> None:
+    results = PathCompleter().get_completions("@../.", cursor_pos=5)
+
+    assert "@../.env" in results
+    assert all(not r.startswith("@../.") or r == "@../.env" for r in results)
+
+
+def test_windows_backslash_in_parent_traversal_is_normalized(
+    nested_project: Path,
+) -> None:
+    # On Windows a user may type @..\ instead of @../. The completer must
+    # normalize the backslash so parent traversal still works. The test is
+    # runnable on Linux/macOS because normalization happens before any
+    # filesystem call.
+    results = PathCompleter().get_completions("@..\\", cursor_pos=4)
+
+    assert "@../sibling/" in results
+    assert "@../project/" in results
+
+
+def test_windows_backslash_drills_into_sibling(nested_project: Path) -> None:
+    results = PathCompleter().get_completions("@..\\sibling\\", cursor_pos=12)
+
+    assert "@../sibling/note.txt" in results
+    assert "@../sibling/nested/" in results

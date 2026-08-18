@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 import copy
 from typing import Any
 
@@ -13,6 +13,9 @@ from pydantic import ValidationError
 from vibe.core.config.builder import ConfigBuilder
 from vibe.core.config.event_bus import EventBus
 from vibe.core.config.layer import ConfigLayer, LayerNotLoadedError, RawConfig
+from vibe.core.config.layers.default import DefaultConfigLayer
+from vibe.core.config.layers.project import ProjectConfigLayer
+from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.patch import (
     AddOperationPatch,
     ConfigPatch,
@@ -44,6 +47,28 @@ class DefaultLayerResolutionError(Exception):
 
 
 type DefaultLayerResolver = Callable[[], ConfigLayer[RawConfig]]
+
+# Durable layers reconstruct deterministically on restart, so a model alias
+# present in any of them is safe to override sparsely. Dynamic layers
+# (GrowthBook, admin) are excluded on purpose: a runtime-injected model absent
+# from the durable layers must be materialized, or its sparse override would
+# fail schema validation on the next launch (VIBE-4041).
+_DURABLE_LAYER_TYPES = (DefaultConfigLayer, UserConfigLayer, ProjectConfigLayer)
+
+
+async def _durable_model_aliases(layers: Iterable[ConfigLayer[RawConfig]]) -> set[str]:
+    aliases: set[str] = set()
+    for layer in layers:
+        if not isinstance(layer, _DURABLE_LAYER_TYPES):
+            continue
+        try:
+            raw = await layer.load()
+        except Exception:
+            continue
+        models = raw.model_dump().get("models")
+        if isinstance(models, dict):
+            aliases.update(models)
+    return aliases
 
 
 class ConfigOrchestrator[S: ConfigSchema]:
@@ -141,6 +166,10 @@ class ConfigOrchestrator[S: ConfigSchema]:
 
     async def load_persistence_layer(self) -> RawConfig:
         return await self._default_layer_resolver().load()
+
+    async def durable_model_aliases(self) -> set[str]:
+        """Model aliases reconstructable from durable layers after a restart."""
+        return await _durable_model_aliases(self.layers)
 
     def persisted_active_model(self) -> str:
         data = self._default_layer_resolver().cached_data

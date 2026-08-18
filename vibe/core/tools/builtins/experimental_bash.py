@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-from collections.abc import AsyncGenerator, Collection
+from collections.abc import AsyncGenerator, AsyncIterator, Collection
+import contextlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import errno
@@ -17,7 +18,14 @@ import time
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, get_args
 import uuid
 
-from pydantic import AliasChoices, BaseModel, Field, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    Field,
+    JsonValue,
+    computed_field,
+    model_validator,
+)
 from tree_sitter import Language, Node, Parser
 import tree_sitter_bash as tsbash
 
@@ -35,6 +43,7 @@ from vibe.core.tools.base import (
 from vibe.core.tools.builtins.bash import BashToolConfig
 from vibe.core.tools.builtins.managed_shell import backend as managed_shell_backend
 from vibe.core.tools.builtins.managed_shell.backend import (
+    UNKNOWN_EXIT_CODE,
     ManagedShellBackend,
     ManagedShellBackendError,
     ManagedTerminal,
@@ -48,7 +57,8 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import ToolPath, is_path_within_workdir, resolve_tool_path
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows
-from vibe.utils.io import decode_safe
+from vibe.observability.logging import logger
+from vibe.utils.io import decode_console_safe
 from vibe.utils.tool_presentation import ToolEffectKind
 
 if TYPE_CHECKING:
@@ -65,6 +75,7 @@ DEFAULT_MAX_POLL_SECONDS = 300.0
 KILL_GRACE_SECONDS = 2.0
 FORCE_TERMINATION_TIMEOUT_SECONDS = 2.0
 READER_SELECT_SECONDS = 0.1
+FOREGROUND_STREAM_SECONDS = 0.2
 
 CONTROL_SEQUENCES: dict[str, bytes] = {
     "ctrl_@": b"\x00",
@@ -472,7 +483,8 @@ def _now_iso(timestamp: float | None = None) -> str:
 
 
 def _decode_output(raw: bytes) -> str:
-    return decode_safe(raw, from_subprocess=True).text
+    # Verbatim, including CRLF: rewriting newlines would depend on where the window ends.
+    return decode_console_safe(raw)
 
 
 _UTF8_CONTINUATION_MIN = 0x80
@@ -508,6 +520,19 @@ def _trim_incomplete_utf8_suffix(raw: bytes) -> bytes:
             return raw[:-back]
         return raw
     return raw
+
+
+def _output_detail(output: str) -> str | None:
+    # The model needs the output spelled out; the client already streamed it.
+    return f"Output:\n{output}" if output else None
+
+
+def _clip_to_bytes(text: str, max_bytes: int) -> str:
+    raw = text.encode()
+    if len(raw) <= max_bytes:
+        return text
+    # A clip lands up to 3 bytes short of max_bytes to keep the last character whole.
+    return _trim_incomplete_utf8_suffix(raw[:max_bytes]).decode()
 
 
 def _skip_utf8_continuation_prefix(path: Path, cursor: int) -> int:
@@ -606,17 +631,6 @@ class TerminalSessionManager:
     def resolve_shell(self, requested: str | None, configured: str | None) -> str:
         return self._backend.resolve_shell(requested, configured)
 
-    def wait_for_exit(self, session_id: str, timeout_seconds: float) -> bool:
-        session = self._live_session(session_id)
-        deadline = time.monotonic() + timeout_seconds
-        with session.condition:
-            while session.status == "running":
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                session.condition.wait(timeout=remaining)
-            return True
-
     def write_stdin(self, session_id: str, text: str) -> int:
         return self.write_bytes(session_id, text.encode("utf-8"))
 
@@ -661,7 +675,7 @@ class TerminalSessionManager:
                 session.output_path,
                 cursor=cursor,
                 max_bytes=max_bytes,
-                trim_final_incomplete_utf8=info.status == "running",
+                more_output_expected=info.status == "running",
             )
             return info, chunk
 
@@ -676,7 +690,7 @@ class TerminalSessionManager:
             output_path,
             cursor=cursor,
             max_bytes=max_bytes,
-            trim_final_incomplete_utf8=info.status == "running",
+            more_output_expected=info.status == "running",
         )
         return info, chunk
 
@@ -777,7 +791,7 @@ class TerminalSessionManager:
             path,
             cursor=offset,
             max_bytes=max_bytes,
-            trim_final_incomplete_utf8=self._is_running_output_path(path),
+            more_output_expected=self._is_running_output_path(path),
         )
 
     def write_log_file(self, path: Path, *, action: LogAction, content: str) -> int:
@@ -865,7 +879,11 @@ class TerminalSessionManager:
             with session.condition:
                 if session.status == "running":
                     session.status = "completed"
-                session.exit_code = session.terminal.returncode
+                # The terminate above can leave the terminal unreaped.
+                returncode = session.terminal.returncode
+                session.exit_code = (
+                    UNKNOWN_EXIT_CODE if returncode is None else returncode
+                )
                 session.updated_at = time.time()
                 session.condition.notify_all()
                 self._save_manifest(session)
@@ -1089,7 +1107,7 @@ class TerminalSessionManager:
         *,
         cursor: int,
         max_bytes: int,
-        trim_final_incomplete_utf8: bool = False,
+        more_output_expected: bool = False,
     ) -> OutputChunk:
         if cursor < 0:
             raise ManagedShellError("cursor must be a non-negative byte offset")
@@ -1103,7 +1121,7 @@ class TerminalSessionManager:
         with path.open("rb") as handle:
             handle.seek(safe_cursor)
             raw = handle.read(max_bytes)
-        if trim_final_incomplete_utf8 or size > safe_cursor + len(raw):
+        if more_output_expected or size > safe_cursor + len(raw):
             raw = _trim_incomplete_utf8_suffix(raw)
         next_cursor = safe_cursor + len(raw)
         return OutputChunk(
@@ -1115,6 +1133,71 @@ class TerminalSessionManager:
     def _new_session_id(self) -> str:
         stamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
         return f"{self.session_prefix}_{stamp}_{uuid.uuid4().hex[:8]}"
+
+
+class _ForegroundStream:
+    """Drained before any result is yielded, so "streamed" means "streamed whole"."""
+
+    def __init__(
+        self,
+        manager: TerminalSessionManager,
+        *,
+        session_id: str,
+        tool_name: str,
+        tool_call_id: str | None,
+        max_bytes: int,
+    ) -> None:
+        self._manager = manager
+        self._session_id = session_id
+        self._tool_name = tool_name
+        self._tool_call_id = tool_call_id
+        # Caps both a single read and the total; the result is read under it too.
+        self._max_bytes = max_bytes
+        self._budget = max_bytes
+        self._cursor = 0
+        self.completed = False
+
+    def _event(self, output: str) -> ToolStreamEvent | None:
+        if self._tool_call_id is None or self._budget <= 0:
+            return None
+        message = _clip_to_bytes(output, self._budget)
+        if not message:
+            return None
+        self._budget -= len(message.encode())
+        return ToolStreamEvent(
+            tool_name=self._tool_name, tool_call_id=self._tool_call_id, message=message
+        )
+
+    async def pump(self, *, timeout: float) -> AsyncGenerator[ToolStreamEvent, None]:
+        deadline = time.monotonic() + timeout
+        while not self.completed:
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                return
+            info, chunk = await asyncio.to_thread(
+                self._manager.read_output,
+                session_id=self._session_id,
+                cursor=self._cursor,
+                wait_seconds=min(remaining_seconds, FOREGROUND_STREAM_SECONDS),
+                max_bytes=self._max_bytes,
+            )
+            self._cursor = chunk.next_cursor
+            if event := self._event(chunk.output):
+                yield event
+            # A terminal status is published only after the reader's last write.
+            self.completed = info.status != "running"
+
+    async def drain(self) -> ToolStreamEvent | None:
+        info, chunk = await asyncio.to_thread(
+            self._manager.read_output,
+            session_id=self._session_id,
+            cursor=self._cursor,
+            wait_seconds=0,
+            max_bytes=self._max_bytes,
+        )
+        self._cursor = chunk.next_cursor
+        self.completed = info.status != "running"
+        return self._event(chunk.output)
 
 
 def _manager(
@@ -1226,13 +1309,18 @@ class ExperimentalBashResult(BaseModel):
     exit_code: int | None = None
     shell: str = ""
     background: bool = False
+    # The PTY interleaves both streams here, so there is no separate stderr.
     output: str = ""
     next_cursor: int = 0
     truncated: bool = False
     output_path: str = ""
-    stdout: str = ""
-    stderr: str = ""
-    returncode: int = 0
+
+    # Kept for `post_tool` hooks that read `tool_output.returncode`; the dumped
+    # result is the hook payload verbatim.
+    @computed_field(description="Deprecated alias for `exit_code`.")
+    @property
+    def returncode(self) -> int:
+        return self.exit_code or 0
 
 
 class BashOutputArgs(BaseModel):
@@ -1629,6 +1717,16 @@ class ExperimentalBash(
         )
 
     @classmethod
+    def project_result(cls, result: ExperimentalBashResult) -> JsonValue:
+        # The PTY interleaves both streams, so the transcript is the whole output.
+        return {
+            "stdout": result.output,
+            "stderr": "",
+            "output": result.output,
+            "truncated": result.truncated,
+        }
+
+    @classmethod
     def get_status_text(cls) -> str:
         return "Running command"
 
@@ -1678,7 +1776,6 @@ class ExperimentalBash(
     async def run(
         self, args: ExperimentalBashArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | ExperimentalBashResult, None]:
-        _ = ctx
         requested_timeout = (
             float(args.timeout) if args.timeout is not None else args.timeout_seconds
         )
@@ -1698,14 +1795,27 @@ class ExperimentalBash(
                 background=args.background,
             )
             if args.background:
-                yield self._result_from_session(session.session_id, True, max_bytes)
+                yield await self._result_from_session(
+                    session.session_id, True, max_bytes
+                )
                 return
 
-            completed = await asyncio.to_thread(
-                manager.wait_for_exit, session.session_id, timeout
+            stream = _ForegroundStream(
+                manager,
+                session_id=session.session_id,
+                tool_name=self.get_name(),
+                tool_call_id=ctx.tool_call_id if ctx is not None else None,
+                max_bytes=max_bytes,
             )
-            if completed:
-                yield self._result_from_session(
+            # The session is ours until it exits or is handed over to the background.
+            async with self._kill_on_abort(session.session_id):
+                async for event in stream.pump(timeout=timeout):
+                    yield event
+                if event := await stream.drain():
+                    yield event
+
+            if stream.completed:
+                yield await self._result_from_session(
                     session.session_id,
                     background=False,
                     max_bytes=max_bytes,
@@ -1714,23 +1824,31 @@ class ExperimentalBash(
                 return
 
             if not hard_timeout:
-                yield self._result_from_session(session.session_id, True, max_bytes)
+                yield await self._result_from_session(
+                    session.session_id, True, max_bytes
+                )
                 return
 
             info = await asyncio.to_thread(
                 manager.kill, session.session_id, status="timed_out"
             )
-            chunk = manager.read_log_file(
-                Path(info.output_path), offset=0, max_bytes=max_bytes
+            # The kill can push out a last line after the drain above.
+            if event := await stream.drain():
+                yield event
+            chunk = await asyncio.to_thread(
+                manager.read_log_file,
+                Path(info.output_path),
+                offset=0,
+                max_bytes=max_bytes,
             )
-            raise ToolError(
+            reason = (
                 "Command timed out after "
                 f"{timeout:g}s: {args.command!r}\n"
                 f"session_id: {info.session_id}\n"
                 f"status: {info.status}\n"
-                f"output_path: {info.output_path}\n"
-                f"output:\n{chunk.output}"
+                f"output_path: {info.output_path}"
             )
+            raise ToolError(reason, model_detail=_output_detail(chunk.output))
         except ToolError:
             raise
         except (ManagedShellError, ManagedShellBackendError) as exc:
@@ -1738,11 +1856,29 @@ class ExperimentalBash(
         except Exception as exc:
             raise ToolError(f"Error running command {args.command!r}: {exc}") from exc
 
+    @contextlib.asynccontextmanager
+    async def _kill_on_abort(self, session_id: str) -> AsyncIterator[None]:
+        try:
+            yield
+        except (asyncio.CancelledError, GeneratorExit):
+            try:
+                # Shielded: a second cancellation must not leave the PTY running.
+                await asyncio.shield(
+                    asyncio.to_thread(self._session_manager().kill, session_id)
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to kill managed shell session %s after cancellation",
+                    session_id,
+                    exc_info=True,
+                )
+            raise
+
     def _resolve_timeout(self, requested: float | None) -> float:
         timeout = self.config.default_timeout if requested is None else requested
         return min(timeout, self.config.max_timeout_seconds)
 
-    def _result_from_session(
+    async def _result_from_session(
         self,
         session_id: str,
         background: bool,
@@ -1750,20 +1886,21 @@ class ExperimentalBash(
         *,
         enforce_success: bool = False,
     ) -> ExperimentalBashResult:
-        info, chunk = self._session_manager().read_output(
-            session_id=session_id, cursor=0, wait_seconds=0, max_bytes=max_bytes
+        manager = self._session_manager()
+        info, chunk = await asyncio.to_thread(
+            manager.read_output,
+            session_id=session_id,
+            cursor=0,
+            wait_seconds=0,
+            max_bytes=max_bytes,
         )
         returncode = info.exit_code or 0
         if enforce_success and (info.status != "completed" or returncode != 0):
-            error_msg = f"Command failed: {info.command!r}\n"
-            error_msg += f"Return code: {returncode}"
+            reason = f"Command failed: {info.command!r}\nReturn code: {returncode}"
             if info.status != "completed":
-                error_msg += f"\nStatus: {info.status}"
-            if chunk.output:
-                error_msg += f"\nStdout: {chunk.output}"
-            raise ToolError(error_msg.strip())
+                reason += f"\nStatus: {info.status}"
+            raise ToolError(reason, model_detail=_output_detail(chunk.output))
 
-        normalized_output = chunk.output.replace("\r\n", "\n")
         return ExperimentalBashResult(
             command=info.command,
             session_id=info.session_id,
@@ -1775,9 +1912,6 @@ class ExperimentalBash(
             truncated=chunk.truncated,
             output_path=info.output_path,
             shell=info.shell,
-            stdout=normalized_output,
-            stderr="",
-            returncode=returncode,
         )
 
 

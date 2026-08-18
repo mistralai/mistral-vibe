@@ -197,7 +197,7 @@ Session creation and user execution are separate:
 - `session/continue` resolves and attaches the latest eligible session;
 - `session/read`, `session/list`, and `session/history/list` are passive reads;
 - `session/fork` creates a session from an existing public boundary;
-- `session/close` flushes and closes the attached runtime;
+- `session/stop` flushes and shuts down the attached runtime;
 - `turn/start` begins structured user input and may mark harness instructions as
   injected so they remain hidden from public history;
 - `turn/steer` adds input to the active turn; and
@@ -268,7 +268,10 @@ their async stream and projects only client-relevant semantics. It does not
 mirror every core event into a second private hierarchy.
 
 Projection-changing notifications carry a positive, monotonic event ID scoped
-to the session. The snapshot's `eventId` is its watermark. The client reducer:
+to one loaded session runtime. A restored runtime may begin a new sequence and
+its subscription snapshot replaces the earlier projection and watermark. A
+subscription never promises replay of events from an earlier connection or
+process. The snapshot's `eventId` is its watermark. The client reducer:
 
 1. ignores IDs at or below the watermark;
 2. accepts only the next ID;
@@ -308,7 +311,11 @@ instead of silently switching ownership or implementation.
 
 ## Server-owned resources
 
-State outside the main timeline uses typed resource families. Current families
+State outside the main timeline uses typed resource families. Live-session
+configuration mutations such as agent switching, settings updates, config
+writes, and config reloads are applied through the selected session backend;
+the app server remains responsible for their typed Host API and public result.
+Current resource families
 include runtime/config, agents, skills, tools, MCP, connectors, diagnostics,
 statistics, session logs, scheduled loops, workspace trust and prompt
 preparation, account, feedback, narration, review, telemetry, shell, and Vibe
@@ -360,11 +367,13 @@ projection from the returned snapshot, and receives still-open callbacks. Stdio
 EOF closes its server process; process restart uses normal persisted-session
 resume semantics and does not imply restoration of in-flight execution.
 
-A successful `session/close` is the delivery surface's durability and cleanup
-boundary. The server records eligible last-session state, flushes session-owned
-data, closes child runtimes, interrupts or rejects pending work, and releases
-owned runtime resources such as MCP clients, model backends, experiments,
-managed terminals, Vibe Code operations, and telemetry before shutdown finishes.
+Transport detachment only removes that connection's subscriptions and callback
+claims. A successful `session/stop` is the delivery surface's durability and
+runtime-cleanup boundary. The server records eligible last-session state,
+flushes session-owned data, closes child runtimes, interrupts or rejects pending
+work, and releases owned runtime resources such as MCP clients, model backends,
+experiments, managed terminals, Vibe Code operations, and telemetry before
+shutdown finishes.
 
 Security rules:
 

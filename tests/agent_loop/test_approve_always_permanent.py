@@ -11,6 +11,7 @@ from tests.conftest import (
     build_test_vibe_config_schema,
 )
 from vibe.core.tools.base import ToolPermission
+from vibe.core.tools.builtins.bash import _get_default_allowlist
 from vibe.core.tools.permissions import PermissionScope, RequiredPermission
 
 
@@ -18,6 +19,12 @@ def _read_persisted_config(config_dir: Path) -> dict:
     config_file = config_dir / "config.toml"
     with config_file.open("rb") as f:
         return tomllib.load(f)
+
+
+def _expected_bash_allowlist(*patterns: str) -> list[str]:
+    allowlist = _get_default_allowlist()
+    allowlist.extend(pattern for pattern in patterns if pattern not in allowlist)
+    return sorted(allowlist)
 
 
 class TestApproveAlwaysPermanentNoGranularPermissions:
@@ -63,7 +70,21 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
         await agent.approve_always("bash", perms, save_permanently=True)
 
         persisted = _read_persisted_config(config_dir)
-        assert persisted["tools"]["bash"]["allowlist"] == ["npm install"]
+        assert persisted["tools"]["bash"]["allowlist"] == _expected_bash_allowlist(
+            "npm install"
+        )
+
+    @pytest.mark.asyncio
+    async def test_persisted_allowlist_preserves_bash_runtime_defaults(
+        self, config_dir: Path
+    ):
+        agent = build_test_agent_loop()
+        perms = self._make_permissions()
+
+        await agent.approve_always("bash", perms, save_permanently=True)
+
+        config = agent.tool_manager.get_tool_config("bash")
+        assert config.allowlist == _expected_bash_allowlist("npm install")
 
     @pytest.mark.asyncio
     async def test_also_adds_session_rules(self, config_dir: Path):
@@ -125,7 +146,9 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
         await agent.config_orchestrator.set_field("/autocopy_to_clipboard", False)
 
         persisted = _read_persisted_config(config_dir)
-        assert persisted["tools"]["bash"]["allowlist"] == ["npm install"]
+        assert persisted["tools"]["bash"]["allowlist"] == _expected_bash_allowlist(
+            "npm install"
+        )
         assert persisted["autocopy_to_clipboard"] is False
 
     @pytest.mark.asyncio
@@ -144,7 +167,9 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
         )
 
         persisted = _read_persisted_config(config_dir)
-        assert persisted["tools"]["bash"]["allowlist"] == ["npm install"]
+        assert persisted["tools"]["bash"]["allowlist"] == _expected_bash_allowlist(
+            "npm install"
+        )
         assert persisted["tools"]["edit"]["permission"] == "always"
 
     @pytest.mark.asyncio
@@ -161,7 +186,9 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
         )
 
         persisted = _read_persisted_config(config_dir)
-        assert persisted["tools"]["bash"]["allowlist"] == ["npm install"]
+        assert persisted["tools"]["bash"]["allowlist"] == _expected_bash_allowlist(
+            "npm install"
+        )
         assert persisted["tools"]["bash"]["permission"] == "always"
 
     @pytest.mark.asyncio
@@ -177,7 +204,9 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
         )
 
         persisted = _read_persisted_config(config_dir)
-        assert persisted["tools"]["bash"]["allowlist"] == ["npm install"]
+        assert persisted["tools"]["bash"]["allowlist"] == _expected_bash_allowlist(
+            "npm install"
+        )
 
     @pytest.mark.asyncio
     async def test_multiple_permissions_persisted(self, config_dir: Path):
@@ -200,4 +229,6 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
         await agent.approve_always("bash", perms, save_permanently=True)
 
         persisted = _read_persisted_config(config_dir)
-        assert persisted["tools"]["bash"]["allowlist"] == ["/tmp/*", "npm install"]
+        assert persisted["tools"]["bash"]["allowlist"] == _expected_bash_allowlist(
+            "/tmp/*", "npm install"
+        )
