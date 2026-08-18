@@ -168,6 +168,24 @@ async def test_config_options_delegate_to_typed_app_server_resources(
         await acp_agent_loop.set_config_option("unknown", session_id, "x")
 
 
+@pytest.mark.asyncio
+async def test_new_session_advertises_thinking_under_the_reserved_acp_category(
+    acp_agent_loop: VibeAcpAgent,
+) -> None:
+    response = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+
+    assert response.config_options is not None
+    categories = {option.id: option.category for option in response.config_options}
+    assert categories["thinking"] == "thought_level"
+    assert categories["mode"] == "mode"
+    assert categories["model"] == "model"
+
+    assert (
+        await acp_agent_loop.set_config_option("thinking", response.session_id, "low")
+        is not None
+    )
+
+
 def _acp_agent_with_allowed_models() -> VibeAcpAgent:
     config = build_test_vibe_config(
         active_model="allowed",

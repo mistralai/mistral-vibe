@@ -120,7 +120,9 @@ def make_thinking_response(config: ConfigView) -> SessionConfigOptionSelect:
         id="thinking",
         name="Thinking",
         current_value=config.active_model.thinking,
-        category="thinking",
+        # ACP reserves `thought_level` for reasoning-level selectors; clients
+        # that match on the reserved category drop anything else.
+        category="thought_level",
         type="select",
         options=[
             SessionConfigSelectOption(value=level, name=level.capitalize())
