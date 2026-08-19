@@ -28,6 +28,7 @@ class CompletionPopup(VerticalScroll):
         self.styles.padding = (0, COMPLETION_POPUP_PADDING_X)
         self.can_focus = False
         self._suggestions: list[tuple[str, str]] = []
+        self._selected_index: int = -1
 
     def update_suggestions(
         self, suggestions: list[tuple[str, str]], selected: int
@@ -38,9 +39,10 @@ class CompletionPopup(VerticalScroll):
 
         if suggestions != self._suggestions:
             rows = self._rebuild(suggestions)
+            self._select_all(rows, selected)
         else:
             rows = list(self.query(_CompletionRow))
-        self._select(rows, selected)
+            self._select_incremental(rows, selected)
         self.styles.display = "block"
 
     def _rebuild(self, suggestions: list[tuple[str, str]]) -> list[_CompletionRow]:
@@ -65,16 +67,34 @@ class CompletionPopup(VerticalScroll):
         self.mount_all(rows)
         return rows
 
-    @staticmethod
-    def _select(rows: list[_CompletionRow], selected: int) -> None:
+    def _select_all(self, rows: list[_CompletionRow], selected: int) -> None:
+        """Update all row classes (used when rebuilding popup)."""
         for idx, row in enumerate(rows):
             row.set_class(idx == selected, SELECTED_CLASS)
         if 0 <= selected < len(rows):
             rows[selected].scroll_visible(animate=False)
+        self._selected_index = selected
+
+    def _select_incremental(self, rows: list[_CompletionRow], selected: int) -> None:
+        """Update only changed row classes (used when just moving selection)."""
+        if selected == self._selected_index:
+            return
+
+        # Deselect old row
+        if 0 <= self._selected_index < len(rows):
+            rows[self._selected_index].set_class(False, SELECTED_CLASS)
+
+        # Select new row
+        if 0 <= selected < len(rows):
+            rows[selected].set_class(True, SELECTED_CLASS)
+            rows[selected].scroll_visible(animate=False)
+
+        self._selected_index = selected
 
     def hide(self) -> None:
         self.remove_children()
         self._suggestions = []
+        self._selected_index = -1
         self.styles.display = "none"
 
     @property
