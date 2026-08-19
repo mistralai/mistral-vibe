@@ -6,7 +6,6 @@ call.
 - PowerShell only: Vibe resolves `pwsh.exe`, then `powershell.exe`, unless a PowerShell `shell` override is provided.
 - `cmd.exe` is not used by this tool.
 - Stateful sessions: each command gets a `session_id`, a PTY, and a durable log file.
-- Merged terminal stream: PTY sessions combine stdout and stderr in the captured output; use `output`/`stdout` as the terminal stream and expect compatibility `stderr` to be empty.
 - Background handling: use `powershell(background=true)` for dev servers, watchers, and long builds that should keep running.
 - Soft foreground timeout: `powershell(background=false, hard_timeout=false)` waits for `timeout_seconds`, then returns a live session if the command is still running.
 - Hard foreground timeout: `powershell(..., hard_timeout=true)` terminates the process tree when `timeout_seconds` expires and reports a timeout error.

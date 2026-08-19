@@ -17,6 +17,18 @@ class ShellEffectInput(ProtocolModel):
 class ShellEffectOutput(ProtocolModel):
     stdout: str
     stderr: str
+    # Arrival-ordered transcript; empty for producers that never streamed.
+    output: str = ""
+    truncated: bool = False
+
+    @property
+    def transcript(self) -> str:
+        if self.output:
+            return self.output
+        # Separate captures: concatenating them bare would fabricate a line.
+        if self.stdout and self.stderr and not self.stdout.endswith("\n"):
+            return f"{self.stdout}\n{self.stderr}"
+        return self.stdout + self.stderr
 
 
 class FileEditEffectInput(ProtocolModel):
@@ -163,6 +175,15 @@ class SubagentEffectOutput(ProtocolModel):
     completed: bool
 
 
+# The path is carried alongside the name because a managed worktree lives under
+# $VIBE_HOME rather than beside the repo, so the name alone does not tell the
+# user where on disk the directory landed.
+class WorktreeEffectInput(ProtocolModel):
+    name: str
+    branch: str
+    path: str
+
+
 class _EffectDetailBase(ProtocolModel):
     tool_name: str
     display: EffectCallDisplay
@@ -229,6 +250,11 @@ class SubagentEffectDetail(_EffectDetailBase):
     child_session_id: str | None = None
 
 
+class WorktreeEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.WORKTREE] = ToolEffectKind.WORKTREE
+    input: WorktreeEffectInput | None = None
+
+
 EffectDetail = Annotated[
     GenericEffectDetail
     | ShellEffectDetail
@@ -241,7 +267,8 @@ EffectDetail = Annotated[
     | WebSearchEffectDetail
     | WebFetchEffectDetail
     | SkillEffectDetail
-    | SubagentEffectDetail,
+    | SubagentEffectDetail
+    | WorktreeEffectDetail,
     Field(discriminator="kind"),
 ]
 

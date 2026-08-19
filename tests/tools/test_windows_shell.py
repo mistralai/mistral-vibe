@@ -1322,7 +1322,8 @@ async def test_git_bash_fallback_projects_native_shell_to_client_terminal(
         )
     )
 
-    assert result.output == "client stdoutclient stderr"
+    assert result.stdout == "client stdout"
+    assert result.stderr == "client stderr"
     assert tool_io.requests == [
         ShellCommandRequest(
             session_id="session-1",
@@ -1376,7 +1377,8 @@ async def test_powershell_fallback_projects_native_shell_to_client_terminal(
         )
     )
 
-    assert result.output == "client stdoutclient stderr"
+    assert result.stdout == "client stdout"
+    assert result.stderr == "client stderr"
     assert tool_io.requests == [
         ShellCommandRequest(
             session_id="session-2",
@@ -1482,7 +1484,7 @@ async def test_windows_shell_managed_echo_hello(native_windows_platform):
     )
 
     assert result.status == "completed"
-    assert result.returncode == 0
+    assert result.exit_code == 0
     assert "hello" in result.output.lower()
     assert result.shell
     assert result.session_id.startswith("powershell_")

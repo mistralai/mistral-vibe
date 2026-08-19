@@ -12,8 +12,11 @@ from vibe.cli.clipboard import copy_to_clipboard
 from vibe.cli.theme import resolve_auto_theme, resolve_theme, resolve_theme_name
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config._defaults import (
+    DEFAULT_CONSOLE_BASE_URL,
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
+    DEFAULT_MISTRAL_SERVER_URL,
+    DEFAULT_VIBE_BASE_URL,
 )
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -21,10 +24,12 @@ from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.telemetry.types import LaunchContext
 from vibe.setup.auth import BrowserSignInService, HttpBrowserSignInGateway
 from vibe.setup.auth.api_key_persistence import (
+    ProviderCredentialsPersistRequest,
     persist_api_key,
-    persist_provider_to_config,
+    persist_provider_credentials,
     resolve_api_key_provider,
 )
+from vibe.setup.auth.whoami import resolve_tenant_domains
 from vibe.setup.onboarding.context import OnboardingContext, resolve_browser_auth_urls
 from vibe.setup.onboarding.screens import (
     ApiKeyScreen,
@@ -69,6 +74,7 @@ class OnboardingApp(App[str | None]):
         self._theme_selection_screen: ThemeSelectionScreen | None = None
         self._provider = config.provider
         self._vibe_base_url = config.vibe_base_url
+        self._console_base_url = config.console_base_url
         self._launch_context = launch_context
         self._browser_sign_in_success_delay = browser_sign_in_success_delay
         self._browser_sign_in_url_help_delay = browser_sign_in_url_help_delay
@@ -137,16 +143,26 @@ class OnboardingApp(App[str | None]):
                 "browser_auth_api_base_url": browser_api_base_url,
             }
         )
+        # Keep the top-level console URL (used for /whoami, plan lookups) in sync
+        # with the provider's browser auth host — otherwise on-prem users sign in
+        # against their tenant but every account call still hits console.mistral.ai.
+        self._console_base_url = browser_base_url
 
     def apply_mistral_default_domain(self) -> None:
         self._provider = self._provider.model_copy(
             update={
                 "browser_auth_base_url": DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
                 "browser_auth_api_base_url": DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
+                "api_base": f"{DEFAULT_MISTRAL_SERVER_URL}/v1",
             }
         )
+        self._console_base_url = DEFAULT_CONSOLE_BASE_URL
+        self._vibe_base_url = DEFAULT_VIBE_BASE_URL
 
-    def persist_credentials(self, api_key: str) -> str:
+    async def persist_credentials(self, api_key: str) -> str:
+        """Persist the API key and, for on-prem sign-ins, resolve tenant domains
+        from /whoami before writing provider/console/vibe URLs to config.
+        """
         resolved = resolve_api_key_provider(self._provider)
         base_url = self._provider.browser_auth_base_url
         result = persist_api_key(
@@ -157,9 +173,39 @@ class OnboardingApp(App[str | None]):
                 base_url and base_url != DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL
             ),
         )
-        if result == "completed" and self._provider != self._config.provider:
-            if not persist_provider_to_config(self._provider):
-                return "provider_config_error:failed to persist provider config"
+        if result != "completed":
+            return result
+        if (
+            self._provider == self._config.provider
+            and self._console_base_url == self._config.console_base_url
+            and self._vibe_base_url == self._config.vibe_base_url
+        ):
+            return result
+
+        # Only fetch tenant domains for on-prem consoles — the public Mistral
+        # console has no per-tenant redirection to discover.
+        if self._console_base_url != DEFAULT_CONSOLE_BASE_URL:
+            self._provider, self._vibe_base_url = await resolve_tenant_domains(
+                self._provider, self._console_base_url, api_key, self._vibe_base_url
+            )
+
+        request = ProviderCredentialsPersistRequest(
+            provider=self._provider,
+            console_base_url=(
+                self._console_base_url
+                if self._console_base_url != self._config.console_base_url
+                else None
+            ),
+            vibe_base_url=(
+                self._vibe_base_url
+                if self._vibe_base_url != self._config.vibe_base_url
+                else None
+            ),
+        )
+        outcome = await persist_provider_credentials(request)
+        failure = outcome.first_failure()
+        if failure is not None:
+            return f"provider_config_error:failed to persist {failure}"
         return result
 
     def _build_browser_sign_in_service_factory(

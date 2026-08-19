@@ -252,8 +252,8 @@ def test_copy_text_to_clipboard_returns_none_for_empty_text(
     mock_app.notify.assert_not_called()
 
 
-@patch("vibe.cli.clipboard.pyperclip.paste", return_value="hello")
-@patch("vibe.cli.clipboard.pyperclip.copy")
+@patch("pyperclip.paste", return_value="hello")
+@patch("pyperclip.copy")
 def test_copy_native_verifies_exact_readback(
     copy_mock: MagicMock, paste_mock: MagicMock
 ) -> None:
@@ -262,8 +262,8 @@ def test_copy_native_verifies_exact_readback(
     paste_mock.assert_called_once_with()
 
 
-@patch("vibe.cli.clipboard.pyperclip.paste", return_value="line one\r\nline two")
-@patch("vibe.cli.clipboard.pyperclip.copy")
+@patch("pyperclip.paste", return_value="line one\r\nline two")
+@patch("pyperclip.copy")
 def test_copy_native_verifies_when_only_newlines_differ(
     copy_mock: MagicMock, paste_mock: MagicMock
 ) -> None:
@@ -272,8 +272,8 @@ def test_copy_native_verifies_when_only_newlines_differ(
     paste_mock.assert_called_once_with()
 
 
-@patch("vibe.cli.clipboard.pyperclip.paste", return_value="old value")
-@patch("vibe.cli.clipboard.pyperclip.copy")
+@patch("pyperclip.paste", return_value="old value")
+@patch("pyperclip.copy")
 def test_copy_native_returns_unverified_when_readback_differs(
     copy_mock: MagicMock, paste_mock: MagicMock
 ) -> None:
@@ -282,8 +282,8 @@ def test_copy_native_returns_unverified_when_readback_differs(
     paste_mock.assert_called_once_with()
 
 
-@patch("vibe.cli.clipboard.pyperclip.paste", side_effect=RuntimeError("unreadable"))
-@patch("vibe.cli.clipboard.pyperclip.copy")
+@patch("pyperclip.paste", side_effect=RuntimeError("unreadable"))
+@patch("pyperclip.copy")
 def test_copy_native_returns_unverified_when_readback_fails(
     copy_mock: MagicMock, paste_mock: MagicMock
 ) -> None:

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 import fnmatch
 import glob
+import os
 from pathlib import Path, PurePath
 from typing import Annotated
 
 from pydantic import AfterValidator
 
-from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.config.harness_files import (
+    HarnessFilesManager,
+    get_harness_files_manager,
+)
 from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.permissions import (
@@ -40,6 +47,24 @@ def matches_sensitive_pattern(resolved_path: str, patterns: list[str]) -> bool:
     return any(lowered.match(pattern.lower()) for pattern in patterns)
 
 
+_active_file_display_harness: ContextVar[HarnessFilesManager | None] = ContextVar(
+    "active_file_display_harness", default=None
+)
+
+
+@contextmanager
+def file_display_harness(harness_files: HarnessFilesManager | None) -> Iterator[None]:
+    if harness_files is None:
+        yield
+        return
+
+    token = _active_file_display_harness.set(harness_files)
+    try:
+        yield
+    finally:
+        _active_file_display_harness.reset(token)
+
+
 def _make_absolute(path_str: str, cwd: Path) -> Path:
     path = Path(normalize_windows_path(path_str)).expanduser()
     if target_pure_path(str(path)).is_absolute():
@@ -61,6 +86,48 @@ def _configured_project_roots() -> list[Path]:
         return get_harness_files_manager().project_roots
     except RuntimeError:
         return []
+
+
+def _resolve_display_target(path_str: str, cwd: Path) -> Path | None:
+    """Resolve user-provided absolute, relative, or home-relative paths."""
+    try:
+        path = Path(path_str).expanduser()
+        if not path.is_absolute():
+            path = cwd / path
+        return Path(os.path.normpath(path))
+    except (ValueError, OSError):
+        return None
+
+
+def _display_relative_to_cwd(path: Path, cwd: Path) -> str | None:
+    """Return a stable cwd-relative display path, or None when outside cwd."""
+    try:
+        rel = path.relative_to(cwd)
+    except ValueError:
+        return None
+    if str(rel) == ".":
+        return path.name
+    return str(rel)
+
+
+def display_file_path(path_str: str) -> str:
+    """Path relative to the session cwd, for display.
+
+    Falls back to the original string when the path can't be resolved, or the
+    resolved absolute path when it does not sit under the session cwd.
+    """
+    manager = _active_file_display_harness.get()
+    cwd_raw = (
+        (manager.cwd or Path.cwd()).expanduser() if manager is not None else Path.cwd()
+    )
+    cwd = Path(os.path.normpath(str(cwd_raw)))
+    path = _resolve_display_target(path_str, cwd)
+    if path is None:
+        return path_str
+
+    if relative_path := _display_relative_to_cwd(path, cwd):
+        return relative_path
+    return str(path)
 
 
 def resolve_path_permission(

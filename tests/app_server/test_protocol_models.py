@@ -98,6 +98,7 @@ def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
         },
         "historyLimit": 100,
         "idempotencyKey": None,
+        "kind": "normal",
     }
 
 

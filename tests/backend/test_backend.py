@@ -774,20 +774,14 @@ class TestMistralBackendReasoningEffort:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("thinking", "expected_effort", "expected_temperature"),
-        [
-            ("off", None, 0.2),
-            ("low", "none", 1.0),
-            ("medium", "high", 1.0),
-            ("high", "high", 1.0),
-        ],
+        ("thinking", "expected_effort"),
+        [("off", None), ("low", "none"), ("medium", "high"), ("high", "high")],
     )
     async def test_complete_passes_reasoning_effort(
         self,
         backend: MistralBackend,
         thinking: Literal["off", "low", "medium", "high"],
         expected_effort: str | None,
-        expected_temperature: float,
     ) -> None:
         model = ModelConfig(
             name="mistral-small-latest",
@@ -820,7 +814,7 @@ class TestMistralBackendReasoningEffort:
 
             call_kwargs = mock_client.chat.complete_async.call_args.kwargs
             assert call_kwargs["reasoning_effort"] == expected_effort
-            assert call_kwargs["temperature"] == expected_temperature
+            assert call_kwargs["temperature"] == 0.2
 
     @pytest.mark.asyncio
     async def test_complete_omits_reasoning_content_when_thinking_off(

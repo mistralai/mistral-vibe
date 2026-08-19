@@ -67,6 +67,8 @@ from vibe.app_server.models import (
     ResourceContentBlock,
     RunningEffectState,
     SessionTitleUpdatedNoticeDetail,
+    ShellEffectDetail,
+    ShellEffectOutput,
     SkillEffectDetail,
     SkillEffectInput,
     SkillEffectOutput,
@@ -105,6 +107,7 @@ _TOOL_KINDS: dict[ToolEffectKind, ToolKind] = {
     ToolEffectKind.WEB_FETCH: "fetch",
     ToolEffectKind.SKILL: "read",
     ToolEffectKind.SUBAGENT: "think",
+    ToolEffectKind.WORKTREE: "other",
 }
 
 
@@ -388,6 +391,9 @@ def _result_effect_content(
 ) -> list[ToolCallContentVariant]:
     content: list[ToolCallContentVariant] = []
     match entry.detail:
+        case ShellEffectDetail() if isinstance(entry.state, CompletedEffectState):
+            # The transcript arrives as output; a trailer would repeat its tail.
+            return []
         case FileEditEffectDetail():
             if value := _effect_output(entry, FileEditEffectOutput):
                 content.append(
@@ -645,6 +651,10 @@ def _effect_meta(entry: PublicEffectEntry) -> dict[str, JsonValue]:
         "effect_kind": entry.detail.kind.value,
     }
     match entry.detail:
+        case ShellEffectDetail():
+            output = _effect_output(entry, ShellEffectOutput)
+            if output is not None and output.truncated:
+                meta["output_truncated"] = True
         case FileSearchEffectDetail(input=FileSearchEffectInput() as value):
             meta.update(query=value.pattern, search_path=_resolved_path(value.path))
         case WebSearchEffectDetail(input=WebSearchEffectInput() as value):

@@ -36,7 +36,7 @@ from vibe.core.tools.ui import ToolResultDisplay
 from vibe.core.types import ToolStreamEvent
 from vibe.observability.logging import logger
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
-from vibe.utils.io import decode_safe
+from vibe.utils.io import decode_console_safe
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -51,7 +51,7 @@ _MCP_DEFAULT_SSE_READ_TIMEOUT = 300.0
 def _stderr_logger_thread(read_fd: int) -> None:
     with open(read_fd, "rb") as f:
         for line in iter(f.readline, b""):
-            decoded = decode_safe(line, from_subprocess=True).text.rstrip()
+            decoded = decode_console_safe(line).rstrip()
             if decoded:
                 logger.debug(f"[MCP stderr] {decoded}")
 

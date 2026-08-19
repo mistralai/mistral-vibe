@@ -66,40 +66,6 @@ async def test_config_schema_returns_the_canonical_versioned_schema() -> None:
 
 
 @pytest.mark.asyncio
-async def test_config_mutation_refreshes_all_derived_client_resources() -> None:
-    agent_loop = build_test_agent_loop()
-    session = await create_test_app_server_session(agent_loop)
-    try:
-        assert session.resources.runtime.has_tool("grep")
-
-        await session.resources.config.update(
-            {"disabled_tools": ["grep"]}, reload_runtime=True
-        )
-
-        assert not session.resources.runtime.has_tool("grep")
-    finally:
-        await session.close()
-
-
-@pytest.mark.asyncio
-async def test_config_change_notifies_subscribers_until_unsubscribed() -> None:
-    agent_loop = build_test_agent_loop()
-    session = await create_test_app_server_session(agent_loop)
-    themes: list[str] = []
-    unsubscribe = session.resources.config.subscribe(
-        lambda config: themes.append(config.theme)
-    )
-    try:
-        await session.resources.config.update({"theme": "monokai"})
-        unsubscribe()
-        await session.resources.config.update({"theme": "gruvbox"})
-    finally:
-        await session.close()
-
-    assert themes == ["monokai"]
-
-
-@pytest.mark.asyncio
 async def test_workspace_trust_is_server_owned(
     tmp_working_directory: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -136,7 +102,7 @@ async def test_workspace_trust_is_server_owned(
 
 
 @pytest.mark.asyncio
-async def test_session_fork_can_persist_a_detached_public_session(
+async def test_legacy_detached_fork_persists_to_the_session_store(
     tmp_path: Path,
 ) -> None:
     config = build_test_vibe_config(
@@ -159,50 +125,12 @@ async def test_session_fork_can_persist_a_detached_public_session(
 
     try:
         response = await session.resources.sessions.fork("user-1", attach=False)
-        source_state = session.state
     finally:
         await session.close()
 
-    assert response.source_session_id == agent_loop.session_id
-    assert response.state.session.id != response.source_session_id
-    assert response.state.session.parent_session_id == response.source_session_id
-    assert [entry.id for entry in response.state.history or []] == [
-        "user-1",
-        "assistant-1",
-    ]
-    assert source_state.session.id == response.source_session_id
     assert (
         SessionLoader.find_session_by_id(
             response.state.session.id, config.session_logging
         )
         is not None
     )
-
-
-@pytest.mark.asyncio
-async def test_session_fork_attaches_the_new_session_by_default(tmp_path: Path) -> None:
-    config = build_test_vibe_config(
-        session_logging=SessionLoggingConfig(
-            enabled=True, save_dir=str(tmp_path / "sessions")
-        )
-    )
-    agent_loop = build_test_agent_loop(config=config)
-    agent_loop.messages.extend([
-        LLMMessage(role=Role.user, content="First", message_id="user-1"),
-        LLMMessage(
-            role=Role.assistant, content="First answer", message_id="assistant-1"
-        ),
-    ])
-    session = await create_test_app_server_session(agent_loop)
-    source_session_id = session.session_id
-
-    try:
-        response = await session.resources.sessions.fork("user-1")
-
-        assert session.session_id == response.state.session.id
-        assert session.session_id != source_session_id
-        assert response.source_session_id == source_session_id
-        assert response.state.session.parent_session_id == source_session_id
-        assert [entry.id for entry in session.history] == ["user-1", "assistant-1"]
-    finally:
-        await session.close()

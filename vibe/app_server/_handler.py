@@ -14,7 +14,6 @@ from vibe.app_server._execution import (
     SessionExecutionConflict,
     SessionExecutionKind,
 )
-from vibe.app_server._host import project_session_list
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._projection import (
     history_user_message_index,
@@ -34,6 +33,7 @@ from vibe.app_server._shell import ShellConflictError
 from vibe.app_server._shell_requests import ShellRequestHandler
 from vibe.app_server._state import build_public_state, history_page
 from vibe.app_server._turns import (
+    CallbackClosedError,
     CallbackConflictError,
     CallbackNotFoundError,
     StaleTurnError,
@@ -69,6 +69,7 @@ from vibe.app_server.protocol import (
     EmptyResponse,
     ProtocolErrorCode,
     RuntimeMutationResponse,
+    RuntimeUpdatedParams,
     SessionCompactParams,
     SessionCompactResponse,
     SessionContinueParams,
@@ -79,7 +80,7 @@ from vibe.app_server.protocol import (
     SessionHistoryClearResponse,
     SessionHistoryListParams,
     SessionHistoryListResponse,
-    SessionListParams,
+    SessionKind,
     SessionLogReadParams,
     SessionLogReadResponse,
     SessionReadParams,
@@ -134,12 +135,14 @@ from vibe.app_server.protocol import (
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.compaction import CompactionFailedError
 from vibe.core.session.saved_sessions import update_saved_session_title_at_path
+from vibe.observability.logging import logger
 
 DEFAULT_HISTORY_LIMIT = 200
 
 type ReplaceRoot = Callable[[str, int], Awaitable[PublicSessionState]]
 type AdoptRoot = Callable[[AgentLoop, int], Awaitable[PublicSessionState]]
 type StageRoot = Callable[[AgentLoop], Awaitable[None]]
+type SpawnResumeTask = Callable[[asyncio.Task[None]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +150,19 @@ class RootLifecycle:
     replace: ReplaceRoot
     adopt: AdoptRoot
     stage: StageRoot | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeOrchestration:
+    """Server-owned callbacks that manage the fast-resume background lifecycle.
+
+    Grouped separately from ``RootLifecycle`` because they are server concerns
+    (task tracking, post-response notification) rather than session-state concerns.
+    """
+
+    runtime_factory: AgentRuntimeFactory
+    current_event_id: Callable[[str], int]
+    spawn_resume_task: SpawnResumeTask
 
 
 class CoreRequestHandler:
@@ -160,15 +176,15 @@ class CoreRequestHandler:
         resources: ResourceRequestHandler,
         root_session: RootSessionCoordinator,
         root_lifecycle: RootLifecycle,
-        runtime_factory: AgentRuntimeFactory,
-        current_event_id: Callable[[str], int],
+        resume_orchestration: ResumeOrchestration,
     ) -> None:
         self._agent_loop = agent_loop
         self._turns = turns
         self._execution = execution
+        self._notify = notify
         self._sessions = sessions
         self._root_session = root_session
-        self._current_event_id = current_event_id
+        self._current_event_id = resume_orchestration.current_event_id
         self._shell = ShellRequestHandler(
             agent_loop, turns, execution, self._require_attached, self._current_event_id
         )
@@ -182,8 +198,9 @@ class CoreRequestHandler:
             self._execution.require_idle,
         )
         self._root_lifecycle = root_lifecycle
-        self._runtime_factory = runtime_factory
+        self._runtime_factory = resume_orchestration.runtime_factory
         self._closed = False
+        self._spawn_resume_task = resume_orchestration.spawn_resume_task
 
     async def dispatch(self, method: str, raw_params: dict[str, Any]) -> DispatchResult:
         try:
@@ -203,6 +220,8 @@ class CoreRequestHandler:
             ) from exc
         except CallbackNotFoundError as exc:
             raise RequestFailure(ProtocolErrorCode.NOT_FOUND, str(exc)) from exc
+        except CallbackClosedError as exc:
+            raise RequestFailure(ProtocolErrorCode.CALLBACK_CLOSED, str(exc)) from exc
         except CallbackConflictError as exc:
             raise RequestFailure(ProtocolErrorCode.CONFLICT, str(exc)) from exc
         except (PromptPreparationError, WorkspaceTrustError) as exc:
@@ -386,7 +405,6 @@ class CoreRequestHandler:
             in {
                 "session/history/list",
                 "session/turns/list",
-                "session/archive",
                 "session/rename",
                 "session/compact",
             }
@@ -421,11 +439,6 @@ class CoreRequestHandler:
             case "session/log/read":
                 response = self._session_log_read(
                     validate_wire(SessionLogReadParams, raw_params)
-                )
-            case "session/list":
-                params = validate_wire(SessionListParams, raw_params)
-                response = await asyncio.to_thread(
-                    project_session_list, self._agent_loop.config, params
                 )
             case "session/context/inject":
                 params = validate_wire(ContextInjectParams, raw_params)
@@ -476,12 +489,6 @@ class CoreRequestHandler:
                         validate_wire(SessionTurnsListParams, raw_params)
                     )
                 )
-            case "session/archive":
-                # Reserved for future clients; Vibe has no archive backing yet.
-                raise RequestFailure(
-                    ProtocolErrorCode.NOT_IMPLEMENTED,
-                    "Archiving sessions is not supported",
-                )
         raise method_not_found(method)
 
     async def _dispatch_session_records(
@@ -531,7 +538,9 @@ class CoreRequestHandler:
                     "The app server was started in a different working directory",
                 )
             self._root_session.attach(self._agent_loop.session_id)
-            self._agent_loop.start_initialize_experiments()
+            self._agent_loop.start_initialize_experiments(
+                defer_new_session_telemetry=params.kind is SessionKind.EPHEMERAL
+            )
             return DispatchResult(
                 SessionStartResponse(
                     state=(state := self._public_state(params.history_limit)),
@@ -714,8 +723,16 @@ class CoreRequestHandler:
             state = await self._root_lifecycle.replace(
                 params.session_id, params.history_limit
             )
+            agent_loop = self._agent_loop
+            session_id = params.session_id
+
+            def _spawn() -> None:
+                task = asyncio.create_task(self._finish_resume(agent_loop, session_id))
+                self._spawn_resume_task(task)
+
             return DispatchResult(
                 SessionResumeResponse(state=state, last_event_id=state.event_id),
+                after_response=_spawn,
                 session_attached=True,
                 runtime_updated=True,
             )
@@ -728,6 +745,21 @@ class CoreRequestHandler:
             session_attached=True,
             runtime_updated=True,
         )
+
+    async def _finish_resume(self, agent_loop: AgentLoop, session_id: str) -> None:
+        await self._runtime_factory.finish_resume_root(agent_loop, session_id)
+        try:
+            await self._notify(
+                "runtime/updated",
+                RuntimeUpdatedParams(
+                    session_id=session_id, runtime=self._resources.runtime_snapshot()
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to emit runtime/updated after resuming session_id=%s",
+                session_id,
+            )
 
     async def _session_title_update(
         self, params: SessionTitleUpdateParams
@@ -823,7 +855,10 @@ class CoreRequestHandler:
                     completed_turns=[],
                     history_limit=params.history_limit,
                 )
-                if self._root_lifecycle.stage is not None:
+                if (
+                    self._root_lifecycle.stage is not None
+                    and not forked.session_logger.enabled
+                ):
                     await self._root_lifecycle.stage(forked)
                     forked = None
             finally:

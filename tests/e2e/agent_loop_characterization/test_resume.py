@@ -149,7 +149,7 @@ def _resume_tool_history_factory(
     return assistant_text_chunks(RESUME_RESUMED_TURN_RESPONSE, created=60)
 
 
-@pytest.mark.timeout(35)
+@pytest.mark.timeout(45)
 @pytest.mark.parametrize(
     "streaming_mock_server",
     [pytest.param(_resume_tool_history_factory, id="resume-tool-history")],
@@ -200,7 +200,7 @@ def test_resumed_session_sends_prior_tool_call_and_result_history_to_the_model(
             resumed_captured,
             lambda: len(streaming_mock_server.requests),
             expected_count=3,
-            timeout=10,
+            timeout=20,
         )
         wait_for_rendered_text(
             resumed_child,

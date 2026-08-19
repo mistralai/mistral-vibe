@@ -8,7 +8,7 @@ from pydantic import ValidationError
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from tests.stubs.app_server import build_test_app_server
+from tests.stubs.app_server import build_test_app_server, legacy_backend
 from vibe.app_server._dispatch import DispatchResult
 from vibe.app_server.client import AppServerClient, AppServerConnectionClosed
 from vibe.app_server.protocol import (
@@ -227,9 +227,10 @@ async def test_shutdown_closes_root_and_transport_after_child_cleanup_failure() 
     await client.initialize(ClientInfo(name="test", version="1"))
     await client.notify("initialized")
     await client.request("session/start", {"agentConfig": {"cwd": str(agent_loop.cwd)}})
-    handler = server._handler
+    backend = legacy_backend(server)
+    handler = backend.handler
     handler.close = AsyncMock()
-    server._sessions.close = AsyncMock(side_effect=RuntimeError("child close failed"))
+    backend.children.close = AsyncMock(side_effect=RuntimeError("child close failed"))
     agent_loop.emit_session_closed_telemetry = Mock()
     agent_loop.aclose = AsyncMock()
     agent_loop.telemetry_client.aclose = AsyncMock()
@@ -265,7 +266,9 @@ async def test_session_close_records_pointer_before_responding(
         ),
     )
     record = Mock()
-    monkeypatch.setattr("vibe.app_server.server.last_session_pointer.record", record)
+    monkeypatch.setattr(
+        "vibe.app_server._legacy_session_runtime.last_session_pointer.record", record
+    )
 
     await client.initialize(ClientInfo(name="test", version="1"))
     await client.notify("initialized")
@@ -293,7 +296,9 @@ async def test_session_close_does_not_record_unpersisted_pointer(
         ),
     )
     record = Mock()
-    monkeypatch.setattr("vibe.app_server.server.last_session_pointer.record", record)
+    monkeypatch.setattr(
+        "vibe.app_server._legacy_session_runtime.last_session_pointer.record", record
+    )
 
     await client.initialize(ClientInfo(name="test", version="1"))
     await client.notify("initialized")

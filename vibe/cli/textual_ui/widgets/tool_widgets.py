@@ -12,7 +12,7 @@ from textual.containers import Vertical
 from textual.content import Content
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Markdown, Static
+from textual.widgets import Static
 from textual.worker import Worker
 
 from vibe.app_server.models import (
@@ -59,7 +59,7 @@ _ANSI_ESCAPE = re.compile(
 _CONTROL_BYTES = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
-def _clean_output(content: str) -> str:
+def clean_output(content: str) -> str:
     """Sanitize captured command output for terminal-safe display.
 
     Command output (e.g. uv's in-place progress bars) carries ANSI escapes,
@@ -67,13 +67,17 @@ def _clean_output(content: str) -> str:
     straight to the terminal (it does not strip ESC), corrupting the display,
     and scrolling emits a different slice so the glitches shift. Collapse each
     ``\\r``-redrawn line to its final state and strip escape/control bytes.
+
+    Mirrors the webview's ``collapseCarriageReturns``: a trailing ``\\r`` only
+    parks the cursor at column 0, so the line it sits on stands until something
+    overwrites it.
     """
-    content = content.replace("\r\n", "\n")
     cleaned: list[str] = []
-    for line in content.split("\n"):
-        if "\r" in line:
-            line = line.rsplit("\r", 1)[-1]
-        cleaned.append(_CONTROL_BYTES.sub("", _ANSI_ESCAPE.sub("", line)))
+    for line in content.replace("\r\n", "\n").split("\n"):
+        written = line.rstrip("\r")
+        cleaned.append(
+            _CONTROL_BYTES.sub("", _ANSI_ESCAPE.sub("", written.rsplit("\r", 1)[-1]))
+        )
     return "\n".join(cleaned)
 
 
@@ -162,12 +166,14 @@ class ToolResultWidget[TResult: BaseModel](Static):
     def _yield_text(
         self, content: str, *, classes: str = "tool-result-detail"
     ) -> Iterable[Widget]:
-        cleaned = _clean_output(content.strip("\n"))
+        cleaned = clean_output(content.strip("\n"))
         if cleaned:
             yield NoMarkupStatic(cleaned, classes=classes)
 
     def _yield_markdown(self, content: str, *, ext: str) -> Iterable[Widget]:
         if content:
+            from textual.widgets import Markdown
+
             yield Markdown(_fenced_code_block(content.strip("\n"), ext))
 
     def compose(self) -> ComposeResult:
@@ -208,19 +214,14 @@ def _format_generic_value(value: JsonValue) -> str:
 
 class BashApprovalWidget(ToolApprovalWidget[ShellInput]):
     def compose(self) -> ComposeResult:
+        from textual.widgets import Markdown
+
         yield Markdown(_fenced_code_block(self.args.command, "bash"))
 
 
 class BashResultWidget(ToolResultWidget[ShellOutput]):
     def _collapsed_output(self) -> str:
-        if not self.result:
-            return ""
-        parts: list[str] = []
-        if self.result.stdout:
-            parts.append(self.result.stdout.strip("\n"))
-        if self.result.stderr:
-            parts.append(self.result.stderr.strip("\n"))
-        return "\n".join(parts)
+        return self.result.transcript.strip("\n") if self.result else ""
 
     def compose(self) -> ComposeResult:
         if not self.result:
@@ -236,6 +237,8 @@ class BashResultWidget(ToolResultWidget[ShellOutput]):
 
 class WriteFileApprovalWidget(ToolApprovalWidget[FileWriteInput]):
     def compose(self) -> ComposeResult:
+        from textual.widgets import Markdown
+
         yield NoMarkupStatic(
             f"File: {self.args.file_path}", classes="approval-description"
         )

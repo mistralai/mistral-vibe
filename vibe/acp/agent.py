@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing, suppress
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 import signal
@@ -64,11 +65,12 @@ from vibe.acp.auth import (
     ApiKeyPersister,
     ApiKeyRemover,
     BrowserSignInServiceFactory,
+    CredentialsPersister,
     OnboardingContextLoader,
-    ProviderPersister,
+    TenantDomainResolver,
 )
-from vibe.acp.commands import AcpCommandController, AcpCommandRegistry
-from vibe.acp.content import project_prompt
+from vibe.acp.commands import AcpCommandController, AcpCommandRegistry, InjectedPrompt
+from vibe.acp.content import ProjectedPrompt, project_prompt
 from vibe.acp.exceptions import (
     ConfigurationError,
     InternalError,
@@ -129,6 +131,8 @@ from vibe.app_server.models import (
     ApprovalCallbackOutput,
     ApprovalDecision,
     ApprovalDecisionType,
+    ImageAttachment,
+    MentionStats,
     PublicCallbackEntry,
     PublicRetryCategory,
     PublicTurnStatus,
@@ -154,10 +158,23 @@ from vibe.app_server.protocol import (
 from vibe.app_server.session import AppServerSession, AppServerTurnError
 from vibe.observability.logging import logger
 from vibe.observability.sentry import capture_sentry_exception
+from vibe.user_content import UserDisplayContent, UserResource
 
 NON_INTERACTIVE_DISABLED_TOOLS = ("ask_user_question", "exit_plan_mode")
 INITIAL_AVAILABLE_COMMANDS_DELAY_SECONDS = 0.1
 type SessionStarter = Callable[[LocalHarnessOptions], Awaitable[AppServerSession]]
+
+
+@dataclass(frozen=True, slots=True)
+class _TurnInput:
+    text: str
+    client_message_id: str | None = None
+    auto_title: str | None = None
+    images: list[ImageAttachment] = field(default_factory=list)
+    resources: list[UserResource] = field(default_factory=list)
+    user_display_content: UserDisplayContent | None = None
+    mention_stats: MentionStats | None = None
+    injected: bool = False
 
 
 def _project_acp_mcp_servers(
@@ -245,7 +262,8 @@ class VibeAcpAgent(AcpAgent):
         browser_sign_in_service_factory: BrowserSignInServiceFactory | None = None,
         api_key_persister: ApiKeyPersister | None = None,
         api_key_remover: ApiKeyRemover | None = None,
-        provider_persister: ProviderPersister | None = None,
+        credentials_persister: CredentialsPersister | None = None,
+        tenant_domain_resolver: TenantDomainResolver | None = None,
         environ_before_dotenv_load: Mapping[str, str] | None = None,
     ) -> None:
         self.sessions: dict[str, AcpSession] = {}
@@ -264,8 +282,10 @@ class VibeAcpAgent(AcpAgent):
             auth_kwargs["api_key_persister"] = api_key_persister
         if api_key_remover is not None:
             auth_kwargs["api_key_remover"] = api_key_remover
-        if provider_persister is not None:
-            auth_kwargs["provider_persister"] = provider_persister
+        if credentials_persister is not None:
+            auth_kwargs["credentials_persister"] = credentials_persister
+        if tenant_domain_resolver is not None:
+            auth_kwargs["tenant_domain_resolver"] = tenant_domain_resolver
         self._auth = AcpAuthController(**auth_kwargs)
         self._command_controller = AcpCommandController(
             lambda: self.client, self._send_config_options
@@ -543,6 +563,27 @@ class VibeAcpAgent(AcpAgent):
             RETRYING_EXT_METHOD, notification.model_dump(mode="json", by_alias=True)
         )
 
+    @staticmethod
+    async def _prepare_turn_input(
+        session: AcpSession,
+        content: ProjectedPrompt,
+        *,
+        message_id: str,
+        display: UserDisplayContent | None,
+    ) -> _TurnInput:
+        prepared = await session.app_server.resources.workspace.prepare_prompt(
+            content.text, title_content=content.title_content
+        )
+        return _TurnInput(
+            text=prepared.prompt_text,
+            client_message_id=message_id,
+            auto_title=prepared.auto_title,
+            images=[*prepared.images, *content.images],
+            resources=content.resources,
+            user_display_content=display,
+            mention_stats=prepared.mentions,
+        )
+
     @override
     async def prompt(
         self, session_id: str, prompt: list[ContentBlock], **kwargs: Any
@@ -559,26 +600,28 @@ class VibeAcpAgent(AcpAgent):
         content = project_prompt(prompt)
         text = content.text
         message_id = str(uuid4())
-        if response := await self._command_controller.execute(
-            session, text, message_id
-        ):
-            return response
-        self._record_skill_command(session, text)
-        prepared = await session.app_server.resources.workspace.prepare_prompt(
-            text, title_content=content.title_content
-        )
-        images = [*prepared.images, *content.images]
+        match await self._command_controller.execute(session, text, message_id):
+            case PromptResponse() as response:
+                return response
+            case InjectedPrompt(text=injected_text):
+                turn_input = _TurnInput(text=injected_text, injected=True)
+            case None:
+                self._record_skill_command(session, text)
+                turn_input = await self._prepare_turn_input(
+                    session, content, message_id=message_id, display=display
+                )
 
         async def run_turn() -> None:
             async with aclosing(
                 session.app_server.act(
-                    prepared.prompt_text,
-                    client_message_id=message_id,
-                    auto_title=prepared.auto_title,
-                    images=images,
-                    resources=content.resources,
-                    user_display_content=display,
-                    mention_stats=prepared.mentions,
+                    turn_input.text,
+                    client_message_id=turn_input.client_message_id,
+                    auto_title=turn_input.auto_title,
+                    images=turn_input.images,
+                    resources=turn_input.resources,
+                    user_display_content=turn_input.user_display_content,
+                    mention_stats=turn_input.mention_stats,
+                    injected=turn_input.injected,
                 )
             ) as events:
                 async for event in events:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import keyring
+from pydantic import ValidationError
 import pytest
 
 from vibe.core.config import MissingAPIKeyError, ModelConfig, ProviderConfig
@@ -222,7 +223,7 @@ def test_gated_model_not_injected_without_routing() -> None:
     assert _ROUTED_TEST_ALIAS not in config.models
 
 
-def test_gated_model_not_injected_when_pinned_to_other_model() -> None:
+def test_routed_model_available_but_not_active_when_pinned_to_other() -> None:
     config = VibeConfigSchema.model_validate({
         "active_model": "devstral-small",
         "routed_default_model": _ROUTED_TEST_ALIAS,
@@ -231,7 +232,8 @@ def test_gated_model_not_injected_when_pinned_to_other_model() -> None:
 
     assert config.active_model == "devstral-small"
     assert config.get_active_model().alias == "devstral-small"
-    assert _ROUTED_TEST_ALIAS not in config.models
+    assert _ROUTED_TEST_ALIAS in config.models
+    assert config.resolve_default_model_alias() == _ROUTED_TEST_ALIAS
 
 
 def test_gated_model_injected_when_pinned_to_routed_alias() -> None:
@@ -258,6 +260,28 @@ def test_user_model_entry_wins_over_routed_injection() -> None:
     })
 
     assert config.models[_ROUTED_TEST_ALIAS].name == "my-own-model"
+
+
+def test_sparse_user_entry_merges_routed_model_fields() -> None:
+    # A sparse user entry (e.g. only thinking) must still pick up the routed
+    # model's other fields (temperature, supports_images, …) so that writing a
+    # single field does not silently drop routed defaults on reload.
+    sparse_model = ModelConfig(
+        name=_ROUTED_TEST_MODEL.name,
+        provider="mistral",
+        alias=_ROUTED_TEST_ALIAS,
+        thinking="medium",
+    )
+    config = VibeConfigSchema.model_validate({
+        "routed_default_model": _ROUTED_TEST_ALIAS,
+        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
+        "models": [sparse_model],
+    })
+
+    merged = config.models[_ROUTED_TEST_ALIAS]
+    assert merged.thinking == "medium"
+    assert merged.input_price == _ROUTED_TEST_MODEL.input_price
+    assert merged.supports_images == _ROUTED_TEST_MODEL.supports_images
 
 
 def test_known_active_model_is_not_overridden(caplog: pytest.LogCaptureFixture) -> None:
@@ -413,3 +437,23 @@ def test_check_api_key_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> N
 def test_theme_is_preserved_for_the_client_to_interpret() -> None:
     config = VibeConfigSchema(theme="totally-unknown-theme")
     assert config.theme == "totally-unknown-theme"
+
+
+def test_log_level_defaults_to_none() -> None:
+    schema = VibeConfigSchema()
+    assert schema.log_level is None
+
+
+def test_log_level_normalizes_case() -> None:
+    schema = VibeConfigSchema(log_level="debug")
+    assert schema.log_level == "DEBUG"
+
+
+def test_log_level_rejects_invalid() -> None:
+    with pytest.raises(ValidationError):
+        VibeConfigSchema(log_level="VERBOSE")
+
+
+@pytest.mark.parametrize("level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+def test_log_level_accepts_canonical_levels(level: str) -> None:
+    assert VibeConfigSchema(log_level=level).log_level == level

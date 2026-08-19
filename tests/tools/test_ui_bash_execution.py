@@ -97,7 +97,7 @@ async def test_ui_reports_no_output(vibe_app: VibeApp) -> None:
 
         await pilot.press("enter")
         message = await _wait_for_shell_result(vibe_app, pilot)
-        assert _result_output(message) == {"stdout": "", "stderr": ""}
+        assert _result_output(message) == {"stdout": "", "stderr": "", "output": ""}
         assert_no_command_error(vibe_app)
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibe.acp.commands.controller import AcpCommandController
+from vibe.acp.commands.controller import AcpCommandController, InjectedPrompt
 from vibe.acp.commands.registry import (
     AcpCommand,
     AcpCommandContext,
@@ -14,4 +14,5 @@ __all__ = [
     "AcpCommandController",
     "AcpCommandKind",
     "AcpCommandRegistry",
+    "InjectedPrompt",
 ]

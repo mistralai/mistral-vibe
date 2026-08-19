@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -12,14 +14,29 @@ import pytest
 import tomli_w
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.stubs.app_server import legacy_backend
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from vibe.app_server import _runtime as runtime
+from vibe.app_server._dispatch import RequestFailure
+from vibe.app_server._execution import SessionExecutionKind
 import vibe.app_server._host as host_module
 from vibe.app_server._host import HostRequestHandler
-from vibe.app_server._model import validate_wire
-from vibe.app_server._projection import project_config, project_config_view
+from vibe.app_server._legacy_composition import create_legacy_app_server
+from vibe.app_server._legacy_session_backend import LegacySessionBackendHost
+import vibe.app_server._legacy_session_runtime as legacy_runtime_module
+from vibe.app_server._legacy_session_runtime import LegacySessionRuntimeController
+from vibe.app_server._model import ProtocolModel, validate_wire
+from vibe.app_server._projection import (
+    project_config,
+    project_config_view,
+    project_message_history,
+)
+from vibe.app_server._projector import ProjectedUpdate
+import vibe.app_server._sessions as _sessions
+from vibe.app_server._turns import TurnController
 from vibe.app_server.client import AppServerClient
+from vibe.app_server.models import PublicHistoryEntry
 from vibe.app_server.protocol import (
     AppServerResponseError,
     AutoWorktreeInput,
@@ -32,8 +49,11 @@ from vibe.app_server.protocol import (
     ConfigSchemaReadParams,
     EmptyResponse,
     ExistingWorktreeInput,
+    HistoryEntryUpdatedParams,
     NewWorktreeInput,
     ProtocolErrorCode,
+    RuntimeReadParams,
+    RuntimeReadResponse,
     SessionDeleteParams,
     SessionHistoryListParams,
     SessionListParams,
@@ -41,15 +61,15 @@ from vibe.app_server.protocol import (
     SessionMCPStdioServer,
     SessionOptions,
     SessionReadParams,
+    SessionResumeParams,
     SessionStartParams,
     SessionTitleUpdateParams,
     SessionTitleUpdateResponse,
     WorkspaceTrustStatusParams,
     WorkspaceWorktreeListParams,
     WorkspaceWorktreeListResponse,
+    WorkspaceWorktreeRemoveResponse,
 )
-import vibe.app_server.server as server_module
-from vibe.app_server.server import AppServer, resolve_worktree
 from vibe.app_server.session import AppServerSession
 from vibe.app_server.transport import memory_transport_pair
 from vibe.core.agent_loop import AgentLoop
@@ -57,17 +77,155 @@ from vibe.core.config import ModelConfig, SessionLoggingConfig, VibeConfigSchema
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.git.errors import GitUnavailableError
+from vibe.core.git.worktree import (
+    LinkedWorktree,
+    ManagedWorktree,
+    PreparedWorktree,
+    WorktreeReleaseOutcome,
+    WorktreeRepository,
+)
+import vibe.core.git.worktree.record as worktree_record
+import vibe.core.git.worktree.repository as worktree_module
 from vibe.core.hooks.config import HookConfigResult
 from vibe.core.session.resume_sessions import ResumeSessionInfo
+from vibe.core.session.session_lease import SessionBusyError, SessionLease
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.trusted_folders import trusted_folders_manager
-import vibe.core.worktree as worktree_module
-from vibe.core.worktree import (
-    GitUnavailableError,
-    list_linked_worktrees,
-    prepare_worktree_session,
-)
 from vibe.utils.terminal import TerminalEmulator
+
+
+class _FakeSessionBackendServices:
+    def client_info(self) -> ClientInfo:
+        return ClientInfo(name="test", version="1")
+
+    def client_capabilities(self) -> ClientCapabilities:
+        return ClientCapabilities()
+
+    def current_session_id(self) -> str:
+        return "root"
+
+    def event_watermark(self, session_id: str) -> int:
+        return 0
+
+    def account_gateway(self) -> None:
+        return None
+
+    def identity_gateway(self) -> None:
+        return None
+
+    @asynccontextmanager
+    async def lifecycle_transition(self):
+        yield
+
+    def task_finished(self, task: asyncio.Task[None]) -> None:
+        pass
+
+    async def notify(self, method: str, params: Any) -> None:
+        pass
+
+    async def publish_callback(self, callback: Any) -> None:
+        pass
+
+    async def record_child_notification(self, method: str, params: Any) -> None:
+        pass
+
+    async def request_client_result[ResultT: ProtocolModel](
+        self, method: str, params: ProtocolModel, response_type: type[ResultT]
+    ) -> ResultT:
+        raise AssertionError("test services do not serve client requests")
+
+
+def test_local_harness_options_preserves_client_positional_argument() -> None:
+    client = runtime.ClientDescriptor(info=ClientInfo(name="test", version="1"))
+
+    options = runtime.LocalHarnessOptions(client)
+
+    assert options.client is client
+    assert options.experimental_harness is False
+
+
+@pytest.mark.asyncio
+async def test_first_session_open_holds_the_lifecycle_lock() -> None:
+    root = build_test_agent_loop()
+    lock_states: list[bool] = []
+
+    async def open_root(_request: runtime.RootOpenRequest) -> AgentLoop:
+        lock_states.append(server._lifecycle_lock.locked())
+        return root
+
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(ClientInfo(name="test", version="1"))
+    await client.notify("initialized")
+    try:
+        await client.request("session/start", SessionStartParams())
+        host = server._session_backend_host
+        assert isinstance(host, LegacySessionBackendHost)
+        original_resume = host._resume
+        assert original_resume is not None
+        event_task = server._backend_event_task
+
+        async def resume(params: SessionResumeParams):
+            lock_states.append(server._lifecycle_lock.locked())
+            return await original_resume(params)
+
+        host._resume = resume
+        await client.request(
+            "session/resume", SessionResumeParams(session_id=root.session_id)
+        )
+
+        assert lock_states == [True, True]
+        assert server._backend_event_task is event_task
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["config/write", "config/reload"])
+async def test_busy_config_mutations_return_conflict(method: str) -> None:
+    root = build_test_agent_loop()
+
+    async def open_root(_request: runtime.RootOpenRequest) -> AgentLoop:
+        return root
+
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(ClientInfo(name="test", version="1"))
+    await client.notify("initialized")
+    try:
+        await client.request("session/start", SessionStartParams())
+        backend = legacy_backend(server)
+        params: dict[str, Any] = {"sessionId": root.session_id}
+        if method == "config/write":
+            params["ops"] = []
+        with backend.session.execution.reserve(SessionExecutionKind.TURN, "turn-1"):
+            with pytest.raises(AppServerResponseError) as exc_info:
+                await client.request(method, params)
+        assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT
+    finally:
+        await client.close()
+
+
+# The API is repository-scoped; these keep a test that only cares about the
+# resulting worktree down to a single call.
+
+
+def _prepare(name: str, base: Path, *, branch: str | None = None) -> PreparedWorktree:
+    with WorktreeRepository.open(base) as repository:
+        return repository.prepare(name, branch=branch)
+
+
+def _prepare_auto(base: Path, *, prompt: str | None = None) -> PreparedWorktree:
+    with WorktreeRepository.open(base) as repository:
+        return repository.prepare_auto(prompt=prompt)
+
+
+def _linked(base: Path) -> tuple[LinkedWorktree, ...]:
+    with WorktreeRepository.open(base) as repository:
+        return repository.linked()
 
 
 class ClosingBackend(FakeBackend):
@@ -92,7 +250,7 @@ def _init_repo(root: Path) -> Repo:
 def test_session_start_worktree_create_selection_resolves_cwd(tmp_path: Path) -> None:
     _init_repo(tmp_path)
 
-    resolution = resolve_worktree(
+    resolution = legacy_runtime_module.resolve_worktree(
         SessionOptions(
             cwd=str(tmp_path),
             workspace_roots=[str(tmp_path)],
@@ -116,7 +274,7 @@ def test_session_start_worktree_auto_selection_names_from_prompt(
 ) -> None:
     _init_repo(tmp_path)
 
-    resolution = resolve_worktree(
+    resolution = legacy_runtime_module.resolve_worktree(
         SessionOptions(
             cwd=str(tmp_path),
             workspace_roots=[str(tmp_path)],
@@ -140,7 +298,7 @@ def test_session_start_worktree_auto_selection_uses_a_suggested_name(
 ) -> None:
     _init_repo(tmp_path)
 
-    resolution = resolve_worktree(
+    resolution = legacy_runtime_module.resolve_worktree(
         SessionOptions(
             cwd=str(tmp_path),
             workspace_roots=[str(tmp_path)],
@@ -164,9 +322,9 @@ async def test_auto_worktree_asks_the_model_for_a_name(
         asked.append(prompt)
         return "repair-oauth-redirect"
 
-    monkeypatch.setattr(server_module, "suggest_worktree_name", suggest)
+    monkeypatch.setattr(legacy_runtime_module, "suggest_worktree_name", suggest)
 
-    suggested = await AppServer._suggest_worktree_name(
+    suggested = await LegacySessionRuntimeController._suggest_worktree_name(
         SessionOptions(
             cwd=str(tmp_path), worktree=AutoWorktreeInput(prompt="Fix the login bug")
         )
@@ -191,11 +349,11 @@ async def test_only_an_auto_worktree_pays_for_a_model_call(
     async def explode(*_args: Any, **_kwargs: Any) -> str:
         raise AssertionError("a named worktree must not wait on the model")
 
-    monkeypatch.setattr(server_module, "suggest_worktree_name", explode)
+    monkeypatch.setattr(legacy_runtime_module, "suggest_worktree_name", explode)
 
     options = SessionOptions(cwd=str(tmp_path), worktree=worktree)
 
-    assert await AppServer._suggest_worktree_name(options) is None
+    assert await LegacySessionRuntimeController._suggest_worktree_name(options) is None
 
 
 def test_session_start_worktree_auto_selection_is_unique_per_call(
@@ -204,7 +362,7 @@ def test_session_start_worktree_auto_selection_is_unique_per_call(
     _init_repo(tmp_path)
 
     def resolve() -> str:
-        resolution = resolve_worktree(
+        resolution = legacy_runtime_module.resolve_worktree(
             SessionOptions(
                 cwd=str(tmp_path),
                 worktree=AutoWorktreeInput(prompt="Fix the login bug"),
@@ -223,7 +381,7 @@ def test_session_start_worktree_auto_selection_without_prompt_uses_a_slug(
     _init_repo(tmp_path)
     monkeypatch.setattr(worktree_module, "create_slug", lambda: "brave-quiet-otter")
 
-    resolution = resolve_worktree(
+    resolution = legacy_runtime_module.resolve_worktree(
         SessionOptions(cwd=str(tmp_path), worktree=AutoWorktreeInput())
     )
 
@@ -233,11 +391,9 @@ def test_session_start_worktree_auto_selection_without_prompt_uses_a_slug(
 
 def test_session_start_worktree_existing_selection_resolves_cwd(tmp_path: Path) -> None:
     _init_repo(tmp_path)
-    worktree = prepare_worktree_session(
-        "existing-worktree", tmp_path, branch="feat/existing-worktree"
-    )
+    worktree = _prepare("existing-worktree", tmp_path, branch="feat/existing-worktree")
 
-    resolution = resolve_worktree(
+    resolution = legacy_runtime_module.resolve_worktree(
         SessionOptions(
             cwd=str(tmp_path),
             workspace_roots=[str(tmp_path)],
@@ -279,6 +435,95 @@ def test_session_list_falls_back_for_malformed_saved_timestamps(
     assert response.items[0].updated_at == 123_456
 
 
+def _stub_session_list_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        host_module,
+        "list_local_resume_sessions",
+        lambda _config, _cwd: [
+            ResumeSessionInfo(
+                session_id="newer", cwd="/workspace", updated_at="2026-01-02"
+            ),
+            ResumeSessionInfo(
+                session_id="older", cwd="/workspace", updated_at="2026-01-01"
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        host_module.SessionLoader, "get_first_user_message", lambda *_args: ""
+    )
+
+
+def test_session_list_continue_id_prefers_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_test_vibe_config()
+    _stub_session_list_sources(monkeypatch)
+    monkeypatch.setattr(
+        host_module.last_session_pointer, "load", lambda _config: "older"
+    )
+
+    response = host_module.project_session_list(config, SessionListParams())
+
+    assert response.continue_session_id == "older"
+
+
+def test_session_list_continue_id_falls_back_to_newest_when_pointer_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_test_vibe_config()
+    _stub_session_list_sources(monkeypatch)
+    monkeypatch.setattr(host_module.last_session_pointer, "load", lambda _config: None)
+
+    response = host_module.project_session_list(config, SessionListParams())
+
+    assert response.continue_session_id == "newer"
+
+
+def test_session_list_continue_id_ignores_stale_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_test_vibe_config()
+    _stub_session_list_sources(monkeypatch)
+    monkeypatch.setattr(
+        host_module.last_session_pointer, "load", lambda _config: "does-not-exist"
+    )
+
+    response = host_module.project_session_list(config, SessionListParams())
+
+    assert response.continue_session_id == "newer"
+
+
+def test_session_list_continue_id_accepts_forked_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_test_vibe_config()
+    monkeypatch.setattr(
+        host_module,
+        "list_local_resume_sessions",
+        lambda _config, _cwd: [
+            ResumeSessionInfo(
+                session_id="root", cwd="/workspace", updated_at="2026-01-02"
+            ),
+            ResumeSessionInfo(
+                session_id="fork",
+                cwd="/workspace",
+                updated_at="2026-01-01",
+                parent_session_id="root",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        host_module.SessionLoader, "get_first_user_message", lambda *_args: ""
+    )
+    monkeypatch.setattr(
+        host_module.last_session_pointer, "load", lambda _config: "fork"
+    )
+
+    response = host_module.project_session_list(config, SessionListParams())
+
+    assert response.continue_session_id == "fork"
+
+
 @pytest.mark.asyncio
 async def test_session_start_rejects_existing_selection_outside_linked_worktrees(
     tmp_path: Path,
@@ -292,7 +537,7 @@ async def test_session_start_rejects_existing_selection_outside_linked_worktrees
         raise AssertionError("runtime must not open for an unlinked worktree")
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, open_root=open_root)
+    server = create_legacy_app_server(server_transport, open_root=open_root)
     client = AppServerClient(client_transport, run_peer=server.serve)
 
     try:
@@ -338,7 +583,7 @@ async def test_worktree_selection_is_rejected_outside_session_start(
         raise AssertionError(f"{method} must not open a runtime")
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, open_root=open_root)
+    server = create_legacy_app_server(server_transport, open_root=open_root)
     client = AppServerClient(client_transport, run_peer=server.serve)
     await client.initialize(ClientInfo(name="selection-guard-client", version="1"))
     await client.notify("initialized")
@@ -357,8 +602,591 @@ async def test_worktree_selection_is_rejected_outside_session_start(
 
     assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS
     assert "only supported when starting a session" in exc_info.value.error.message
-    assert list_linked_worktrees(tmp_path) == ()
+    assert _linked(tmp_path) == ()
     assert "feat/rejected-selection" not in [head.name for head in repo.heads]
+
+
+async def _open_local_session(
+    name: str, session_options: SessionOptions
+) -> tuple[AppServerSession, AppServerClient]:
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        assert request.options.cwd is not None
+        return build_test_agent_loop(cwd=Path(request.options.cwd))
+
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    session = await AppServerSession.start(
+        client,
+        client_info=ClientInfo(name=name, version="1"),
+        capabilities=ClientCapabilities(),
+        session_options=session_options,
+    )
+    return session, client
+
+
+@pytest.mark.asyncio
+async def test_session_stop_removes_a_clean_auto_worktree(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    session, client = await _open_local_session(
+        "release-client",
+        SessionOptions(
+            cwd=str(tmp_path), worktree=AutoWorktreeInput(prompt="fix the login bug")
+        ),
+    )
+    worktree_root = Path(session.cwd)
+    assert worktree_root.is_dir()
+
+    try:
+        await session.close()
+    finally:
+        await client.close()
+
+    assert not worktree_root.exists()
+    assert _linked(tmp_path) == ()
+    assert "vibe/fix-the-login-bug" not in [head.name for head in repo.heads]
+
+
+@pytest.mark.asyncio
+async def test_created_worktree_is_reported_in_the_transcript(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    session, client = await _open_local_session(
+        "reporting-client",
+        SessionOptions(
+            cwd=str(tmp_path), worktree=AutoWorktreeInput(prompt="fix the login bug")
+        ),
+    )
+    try:
+        effects = [entry for entry in session.history if entry.type == "effect"]
+        assert len(effects) == 1
+        detail = effects[0].detail
+        assert detail.kind == "worktree"
+        assert detail.input is not None
+        # Name, branch and path together: a managed worktree lives under
+        # $VIBE_HOME, so the name alone does not say where it landed.
+        assert detail.input.name == "fix-the-login-bug"
+        assert detail.input.branch == "vibe/fix-the-login-bug"
+        assert detail.input.path == session.cwd
+        assert effects[0].state.status == "completed"
+    finally:
+        await session.close()
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_notification_still_retires_the_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo(tmp_path)
+    emit = TurnController._emit_projected
+
+    async def drop_the_completion(
+        self: TurnController, update: ProjectedUpdate
+    ) -> None:
+        # Starting an effect adds an entry; only completing one patches it.
+        if isinstance(update.params, HistoryEntryUpdatedParams):
+            raise RuntimeError("the client went away")
+        await emit(self, update)
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        assert request.options.cwd is not None
+        return build_test_agent_loop(cwd=Path(request.options.cwd))
+
+    monkeypatch.setattr(TurnController, "_emit_projected", drop_the_completion)
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    session = await AppServerSession.start(
+        client,
+        client_info=ClientInfo(name="dropped-client", version="1"),
+        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(
+            cwd=str(tmp_path), worktree=AutoWorktreeInput(prompt="fix the login bug")
+        ),
+    )
+    try:
+        effects = [entry for entry in session.history if entry.type == "effect"]
+        assert len(effects) == 1
+        assert effects[0].state.status == "completed"
+        # Losing the notification costs the live update and nothing else. Still
+        # registered, the effect would be served from the live bucket, which
+        # sorts after every entry that follows - so the creation would drift to
+        # the bottom of the transcript as soon as the user said anything.
+        assert legacy_backend(server).session.turns._harness_effects == {}
+    finally:
+        await session.close()
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_notification_still_survives_a_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo(tmp_path)
+    emit = TurnController._emit_projected
+    loops: list[AgentLoop] = []
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        )
+    )
+
+    async def drop_the_completion(
+        self: TurnController, update: ProjectedUpdate
+    ) -> None:
+        if isinstance(update.params, HistoryEntryUpdatedParams):
+            raise RuntimeError("the client went away")
+        await emit(self, update)
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        assert request.options.cwd is not None
+        agent_loop = build_test_agent_loop(cwd=Path(request.options.cwd), config=config)
+        loops.append(agent_loop)
+        return agent_loop
+
+    monkeypatch.setattr(TurnController, "_emit_projected", drop_the_completion)
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    session = await AppServerSession.start(
+        client,
+        client_info=ClientInfo(name="dropped-resume-client", version="1"),
+        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(
+            cwd=str(tmp_path), worktree=AutoWorktreeInput(prompt="fix the login bug")
+        ),
+    )
+    try:
+        # The live entry is cosmetic; the persisted metadata is the only thing a
+        # resume rebuilds from. Losing the completion notification must not cost
+        # the durable record too, or the worktree disappears from the transcript
+        # in exactly the failure this notification path is allowed to have.
+        agent_loop = loops[0]
+        await agent_loop.persist_empty_session()
+        session_dir = agent_loop.session_logger.session_dir
+        assert session_dir is not None
+    finally:
+        await session.close()
+        await client.close()
+
+    rebuilt = _rebuild_from_disk(agent_loop.session_id, session_dir)
+    effects = [entry for entry in rebuilt if entry.type == "effect"]
+    assert len(effects) == 1
+    assert effects[0].detail.kind == "worktree"
+
+
+def _rebuild_from_disk(session_id: str, session_dir: Path) -> list[PublicHistoryEntry]:
+    """Rebuild a transcript the way a resume does: from the files, not memory."""
+    messages, _ = SessionLoader.load_session(session_dir)
+    return project_message_history(
+        session_id, messages, SessionLoader.load_metadata(session_dir)
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_worktree_entry_survives_a_resume(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    loops: list[AgentLoop] = []
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        )
+    )
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        assert request.options.cwd is not None
+        agent_loop = build_test_agent_loop(cwd=Path(request.options.cwd), config=config)
+        loops.append(agent_loop)
+        return agent_loop
+
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    session = await AppServerSession.start(
+        client,
+        client_info=ClientInfo(name="resume-client", version="1"),
+        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(
+            cwd=str(tmp_path), worktree=AutoWorktreeInput(prompt="fix the login bug")
+        ),
+    )
+    try:
+        # The metadata file does not exist yet when the worktree is recorded, so
+        # the field patch has nothing to write into: this full save is what
+        # first carries the worktree to disk.
+        agent_loop = loops[0]
+        await agent_loop.persist_empty_session()
+        session_dir = agent_loop.session_logger.session_dir
+        assert session_dir is not None
+    finally:
+        await session.close()
+        await client.close()
+
+    # A harness effect living only in the TurnController is gone by here, and
+    # the runner reclaims the process a second after every turn - so the round
+    # trip through the file is the whole guarantee.
+    assert SessionLoader.load_metadata(session_dir).created_worktree is not None
+
+    rebuilt = _rebuild_from_disk(agent_loop.session_id, session_dir)
+    effects = [entry for entry in rebuilt if entry.type == "effect"]
+    assert len(effects) == 1
+    assert effects[0].detail.kind == "worktree"
+    assert effects[0].detail.input is not None
+    assert effects[0].detail.input.name == "fix-the-login-bug"
+    # The worktree exists before anything else the transcript can show.
+    assert rebuilt[0] is effects[0]
+
+
+@pytest.mark.asyncio
+async def test_the_worktree_is_not_the_session_preview(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    session, client = await _open_local_session(
+        "preview-client",
+        SessionOptions(
+            cwd=str(tmp_path), worktree=AutoWorktreeInput(prompt="fix the login bug")
+        ),
+    )
+    try:
+        # The preview is the first thing the user typed. Recording the worktree
+        # must never put a message in front of that - the previous attempt did,
+        # by injecting a user-role notice the user never wrote.
+        assert session.state.session.preview == ""
+    finally:
+        await session.close()
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_session_without_a_worktree_reports_nothing(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    session, client = await _open_local_session(
+        "plain-client", SessionOptions(cwd=str(tmp_path))
+    )
+    try:
+        assert [entry for entry in session.history if entry.type == "effect"] == []
+    finally:
+        await session.close()
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_opening_an_existing_worktree_reports_nothing(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    worktree = _prepare("existing-worktree", tmp_path, branch="feat/existing-worktree")
+    session, client = await _open_local_session(
+        "existing-client",
+        SessionOptions(
+            cwd=str(tmp_path), worktree=ExistingWorktreeInput(cwd=str(worktree.path))
+        ),
+    )
+    try:
+        # Only a worktree this session brought into being is worth a transcript
+        # entry. Moving into one that was already there is not a mutation, and
+        # reporting it would claim credit for the user's own directory.
+        assert [entry for entry in session.history if entry.type == "effect"] == []
+    finally:
+        await session.close()
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_session_stop_keeps_an_auto_worktree_holding_work(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    session, client = await _open_local_session(
+        "dirty-client",
+        SessionOptions(
+            cwd=str(tmp_path), worktree=AutoWorktreeInput(prompt="fix the login bug")
+        ),
+    )
+    worktree_root = Path(session.cwd)
+    (worktree_root / "written-by-the-agent.txt").write_text("work\n")
+
+    try:
+        await session.close()
+    finally:
+        await client.close()
+
+    assert worktree_root.is_dir()
+    assert "vibe/fix-the-login-bug" in [head.name for head in repo.heads]
+
+
+@pytest.mark.asyncio
+async def test_session_stop_releases_the_holder_before_shutting_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo(tmp_path)
+    loops: list[AgentLoop] = []
+    order: list[str] = []
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        assert request.options.cwd is not None
+        agent_loop = build_test_agent_loop(cwd=Path(request.options.cwd))
+        loops.append(agent_loop)
+        return agent_loop
+
+    release_holder = ManagedWorktree.release_holder
+    close_agent_loop = _sessions.close_agent_loop
+
+    def record_release(self: ManagedWorktree, session_id: str) -> None:
+        order.append("holder")
+        release_holder(self, session_id)
+
+    async def record_close(agent_loop: AgentLoop) -> None:
+        order.append("close")
+        await close_agent_loop(agent_loop)
+
+    monkeypatch.setattr(ManagedWorktree, "release_holder", record_release)
+    monkeypatch.setattr(_sessions, "close_agent_loop", record_close)
+
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    session = await AppServerSession.start(
+        client,
+        client_info=ClientInfo(name="idle-client", version="1"),
+        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(
+            cwd=str(tmp_path), worktree=AutoWorktreeInput(prompt="fix the login bug")
+        ),
+    )
+    loops[0].session_logger._persisted = True
+
+    try:
+        await session.close()
+    finally:
+        await client.close()
+
+    # The runner caps session/stop at two seconds and then deletes regardless.
+    # A holder released after a slow shutdown is still on disk when the delete
+    # asks for removal, which reads the worktree as in use and strands it with
+    # its session already gone.
+    assert order == ["holder", "close"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_holder_release_still_shuts_the_session_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo(tmp_path)
+    closed: list[str] = []
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        assert request.options.cwd is not None
+        return build_test_agent_loop(cwd=Path(request.options.cwd))
+
+    close_agent_loop = _sessions.close_agent_loop
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise OSError("the holder marker could not be unlinked")
+
+    async def record_close(agent_loop: AgentLoop) -> None:
+        closed.append(agent_loop.session_id)
+        await close_agent_loop(agent_loop)
+
+    monkeypatch.setattr(ManagedWorktree, "release_holder", refuse)
+    monkeypatch.setattr(_sessions, "close_agent_loop", record_close)
+
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    session = await AppServerSession.start(
+        client,
+        client_info=ClientInfo(name="idle-client", version="1"),
+        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(
+            cwd=str(tmp_path), worktree=AutoWorktreeInput(prompt="fix the login bug")
+        ),
+    )
+
+    try:
+        await session.close()
+    finally:
+        await client.close()
+
+    # Releasing the holder is the first step of the close now, so letting it
+    # throw would skip every step after it - the MCP clients and terminals
+    # session.close() shuts down, and the rollback of a failed create.
+    assert closed
+
+
+@pytest.mark.asyncio
+async def test_session_stop_keeps_the_worktree_of_a_session_that_ran_a_turn(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    loops: list[AgentLoop] = []
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        assert request.options.cwd is not None
+        agent_loop = build_test_agent_loop(cwd=Path(request.options.cwd))
+        loops.append(agent_loop)
+        return agent_loop
+
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    session = await AppServerSession.start(
+        client,
+        client_info=ClientInfo(name="idle-client", version="1"),
+        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(
+            cwd=str(tmp_path), worktree=AutoWorktreeInput(prompt="fix the login bug")
+        ),
+    )
+    worktree_root = Path(session.cwd)
+    # The runner sends session/stop a second after every turn to reclaim the
+    # app-server process; the session stays live and resumable. persisted is
+    # what records that a turn ran, and it is the only thing standing between an
+    # idle session and losing the worktree it is still working in.
+    loops[0].session_logger._persisted = True
+
+    try:
+        await session.close()
+    finally:
+        await client.close()
+
+    assert worktree_root.is_dir()
+    assert "vibe/fix-the-login-bug" in [head.name for head in repo.heads]
+
+
+@pytest.mark.asyncio
+async def test_session_stop_keeps_a_worktree_the_session_did_not_create(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+    # Opened in a worktree that already existed. Rolling back a failed create
+    # must never reach a worktree this session has no claim on.
+    worktree = _prepare_auto(tmp_path)
+    session, client = await _open_local_session(
+        "adopting-client", SessionOptions(cwd=str(worktree.path))
+    )
+
+    try:
+        await session.close()
+    finally:
+        await client.close()
+
+    assert worktree.root.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_session_start_does_not_sweep_a_stale_claim_it_is_using(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path)
+    claim = worktree_record.WorktreeClaim.locate(worktree.root)
+    assert claim is not None
+    record = claim.read()
+    assert record is not None
+    claim.write(
+        record.model_copy(
+            update={"claimed_at": record.claimed_at - timedelta(minutes=30)}
+        )
+    )
+
+    session, client = await _open_local_session(
+        "stale-claim-client", SessionOptions(cwd=str(worktree.path))
+    )
+    try:
+        await asyncio.sleep(0.1)
+    finally:
+        await session.close()
+        await client.close()
+
+    assert worktree.root.is_dir()
+
+
+async def _remove_worktree_over_rpc(
+    cwd: Path, *, attach_root: Path | None = None
+) -> WorkspaceWorktreeRemoveResponse:
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        assert request.options.cwd is not None
+        return build_test_agent_loop(cwd=Path(request.options.cwd))
+
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    session = None
+    if attach_root is None:
+        await client.initialize(ClientInfo(name="remove-client", version="1"))
+        await client.notify("initialized")
+    else:
+        session = await AppServerSession.start(
+            client,
+            client_info=ClientInfo(name="attached-remove-client", version="1"),
+            capabilities=ClientCapabilities(),
+            session_options=SessionOptions(cwd=str(attach_root)),
+        )
+
+    try:
+        raw = await client.request("workspace/worktrees/remove", {"cwd": str(cwd)})
+    finally:
+        if session is not None:
+            await session.close()
+        await client.close()
+    return validate_wire(WorkspaceWorktreeRemoveResponse, raw)
+
+
+@pytest.mark.asyncio
+async def test_worktree_remove_deletes_a_clean_managed_worktree(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path)
+
+    response = await _remove_worktree_over_rpc(worktree.root)
+
+    assert response.outcome == WorktreeReleaseOutcome.REMOVED
+    assert response.branch_deleted is True
+    assert response.root == str(worktree.root)
+    assert not worktree.root.exists()
+    assert worktree.branch not in [head.name for head in repo.heads]
+
+
+@pytest.mark.asyncio
+async def test_worktree_remove_keeps_a_worktree_holding_work(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path)
+    (worktree.root / "unsaved.txt").write_text("work\n")
+
+    response = await _remove_worktree_over_rpc(worktree.root)
+
+    assert response.outcome == WorktreeReleaseOutcome.KEPT_DIRTY
+    assert response.reasons == ["untracked files"]
+    assert worktree.root.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_worktree_remove_ignores_an_unmanaged_worktree(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+
+    response = await _remove_worktree_over_rpc(tmp_path)
+
+    assert response.outcome == WorktreeReleaseOutcome.KEPT_UNMANAGED
+    assert tmp_path.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_worktree_remove_forgets_a_worktree_already_gone(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path)
+    repo.git.worktree("remove", "--force", str(worktree.root))
+
+    response = await _remove_worktree_over_rpc(worktree.root)
+
+    assert response.outcome == WorktreeReleaseOutcome.NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_worktree_remove_is_reachable_while_a_root_is_attached(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path)
+
+    response = await _remove_worktree_over_rpc(worktree.root, attach_root=tmp_path)
+
+    assert response.outcome == WorktreeReleaseOutcome.REMOVED
+    assert not worktree.root.exists()
 
 
 @pytest.mark.asyncio
@@ -373,7 +1201,7 @@ async def test_session_start_cleans_created_worktree_when_runtime_open_fails(
         raise runtime.RuntimeConfigurationError("startup failed")
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, open_root=open_root)
+    server = create_legacy_app_server(server_transport, open_root=open_root)
     client = AppServerClient(client_transport, run_peer=server.serve)
 
     try:
@@ -393,8 +1221,15 @@ async def test_session_start_cleans_created_worktree_when_runtime_open_fails(
         await client.close()
 
     assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS
-    assert list_linked_worktrees(tmp_path) == ()
+    assert _linked(tmp_path) == ()
     assert "feat/startup-fails" not in [head.name for head in repo.heads]
+    # The record has to go with the worktree. The sweep only reclaims claims
+    # with no base commit, so one left here would outlive what it describes.
+    bucket = worktree_record.managed_bucket_name(tmp_path, tmp_path / ".git")
+    assert (
+        worktree_record.WorktreeClaim(bucket=bucket, name="startup-fails").read()
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -405,7 +1240,7 @@ async def test_session_start_cleans_created_worktree_when_cancelled_mid_resoluti
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
-    real_resolve = server_module.resolve_worktree
+    real_resolve = legacy_runtime_module.resolve_worktree
 
     def slow_resolve(options: SessionOptions, suggested_name: str | None = None) -> Any:
         started.set()
@@ -415,18 +1250,22 @@ async def test_session_start_cleans_created_worktree_when_cancelled_mid_resoluti
         finally:
             finished.set()
 
-    monkeypatch.setattr(server_module, "resolve_worktree", slow_resolve)
+    monkeypatch.setattr(legacy_runtime_module, "resolve_worktree", slow_resolve)
 
     async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
         raise AssertionError("runtime should not open after cancellation")
 
-    _, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, open_root=open_root)
-    server._client_info = ClientInfo(name="cancel-client", version="1")
+    services = _FakeSessionBackendServices()
+    controller = LegacySessionRuntimeController(
+        open_root=open_root,
+        runtime_factory=runtime.AgentRuntimeFactory(),
+        host_handler=HostRequestHandler(HarnessFilesManager(sources=())),
+        stage_root=None,
+        services=services,
+    )
 
     task = asyncio.create_task(
-        server._open_runtime(
-            open_root,
+        controller._open_runtime(
             SessionStartParams(
                 agent_config=SessionOptions(
                     cwd=str(tmp_path),
@@ -445,16 +1284,80 @@ async def test_session_start_cleans_created_worktree_when_cancelled_mid_resoluti
         await task
     assert await asyncio.to_thread(finished.wait, 5)
 
-    assert list_linked_worktrees(tmp_path) == ()
+    assert _linked(tmp_path) == ()
     assert "feat/cancelled" not in [head.name for head in repo.heads]
+
+
+@pytest.mark.asyncio
+async def test_open_runtime_maps_git_errors_to_invalid_params(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        raise AssertionError("runtime should not open after worktree failure")
+
+    services = _FakeSessionBackendServices()
+    controller = LegacySessionRuntimeController(
+        open_root=open_root,
+        runtime_factory=runtime.AgentRuntimeFactory(),
+        host_handler=HostRequestHandler(HarnessFilesManager(sources=())),
+        stage_root=None,
+        services=services,
+    )
+
+    async def fail_resolve(_options: SessionOptions) -> Any:
+        raise GitUnavailableError("git unavailable")
+
+    monkeypatch.setattr(controller, "_resolve_worktree", fail_resolve)
+
+    with pytest.raises(RequestFailure) as exc_info:
+        await controller._open_runtime(
+            SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path))), None
+        )
+
+    assert exc_info.value.code is ProtocolErrorCode.INVALID_PARAMS
+    assert str(exc_info.value) == "git unavailable"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_failure_does_not_reach_app_server_task_finished(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Services(_FakeSessionBackendServices):
+        def __init__(self) -> None:
+            self.finished_tasks: list[asyncio.Task[None]] = []
+
+        def task_finished(self, task: asyncio.Task[None]) -> None:
+            self.finished_tasks.append(task)
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        raise AssertionError("runtime should not open")
+
+    services = Services()
+    controller = LegacySessionRuntimeController(
+        open_root=open_root,
+        runtime_factory=runtime.AgentRuntimeFactory(),
+        host_handler=HostRequestHandler(HarnessFilesManager(sources=())),
+        stage_root=None,
+        services=services,
+    )
+
+    async def fail_scheduler() -> None:
+        raise RuntimeError("scheduler failed")
+
+    monkeypatch.setattr(controller, "_run_scheduler", fail_scheduler)
+
+    controller._ensure_scheduler()
+    await asyncio.sleep(0)
+
+    assert services.finished_tasks == []
+    assert controller._scheduler_task is not None
+    assert controller._scheduler_task.done()
 
 
 @pytest.mark.asyncio
 async def test_passive_host_lists_linked_worktrees(tmp_path: Path) -> None:
     _init_repo(tmp_path)
-    worktree = prepare_worktree_session(
-        "host-listed", tmp_path, branch="feat/host-listed"
-    )
+    worktree = _prepare("host-listed", tmp_path, branch="feat/host-listed")
     handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
 
     result = await handler.dispatch(
@@ -481,12 +1384,12 @@ async def test_passive_host_lists_no_worktrees_without_git(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _init_repo(tmp_path)
-    prepare_worktree_session("gitless", tmp_path, branch="feat/gitless")
+    _prepare("gitless", tmp_path, branch="feat/gitless")
 
-    def missing_git(_base: Path) -> tuple[object, ...]:
+    def missing_git(_repository: WorktreeRepository) -> tuple[object, ...]:
         raise GitUnavailableError("Git worktree operations require git.")
 
-    monkeypatch.setattr(host_module, "list_linked_worktrees", missing_git)
+    monkeypatch.setattr(WorktreeRepository, "linked", missing_git)
     handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
 
     result = await handler.dispatch(
@@ -576,7 +1479,7 @@ async def test_invalid_request_returns_validation_issues() -> None:
         raise AssertionError("The request must not open a session")
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, open_root=open_root)
+    server = create_legacy_app_server(server_transport, open_root=open_root)
     client = AppServerClient(client_transport, run_peer=server.serve)
     await client.initialize(ClientInfo(name="validation-test", version="1"))
     await client.notify("initialized")
@@ -615,6 +1518,70 @@ async def test_root_config_discovery_uses_session_cwd(
 
     assert blueprint.cwd == session_cwd
     assert blueprint.config.default_agent == "plan"
+
+
+def test_experimental_harness_process_selects_the_unified_harness_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("mistralai_rust_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendHostAdapter,
+    )
+
+    selected = SimpleNamespace(harness_kind="rust")
+    monkeypatch.setattr(runtime, "create_experimental_harness_host", lambda: selected)
+
+    process = runtime.HarnessProcess(experimental_harness=True)
+    host = process.create_session_backend_host(_FakeSessionBackendServices())
+
+    # The process hands the app server the Vibe-side adapter, not the raw
+    # Harness Host, so the two protocol shapes only meet in one place.
+    assert isinstance(host, UnifiedHarnessBackendHostAdapter)
+    assert host.harness_kind == selected.harness_kind
+
+
+def test_default_process_selects_the_legacy_session_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def explode() -> object:
+        raise AssertionError("the default path must not import the Harness")
+
+    monkeypatch.setattr(runtime, "create_experimental_harness_host", explode)
+
+    host = runtime.HarnessProcess().create_session_backend_host(
+        _FakeSessionBackendServices()
+    )
+
+    assert isinstance(host, LegacySessionBackendHost)
+
+
+def test_unavailable_experimental_harness_fails_with_a_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable() -> object:
+        raise runtime.ExperimentalHarnessUnavailableError("not installed")
+
+    monkeypatch.setattr(runtime, "create_experimental_harness_host", unavailable)
+    process = runtime.HarnessProcess(experimental_harness=True)
+
+    with pytest.raises(runtime.RuntimeConfigurationError, match="not installed"):
+        process.create_session_backend_host(_FakeSessionBackendServices())
+
+
+@pytest.mark.asyncio
+async def test_experimental_harness_process_never_opens_a_legacy_runtime(
+    tmp_path: Path,
+) -> None:
+    process = runtime.HarnessProcess(experimental_harness=True)
+    request = runtime.RootOpenRequest(
+        options=SessionOptions(cwd=str(tmp_path)),
+        client_info=ClientInfo(name="test", version="1"),
+    )
+
+    with pytest.raises(
+        runtime.RuntimeConfigurationError, match="never opens a legacy runtime"
+    ):
+        await process.open_root(request)
 
 
 @pytest.mark.asyncio
@@ -774,7 +1741,14 @@ async def test_runtime_is_built_only_when_session_start_crosses_json_rpc(
     process = runtime.HarnessProcess()
     agent_loop = build_test_agent_loop()
     blueprint = Mock()
-    blueprint.build.return_value = agent_loop
+    blueprint.config = agent_loop.config
+
+    def build_root(*, session_id: str, session_lease: SessionLease) -> AgentLoop:
+        del session_id
+        agent_loop.replace_session_lease(session_lease)
+        return agent_loop
+
+    blueprint.build.side_effect = build_root
     build_blueprint = AsyncMock(return_value=blueprint)
     monkeypatch.setattr(process, "build_root_blueprint", build_blueprint)
     client_transport, server_transport = memory_transport_pair()
@@ -795,9 +1769,47 @@ async def test_runtime_is_built_only_when_session_start_crosses_json_rpc(
     )
     try:
         build_blueprint.assert_called_once_with(options, client_info, capabilities)
-        blueprint.build.assert_called_once_with()
+        blueprint.build.assert_called_once()
     finally:
         await session.close()
+
+
+@pytest.mark.asyncio
+async def test_production_legacy_root_holds_lease_until_runtime_shutdown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    saved = build_test_agent_loop(config=config)
+    await saved.persist_empty_session()
+    session_id = saved.session_id
+    await saved.aclose()
+
+    process = runtime.HarnessProcess()
+    blueprint = Mock()
+    blueprint.config = config
+    blueprint.cwd = tmp_path
+    blueprint.build.side_effect = lambda **kwargs: build_test_agent_loop(
+        config=config, **kwargs
+    )
+    monkeypatch.setattr(
+        process, "build_root_blueprint", AsyncMock(return_value=blueprint)
+    )
+    request = runtime.RootOpenRequest(
+        options=SessionOptions(cwd=str(tmp_path)),
+        client_info=ClientInfo(name="test", version="1"),
+        session_id=session_id,
+    )
+
+    root = await process.open_root(request)
+    with pytest.raises(SessionBusyError):
+        SessionLease(tmp_path, session_id).acquire()
+
+    await root.aclose()
+    SessionLease(tmp_path, session_id).acquire().release()
 
 
 @pytest.mark.asyncio
@@ -832,7 +1844,7 @@ async def test_passive_host_requests_do_not_open_runtime(
 
     harness_files = HarnessFilesManager(sources=())
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(
+    server = create_legacy_app_server(
         server_transport,
         open_root=open_root,
         host_handler=HostRequestHandler(harness_files),
@@ -925,7 +1937,7 @@ async def test_config_read_serves_the_catalogue_with_and_without_a_session(
         return root
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(
+    server = create_legacy_app_server(
         server_transport,
         open_root=open_root,
         host_handler=HostRequestHandler(HarnessFilesManager(sources=())),
@@ -968,6 +1980,27 @@ async def test_config_read_serves_the_catalogue_with_and_without_a_session(
         assert attached.config == project_config(root)
         assert [model.alias for model in attached.config.models] != ["medium", "small"]
 
+        # Session-scoped config/read must populate the banner count fields from
+        # the live agent loop (regression for the session _config_read path that
+        # previously returned only `config=...` and left counts at default 0).
+        runtime_snapshot = validate_wire(
+            RuntimeReadResponse,
+            await client.request(
+                "runtime/read", RuntimeReadParams(session_id=root.session_id)
+            ),
+        ).runtime
+        assert attached.hooks_count == runtime_snapshot.hooks_count
+        assert attached.skills_count == sum(
+            1 for skill in runtime_snapshot.skills if skill.source != "builtin"
+        )
+        runtime_servers = [
+            src for src in runtime_snapshot.mcp.sources if src.kind.value == "server"
+        ]
+        assert attached.mcp_servers_total == len(runtime_servers)
+        assert attached.mcp_servers_enabled == sum(
+            1 for src in runtime_servers if src.status.value != "disabled"
+        )
+
         omitted = validate_wire(
             ConfigReadResponse,
             await client.request("config/read", ConfigReadParams(cwd=str(workspace))),
@@ -995,7 +2028,7 @@ async def test_config_fields_read_hides_internal_settings() -> None:
         return root
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, open_root=open_root)
+    server = create_legacy_app_server(server_transport, open_root=open_root)
     client = AppServerClient(client_transport, run_peer=server.serve)
     await client.initialize(ClientInfo(name="config-fields-client", version="1"))
     await client.notify("initialized")
@@ -1045,7 +2078,7 @@ async def test_config_mutations_are_rejected_without_a_session(
         return root
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(
+    server = create_legacy_app_server(
         server_transport,
         open_root=open_root,
         host_handler=HostRequestHandler(HarnessFilesManager(sources=())),
@@ -1090,7 +2123,7 @@ async def test_session_continue_opens_the_resumed_root_once_over_json_rpc() -> N
         return resumed
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, open_root=open_root)
+    server = create_legacy_app_server(server_transport, open_root=open_root)
     session = await AppServerSession.start(
         AppServerClient(client_transport, run_peer=server.serve),
         client_info=ClientInfo(name="continue-client", version="1"),
@@ -1116,7 +2149,7 @@ async def test_session_start_reports_authentication_failure_as_typed_rpc_error()
         raise runtime.RuntimeAuthenticationError("mistral")
 
     client_transport, server_transport = memory_transport_pair()
-    server = AppServer(server_transport, open_root=open_root)
+    server = create_legacy_app_server(server_transport, open_root=open_root)
 
     with pytest.raises(AppServerResponseError) as exc_info:
         await AppServerSession.start(
@@ -1130,14 +2163,13 @@ async def test_session_start_reports_authentication_failure_as_typed_rpc_error()
 
 
 @pytest.mark.asyncio
-async def test_resume_builds_an_independent_backend(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+async def test_resume_rebinds_session_in_place_preserving_backend(
+    tmp_path: Path,
 ) -> None:
     logging = SessionLoggingConfig(
         enabled=True, save_dir=str(tmp_path / "sessions"), session_prefix="session"
     )
     source_backend = ClosingBackend()
-    replacement_backend = ClosingBackend()
     source = build_test_agent_loop(
         config=build_test_vibe_config(session_logging=logging), backend=source_backend
     )
@@ -1145,23 +2177,19 @@ async def test_resume_builds_an_independent_backend(
     source.stats.session_completion_tokens = 7
     source.stats.context_tokens = 18
     await source.persist_empty_session()
-    monkeypatch.setattr(
-        "vibe.core.agent_loop._loop.create_backend", lambda **_: replacement_backend
-    )
 
-    replacement = await runtime.AgentRuntimeFactory().resume_root(
-        source, source.session_id
-    )
+    original_session_id = source.session_id
+    await runtime.AgentRuntimeFactory().resume_root(source, original_session_id)
+
     try:
-        assert replacement.backend is replacement_backend
-        assert replacement.backend is not source.backend
-        assert replacement.stats == source.stats
-        await source.aclose()
-        assert source_backend.closed
-        assert not replacement_backend.closed
+        # resume_root mutates in-place: same object, same backend, stats preserved.
+        assert source.session_id == original_session_id
+        assert source.backend is source_backend
+        assert source.stats.session_prompt_tokens == 11
+        assert source.stats.session_completion_tokens == 7
+        assert not source_backend.closed
     finally:
-        await replacement.aclose()
-        await replacement.telemetry_client.aclose()
+        await source.aclose()
         await source.telemetry_client.aclose()
 
 

@@ -14,7 +14,6 @@ import time
 from typing import NamedTuple
 
 import anyio
-from charset_normalizer import from_bytes
 
 
 class ReadSafeResult(NamedTuple):
@@ -56,6 +55,8 @@ def _encodings_from_bom(raw: bytes) -> str | None:
 
 
 def _encoding_from_best_match(raw: bytes) -> str | None:
+    from charset_normalizer import from_bytes
+
     if not (match := from_bytes(raw).best()):
         return None
     return match.encoding
@@ -64,8 +65,8 @@ def _encoding_from_best_match(raw: bytes) -> str | None:
 @lru_cache(maxsize=1)
 def _windows_oem_encoding() -> str | None:
     # Windows console output is OEM (cp850), not ANSI (cp1252 from locale).
-    # Only correct for subprocess/console output (see ``decode_safe``'s
-    # ``from_subprocess``); file reads must not use it.
+    # Only correct for console output (see ``decode_console_safe``); file reads
+    # must not use it.
     if sys.platform != "win32":
         return None
     import ctypes
@@ -100,29 +101,43 @@ def normalize_newlines(text: str) -> tuple[str, str]:
     return text.replace("\r\n", "\n").replace("\r", "\n"), newline
 
 
-def decode_safe(
-    raw: bytes, *, raise_on_error: bool = False, from_subprocess: bool = False
-) -> ReadSafeResult:
-    """Decode ``raw`` like :func:`read_safe` after ``read_bytes``.
+def _decode(
+    raw: bytes, *, raise_on_error: bool, preferred: str | None
+) -> tuple[str, str]:
+    for encoding in _get_candidate_encodings(raw, preferred):
+        try:
+            return raw.decode(encoding), encoding
+        except (LookupError, UnicodeDecodeError, ValueError):
+            pass
+    errors = "strict" if raise_on_error else "replace"
+    return raw.decode("utf-8", errors=errors), "utf-8"
+
+
+def decode_safe(raw: bytes, *, raise_on_error: bool = False) -> ReadSafeResult:
+    """Decode file ``raw`` like :func:`read_safe` after ``read_bytes``.
 
     Tries BOM, UTF-8, locale, charset-normalizer, then UTF-8 (strict or
     replace). ``UnicodeDecodeError`` can only occur in that last step when
-    ``raise_on_error`` is true. Set ``from_subprocess`` when decoding console
-    output so the Windows OEM code page is preferred over the ANSI locale.
+    ``raise_on_error`` is true.
     """
-    preferred = _windows_oem_encoding() if from_subprocess else None
-    for encoding in _get_candidate_encodings(raw, preferred):
-        try:
-            text = raw.decode(encoding)
-            break
-        except (LookupError, UnicodeDecodeError, ValueError):
-            pass
-    else:
-        errors = "strict" if raise_on_error else "replace"
-        encoding = "utf-8"
-        text = raw.decode(encoding, errors=errors)
+    text, encoding = _decode(raw, raise_on_error=raise_on_error, preferred=None)
     text, newline = normalize_newlines(text)
     return ReadSafeResult(text, encoding, newline)
+
+
+def decode_console_safe(raw: bytes, *, raise_on_error: bool = False) -> str:
+    r"""Decode console output with the same fallback chain as :func:`decode_safe`.
+
+    Prefers the Windows OEM code page over the ANSI locale. Newlines are left
+    verbatim: a lone ``\r`` redraws the line rather than ending one, and folding
+    ``\r\n`` here would break a reader that pages the output in byte windows,
+    because a window can end between the two bytes. Collapsing carriage returns
+    is a rendering decision, so it belongs to whoever draws the text.
+    """
+    text, _encoding = _decode(
+        raw, raise_on_error=raise_on_error, preferred=_windows_oem_encoding()
+    )
+    return text
 
 
 def encode_safe(text: str, *, encoding: str = "utf-8", newline: str = "\n") -> bytes:

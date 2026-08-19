@@ -16,7 +16,13 @@ from vibe.core.loop import ScheduledLoop
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.tools.manager import ToolManager
-from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
+from vibe.core.types import (
+    AgentStats,
+    LLMMessage,
+    Role,
+    SessionMetadata,
+    WorktreeContext,
+)
 
 
 @pytest.fixture
@@ -1529,3 +1535,76 @@ class TestPersistExperiments:
             metadata["experiments"]["features"]["vibe_code_cli_test_ab"]["defaultValue"]
             == "cli"
         )
+
+
+class TestPersistCreatedWorktree:
+    @pytest.fixture
+    def worktree(self) -> WorktreeContext:
+        return WorktreeContext(
+            entry_id="worktree-feature-x",
+            name="feature-x",
+            branch="vibe/feature-x",
+            path="/repo/.worktrees/feature-x",
+            created_at=1234567890,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_session_carries_the_worktree_into_the_first_save(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+        worktree: WorktreeContext,
+    ) -> None:
+        # The worktree is recorded before the session has a message, so there is
+        # no meta.json to patch yet: only the in-memory metadata can carry it
+        # until the first full save writes it out.
+        logger = SessionLogger(session_config, "worktree-session")
+        assert logger.session_dir is not None
+        assert not (logger.session_dir / "meta.json").exists()
+
+        await logger.persist_created_worktree(worktree)
+
+        assert not (logger.session_dir / "meta.json").exists()
+
+        await logger.save_interaction(
+            messages=[
+                LLMMessage(role=Role.system, content="System prompt"),
+                LLMMessage(role=Role.user, content="Hello"),
+            ],
+            stats=AgentStats(steps=1),
+            config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        reloaded = SessionLoader.load_metadata(logger.session_dir)
+        assert reloaded.created_worktree == worktree
+
+    @pytest.mark.asyncio
+    async def test_an_existing_metadata_file_is_patched_without_a_full_save(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+        worktree: WorktreeContext,
+    ) -> None:
+        logger = SessionLogger(session_config, "worktree-resumed")
+        await logger.save_interaction(
+            messages=[
+                LLMMessage(role=Role.system, content="System prompt"),
+                LLMMessage(role=Role.user, content="Hello"),
+            ],
+            stats=AgentStats(steps=1),
+            config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        await logger.persist_created_worktree(worktree)
+
+        assert logger.session_dir is not None
+        reloaded = SessionLoader.load_metadata(logger.session_dir)
+        assert reloaded.created_worktree == worktree

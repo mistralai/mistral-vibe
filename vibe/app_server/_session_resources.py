@@ -187,6 +187,15 @@ class SessionResource:
             cursor = response.next_cursor
         return sessions
 
+    async def resolve_continue_session(self, cwd: str | None = None) -> str | None:
+        """The session `--continue` resumes, resolved server-side (pointer-first)."""
+        client = await self._connection.connect()
+        response = validate_wire(
+            SessionListResponse,
+            await client.request("session/list", SessionListParams(cwd=cwd)),
+        )
+        return response.continue_session_id
+
     @property
     def history_before_cursor(self) -> str | None:
         return self._state.projection.history_before_cursor
@@ -243,6 +252,26 @@ class SessionResource:
         self._state.projection = ClientProjection(response.state)
         self._state.reset_usage_baseline()
         self._connection.mark_session_attached()
+
+    async def get_session_history(
+        self, session_id: str, history_limit: int = 200
+    ) -> list[PublicHistoryEntry]:
+        from vibe.app_server.protocol import (
+            SessionHistoryGetParams,
+            SessionHistoryGetResponse,
+        )
+
+        client = await self._connection.connect()
+        response = validate_wire(
+            SessionHistoryGetResponse,
+            await client.request(
+                "session/history/get",
+                SessionHistoryGetParams(
+                    session_id=session_id, history_limit=history_limit
+                ),
+            ),
+        )
+        return response.history
 
     async def update_settings(
         self, *, max_turns: int | None = None, max_tokens: int | None = None

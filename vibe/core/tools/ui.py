@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from pydantic import BaseModel, JsonValue
 
+from vibe.core.tools.utils import file_display_harness
 from vibe.utils.tool_presentation import (
     EffectCallDisplay,
     EffectResultDisplay as ToolResultDisplay,
@@ -15,6 +16,7 @@ from vibe.utils.tool_presentation import (
 )
 
 if TYPE_CHECKING:
+    from vibe.core.config.harness_files import HarnessFilesManager
     from vibe.core.types import ToolCallEvent, ToolResultEvent
 
 
@@ -94,8 +96,14 @@ class ToolUIData[TArgs: BaseModel, TResult: BaseModel](ABC):
 
 
 class ToolUIDataAdapter:
-    def __init__(self, tool_class: Any | None) -> None:
+    def __init__(
+        self,
+        tool_class: Any | None,
+        *,
+        harness_files: HarnessFilesManager | None = None,
+    ) -> None:
         self.tool_class = tool_class
+        self.harness_files = harness_files
         self.ui_data_class: type[ToolUIData[Any, Any]] | None = (
             tool_class
             if isinstance(tool_class, type) and issubclass(tool_class, ToolUIData)
@@ -110,7 +118,8 @@ class ToolUIDataAdapter:
 
     def get_call_display(self, event: ToolCallEvent) -> ToolCallDisplay:
         if self.ui_data_class:
-            display = self.ui_data_class.get_call_display(event)
+            with file_display_harness(self.harness_files):
+                display = self.ui_data_class.get_call_display(event)
         else:
             args_dict = (
                 event.args.model_dump()
@@ -143,7 +152,8 @@ class ToolUIDataAdapter:
             )
 
         if self.ui_data_class:
-            return self.ui_data_class.get_result_display(event)
+            with file_display_harness(self.harness_files):
+                return self.ui_data_class.get_result_display(event)
 
         return ToolResultDisplay(success=True, message="Success")
 

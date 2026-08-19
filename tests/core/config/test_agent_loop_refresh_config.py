@@ -9,6 +9,7 @@ from tests.conftest import (
 )
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.core.agent_loop import AgentLoop
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp
 from vibe.core.tools.mcp import AuthStatus
 
@@ -67,6 +68,23 @@ async def test_refresh_config_drops_disk_bypass_when_not_forced(
     await agent_loop.refresh_config()
 
     assert agent_loop.bypass_tool_permissions is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_policy_reflects_bypass_after_in_session_agent_switch() -> None:
+    # Launching without --auto-approve then switching to auto-approve in-session
+    # must propagate bypass_tool_permissions=True into child loop construction
+    # via runtime_policy, not just into the parent's own permission check.
+    agent_loop = build_test_agent_loop(
+        config=build_test_vibe_config(), agent_name=BuiltinAgentName.ASK
+    )
+    assert agent_loop.bypass_tool_permissions is False
+    assert agent_loop.runtime_policy.force_bypass_tool_permissions is False
+
+    await agent_loop.switch_agent(BuiltinAgentName.AUTO_APPROVE)
+
+    assert agent_loop.bypass_tool_permissions is True
+    assert agent_loop.runtime_policy.force_bypass_tool_permissions is True
 
 
 @pytest.mark.asyncio

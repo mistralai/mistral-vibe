@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vibe.app_server.models import SavedSessionSummary, WorkspaceTrustDetails
+from vibe.app_server.models import WorkspaceTrustDetails
 from vibe.app_server.protocol import WorkspaceTrustStatusResponse
 from vibe.cli.textual_ui import startup
 from vibe.setup.trusted_folders.trust_folder_dialog import TrustFolderApp
@@ -63,56 +63,16 @@ async def test_trust_is_resolved_before_session_open(
 
 
 @pytest.mark.asyncio
-async def test_resume_picker_selects_session_before_opening_runtime(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_resume_picker_opens_one_fresh_session() -> None:
+    # With --resume, startup opens a single fresh session and defers session
+    # selection to AppVibe's in-app picker: it must not resume here, and must not
+    # open more than one runtime.
     host = MagicMock()
     host.cwd = "/workspace"
-    host.list_sessions = AsyncMock(
-        return_value=[
-            SavedSessionSummary(session_id="saved", cwd="/workspace", preview="Hi")
-        ]
-    )
-    session = MagicMock()
-    host.resume_session = AsyncMock(return_value=session)
-    host.start_session = AsyncMock()
-    monkeypatch.setattr(
-        startup._StartupSessionPicker,
-        "run_async",
-        AsyncMock(return_value=startup._PickerResult(session_id="saved")),
-    )
-
-    opened = await startup.open_textual_session(
-        host,
-        prompt_for_workspace_trust=False,
-        show_resume_picker=True,
-        initially_resuming=False,
-    )
-
-    assert opened is not None and opened.resumed
-    assert opened.session is session
-    assert opened.showed_resume_picker is True
-    host.resume_session.assert_awaited_once_with("saved")
-    host.start_session.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_resume_picker_cancel_starts_one_new_session(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    host = MagicMock()
-    host.cwd = "/workspace"
-    host.list_sessions = AsyncMock(
-        return_value=[SavedSessionSummary(session_id="saved", cwd="/workspace")]
-    )
     session = MagicMock()
     host.start_session = AsyncMock(return_value=session)
     host.resume_session = AsyncMock()
-    monkeypatch.setattr(
-        startup._StartupSessionPicker,
-        "run_async",
-        AsyncMock(return_value=startup._PickerResult()),
-    )
+    host.open_session = AsyncMock()
 
     opened = await startup.open_textual_session(
         host,
@@ -125,3 +85,59 @@ async def test_resume_picker_cancel_starts_one_new_session(
     assert opened.session is session
     host.start_session.assert_awaited_once_with()
     host.resume_session.assert_not_awaited()
+    host.open_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_continue_opens_fresh_session_with_auto_continue_descriptor() -> None:
+    # --continue opens a fresh session via start_session (not the cold open_session)
+    # and sets continue_latest so AppVibe drives the resume in-app.
+    host = MagicMock()
+    host.cwd = "/workspace"
+    session = MagicMock()
+    host.start_session = AsyncMock(return_value=session)
+    host.resume_session = AsyncMock()
+    host.open_session = AsyncMock()
+
+    opened = await startup.open_textual_session(
+        host,
+        prompt_for_workspace_trust=False,
+        show_resume_picker=False,
+        initially_resuming=True,
+    )
+
+    assert opened is not None and not opened.resumed
+    assert opened.session is session
+    assert opened.continue_latest is True
+    assert opened.resume_session_id is None
+    host.start_session.assert_awaited_once_with()
+    host.resume_session.assert_not_awaited()
+    host.open_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resume_with_id_opens_fresh_session_with_auto_resume_descriptor() -> None:
+    # --resume <id> opens a fresh session via start_session (not the cold
+    # open_session) and sets resume_session_id so AppVibe resumes in-app.
+    host = MagicMock()
+    host.cwd = "/workspace"
+    session = MagicMock()
+    host.start_session = AsyncMock(return_value=session)
+    host.resume_session = AsyncMock()
+    host.open_session = AsyncMock()
+
+    opened = await startup.open_textual_session(
+        host,
+        prompt_for_workspace_trust=False,
+        show_resume_picker=False,
+        initially_resuming=True,
+        resume_session_id="target-session-id",
+    )
+
+    assert opened is not None and not opened.resumed
+    assert opened.session is session
+    assert opened.resume_session_id == "target-session-id"
+    assert opened.continue_latest is False
+    host.start_session.assert_awaited_once_with()
+    host.resume_session.assert_not_awaited()
+    host.open_session.assert_not_awaited()

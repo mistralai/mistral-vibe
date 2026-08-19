@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-import httpx
+from http import HTTPStatus
+from typing import TYPE_CHECKING
+
 from packaging.utils import parse_sdist_filename, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
@@ -10,12 +12,16 @@ from vibe.cli.update_notifier.ports.update_gateway import (
     UpdateGatewayCause,
     UpdateGatewayError,
 )
-from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
+
+if TYPE_CHECKING:
+    import httpx
+
+    from vibe.utils.http import VibeAsyncHTTPClient
 
 _STATUS_CAUSES: dict[int, UpdateGatewayCause] = {
-    httpx.codes.NOT_FOUND: UpdateGatewayCause.NOT_FOUND,
-    httpx.codes.FORBIDDEN: UpdateGatewayCause.FORBIDDEN,
-    httpx.codes.TOO_MANY_REQUESTS: UpdateGatewayCause.TOO_MANY_REQUESTS,
+    HTTPStatus.NOT_FOUND: UpdateGatewayCause.NOT_FOUND,
+    HTTPStatus.FORBIDDEN: UpdateGatewayCause.FORBIDDEN,
+    HTTPStatus.TOO_MANY_REQUESTS: UpdateGatewayCause.TOO_MANY_REQUESTS,
 }
 
 
@@ -70,6 +76,10 @@ class PyPIUpdateGateway(UpdateGateway):
         return None
 
     async def _fetch(self) -> httpx.Response:
+        import httpx
+
+        from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
+
         headers = {"Accept": "application/vnd.pypi.simple.v1+json"}
         request_path = f"/simple/{self._project_name}/"
 

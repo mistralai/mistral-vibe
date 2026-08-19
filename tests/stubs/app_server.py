@@ -5,6 +5,8 @@ from pathlib import Path
 
 from vibe.app_server._account import AccountGateway
 from vibe.app_server._identity import IdentityGateway
+from vibe.app_server._legacy_composition import create_legacy_app_server
+from vibe.app_server._legacy_session_backend import LegacySessionBackend
 from vibe.app_server._projector import EventProjector
 from vibe.app_server._runtime import AgentRuntimeFactory, RootOpenRequest
 from vibe.app_server.client import AppServerClient
@@ -121,16 +123,22 @@ def build_test_app_server(
                 agent_loop, Path(request.options.cwd or agent_loop.cwd)
             )
         if session_id is not None:
-            return await runtime_factory.resume_root(agent_loop, session_id)
+            await runtime_factory.resume_root(agent_loop, session_id)
         return agent_loop
 
-    return AppServer(
+    return create_legacy_app_server(
         transport,
         open_root=open_root,
         runtime_factory=runtime_factory,
         account_gateway=account_gateway,
         identity_gateway=identity_gateway,
     )
+
+
+def legacy_backend(server: AppServer) -> LegacySessionBackend:
+    root = server._root
+    assert isinstance(root, LegacySessionBackend)
+    return root
 
 
 async def create_test_app_server_session(

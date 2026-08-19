@@ -33,6 +33,7 @@ from vibe.cli.textual_ui.widgets.no_markup_static import (
 from vibe.cli.textual_ui.widgets.status_message import IndicatorState, StatusMessage
 from vibe.cli.textual_ui.widgets.tool_widgets import (
     ToolResultWidget,
+    clean_output,
     effect_result_is_collapsible,
     get_result_widget,
     linkify_effect_result,
@@ -391,7 +392,7 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             # Fold the whole result into a single muted-arrow header; the error
             # detail is the collapsed, bordered body. No separate square icon or
             # "N lines" row. Escalation recolours red.
-            error = self._state.error.message
+            error = clean_output(self._state.error.message)
             verb, message, suffix = self._get_result_parts()
 
             def build_error_body() -> Widget:
@@ -472,7 +473,7 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             self._is_error = True
             # Only the inline "Error" span is ever colored; escalation changes the
             # call icon to a red cross but leaves this folded body untouched.
-            message = self._state.error.message
+            message = clean_output(self._state.error.message)
             line_count = len(message.strip("\n").split("\n"))
             await self._content_container.mount(
                 OverflowCollapsibleSection(

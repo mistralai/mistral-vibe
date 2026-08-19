@@ -69,7 +69,11 @@ async def test_shell_is_one_public_effect_and_injects_model_context() -> None:
     final = updates[-1].entry
     assert isinstance(final, PublicEffectEntry)
     assert isinstance(final.state, CompletedEffectState)
-    assert final.state.output == {"stdout": "hello", "stderr": "warning"}
+    assert final.state.output == {
+        "stdout": "hello",
+        "stderr": "warning",
+        "output": final.state.output_text,
+    }
     assert any(entry.id == final.id for entry in session.history)
 
     injected = agent_loop.messages[-1]
@@ -87,6 +91,34 @@ async def test_shell_is_one_public_effect_and_injects_model_context() -> None:
         if isinstance(entry, PublicEffectEntry) and entry.id == final.id
     )
     assert restored.detail == final.detail
+    assert restored.state == final.state
+
+
+@pytest.mark.asyncio
+async def test_interleaved_stderr_is_recorded_in_arrival_order() -> None:
+    agent_loop = build_test_agent_loop()
+    session = await create_test_app_server_session(agent_loop)
+
+    try:
+        events = [
+            event
+            async for event in session.resources.shell.run(
+                "printf 'E' >&2; sleep 0.1; printf 'o'"
+            )
+        ]
+    finally:
+        await session.close()
+
+    final = _final_effect(events)
+    assert isinstance(final.state, CompletedEffectState)
+    # Pipe order would have reported "oE"; the split is kept for the model context.
+    assert final.state.output == {"stdout": "o", "stderr": "E", "output": "Eo"}
+
+    restored = next(
+        entry
+        for entry in project_history(agent_loop)
+        if isinstance(entry, PublicEffectEntry) and entry.id == final.id
+    )
     assert restored.state == final.state
 
 
@@ -135,4 +167,8 @@ async def test_closing_shell_stream_interrupts_process_and_allows_next_command()
 
     final = _final_effect(events)
     assert isinstance(final.state, CompletedEffectState)
-    assert final.state.output == {"stdout": "finished", "stderr": ""}
+    assert final.state.output == {
+        "stdout": "finished",
+        "stderr": "",
+        "output": "finished",
+    }

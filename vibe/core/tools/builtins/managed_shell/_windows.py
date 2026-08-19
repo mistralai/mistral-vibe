@@ -10,6 +10,7 @@ import time
 from typing import Any, cast
 
 from vibe.core.tools.builtins.managed_shell.backend import (
+    UNKNOWN_EXIT_CODE,
     ManagedShellBackendCapabilities,
     ManagedShellBackendError,
     ManagedTerminal,
@@ -22,7 +23,6 @@ WINDOWS_CONPTY_BACKEND = "ConPTY"
 WINDOWS_WINPTY_BACKEND = "WinPTY"
 _WINPTY_POLL_SECONDS = 0.01
 _TASKKILL_TIMEOUT_SECONDS = 2.0
-_UNKNOWN_EXIT_CODE = 1
 
 
 @dataclass(frozen=True)
@@ -202,7 +202,7 @@ class WindowsManagedTerminal:
             return None
         self._final_returncode = self.returncode
         if self._final_returncode is None:
-            self._final_returncode = _UNKNOWN_EXIT_CODE
+            self._final_returncode = UNKNOWN_EXIT_CODE
         return self._final_returncode
 
     def wait(self, timeout: float | None = None) -> int | None:
@@ -274,7 +274,7 @@ class WindowsManagedTerminal:
         except Exception:
             self._final_returncode = None
         if self._final_returncode is None:
-            self._final_returncode = _UNKNOWN_EXIT_CODE
+            self._final_returncode = UNKNOWN_EXIT_CODE
         process = self._process
         self._process = None
         try:

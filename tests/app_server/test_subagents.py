@@ -19,6 +19,7 @@ from tests.mock.utils import mock_llm_chunk
 from tests.stubs.app_server import (
     attach_test_app_server_session,
     create_test_app_server_session,
+    legacy_backend,
     start_test_app_server,
 )
 from tests.stubs.fake_backend import FakeBackend
@@ -394,7 +395,7 @@ async def test_child_registration_rolls_back_when_projection_fails(
         assert metadata is not None
         assert parent_dir is not None
         assert metadata.child_sessions == []
-        assert server._sessions._children == {}
+        assert legacy_backend(server).children._children == {}
         agents_dir = parent_dir / "agents"
         assert not agents_dir.exists() or not any(agents_dir.iterdir())
     finally:
@@ -540,8 +541,10 @@ async def test_interrupting_task_leaves_child_idle_and_closes_runtime(
         await asyncio.wait_for(turn, timeout=1)
         await asyncio.wait_for(child_backend.stopped.wait(), timeout=1)
 
-        assert len(server._sessions._children) == 1
-        child_session_id, runtime = next(iter(server._sessions._children.items()))
+        children = legacy_backend(server).children
+        child_runtimes = children._children
+        assert len(child_runtimes) == 1
+        child_session_id, runtime = next(iter(child_runtimes.items()))
         assert runtime.turns.active_turn is None
         assert runtime.execution.active is None
         assert runtime.turns._active_task is not None
@@ -558,7 +561,7 @@ async def test_interrupting_task_leaves_child_idle_and_closes_runtime(
         turn.cancel()
         await session.close()
 
-    assert server._sessions._children == {}
+    assert children._children == {}
 
 
 @pytest.mark.asyncio
@@ -674,13 +677,15 @@ async def test_repeated_reads_of_broken_child_stay_not_found(
 
 
 @pytest.mark.asyncio
-async def test_invalid_child_projection_is_closed_and_skipped_on_resume(
+async def test_unprojectable_child_tool_call_is_tolerated_on_resume(
     tmp_path, monkeypatch
 ) -> None:
     logging, parent_session_id, child_session_id, child_dir = await _persist_child(
         tmp_path, monkeypatch
     )
 
+    # A stored tool call whose arguments no longer match its presentation model.
+    # Projection must degrade gracefully rather than discard the whole child.
     invalid_message = LLMMessage(
         role=Role.assistant,
         tool_calls=[
@@ -720,12 +725,20 @@ async def test_invalid_child_projection_is_closed_and_skipped_on_resume(
         start_test_app_server(resumed_loop), resume_session_id=parent_session_id
     )
     try:
+        # The child is created lazily on first read, then kept (not discarded)
+        # because projection degrades gracefully, and stays readable.
         with suppress(Exception):
             await _read_child(resumed, child_session_id)
         assert len(close_calls) == 1
-        close, telemetry_close = close_calls[0]
-        close.assert_awaited_once_with()
-        telemetry_close.assert_awaited_once_with()
+        close, _telemetry_close = close_calls[0]
+        close.assert_not_awaited()
+        child = await _read_child(resumed, child_session_id)
+        assert child.session.parent_session_id == parent_session_id
+        assert any(
+            isinstance(entry, PublicEffectEntry)
+            and entry.detail.kind is ToolEffectKind.TOOL
+            for entry in child.history or []
+        )
     finally:
         await resumed.close()
 

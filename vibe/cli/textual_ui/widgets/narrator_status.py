@@ -35,6 +35,17 @@ class NarratorStatus(NarratorManagerListener, Static):
     def on_unmount(self) -> None:
         self._narrator_manager.remove_listener(self)
 
+    def replace_narrator_manager(self, narrator_manager: NarratorManagerPort) -> None:
+        # Compose binds the idle noop narrator on the cold mount-first path; the
+        # real manager arrives later via _initialize_client_dependencies. Re-bind
+        # the listener so the widget actually receives narrator state changes.
+        if self._narrator_manager is narrator_manager:
+            return
+        self._narrator_manager.remove_listener(self)
+        self._narrator_manager = narrator_manager
+        self._narrator_manager.add_listener(self)
+        self.state = self._narrator_manager.state
+
     def on_narrator_state_change(self, state: NarratorState) -> None:
         self.state = state
 

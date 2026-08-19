@@ -1,0 +1,14 @@
+strace_code = "import vibe"
+slowest_count = 15
+
+# Budgets set from baseline run (observed module count + ~10% headroom).
+
+[[commands]]
+label = "import vibe"
+code = "import vibe"
+budget = 68
+
+[[commands]]
+label = "from vibe.cli.textual_ui.app import VibeApp"
+code = "from vibe.cli.textual_ui.app import VibeApp"
+budget = 791

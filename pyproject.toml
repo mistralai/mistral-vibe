@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.24.1"
+version = "2.24.2"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -226,6 +226,7 @@ select = [
     "RUF012",
     "RUF019",
     "RUF100",
+    "TC004",
 ]
 ignore = ["D203", "D205", "D213", "ANN401", "PLR6301"]
 
@@ -261,6 +262,9 @@ ignore_decorators = ["@*"]
 [tool.pytest.ini_options]
 addopts = "-vvvv -q -n auto --durations=10 --import-mode=importlib --maxschedchunk=1"
 timeout = 10
+markers = [
+    "unified_supported: backend contract behavior implemented by the Unified Harness",
+]
 filterwarnings = [
     # (e2e) streaming mock server is started in a thread; and the cli is spawn in a fork
     "ignore:This process \\(pid=.*\\) is multi-threaded, use of forkpty\\(\\) may lead to deadlocks in the child\\.:DeprecationWarning",

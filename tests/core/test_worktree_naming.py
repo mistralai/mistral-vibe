@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.core.worktree_naming import (
+from vibe.core.git.worktree.naming import (
     MAX_WORKTREE_NAME_LENGTH,
     worktree_name_from_text,
     worktree_name_with_suffix,

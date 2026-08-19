@@ -13,6 +13,7 @@ from vibe.app_server._account import (
     AccountGatewayUnavailable,
     HttpAccountGateway,
     WhoAmIResult,
+    reconcile_tenant_domains,
 )
 from vibe.app_server.models import (
     AccountActionKind,
@@ -386,3 +387,192 @@ def test_account_wire_models_reject_extra_fields() -> None:
             "sessionId": "session",
             "apiKey": "client-secret",
         })
+
+
+class _ReconcileSpies:
+    """Records what reconcile_tenant_domains asks the persistence layer to do."""
+
+    def __init__(self) -> None:
+        self.provider_calls: list[str] = []  # captured api_base per call
+        self.vibe_calls: list[str] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from vibe.app_server import _account as account_module
+
+        async def _fake_apply_provider_to_config(
+            _orchestrator, provider, *, reason: str
+        ) -> bool:
+            self.provider_calls.append(provider.api_base)
+            return True
+
+        async def _fake_apply_vibe_base_url(
+            _orchestrator, vibe_base_url, *, reason: str
+        ) -> bool:
+            self.vibe_calls.append(vibe_base_url)
+            return True
+
+        monkeypatch.setattr(
+            account_module, "apply_provider_to_config", _fake_apply_provider_to_config
+        )
+        monkeypatch.setattr(
+            account_module, "apply_vibe_base_url", _fake_apply_vibe_base_url
+        )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_tenant_domains_noop_when_domains_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spies = _ReconcileSpies()
+    spies.install(monkeypatch)
+    agent_loop = build_test_agent_loop()
+    try:
+        await reconcile_tenant_domains(
+            agent_loop.config_orchestrator,
+            WhoAmIResult(plan_type=AccountPlanKind.API, plan_name="FREE"),
+        )
+    finally:
+        await agent_loop.aclose()
+
+    assert spies.provider_calls == []
+    assert spies.vibe_calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_tenant_domains_noop_when_values_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spies = _ReconcileSpies()
+    spies.install(monkeypatch)
+
+    from vibe.core.config import DEFAULT_PROVIDERS
+
+    provider = DEFAULT_PROVIDERS[0].model_copy(
+        update={"api_base": "https://api.tenant.corp/v1"}
+    )
+    config = build_test_vibe_config(
+        vibe_base_url="https://chat.tenant.corp", providers=[provider]
+    )
+    agent_loop = build_test_agent_loop(config=config)
+    try:
+        await reconcile_tenant_domains(
+            agent_loop.config_orchestrator,
+            WhoAmIResult(
+                plan_type=AccountPlanKind.API,
+                plan_name="FREE",
+                api_base="https://api.tenant.corp",
+                vibe_base="https://chat.tenant.corp",
+            ),
+        )
+    finally:
+        await agent_loop.aclose()
+
+    assert spies.provider_calls == []
+    assert spies.vibe_calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_tenant_domains_patches_api_base_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spies = _ReconcileSpies()
+    spies.install(monkeypatch)
+    agent_loop = build_test_agent_loop()
+    try:
+        await reconcile_tenant_domains(
+            agent_loop.config_orchestrator,
+            WhoAmIResult(
+                plan_type=AccountPlanKind.API,
+                plan_name="FREE",
+                api_base="https://api.tenant.corp",
+            ),
+        )
+    finally:
+        await agent_loop.aclose()
+
+    assert spies.provider_calls == ["https://api.tenant.corp/v1"]
+    assert spies.vibe_calls == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_tenant_domains_patches_chat_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spies = _ReconcileSpies()
+    spies.install(monkeypatch)
+    agent_loop = build_test_agent_loop()
+    try:
+        await reconcile_tenant_domains(
+            agent_loop.config_orchestrator,
+            WhoAmIResult(
+                plan_type=AccountPlanKind.API,
+                plan_name="FREE",
+                vibe_base="https://chat.tenant.corp",
+            ),
+        )
+    finally:
+        await agent_loop.aclose()
+
+    assert spies.provider_calls == []
+    assert spies.vibe_calls == ["https://chat.tenant.corp"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_tenant_domains_still_reconciles_chat_when_no_active_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: earlier code bailed out of the whole function when
+    ``get_active_provider`` raised, silently skipping the independent chat
+    reconciliation. The two branches must remain independent.
+    """
+    spies = _ReconcileSpies()
+    spies.install(monkeypatch)
+    agent_loop = build_test_agent_loop()
+    try:
+        orchestrator = agent_loop.config_orchestrator
+
+        def _raise_no_active_provider(self):
+            raise ValueError("no active provider")
+
+        monkeypatch.setattr(
+            type(orchestrator.config), "get_active_provider", _raise_no_active_provider
+        )
+        await reconcile_tenant_domains(
+            orchestrator,
+            WhoAmIResult(
+                plan_type=AccountPlanKind.API,
+                plan_name="FREE",
+                api_base="https://api.tenant.corp",
+                vibe_base="https://chat.tenant.corp",
+            ),
+        )
+    finally:
+        await agent_loop.aclose()
+
+    assert spies.provider_calls == []  # api branch skipped
+    assert spies.vibe_calls == ["https://chat.tenant.corp"]  # chat still ran
+
+
+@pytest.mark.asyncio
+async def test_reconcile_tenant_domains_rejects_non_https_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-HTTPS or path-traversal URLs from /whoami must not be persisted."""
+    spies = _ReconcileSpies()
+    spies.install(monkeypatch)
+    agent_loop = build_test_agent_loop()
+    try:
+        await reconcile_tenant_domains(
+            agent_loop.config_orchestrator,
+            WhoAmIResult(
+                plan_type=AccountPlanKind.API,
+                plan_name="FREE",
+                api_base="http://api.tenant.corp",
+                vibe_base="http://chat.tenant.corp",
+            ),
+        )
+    finally:
+        await agent_loop.aclose()
+
+    assert spies.provider_calls == []
+    assert spies.vibe_calls == []

@@ -15,9 +15,19 @@ from vibe.cli import (
 )
 from vibe.core.config import MissingAPIKeyError, VibeConfigSchema, harness_files
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.git.worktree import ManagedWorktree, WorktreeRepository
 from vibe.core.trusted_folders import trusted_folders_manager
-from vibe.core.worktree import prepare_worktree_session
 from vibe.setup import onboarding as onboarding_mod, update_prompt as update_prompt_mod
+
+
+def _prepare(name: str, base: Path) -> None:
+    with WorktreeRepository.open(base) as repository:
+        repository.prepare(name)
+
+
+def _holders(cwd: Path) -> frozenset[str]:
+    managed = ManagedWorktree.at(cwd)
+    return frozenset() if managed is None else managed.holders()
 
 
 def _make_args(**overrides: object) -> argparse.Namespace:
@@ -31,6 +41,7 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "disabled_tools": None,
         "output": "text",
         "agent": "ask",
+        "experimental_harness": False,
         "auto_approve": False,
         "check_upgrade": False,
         "setup": False,
@@ -281,6 +292,84 @@ def test_worktree_cleanup_prompt_keeps_dirty_worktree_by_default(
     assert "feature" in (h.name for h in repo.heads)
 
 
+@pytest.mark.parametrize(
+    ("prompt", "exit_code"),
+    [
+        # -p never reaches the cleanup gate, and neither does a failed start.
+        ("do the thing", 0),
+        (None, 1),
+    ],
+)
+def test_worktree_holder_is_released_even_when_cleanup_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: str | None, exit_code: int
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    _init_repo(project)
+    monkeypatch.chdir(project)
+
+    args = _make_args(prompt=prompt, worktree="feature")
+    monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
+    monkeypatch.setattr(
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
+    )
+    worktree_path: list[Path] = []
+
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        worktree_path.append(Path.cwd())
+        raise SystemExit(exit_code)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
+
+    with pytest.raises(SystemExit):
+        entrypoint_mod.main()
+
+    # A marker left here reads as a live session forever: every later release
+    # reports the worktree in use, and the sweep only reclaims reservations
+    # that never became one.
+    assert _holders(worktree_path[0]) == frozenset()
+
+
+def test_worktree_cleanup_stays_held_while_the_prompt_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    _init_repo(project)
+    monkeypatch.chdir(project)
+
+    args = _make_args(prompt=None, worktree="feature")
+    monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
+    monkeypatch.setattr(
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
+    )
+    worktree_path: list[Path] = []
+    held_at_prompt: list[frozenset[str]] = []
+
+    def answer_prompt() -> str:
+        # An app-server sweeping this repo reads the markers. Releasing before
+        # the prompt would let it remove the worktree while the user decides.
+        held_at_prompt.append(_holders(worktree_path[0]))
+        return ""
+
+    monkeypatch.setattr("builtins.input", answer_prompt)
+
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        path = Path.cwd()
+        worktree_path.append(path)
+        (path / "new.txt").write_text("keep me\n", encoding="utf-8")
+        raise SystemExit(0)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
+
+    with pytest.raises(SystemExit):
+        entrypoint_mod.main()
+
+    assert held_at_prompt, "the dirty worktree should have prompted"
+    assert held_at_prompt[0], "the CLI must still hold the worktree at the prompt"
+    assert _holders(worktree_path[0]) == frozenset()
+
+
 def test_worktree_cleanup_prompt_removes_dirty_worktree_when_confirmed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -381,7 +470,7 @@ def test_reused_worktree_is_not_cleaned_up(
     project.mkdir()
     repo = _init_repo(project)
     monkeypatch.chdir(project)
-    prepare_worktree_session("feature", project)
+    _prepare("feature", project)
 
     args = _make_args(prompt=None, worktree="feature")
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
@@ -537,6 +626,36 @@ def test_run_cli_auto_approve_is_a_harness_option_without_changing_agent(
     assert options.session_options.auto_approve is True
     assert options.session_options.trust_workspace is True
     assert config.bypass_tool_permissions is False
+
+
+def test_run_cli_forwards_experimental_harness_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+) -> None:
+    args = _make_args(experimental_harness=True)
+    call: dict[str, object] = {}
+    config = build_test_vibe_config()
+    orchestrator = load_orchestrator(config)
+
+    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(
+        cli_mod, "load_config_orchestrator_or_exit", lambda interactive: orchestrator
+    )
+    monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
+
+    def fake_run_programmatic(**kwargs: object) -> str:
+        call.update(kwargs)
+        return "done"
+
+    monkeypatch.setattr(programmatic_mod, "run_programmatic", fake_run_programmatic)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_mod.run_cli(args)
+
+    assert exc_info.value.code == 0
+    options = call["harness_options"]
+    assert isinstance(options, LocalHarnessOptions)
+    assert options.experimental_harness is True
 
 
 def _patch_run_cli_for_config(

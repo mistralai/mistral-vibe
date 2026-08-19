@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import cast
 
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, JsonValue, ValidationError
 
 from vibe.app_server.models import (
     CancelledEffectState,
@@ -106,12 +106,19 @@ def project_effect_detail(
         return GenericEffectDetail(
             tool_name=tool_name, input=_dump_value(value), display=presentation.display
         )
+    try:
+        projected_input = _project_model(projection.input_model, value)
+    except ValidationError:
+        # Stored tool arguments can predate a schema change (e.g. a field that
+        # became required). Degrade to a generic projection so historical
+        # sessions stay readable and resumable instead of failing the load.
+        return GenericEffectDetail(
+            tool_name=tool_name, input=_dump_value(value), display=presentation.display
+        )
     return cast(
         EffectDetail,
         projection.detail_model(
-            tool_name=tool_name,
-            input=_project_model(projection.input_model, value),
-            display=presentation.display,
+            tool_name=tool_name, input=projected_input, display=presentation.display
         ),
     )
 
@@ -139,12 +146,21 @@ def project_effect_state(
             duration_ms=duration_ms,
             display=display,
         )
+    output = project_effect_output(event)
     return CompletedEffectState(
-        output=project_effect_output(event),
-        output_text=output_text,
+        output=output,
+        output_text=output_text or _unstreamed_shell_transcript(event, output),
         duration_ms=duration_ms,
         display=display,
     )
+
+
+def _unstreamed_shell_transcript(event: ToolResultEvent, output: JsonValue) -> str:
+    presentation = event.presentation
+    if presentation is None or presentation.kind is not ToolEffectKind.SHELL:
+        return ""
+    shell = _project_model(ShellEffectOutput, output)
+    return "" if shell is None else shell.transcript
 
 
 def project_effect_output(event: ToolResultEvent) -> JsonValue:
@@ -167,7 +183,10 @@ def project_effect_output_value(
     projection = _EFFECT_PROJECTIONS.get(kind)
     if projection is None:
         return _dump_value(value)
-    projected = _project_model(projection.output_model, value)
+    try:
+        projected = _project_model(projection.output_model, value)
+    except ValidationError:
+        return _dump_value(value)
     return _dump_value(projected)
 
 
@@ -199,7 +218,8 @@ def _dump_value(value: BaseModel | JsonValue) -> JsonValue:
 def _result_display(event: ToolResultEvent) -> EffectResultDisplay:
     if event.error:
         return EffectResultDisplay(
-            success=False, message=TaggedText.from_string(event.error).message
+            success=False,
+            message=TaggedText.from_string(event.error_display or event.error).message,
         )
     if event.skipped:
         return EffectResultDisplay(

@@ -5,19 +5,26 @@ from typing import cast
 from pydantic import ValidationError
 import pytest
 
-from vibe.app_server._tool_projection import project_effect_detail, project_effect_state
+from vibe.app_server._tool_projection import (
+    project_effect_detail,
+    project_effect_output_value,
+    project_effect_state,
+)
 from vibe.app_server.models import (
     CompletedEffectState,
     EffectCallDisplay,
+    FailedEffectState,
     FileEditEffectOccurrence,
     FileEditEffectOutput,
+    GenericEffectDetail,
     ShellEffectDetail,
     ShellEffectInput,
+    ShellEffectOutput,
     SkillEffectDetail,
     SkillEffectInput,
     validate_history_entry,
 )
-from vibe.core.tools.builtins.bash import Bash, BashArgs, BashResult
+from vibe.core.tools.builtins.bash import Bash, BashArgs, CapturedShellResult
 from vibe.core.tools.builtins.edit import Edit, EditResult
 from vibe.core.tools.builtins.experimental_bash import (
     ExperimentalBash,
@@ -114,6 +121,20 @@ def test_generic_tool_projection_preserves_json_input() -> None:
     assert detail.input == {"command": "forecast Paris", "timeout": 30}
 
 
+def test_stored_effect_args_missing_required_field_degrade_to_generic() -> None:
+    # A subagent call stored before `agent` became required. Projecting it must
+    # not raise so historical sessions stay readable and resumable.
+    detail = project_effect_detail(
+        "task",
+        {"task": "Investigate the retry path"},
+        _presentation(ToolEffectKind.SUBAGENT),
+    )
+
+    assert isinstance(detail, GenericEffectDetail)
+    assert detail.tool_name == "task"
+    assert detail.input == {"task": "Investigate the retry path"}
+
+
 def test_generic_tool_call_uses_running_header_fallback() -> None:
     display = ToolUIDataAdapter(None).get_call_display(
         ToolCallEvent(
@@ -133,7 +154,7 @@ def test_result_projection_uses_the_same_tool_owned_contract() -> None:
         ToolResultEvent(
             tool_name="bash",
             tool_class=Bash,
-            result=BashResult(command="pwd", stdout="ok", stderr="", returncode=0),
+            result=CapturedShellResult(command="pwd", stdout="ok", stderr=""),
             tool_call_id="call-1",
             presentation=ToolResultPresentation(
                 kind=ToolEffectKind.SHELL,
@@ -143,7 +164,90 @@ def test_result_projection_uses_the_same_tool_owned_contract() -> None:
     )
 
     completed = cast(CompletedEffectState, state)
-    assert completed.output == {"stdout": "ok", "stderr": ""}
+    # A tool that never streams owes its whole output to append-only clients.
+    assert completed.output == {
+        "stdout": "ok",
+        "stderr": "",
+        "output": "",
+        "truncated": False,
+    }
+    assert completed.output_text == "ok"
+
+
+@pytest.mark.parametrize(
+    ("output", "stdout", "stderr", "expected"),
+    [
+        ("out\rerr", "out", "err", "out\rerr"),
+        ("", "src\n", "warn\n", "src\nwarn\n"),
+        ("", "ok", "boom", "ok\nboom"),
+        ("", "only stdout", "", "only stdout"),
+        ("", "", "only stderr", "only stderr"),
+    ],
+)
+def test_shell_output_transcript_reads_as_one_terminal(
+    output: str, stdout: str, stderr: str, expected: str
+) -> None:
+    result = ShellEffectOutput(stdout=stdout, stderr=stderr, output=output)
+
+    assert result.transcript == expected
+
+
+def test_shell_projection_keeps_the_transcript_a_tool_streamed_itself() -> None:
+    event = ToolResultEvent(
+        tool_name="bash",
+        tool_class=ExperimentalBash,
+        result=ExperimentalBashResult(command="pwd", output="one two"),
+        tool_call_id="call-1",
+    )
+    event = event.model_copy(
+        update={
+            "presentation": ToolUIDataAdapter(ExperimentalBash).get_result_presentation(
+                event
+            )
+        }
+    )
+
+    completed = cast(
+        CompletedEffectState, project_effect_state(event, output_text="one two")
+    )
+
+    assert completed.output_text == "one two"
+
+
+def test_non_shell_projection_leaves_an_unstreamed_effect_empty() -> None:
+    event = ToolResultEvent(
+        tool_name="grep",
+        tool_class=Grep,
+        result=GrepResult(
+            pattern="todo", matches="app.py:1", match_count=1, was_truncated=False
+        ),
+        tool_call_id="call-1",
+        presentation=ToolResultPresentation(
+            kind=ToolEffectKind.FILE_SEARCH,
+            display=EffectResultDisplay(success=True, message="Success"),
+        ),
+    )
+
+    completed = cast(CompletedEffectState, project_effect_state(event))
+
+    assert completed.output_text == ""
+
+
+def _project_shell_result(
+    tool_class, result: ExperimentalBashResult | CapturedShellResult
+) -> CompletedEffectState:
+    event = ToolResultEvent(
+        tool_name=tool_class.get_name(),
+        tool_class=tool_class,
+        result=result,
+        tool_call_id="call-1",
+    )
+    presentation = ToolUIDataAdapter(tool_class).get_result_presentation(event)
+    assert presentation.kind is ToolEffectKind.SHELL
+    return cast(
+        CompletedEffectState,
+        project_effect_state(event.model_copy(update={"presentation": presentation})),
+    )
 
 
 @pytest.mark.parametrize(
@@ -153,27 +257,61 @@ def test_managed_shell_variants_project_output_for_terminal_safe_rendering(
     tool_class,
 ) -> None:
     result = ExperimentalBashResult(
-        command="status",
-        stdout="ready\rworking\x1b[2K\x07done",
-        stderr="\x1b[31mwarning\x1b[0m",
+        command="status", output="ready\rworking\x1b[2K\x07done"
     )
-    event = ToolResultEvent(
-        tool_name=tool_class.get_name(),
-        tool_class=tool_class,
-        result=result,
-        tool_call_id="call-1",
-    )
-    presentation = ToolUIDataAdapter(tool_class).get_result_presentation(event)
 
-    assert presentation.kind is ToolEffectKind.SHELL
+    completed = _project_shell_result(tool_class, result)
 
-    completed = cast(
-        CompletedEffectState,
-        project_effect_state(event.model_copy(update={"presentation": presentation})),
-    )
     assert completed.output == {
         "stdout": "ready\rworking\x1b[2K\x07done",
+        "stderr": "",
+        "output": "ready\rworking\x1b[2K\x07done",
+        "truncated": False,
+    }
+
+
+@pytest.mark.parametrize("tool_class", [GitBash, WindowsShell])
+def test_fallback_shell_variants_project_both_captured_streams(tool_class) -> None:
+    result = CapturedShellResult(
+        command="status", stdout="\x1b[32mok\x1b[0m", stderr="\x1b[31mwarning\x1b[0m"
+    )
+
+    completed = _project_shell_result(tool_class, result)
+
+    assert completed.output == {
+        "stdout": "\x1b[32mok\x1b[0m",
         "stderr": "\x1b[31mwarning\x1b[0m",
+        "output": "",
+        "truncated": False,
+    }
+
+
+def test_legacy_persisted_shell_payloads_still_project_on_resume() -> None:
+    # Transcripts written before the shell result split persist the raw dump of
+    # the old model, which carried `output` alongside `stdout` / `stderr`.
+    legacy_output = {
+        "command": "status",
+        "session_id": "session-1",
+        "status": "completed",
+        "exit_code": 0,
+        "shell": "/bin/bash",
+        "background": False,
+        "output": "ok",
+        "next_cursor": 2,
+        "truncated": False,
+        "output_path": "",
+        "stdout": "ok",
+        "stderr": "warning",
+        "returncode": 0,
+    }
+
+    projected = project_effect_output_value(ToolEffectKind.SHELL, legacy_output)
+
+    assert projected == {
+        "stdout": "ok",
+        "stderr": "warning",
+        "output": "ok",
+        "truncated": False,
     }
 
 
@@ -267,3 +405,34 @@ def test_effect_kind_is_strict_on_the_wire() -> None:
 
     with pytest.raises(ValidationError, match="kind"):
         validate_history_entry(invalid_entry)
+
+
+def test_failed_effect_display_prefers_the_summary_the_tool_supplied() -> None:
+    state = project_effect_state(
+        ToolResultEvent(
+            tool_name="bash",
+            tool_class=None,
+            error="<tool_error>bash failed: Return code: 3\n\nOutput:\nboom</tool_error>",
+            error_display="Return code: 3",
+            tool_call_id="call-1",
+        ),
+        output_text="boom",
+    )
+
+    assert isinstance(state, FailedEffectState)
+    assert state.display.message == "Return code: 3"
+    assert "boom" in state.error.message
+
+
+def test_failed_effect_display_falls_back_to_the_error_text() -> None:
+    state = project_effect_state(
+        ToolResultEvent(
+            tool_name="grep",
+            tool_class=None,
+            error="<tool_error>grep failed: no such file</tool_error>",
+            tool_call_id="call-1",
+        )
+    )
+
+    assert isinstance(state, FailedEffectState)
+    assert state.display.message == "grep failed: no such file"

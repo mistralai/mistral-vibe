@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from uuid import uuid4
 
 from acp import Client, PromptResponse
@@ -40,12 +41,19 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import AppServerResponseError
 from vibe.utils.data_retention import DATA_RETENTION_MESSAGE
+from vibe.utils.retry_prompt import build_retry_prompt
 
-_MCP_COMMAND_MAX_SPLITS = 2
-_MCP_COMMAND_ARG_INDEX = 2
 _TELEPORT_NO_HISTORY_MESSAGE = "No conversation history to teleport."
+_RETRY_NO_HISTORY_MESSAGE = "No interrupted response to continue."
 
 type SendConfigOptions = Callable[[AcpSession], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class InjectedPrompt:
+    """Command outcome that runs a turn on a prompt the user never typed."""
+
+    text: str
 
 
 class AcpCommandController:
@@ -79,7 +87,7 @@ class AcpCommandController:
 
     async def execute(
         self, session: AcpSession, text: str, message_id: str
-    ) -> PromptResponse | None:
+    ) -> PromptResponse | InjectedPrompt | None:
         parts = text.strip().split(None, 1)
         if not parts or not parts[0].startswith("/"):
             return None
@@ -87,6 +95,7 @@ class AcpCommandController:
         command = session.commands.get(name)
         if command is None:
             return None
+        arguments = parts[1] if len(parts) > 1 else ""
         await self._user_message(session, text, message_id)
         session.app_server.resources.telemetry.record(
             "vibe.slash_command_used", {"command": name, "command_type": "builtin"}
@@ -95,17 +104,19 @@ class AcpCommandController:
             case AcpCommandKind.HELP:
                 response = await self._help(session)
             case AcpCommandKind.COMPACT:
-                response = await self._compact(session, text)
+                response = await self._compact(session, arguments)
             case AcpCommandKind.RELOAD:
                 response = await self._reload(session)
             case AcpCommandKind.LOG:
                 response = await self._log(session)
             case AcpCommandKind.MCP:
-                response = await self._mcp(session, text)
+                response = await self._mcp(session, arguments)
             case AcpCommandKind.TELEPORT:
                 response = await self._teleport(session)
             case AcpCommandKind.PROXY_SETUP:
-                response = await self._proxy_setup(session, text)
+                response = await self._proxy_setup(session, arguments)
+            case AcpCommandKind.RETRY:
+                response = await self._retry(session, arguments)
             case AcpCommandKind.LEANSTALL:
                 response = await self._set_lean(session, installed=True)
             case AcpCommandKind.UNLEANSTALL:
@@ -164,14 +175,13 @@ class AcpCommandController:
             )
         return await self._reply(session, "\n".join(lines))
 
-    async def _compact(self, session: AcpSession, text: str) -> PromptResponse:
+    async def _compact(self, session: AcpSession, instructions: str) -> PromptResponse:
         if not session.app_server.history:
             return await self._reply(session, "No conversation history to compact yet.")
         call_id = str(uuid4())
         await self._client().session_update(
             session_id=session.id, update=compact_start_update(call_id)
         )
-        instructions = text.strip().partition(" ")[2].strip()
         try:
             await session.app_server.compact(instructions)
         except AppServerResponseError as exc:
@@ -219,14 +229,10 @@ class AcpCommandController:
         )
         return await self._reply(session, message)
 
-    async def _mcp(self, session: AcpSession, text: str) -> PromptResponse:
-        parts = text.strip().split(None, _MCP_COMMAND_MAX_SPLITS)
-        subcommand = parts[1].lower() if len(parts) > 1 else "status"
-        alias = (
-            parts[_MCP_COMMAND_ARG_INDEX].strip()
-            if len(parts) > _MCP_COMMAND_ARG_INDEX
-            else ""
-        )
+    async def _mcp(self, session: AcpSession, arguments: str) -> PromptResponse:
+        parts = arguments.split(None, 1)
+        subcommand = parts[0].lower() if parts else "status"
+        alias = parts[1] if len(parts) > 1 else ""
         match subcommand:
             case "status" if alias:
                 response = await self._reply(session, "Usage: `/mcp status`")
@@ -347,13 +353,13 @@ class AcpCommandController:
             )
         raise InternalError("Teleport ended without a result")
 
-    async def _proxy_setup(self, session: AcpSession, text: str) -> PromptResponse:
-        arguments = text.strip().partition(" ")[2].strip()
+    async def _proxy_setup(self, session: AcpSession, arguments: str) -> PromptResponse:
         settings = await session.app_server.resources.config.read_proxy()
         if not arguments:
             return await self._reply(session, get_proxy_help_text(settings))
-        key, _, value = arguments.partition(" ")
-        key = key.upper()
+        parts = arguments.split(None, 1)
+        key = parts[0].upper()
+        value = parts[1] if len(parts) > 1 else ""
         if key not in settings.values:
             return await self._reply(
                 session, f"Error: Unsupported proxy variable: {key}"
@@ -376,6 +382,13 @@ class AcpCommandController:
                 "Please start a new chat for changes to take effect."
             )
         return await self._reply(session, message)
+
+    async def _retry(
+        self, session: AcpSession, instructions: str
+    ) -> PromptResponse | InjectedPrompt:
+        if not session.app_server.history:
+            return await self._reply(session, _RETRY_NO_HISTORY_MESSAGE)
+        return InjectedPrompt(build_retry_prompt(instructions))
 
     async def _set_lean(
         self, session: AcpSession, *, installed: bool

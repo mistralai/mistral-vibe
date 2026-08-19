@@ -118,12 +118,15 @@ class ApiKeyScreen(OnboardingScreen):
         feedback.add_class("error")
         input_box.add_class("invalid")
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.validation_result and event.validation_result.is_valid:
-            self._save_and_finish(event.value)
+            await self._save_and_finish(event.value)
 
-    def _save_and_finish(self, api_key: str) -> None:
-        self.app.exit(self.onboarding_app.persist_credentials(api_key))
+    async def _save_and_finish(self, api_key: str) -> None:
+        # `persist_credentials` may hit the network for tenant-domain discovery;
+        # awaiting keeps the Textual event loop responsive.
+        result = await self.onboarding_app.persist_credentials(api_key)
+        self.app.exit(result)
 
     def on_mouse_up(self, event: MouseUp) -> None:
         copy_selection_to_clipboard(self.app)

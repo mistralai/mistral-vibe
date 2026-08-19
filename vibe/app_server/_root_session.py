@@ -20,6 +20,7 @@ from vibe.app_server.models import (
     SessionLogSummary,
 )
 from vibe.core.agent_loop import AgentLoop
+from vibe.observability.logging import logger
 
 
 class SessionResources(Protocol):
@@ -101,7 +102,18 @@ class RootSessionCoordinator:
         )
 
     def replace_from_core(self) -> None:
-        self._history.replace(project_history(self._agent_loop))
+        # Runs after an in-place resume has committed, so it must not raise:
+        # malformed stored messages can make project_history throw beyond the
+        # ValidationError it already tolerates. Degrade to an empty history.
+        try:
+            history = project_history(self._agent_loop)
+        except Exception:
+            logger.exception(
+                "Failed to project history while refreshing resumed session_id=%s",
+                self._agent_loop.session_id,
+            )
+            history = []
+        self._history.replace(history)
         self._handoffs.clear()
         self._resources.restore_loops()
 

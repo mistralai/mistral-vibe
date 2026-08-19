@@ -1145,7 +1145,7 @@ class TestAuthActionablediscovery:
 
 class TestComputeConnectorCounts:
     def test_no_registry(self) -> None:
-        assert compute_connector_counts(build_test_vibe_config(), None) == (0, 0)
+        assert compute_connector_counts(build_test_vibe_config(), None) == (0, None)
 
     def test_empty_registry(self) -> None:
         registry = FakeConnectorRegistry()

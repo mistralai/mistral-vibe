@@ -14,13 +14,14 @@ import sys
 from typing import TYPE_CHECKING
 
 from vibe import __version__
+from vibe._experimental_harness import add_experimental_harness_argument
 
 # Anything heavier than argparse is imported inside the functions below, after
 # argument parsing, so that --help/--version don't pay for the config stack
 # (pydantic, textual, rich) at import time.
 
 if TYPE_CHECKING:
-    from vibe.core.worktree import PreparedWorktree, WorktreeCleanupState
+    from vibe.core.git.worktree import PreparedWorktree, WorktreeCleanupState
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -33,6 +34,7 @@ def parse_arguments() -> argparse.Namespace:
             "Environment variables:\n"
             "  VIBE_HOME       Override the Vibe home directory (default: ~/.vibe)\n"
             "  LOG_LEVEL       Logging level: DEBUG, INFO, WARNING (default), ERROR, CRITICAL.\n"
+            "                  Also set via log_level in config.toml or /log-level at runtime.\n"
             "                  Logs are written to $VIBE_HOME/logs/vibe.log.\n"
             "  LOG_MAX_BYTES   Max size of vibe.log before rotation (default: 10485760).\n"
             "  VIBE_*          Override any config field (e.g. VIBE_ACTIVE_MODEL=local)."
@@ -114,6 +116,7 @@ def parse_arguments() -> argparse.Namespace:
         "'default_agent' config setting in both interactive and programmatic "
         "(-p/--prompt) mode.",
     )
+    add_experimental_harness_argument(parser)
     parser.add_argument(
         "--auto-approve",
         "--yolo",
@@ -183,6 +186,34 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _enter_worktree(args: argparse.Namespace) -> PreparedWorktree:
+    """Prepare the requested worktree, hold it, and chdir into it."""
+    from rich import print as rprint
+
+    from vibe.core.git.errors import GitError
+    from vibe.core.git.worktree import ManagedWorktree, WorktreeRepository
+
+    requested = "" if args.worktree is True else f" {args.worktree!r}"
+    rprint(f"[dim]Preparing worktree{requested}...[/]", file=sys.stderr)
+    try:
+        with WorktreeRepository.open(Path.cwd()) as repository:
+            if args.worktree is True:
+                prompt = args.prompt or args.initial_prompt
+                session = repository.prepare_auto(
+                    prompt=prompt, suggested_name=_suggest_worktree_name(prompt)
+                )
+            else:
+                session = repository.prepare(args.worktree)
+    except GitError as e:
+        rprint(f"[red]Error: {e}[/]")
+        sys.exit(1)
+    rprint(f"[dim]Using worktree: {session.path}[/]", file=sys.stderr)
+    if managed := ManagedWorktree.at(session.root):
+        managed.hold(_cli_worktree_holder())
+    os.chdir(session.path)
+    return session
+
+
 def _prompt_remove_worktree(
     worktree: PreparedWorktree, cleanup_state: WorktreeCleanupState
 ) -> bool:
@@ -223,18 +254,27 @@ def _prompt_delete_attached_branch(worktree: PreparedWorktree) -> bool:
     return answer in {"y", "yes", "delete"}
 
 
+# One holder per CLI process. An app-server sweeping the same repo reads these
+# markers to tell a live worktree from an abandoned one, so a CLI session that
+# never registered could have its worktree removed underneath it.
+def _cli_worktree_holder() -> str:
+    return f"cli-{os.getpid()}"
+
+
 def _cleanup_worktree_on_exit(worktree: PreparedWorktree) -> None:
     from rich import print as rprint
 
-    from vibe.core.worktree import (
-        WorktreeError,
-        inspect_worktree_for_cleanup,
-        remove_worktree,
-    )
+    from vibe.core.git.errors import GitError
+    from vibe.core.git.worktree import ManagedWorktree
 
+    # Our marker stays up for all of this, prompts included: an app-server
+    # sweeping the same repo treats an unheld worktree as fair game, and the
+    # user can sit at a prompt indefinitely. It is dropped by the caller, which
+    # acquired it, on every path rather than only this one.
+    holder = _cli_worktree_holder()
     try:
-        cleanup_state = inspect_worktree_for_cleanup(worktree)
-    except WorktreeError as e:
+        cleanup_state = worktree.inspect_for_cleanup()
+    except GitError as e:
         rprint(
             f"[yellow]Could not inspect worktree for cleanup: {e}[/]", file=sys.stderr
         )
@@ -248,13 +288,30 @@ def _cleanup_worktree_on_exit(worktree: PreparedWorktree) -> None:
 
     delete_branch = worktree.branch_created or _prompt_delete_attached_branch(worktree)
 
+    # Re-read after the prompts: an app-server session can join this
+    # worktree through the composer while the user sits at them, and
+    # removing it then would drop a live session into a deleted directory.
+    # Our own marker is still up, so discount it.
+    managed = ManagedWorktree.at(worktree.root)
+    held_by = frozenset() if managed is None else managed.holders()
+    if remaining := held_by - {holder}:
+        rprint(
+            f"[dim]Keeping worktree {worktree.root}: in use by "
+            f"{len(remaining)} other session(s)[/]",
+            file=sys.stderr,
+        )
+        return
+
     try:
         rprint(f"[dim]Removing worktree: {worktree.root}[/]", file=sys.stderr)
-        remove_worktree(worktree, delete_branch=delete_branch)
-    except WorktreeError as e:
+        worktree.leave_if_current_directory()
+        worktree.remove(delete_branch=delete_branch)
+    except GitError as e:
         rprint(f"[yellow]Could not remove worktree: {e}[/]", file=sys.stderr)
         return
 
+    if managed is not None:
+        managed.forget()
     rprint(f"[dim]Removed worktree: {worktree.root}[/]", file=sys.stderr)
     if not delete_branch:
         rprint(f"[dim]Kept branch: {worktree.branch}[/]", file=sys.stderr)
@@ -270,7 +327,7 @@ def _suggest_worktree_name(prompt: str | None) -> str | None:
 
     from vibe.core.config.harness_files import init_harness_files_manager
     from vibe.core.config.vibe_schema import load_dotenv_values
-    from vibe.core.worktree_naming_model import suggest_worktree_name
+    from vibe.core.git.worktree.naming_model import suggest_worktree_name
 
     # Worktrees are prepared before run_cli, so neither of the things the
     # suggestion needs has happened yet. ~/.vibe/.env is not in os.environ, so a
@@ -319,30 +376,7 @@ def main() -> None:
     # Must run before `cwd` is read and before run_cli so that session lookups
     # (-c / --resume picker) scope to the worktree directory.
     if args.worktree and not (args.setup or args.check_upgrade):
-        from vibe.core.worktree import (
-            WorktreeError,
-            prepare_auto_worktree_session,
-            prepare_worktree_session,
-        )
-
-        requested = "" if args.worktree is True else f" {args.worktree!r}"
-        rprint(f"[dim]Preparing worktree{requested}...[/]", file=sys.stderr)
-        try:
-            if args.worktree is True:
-                prompt = args.prompt or args.initial_prompt
-                worktree_session = prepare_auto_worktree_session(
-                    Path.cwd(),
-                    prompt=prompt,
-                    suggested_name=_suggest_worktree_name(prompt),
-                )
-            else:
-                worktree_session = prepare_worktree_session(args.worktree, Path.cwd())
-        except WorktreeError as e:
-            rprint(f"[red]Error: {e}[/]")
-            sys.exit(1)
-        target = worktree_session.path
-        rprint(f"[dim]Using worktree: {target}[/]", file=sys.stderr)
-        os.chdir(target)
+        worktree_session = _enter_worktree(args)
 
     try:
         Path.cwd()
@@ -395,6 +429,16 @@ def _run_cli_with_worktree_cleanup(
             and session_started
         ):
             _cleanup_worktree_on_exit(worktree_session)
+        # Released for every worktree this run held, not only the ones eligible
+        # for cleanup above. A marker left behind reads as a live session
+        # forever: releases report the worktree in use, and the sweep only
+        # reclaims reservations that never became one, so nothing would remove
+        # that checkout again.
+        if worktree_session is not None:
+            from vibe.core.git.worktree import ManagedWorktree
+
+            if managed := ManagedWorktree.at(worktree_session.root):
+                managed.release_holder(_cli_worktree_holder())
 
 
 if __name__ == "__main__":

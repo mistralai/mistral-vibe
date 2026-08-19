@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from vibe.config_values import (
     AUTO_THEME as AUTO_THEME,
+    DEFAULT_LOG_LEVEL as DEFAULT_LOG_LEVEL,
     DEFAULT_THEME as DEFAULT_THEME,
     FALLBACK_THEME as FALLBACK_THEME,
 )

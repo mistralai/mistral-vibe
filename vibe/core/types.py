@@ -169,6 +169,19 @@ class ChildSessionLink(BaseModel):
     relative_path: str | None = None
 
 
+# Session state rather than a message, because the worktree is created before
+# the session has a first turn: there is no message it could belong to, and the
+# transcript is rebuilt on every resume from what was persisted here.
+class WorktreeContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entry_id: str
+    name: str
+    branch: str
+    path: str
+    created_at: int
+
+
 class SessionMetadata(BaseModel):
     session_id: str
     parent_session_id: str | None = None
@@ -183,6 +196,8 @@ class SessionMetadata(BaseModel):
     title: str | None = None
     title_source: Literal["auto", "manual"] = "auto"
     experiments: EvalResponse | None = None
+    import_provenance: dict[str, JsonValue] | None = None
+    created_worktree: WorktreeContext | None = None
 
 
 StrToolChoice = Literal["auto", "none", "any", "required"]
@@ -525,6 +540,7 @@ class ToolResultEvent(BaseEvent):
     tool_class: type[BaseTool] | None
     result: BaseModel | None = None
     error: str | None = None
+    error_display: str | None = None
     skipped: bool = False
     skip_reason: str | None = None
     cancelled: bool = False

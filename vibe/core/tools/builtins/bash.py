@@ -7,7 +7,7 @@ from pathlib import Path
 import shlex
 from typing import ClassVar, final
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from tree_sitter import Language, Node, Parser
 import tree_sitter_bash as tsbash
 
@@ -32,7 +32,7 @@ from vibe.core.tools.utils import is_path_within_workdir, resolve_tool_path
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows, kill_async_subprocess
 from vibe.core.utils.shell import spawn_shell_command, uses_posix_shell
-from vibe.utils.io import decode_safe
+from vibe.utils.io import decode_console_safe
 from vibe.utils.paths import normalize_windows_path
 from vibe.utils.tool_presentation import ToolEffectKind
 
@@ -287,16 +287,42 @@ class BashArgs(BaseModel):
     )
 
 
-class BashResult(BaseModel):
+class CapturedShellResult(BaseModel):
+    """Result of a shell that captures stdout and stderr as two separate pipes."""
+
     command: str
-    stdout: str
-    stderr: str
-    returncode: int
+    shell: str = ""
+    exit_code: int = 0
+    stdout: str = ""
+    stderr: str = ""
+
+    # `model_dump` of a tool result is the `post_tool` hook payload, so dropping
+    # this key outright would break hooks that read `tool_output.returncode`.
+    @computed_field(description="Deprecated alias for `exit_code`.")
+    @property
+    def returncode(self) -> int:
+        return self.exit_code
+
+
+def completed_shell_result(
+    *, command: str, stdout: str, stderr: str, exit_code: int, shell: str = ""
+) -> CapturedShellResult:
+    if exit_code != 0:
+        message = f"Command failed: {command!r}\nReturn code: {exit_code}"
+        if stderr:
+            message += f"\nStderr: {stderr}"
+        if stdout:
+            message += f"\nStdout: {stdout}"
+        raise ToolError(message)
+
+    return CapturedShellResult(
+        command=command, shell=shell, exit_code=exit_code, stdout=stdout, stderr=stderr
+    )
 
 
 class Bash(
-    BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState],
-    ToolUIData[BashArgs, BashResult],
+    BaseTool[BashArgs, CapturedShellResult, BashToolConfig, BaseToolState],
+    ToolUIData[BashArgs, CapturedShellResult],
 ):
     effect_kind = ToolEffectKind.SHELL
     shell_rollout: ClassVar[str | None] = "legacy"
@@ -313,7 +339,7 @@ class Bash(
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
-        if not isinstance(event.result, BashResult):
+        if not isinstance(event.result, CapturedShellResult):
             return ToolResultDisplay(
                 success=False, message=event.error or event.skip_reason or "No result"
             )
@@ -509,26 +535,9 @@ class Bash(
     def _build_timeout_error(self, command: str, timeout: int) -> ToolError:
         return ToolError(f"Command timed out after {timeout}s: {command!r}")
 
-    @final
-    def _build_result(
-        self, *, command: str, stdout: str, stderr: str, returncode: int
-    ) -> BashResult:
-        if returncode != 0:
-            error_msg = f"Command failed: {command!r}\n"
-            error_msg += f"Return code: {returncode}"
-            if stderr:
-                error_msg += f"\nStderr: {stderr}"
-            if stdout:
-                error_msg += f"\nStdout: {stdout}"
-            raise ToolError(error_msg.strip())
-
-        return BashResult(
-            command=command, stdout=stdout, stderr=stderr, returncode=returncode
-        )
-
     async def run(
         self, args: BashArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | BashResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | CapturedShellResult, None]:
         timeout = args.timeout or self.config.default_timeout
         max_bytes = self.config.max_output_bytes
 
@@ -557,11 +566,11 @@ class Bash(
                 raise ToolError(
                     f"Error running command {args.command!r}: {exc}"
                 ) from exc
-            yield self._build_result(
+            yield completed_shell_result(
                 command=args.command,
                 stdout=result.stdout[:max_bytes],
                 stderr=result.stderr[:max_bytes],
-                returncode=result.returncode,
+                exit_code=result.returncode,
             )
             return
 
@@ -578,23 +587,17 @@ class Bash(
                 raise self._build_timeout_error(args.command, timeout)
 
             stdout = (
-                decode_safe(stdout_bytes, from_subprocess=True).text[:max_bytes]
-                if stdout_bytes
-                else ""
+                decode_console_safe(stdout_bytes)[:max_bytes] if stdout_bytes else ""
             )
             stderr = (
-                decode_safe(stderr_bytes, from_subprocess=True).text[:max_bytes]
-                if stderr_bytes
-                else ""
+                decode_console_safe(stderr_bytes)[:max_bytes] if stderr_bytes else ""
             )
 
-            returncode = proc.returncode or 0
-
-            yield self._build_result(
+            yield completed_shell_result(
                 command=args.command,
                 stdout=stdout,
                 stderr=stderr,
-                returncode=returncode,
+                exit_code=proc.returncode or 0,
             )
 
         except (ToolError, asyncio.CancelledError):

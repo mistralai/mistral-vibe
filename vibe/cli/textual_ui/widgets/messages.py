@@ -14,6 +14,9 @@ from vibe.observability.logging import logger
 from vibe.utils.io import read_safe_async
 
 if TYPE_CHECKING:
+    from textual.widgets import Markdown
+    from textual.widgets._markdown import MarkdownStream
+
     from vibe.cli.textual_ui.app import ChatScroll
 
 
@@ -25,9 +28,7 @@ from textual.css.query import NoMatches
 from textual.geometry import Size
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Link, Markdown, Static
-from textual.widgets._markdown import MarkdownStream
-from watchfiles import awatch
+from textual.widgets import Link, Static
 
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.collapsible import (
@@ -40,7 +41,7 @@ from vibe.cli.textual_ui.widgets.no_markup_static import (
     NonSelectableStatic,
 )
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
-from vibe.cli.textual_ui.widgets.tool_widgets import _clean_output
+from vibe.cli.textual_ui.widgets.tool_widgets import clean_output
 
 
 class ExpandingBorder(NonSelectableStatic):
@@ -259,6 +260,8 @@ class StreamingMessageBase(Static):
 
     def _ensure_stream(self) -> MarkdownStream:
         if self._stream is None:
+            from textual.widgets import Markdown
+
             self._stream = Markdown.get_stream(self._get_markdown())
         return self._stream
 
@@ -324,6 +327,8 @@ class AssistantMessage(StreamingMessageBase):
         self.add_class("assistant-message")
 
     def compose(self) -> ComposeResult:
+        from textual.widgets import Markdown
+
         markdown = Markdown("")
         self._markdown = markdown
         yield markdown
@@ -359,6 +364,8 @@ class ReasoningMessage(ClickWithoutDragMixin, SpinnerMixin, StreamingMessageBase
                     classes="reasoning-collapsed-text",
                 )
                 yield self._status_text_widget
+            from textual.widgets import Markdown
+
             markdown = Markdown("", classes="reasoning-message-content")
             markdown.display = not self.collapsed
             self._markdown = markdown
@@ -417,6 +424,8 @@ class UserCommandMessage(Static):
         self._content = content
 
     def compose(self) -> ComposeResult:
+        from textual.widgets import Markdown
+
         with Horizontal(classes="user-command-container"):
             yield ExpandingBorder(classes="user-command-border")
             with Vertical(classes="user-command-content"):
@@ -439,6 +448,8 @@ class WhatsNewMessage(Static):
         self._content = content
 
     def compose(self) -> ComposeResult:
+        from textual.widgets import Markdown
+
         yield Markdown(self._content)
 
 
@@ -459,6 +470,25 @@ class VscodeExtensionPromoMessage(Static):
         self._content = content
 
     def compose(self) -> ComposeResult:
+        from textual.widgets import Markdown
+
+        yield Markdown(self._content)
+
+
+class CustomToolsDeprecationMessage(Static):
+    def __init__(self, tool_names: list[str]) -> None:
+        super().__init__()
+        self.add_class("custom-tools-deprecation-message")
+        names = ", ".join(f"`{name}`" for name in sorted(tool_names))
+        replacement = "a skill" if len(tool_names) == 1 else "skills"
+        self._content = (
+            "**Support for custom tools will be deprecated soon.** "
+            f"Ask Vibe to help replace yours ({names}) with {replacement}."
+        )
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets import Markdown
+
         yield Markdown(self._content)
 
 
@@ -510,7 +540,7 @@ class BashOutputMessage(ClickWithoutDragMixin, SpinnerMixin, Static):
     def _clean_lines(self) -> list[str]:
         # Sanitize captured output (ANSI escapes, \r redraws, control bytes)
         # before splitting so it renders terminal-safe and line counts match.
-        return _clean_output(self._output).splitlines()
+        return clean_output(self._output).splitlines()
 
     def _preview_text(self) -> str:
         return "\n".join(self._clean_lines()[: self.PREVIEW_LINES])
@@ -667,7 +697,7 @@ class ErrorMessage(Static):
             error = (
                 self._error
                 if isinstance(self._error, Content)
-                else Content(self._error)
+                else Content(clean_output(self._error))
             )
             text = Content("Error: ") + error if self._show_border else error
             self._content_widget = NoMarkupStatic(text, classes="error-content")
@@ -743,10 +773,14 @@ class PlanFileMessage(Widget):
         self._watch_task: asyncio.Task | None = None
 
     def compose(self) -> ComposeResult:
+        from textual.widgets import Markdown
+
         with Vertical(classes="plan-file-wrapper"):
             yield Markdown(self.content, classes="plan-file-content")
 
     def watch_content(self, new_content: str) -> None:
+        from textual.widgets import Markdown
+
         try:
             self.query_one(Markdown).update(new_content)
         except NoMatches:
@@ -757,6 +791,8 @@ class PlanFileMessage(Widget):
         self._watch_task = asyncio.create_task(self._watch_file())
 
     async def _watch_file(self) -> None:
+        from watchfiles import awatch
+
         try:
             async for _ in awatch(self._file_path):
                 self.content = (await read_safe_async(self._file_path)).text

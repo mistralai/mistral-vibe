@@ -56,7 +56,10 @@ class SubagentRunAccumulator:
             return None
         if event.result is None or event.tool_class is None:
             return None
-        display = ToolUIDataAdapter(event.tool_class).get_result_display(event)
+        if event.presentation is not None:
+            display = event.presentation.display
+        else:
+            display = ToolUIDataAdapter(event.tool_class).get_result_display(event)
         return ToolStreamEvent(
             tool_name="task",
             message=f"{event.tool_name}: {display.text}",

@@ -113,11 +113,14 @@ class ToolManager:
         self._mcp_integrated = False
 
         self._tool_variants_by_name: dict[str, list[type[BaseTool]]] = {}
+        self._custom_tool_variants_by_name: dict[str, list[bool]] = {}
         # Historical one-class-per-name registry. When multiple classes publish the
         # same name, this is the fallback used if no variant is active.
         self._all_tools: dict[str, type[BaseTool]] = {}
-        for tool_class in self._iter_tool_classes(self._search_paths):
-            self._register_discovered_tool_variant(tool_class)
+        for tool_class, is_custom in self._iter_tool_classes_with_origin(
+            self._search_paths
+        ):
+            self._register_discovered_tool_variant(tool_class, is_custom=is_custom)
         self._tool_descriptions: dict[str, str] = dict(
             self._iter_tool_descriptions(self._search_paths)
         )
@@ -170,16 +173,24 @@ class ToolManager:
         the directory — the same flat layout as the builtins and as the sibling
         ``prompts/*.md`` descriptions (see ``_iter_tool_descriptions``).
         """
+        for tool_class, _ in ToolManager._iter_tool_classes_with_origin(search_paths):
+            yield tool_class
+
+    @staticmethod
+    def _iter_tool_classes_with_origin(
+        search_paths: list[Path],
+    ) -> Iterator[tuple[type[BaseTool], bool]]:
+        builtin_dir = DEFAULT_TOOL_DIR.path.resolve()
         for base in search_paths:
             if not base.is_dir() and base.name.endswith(".py"):
                 if tools := ToolManager._load_tools_from_file(base):
                     for tool in tools:
-                        yield tool
+                        yield tool, not base.resolve().is_relative_to(builtin_dir)
 
             for path in base.glob("*.py"):
                 if tools := ToolManager._load_tools_from_file(path):
                     for tool in tools:
-                        yield tool
+                        yield tool, not path.resolve().is_relative_to(builtin_dir)
 
     @staticmethod
     def _load_tools_from_file(file_path: Path) -> list[type[BaseTool]] | None:
@@ -277,9 +288,12 @@ class ToolManager:
                 continue
         return defaults
 
-    def _register_discovered_tool_variant(self, tool_class: type[BaseTool]) -> None:
+    def _register_discovered_tool_variant(
+        self, tool_class: type[BaseTool], *, is_custom: bool
+    ) -> None:
         name = tool_class.get_name()
         self._tool_variants_by_name.setdefault(name, []).append(tool_class)
+        self._custom_tool_variants_by_name.setdefault(name, []).append(is_custom)
         self._all_tools[name] = tool_class
 
     @property
@@ -322,6 +336,29 @@ class ToolManager:
             }
         return result
 
+    @property
+    def custom_tool_names(self) -> set[str]:
+        available_names = set(self.available_tools)
+        custom_names: set[str] = set()
+        with self._lock:
+            for name in available_names:
+                fallback_tool_class = self._all_tools.get(name)
+                if fallback_tool_class is None:
+                    continue
+                selected = self._select_available_variant_with_index(
+                    name, fallback_tool_class
+                )
+                if selected is None:
+                    continue
+                _, discovery_index = selected
+                custom_variants = self._custom_tool_variants_by_name.get(name, [])
+                if (
+                    discovery_index < len(custom_variants)
+                    and custom_variants[discovery_index]
+                ):
+                    custom_names.add(name)
+        return custom_names
+
     def _is_tool_available(self, cls: type[BaseTool]) -> bool:
         if (
             cls.local_managed_shell_only
@@ -362,7 +399,16 @@ class ToolManager:
     def _select_available_variant(
         self, name: str, fallback: type[BaseTool]
     ) -> type[BaseTool] | None:
+        selected = self._select_available_variant_with_index(name, fallback)
+        if selected is None:
+            return None
+        return selected[0]
+
+    def _select_available_variant_with_index(
+        self, name: str, fallback: type[BaseTool]
+    ) -> tuple[type[BaseTool], int] | None:
         selected_tool_class: type[BaseTool] | None = None
+        selected_discovery_index = 0
         selected_rank: tuple[int, int] | None = None
 
         for discovery_index, tool_class in enumerate(
@@ -376,9 +422,12 @@ class ToolManager:
                 continue
 
             selected_tool_class = tool_class
+            selected_discovery_index = discovery_index
             selected_rank = rank
 
-        return selected_tool_class
+        if selected_tool_class is None:
+            return None
+        return selected_tool_class, selected_discovery_index
 
     @staticmethod
     def _tool_selection_priority(tool_class: type[BaseTool]) -> int:

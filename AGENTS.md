@@ -22,6 +22,7 @@ When creating or editing an ADR, follow the `write-vibe-adr` skill and keep the 
 | Adding or changing analytics instrumentation, telemetry events, or event properties | [0008 Feature Instrumentation](docs/adr/0008-feature-instrumentation.md) |
 | App-server ownership, RPCs, lifecycle, projections, effects, callbacks, client tools, or delivery adapters | [0009 App Server Boundary](docs/adr/0009-app-server-boundary.md) |
 | Textual `Content` rendering, styled text, markup parsing, or theme variables in widgets | [0010 Textual Content Rendering](docs/adr/0010-textual-content-rendering.md) |
+| App-server session backend interfaces, adapters, or runtime ownership | [0011 App Server Session Backends](docs/adr/0011-unified-harness-backend.md) |
 
 ## Commands
 
@@ -29,6 +30,8 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 
 - `uv run vibe` / `uv run vibe-acp` — the two entry points.
 - `uv run pytest` — full suite (parallel via `pytest-xdist`).
+- `uv run pytest tests/app_server/backend_contract` — shared app-server contract suite with the legacy backend.
+- `uv run --with-editable ../vibe_sdk/harness/runtimes/python pytest tests/app_server/backend_contract --experimental-harness` — Unified Harness contract frontier.
 - `uv run pyright` — strict type check.
 - `uv run ruff check --fix .` and `uv run ruff format .` — run both after every code change and report the files modified.
 - `uv run pre-commit run --all-files` — full lint pass. Install once with `uv tool install pre-commit && uv run pre-commit install`.
@@ -60,6 +63,14 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 - Pyright is strict and gates CI; fix types at the source.
 - No relative imports — `ban-relative-imports = "all"`. Always `from vibe.core.x import …`.
 - No inline `# type: ignore` or `# noqa`. Fix with refined signatures (TypeVar, Protocol), `isinstance` guards, `typing.cast` when control flow guarantees the type, or a small typed wrapper at the boundary.
+
+### `TYPE_CHECKING` and lazy imports
+
+Moving imports under `if TYPE_CHECKING:` or into function bodies cuts startup time but risks runtime `NameError`. Before merging any import-deferral change, run:
+
+- **Ruff `TC004`** (pre-commit hook) — per-file: flags `TYPE_CHECKING`-only names referenced at runtime.
+- **`uv run python scripts/check_import_contracts.py`** — runtime cross-file: imports every `from <mod> import <name>` across `vibe/` and `tests/` to verify it resolves; also rebuilds Pydantic models to catch lazily-failing field types. Catches cross-file re-exports `TC004` misses. Missing non-vibe deps are non-blocking warnings.
+- **`uv run scripts/suggest_lazy_imports.py`** — informational: reports deferral candidates (`TC001`–`TC003` + single-function heuristic). Not gated.
 
 ## Pydantic
 
@@ -128,6 +139,14 @@ Vibe ships on Linux, macOS, and Windows, but **CI runs the test suite on Linux o
 - No docstrings on test functions, methods, or classes — descriptive names like `test_create_user_returns_403_when_unauthorized` carry the intent. Pytest displays docstrings instead of node IDs when present, which hurts.
 - Tests are exempt from the `ANN` and `PLR` ruff rules (see `per-file-ignores`).
 - Changes to managed shell tools, managed shell backends, shell prompts, or shell dependencies require focused POSIX/common validation and passing Windows shell CI. If Windows shell CI is unavailable, the PR notes must include manual native Windows commands and results.
+- After app-server session behavior, backend adapters, or shared contract-fixture changes, run both backend contract commands. A failing Unified frontier is expected before parity; include its complete pytest summary in parity-related PRs.
+
+## Startup import cost
+
+CI gates cold-start module count via `vibe/scripts/check_startup_import_cost.py` (budgets in `vibe/scripts/startup_import_cost.vibe.toml`).
+
+- When a change touches imports or module structure on the path of `import vibe` or `from vibe.cli.textual_ui.app import VibeApp`, run `cd vibe && uv run scripts/check_startup_import_cost.py` and confirm the count stays within budget.
+- **Verify, do not bump.** An overshoot is a regression to investigate (lazy import, drop the dependency, defer the import) — not a reason to raise the budget. Only widen for a deliberate, PR-justified increase, and set to observed count + ~10% headroom, never the exact count.
 
 ## Git
 

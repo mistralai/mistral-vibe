@@ -34,6 +34,14 @@ def qm() -> QuitManager:
     return QuitManager(mock_app)
 
 
+class _SessionReadyApp:
+    """Warm-path base: app_server is set so the cold-path force-quit guard is skipped."""
+
+    @pytest.fixture(autouse=True)
+    def _set_app_server(self, app: VibeApp) -> None:
+        app._app_server = MagicMock()
+
+
 class TestQuitManager:
     def test_not_confirmed_initially(self, qm: QuitManager) -> None:
         assert qm.is_confirmed("Ctrl+C") is False
@@ -90,7 +98,7 @@ class TestQuitManager:
         assert qm.confirm_key is None
 
 
-class TestActionInterruptOrQuit:
+class TestActionInterruptOrQuit(_SessionReadyApp):
     def test_clears_input_when_has_value(self, app: VibeApp) -> None:
         mock_container = MagicMock()
         mock_container.value = "some text"
@@ -145,7 +153,7 @@ class TestActionInterruptOrQuit:
         mock_confirm.assert_called_once_with("Ctrl+C", "")
 
 
-class TestActionDeleteRightOrQuit:
+class TestActionDeleteRightOrQuit(_SessionReadyApp):
     def test_deletes_right_when_input_has_value(self, app: VibeApp) -> None:
         mock_input = MagicMock()
         mock_container = MagicMock()
@@ -200,6 +208,7 @@ class TestActionDeleteRightOrQuit:
         app = build_test_vibe_app(
             config=build_test_vibe_config(ask_confirmation_on_exit=False)
         )
+        app._app_server = MagicMock()
         config = build_test_app_config().model_copy(
             update={"ask_confirmation_on_exit": False}
         )

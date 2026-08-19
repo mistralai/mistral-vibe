@@ -4,7 +4,7 @@ import atexit
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 # opentelemetry is imported inside the functions below: spans only run during
 # agent turns and the exporter stack pulls in protobuf, so neither belongs on
@@ -34,6 +34,21 @@ VIBE_PROVIDER_API_STYLE = "vibe.provider.api_style"
 VIBE_REQUEST_CALL_TYPE = "vibe.request.call_type"
 VIBE_REQUEST_MESSAGE_ID = "vibe.request.message_id"
 VIBE_REQUEST_STREAMING = "vibe.request.streaming"
+_PUBLIC_REGIONAL_MISTRAL_API_HOSTS = frozenset({
+    "api.eu.mistral.ai",
+    "api.us.mistral.ai",
+})
+
+
+def _get_default_otel_server_url(mistral_provider: ProviderConfig | None) -> str:
+    if mistral_provider is None:
+        return DEFAULT_MISTRAL_SERVER_URL
+    server_url = get_server_url_from_api_base(mistral_provider.api_base)
+    if server_url is None:
+        return DEFAULT_MISTRAL_SERVER_URL
+    if urlparse(server_url).hostname in _PUBLIC_REGIONAL_MISTRAL_API_HOSTS:
+        return DEFAULT_MISTRAL_SERVER_URL
+    return server_url
 
 
 def build_otel_span_exporter_config(
@@ -45,7 +60,8 @@ def build_otel_span_exporter_config(
 
     # When otel_endpoint is set explicitly, authentication is the user's responsibility
     # (via OTEL_EXPORTER_OTLP_* env vars), so headers are left empty.
-    # Otherwise endpoint and API key are derived from the given Mistral provider.
+    # Otherwise endpoint and API key are derived from the given Mistral provider,
+    # except public regional Mistral API hosts that do not serve telemetry.
     traces_export_path = DEFAULT_TRACES_EXPORT_PATH.lstrip("/")
     if otel_endpoint:
         return OtelSpanExporterConfig(
@@ -53,14 +69,12 @@ def build_otel_span_exporter_config(
         )
 
     if mistral_provider is not None:
-        server_url = get_server_url_from_api_base(mistral_provider.api_base)
         api_key_env = mistral_provider.api_key_env_var or DEFAULT_MISTRAL_API_ENV_KEY
     else:
-        server_url = None
         api_key_env = DEFAULT_MISTRAL_API_ENV_KEY
 
     endpoint = urljoin(
-        f"{urljoin(server_url or DEFAULT_MISTRAL_SERVER_URL, MISTRAL_OTEL_PATH).rstrip('/')}/",
+        f"{urljoin(_get_default_otel_server_url(mistral_provider), MISTRAL_OTEL_PATH).rstrip('/')}/",
         traces_export_path,
     )
 

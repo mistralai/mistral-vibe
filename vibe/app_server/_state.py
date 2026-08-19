@@ -217,7 +217,9 @@ def message_preview(messages: Sequence[LLMMessage]) -> str:
         (
             message.content[:160]
             for message in messages
-            if message.role is Role.user and message.content
+            # Skips injected context: a manual shell summary is a user-role
+            # message the user never typed.
+            if message.role is Role.user and message.content and not message.injected
         ),
         "",
     )

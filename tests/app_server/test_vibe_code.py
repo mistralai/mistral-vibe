@@ -12,7 +12,7 @@ from typing import Any, cast
 import pytest
 
 from tests.conftest import build_test_agent_loop
-from tests.stubs.app_server import create_test_app_server_session
+from tests.stubs.app_server import create_test_app_server_session, legacy_backend
 from tests.stubs.fake_account_gateway import FakeAccountGateway
 from vibe.app_server._account import WhoAmIResult
 from vibe.app_server._vibe_code import VibeCodeController
@@ -494,7 +494,7 @@ async def test_closing_teleport_stream_cancels_server_operation(
     monkeypatch.setattr(agent_loop, "teleport_to_vibe_code", teleport)
     stream = session.resources.vibe_code.teleport(None, project_id=project.project_id)
     server = _server(session)
-    controller = server._handler._vibe_code
+    controller = legacy_backend(server).handler._vibe_code
 
     try:
         await session.resources.vibe_code.open_projects(
@@ -583,7 +583,7 @@ async def test_shutdown_cleans_up_push_waiter_and_teleport_task(
     monkeypatch.setattr(agent_loop, "teleport_to_vibe_code", teleport)
     stream = session.resources.vibe_code.teleport(None, project_id=project.project_id)
     server = _server(session)
-    controller = server._handler._vibe_code
+    controller = legacy_backend(server).handler._vibe_code
 
     await session.resources.vibe_code.open_projects(for_teleport=True, prompt="ship it")
     await session.resources.vibe_code.select_project(project.project_id)

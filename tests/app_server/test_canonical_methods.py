@@ -15,16 +15,11 @@ from vibe.app_server.protocol import (
     ConfigReadParams,
     ConfigReadResponse,
     ConfigWriteParams,
-    PageRequest,
     ProtocolErrorCode,
     SessionHistoryListParams,
     SessionHistoryListResponse,
-    SessionReadParams,
-    SessionReadResponse,
     SessionShellCommandParams,
     SessionShellCommandResponse,
-    SessionTurnsListParams,
-    SessionTurnsListResponse,
 )
 from vibe.app_server.session import AppServerSession
 
@@ -36,26 +31,6 @@ async def _session_with_history() -> tuple[AppServerClient, AppServerSession]:
     session = await attach_test_app_server_session(client)
     _ = [event async for event in session.act("hello", client_message_id="u1")]
     return client, session
-
-
-@pytest.mark.asyncio
-async def test_session_read_returns_public_state_and_event_watermark() -> None:
-    client, session = await _session_with_history()
-    try:
-        result = await client.request(
-            "session/read", SessionReadParams(session_id=session.session_id)
-        )
-    finally:
-        await session.close()
-
-    response = SessionReadResponse.model_validate(result)
-    assert response.state.session.id == session.session_id
-    assert "vibe" not in result
-    assert "state" in result
-    assert result["lastEventId"] == response.state.event_id
-    assert "latestTurn" not in result["state"]
-    assert isinstance(result["state"]["history"], list)
-    assert isinstance(result["state"]["turns"], list)
 
 
 @pytest.mark.asyncio
@@ -96,70 +71,6 @@ async def test_history_list_returns_one_rich_public_effect_entry() -> None:
     assert len(effects) == 1
     assert effects[0].detail.display.summary == "shell: printf 'hi'"
     assert effects[0].state.status == "completed"
-
-
-@pytest.mark.asyncio
-async def test_turns_list_reconstructs_and_paginates_public_turns() -> None:
-    backend = FakeBackend([[mock_llm_chunk(content="hi")] for _ in range(3)])
-    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
-    client = start_test_app_server(agent_loop)
-    session = await attach_test_app_server_session(client)
-    try:
-        for index in range(3):
-            _ = [
-                event
-                async for event in session.act(
-                    f"message {index}", client_message_id=f"message-{index}"
-                )
-            ]
-        result = await client.request(
-            "session/turns/list",
-            SessionTurnsListParams(
-                session_id=session.session_id, page=PageRequest(limit=2)
-            ),
-        )
-    finally:
-        await session.close()
-
-    response = SessionTurnsListResponse.model_validate(result)
-    assert len(response.items) == 2
-    assert all(turn.status == "completed" for turn in response.items)
-    assert response.next_cursor == response.items[0].id
-    assert response.previous_cursor is None
-
-
-@pytest.mark.asyncio
-async def test_turns_list_returns_empty_page_for_stale_cursor() -> None:
-    backend = FakeBackend([[mock_llm_chunk(content="hi")] for _ in range(3)])
-    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
-    client = start_test_app_server(agent_loop)
-    session = await attach_test_app_server_session(client)
-    try:
-        for index in range(3):
-            _ = [
-                event
-                async for event in session.act(
-                    f"message {index}", client_message_id=f"message-{index}"
-                )
-            ]
-        responses = [
-            await client.request(
-                "session/turns/list",
-                SessionTurnsListParams(
-                    session_id=session.session_id,
-                    page=PageRequest(cursor="stale", limit=2, direction=direction),
-                ),
-            )
-            for direction in ("backward", "forward")
-        ]
-    finally:
-        await session.close()
-
-    for result in responses:
-        response = SessionTurnsListResponse.model_validate(result)
-        assert response.items == []
-        assert response.next_cursor is None
-        assert response.previous_cursor is None
 
 
 @pytest.mark.asyncio
@@ -250,7 +161,19 @@ async def test_history_list_requires_the_session_namespace() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method", ["plugin/info", "plugin/reload", "session/archive"])
+async def test_session_archive_is_not_in_the_cli_contract() -> None:
+    client, session = await _session_with_history()
+    try:
+        with pytest.raises(AppServerResponseError) as excinfo:
+            await client.request("session/archive", {"sessionId": session.session_id})
+    finally:
+        await session.close()
+
+    assert excinfo.value.error.code is ProtocolErrorCode.METHOD_NOT_FOUND
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["plugin/info", "plugin/reload"])
 async def test_future_client_procedures_are_not_implemented(method: str) -> None:
     client, session = await _session_with_history()
     try:

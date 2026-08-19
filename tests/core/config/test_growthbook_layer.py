@@ -519,7 +519,7 @@ async def test_routing_experiment_does_not_override_pinned_model(
     config = orchestrator.config
     assert config.active_model == "devstral-small"
     assert config.get_active_model().alias == "devstral-small"
-    assert _ROUTED_TEST_ALIAS not in config.models
+    assert _ROUTED_TEST_ALIAS in config.models
 
 
 @pytest.mark.asyncio

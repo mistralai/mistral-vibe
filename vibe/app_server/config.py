@@ -60,6 +60,7 @@ class ConfigView(ProtocolModel):
     awaiting_experiment_model: bool = False
     default_model_alias: str
     theme: str
+    log_level: str | None
     disable_welcome_banner_animation: bool
     show_greeting: bool
     autocopy_to_clipboard: bool

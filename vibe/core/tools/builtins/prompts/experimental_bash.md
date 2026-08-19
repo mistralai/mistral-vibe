@@ -3,7 +3,6 @@ input, or should remain inspectable after the first tool call.
 
 **Key characteristics:**
 - Stateful sessions: each command gets a `session_id`, a PTY, and a durable log file.
-- Merged terminal stream: PTY sessions combine stdout and stderr in the captured output; use `output`/`stdout` as the terminal stream and expect compatibility `stderr` to be empty.
 - Background handling: use `bash(background=true)` for dev servers, watchers, and long builds that should keep running.
 - Soft foreground timeout: `bash(background=false, hard_timeout=false)` waits for `timeout_seconds`, then returns a live session if the command is still running.
 - Hard foreground timeout: `bash(..., hard_timeout=true)` kills the process group when `timeout_seconds` expires and reports a timeout error.

@@ -134,7 +134,7 @@ class PathCompleter(Completer):
         if " " in fragment:
             return None
 
-        return fragment
+        return fragment.replace("\\", "/")
 
     def _build_search_context(self, partial_path: str) -> _SearchContext:
         suffix = partial_path.split("/")[-1]
@@ -313,11 +313,91 @@ class PathCompleter(Completer):
         scored_matches.sort(key=lambda x: x[1], reverse=True)
         return scored_matches[: self._target_matches]
 
+    def _split_outside_root_dir(self, partial_path: str) -> tuple[str, str] | None:
+        if not partial_path:
+            return None
+
+        first_segment = partial_path.split("/", 1)[0]
+        if first_segment != "..":
+            return None
+
+        if partial_path.endswith("/"):
+            return partial_path.rstrip("/"), ""
+
+        idx = partial_path.rfind("/")
+        if idx == -1:
+            return partial_path, ""
+
+        dir_portion = partial_path[:idx]
+        suffix = partial_path[idx + 1 :]
+        if suffix == "..":
+            return f"{dir_portion}/{suffix}", ""
+        return dir_portion, suffix
+
+    def _list_outside_root_children(
+        self, target_dir: Path, dir_portion: str, suffix: str
+    ) -> list[str]:
+        suffix_lower = suffix.lower()
+        results: list[str] = []
+        matched: list[str] = []
+        try:
+            for child in target_dir.iterdir():
+                if len(matched) >= self._max_entries_to_process:
+                    break
+                name = child.name
+                if name.startswith(".") and not suffix.startswith("."):
+                    continue
+                if suffix_lower and not name.lower().startswith(suffix_lower):
+                    continue
+                matched.append(name)
+        except (OSError, PermissionError):
+            return []
+        matched.sort(key=str.lower)
+        for name in matched[: self._target_matches]:
+            child = target_dir / name
+            results.append(f"@{dir_portion}/{name}{'/' if child.is_dir() else ''}")
+            if len(results) >= self._target_matches:
+                break
+        return results
+
+    def _collect_filesystem_matches(self, partial_path: str) -> list[str] | None:
+        split = self._split_outside_root_dir(partial_path)
+        if split is None or not split[0]:
+            return None
+        dir_portion, suffix = split
+
+        root = Path(".").resolve()
+        try:
+            target_dir = (Path(".") / dir_portion).resolve()
+        except (OSError, ValueError):
+            return None
+
+        try:
+            target_dir.relative_to(root)
+        except ValueError:
+            pass
+        else:
+            return None
+
+        if target_dir.is_dir():
+            return self._list_outside_root_children(target_dir, dir_portion, suffix)
+
+        parent = target_dir.parent
+        if parent == root or not parent.is_dir():
+            return []
+        return self._list_outside_root_children(
+            parent, Path(dir_portion).parent.as_posix(), target_dir.name
+        )
+
     def _collect_matches(self, text: str, cursor_pos: int) -> list[str]:
         before_cursor = text[:cursor_pos]
         partial_path = self._extract_partial(before_cursor)
         if partial_path is None:
             return []
+
+        outside_matches = self._collect_filesystem_matches(partial_path)
+        if outside_matches is not None:
+            return outside_matches
 
         context = self._build_search_context(partial_path)
 
@@ -328,6 +408,34 @@ class PathCompleter(Completer):
             return []
 
         scored_matches = self._score_matches(file_index, context)
+
+        if not scored_matches and partial_path.endswith("/"):
+            # Keep the trailing slash as a literal fuzzy anchor rather than
+            # discarding it: the typed boundary stays meaningful. Build the
+            # fuzzy context directly because _build_search_context would route
+            # the trailing slash back into immediate-children mode. Skip
+            # slash-only partials ("/") so we don't flood the picker with every
+            # indexed path containing a separator.
+            #
+            # Do NOT fall back when the prefix is a real indexed directory —
+            # zero children means the dir is empty (or all entries are
+            # gitignored), not that the prefix was a fuzzy miss.
+            prefix = partial_path.rstrip("/")
+            prefix_is_real_dir = any(e.is_dir and e.rel == prefix for e in file_index)
+            if prefix and not prefix_is_real_dir:
+                scored_matches = self._score_matches(
+                    file_index,
+                    self._SearchContext(
+                        search_pattern=partial_path,
+                        path_prefix="",
+                        suffix=partial_path.split("/")[-1],
+                        immediate_only=False,
+                        search_pattern_ascii_mask=self._build_query_ascii_mask(
+                            partial_path
+                        ),
+                    ),
+                )
+
         return [path for path, _ in scored_matches]
 
     def get_completions(self, text: str, cursor_pos: int) -> list[str]:

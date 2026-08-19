@@ -1455,7 +1455,7 @@ NarratorStatus {
 
 .banner-line {
     width: auto;
-    height: auto;
+    height: 1;
 }
 
 #banner-brand {
@@ -1538,6 +1538,24 @@ NarratorStatus {
 
 .vscode-extension-promo-message {
     border-left: heavy $mistral_orange;
+    margin-bottom: 1;
+
+    Markdown {
+        padding: 0 0 0 1;
+        margin: 0;
+
+        & > MarkdownBlock:first-child {
+            margin-top: 0;
+        }
+
+        & > MarkdownBlock:last-child {
+            margin-bottom: 0;
+        }
+    }
+}
+
+.custom-tools-deprecation-message {
+    border-left: heavy $warning;
     margin-bottom: 1;
 
     Markdown {
@@ -1855,6 +1873,65 @@ NarratorStatus {
 }
 
 .thinkingpicker-help {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    margin-top: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#loglevelpicker-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid $foreground-muted;
+    padding: 0 1;
+    margin: 0;
+}
+
+#loglevelpicker-content {
+    width: 100%;
+    height: auto;
+}
+
+.loglevelpicker-title {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+}
+
+.loglevelpicker-subtitle {
+    height: auto;
+    color: $text-muted;
+    margin-bottom: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#loglevelpicker-options {
+    width: 100%;
+    max-height: 50vh;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    border: none;
+}
+
+#loglevelpicker-options:focus {
+    border: none;
+}
+
+.loglevelpicker-persist {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+}
+
+.loglevelpicker-help {
     width: 100%;
     height: auto;
     color: $text-muted;

@@ -236,6 +236,16 @@ class ChatInputContainer(Vertical):
         self._safety = safety
         self._apply_input_box_chrome()
 
+    def replace_command_registry(self, registry: CommandRegistry) -> None:
+        self._command_registry = registry
+
+    def replace_voice_manager(self, voice_manager: VoiceManagerPort | None) -> None:
+        if self._voice_manager is voice_manager:
+            return
+        self._voice_manager = voice_manager
+        if self._body:
+            self._body.replace_voice_manager(voice_manager)
+
     def set_agent_name(self, name: str) -> None:
         self._agent_name = name
         self._apply_input_box_chrome()

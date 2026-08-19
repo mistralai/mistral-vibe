@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from vibe import _experimental_harness
 import vibe.cli.entrypoint as entrypoint
 from vibe.cli.entrypoint import parse_arguments
 from vibe.core.config.harness_files import (
@@ -31,6 +34,62 @@ def test_enabled_and_disabled_tools_are_independent(
     args = _parse(monkeypatch, ["--enabled-tools", "read", "--disabled-tools", "bash"])
     assert args.enabled_tools == ["read"]
     assert args.disabled_tools == ["bash"]
+
+
+def test_experimental_harness_flag_is_parseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _parse(monkeypatch, ["--experimental-harness"])
+
+    assert args.experimental_harness is True
+
+
+def test_experimental_harness_is_hidden_without_package(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        _experimental_harness, "experimental_harness_available", lambda: False
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        _parse(monkeypatch, ["--help"])
+
+    assert exc_info.value.code == 0
+    assert "--experimental-harness" not in capsys.readouterr().out
+
+
+def test_experimental_harness_is_visible_with_package(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        _experimental_harness, "experimental_harness_available", lambda: True
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        _parse(monkeypatch, ["--help"])
+
+    assert exc_info.value.code == 0
+    assert "--experimental-harness" in capsys.readouterr().out
+
+
+def test_experimental_harness_factory_comes_from_harness_distribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported_modules: list[str] = []
+
+    def create_host_stub():
+        raise NotImplementedError("Harness stub selected")
+
+    def import_stub(module_name: str):
+        imported_modules.append(module_name)
+        return SimpleNamespace(create_harness_host=create_host_stub)
+
+    monkeypatch.setattr(_experimental_harness, "import_module", import_stub)
+
+    with pytest.raises(NotImplementedError, match="Harness stub selected"):
+        _experimental_harness.create_experimental_harness_host()
+
+    assert imported_modules == ["mistralai_rust_harness.vibe"]
 
 
 def test_worktree_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,7 +145,7 @@ def test_suggest_worktree_name_reads_the_dotenv_before_asking(
         lambda *_args, **_kwargs: calls.append("dotenv"),
     )
     monkeypatch.setattr(
-        "vibe.core.worktree_naming_model.suggest_worktree_name", suggest
+        "vibe.core.git.worktree.naming_model.suggest_worktree_name", suggest
     )
     # The autouse fixture leaves the singleton initialised, which is not the
     # state a real CLI start is in here. Without this reset the entrypoint's own

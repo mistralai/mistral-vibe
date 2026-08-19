@@ -6,7 +6,7 @@ from pathlib import Path
 from vibe.core.hooks.config import HookConfig
 from vibe.core.hooks.models import HookExecutionResult, HookInvocation
 from vibe.core.utils import kill_async_subprocess
-from vibe.utils.io import decode_safe
+from vibe.utils.io import decode_console_safe
 
 _MAX_OUTPUT_BYTES = 1024 * 1024
 
@@ -74,8 +74,8 @@ class HookExecutor:
                 self._run_process(process, stdin, stdin_data), timeout=hook.timeout
             )
 
-            stdout = decode_safe(stdout_bytes, from_subprocess=True).text.strip()
-            stderr = decode_safe(stderr_bytes, from_subprocess=True).text.strip()
+            stdout = decode_console_safe(stdout_bytes).strip()
+            stderr = decode_console_safe(stderr_bytes).strip()
             return HookExecutionResult(
                 hook_name=hook.name,
                 exit_code=process.returncode,

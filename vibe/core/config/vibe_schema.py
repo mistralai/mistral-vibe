@@ -30,6 +30,10 @@ from vibe.core.config._defaults import (
     DEFAULT_THEME,
     DEFAULT_VIBE_BASE_URL,
 )
+
+# DEFAULT_LOG_LEVEL is not imported here to avoid a circular dependency
+# (vibe_schema.py imports from vibe.observability.logging). The constant
+# lives in vibe.config_values.
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.models import (
     ConnectorConfig,
@@ -228,6 +232,20 @@ def _coerce_routed_model_config(v: str) -> ModelConfig | None:
         return ModelConfig.model_validate_json(v)
     except ValidationError:
         return None
+
+
+_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+
+
+def _normalize_log_level(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    normalized = value.strip().upper()
+    if normalized not in _LOG_LEVELS:
+        raise ValueError(
+            f"Invalid log level {value!r}; expected one of {sorted(_LOG_LEVELS)}"
+        )
+    return normalized
 
 
 class VibeConfigSchema(ConfigSchema):
@@ -486,6 +504,9 @@ class VibeConfigSchema(ConfigSchema):
     vibe_code_sessions_base_url: Annotated[str, WithReplaceMerge()] = (
         "https://chat.mistral.ai"
     )
+    log_level: Annotated[
+        str | None, WithReplaceMerge(), BeforeValidator(_normalize_log_level)
+    ] = None
 
     # Nested configs (REPLACE — simple nested models, no merge semantics)
     project_context: Annotated[ProjectContextConfig, WithReplaceMerge()] = Field(
@@ -620,7 +641,11 @@ class VibeConfigSchema(ConfigSchema):
         )
 
     def build_tool_allowlist_update(
-        self, tool_name: str, patterns: list[str]
+        self,
+        tool_name: str,
+        patterns: list[str],
+        *,
+        current_allowlist: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """Extend a tool's allowlist in memory and return the persist payload.
 
@@ -630,13 +655,15 @@ class VibeConfigSchema(ConfigSchema):
         """
         if tool_name == "bash":
             patterns = [_strip_bash_pattern_wildcard(p) for p in patterns]
-        current_allowlist: list[str] = list(
-            self.tools.get(tool_name, {}).get("allowlist", [])
+        allowlist: list[str] = list(
+            current_allowlist
+            if current_allowlist is not None
+            else self.tools.get(tool_name, {}).get("allowlist", [])
         )
-        new_patterns = [p for p in patterns if p not in current_allowlist]
+        new_patterns = [p for p in patterns if p not in allowlist]
         if not new_patterns:
             return None
-        merged = sorted(current_allowlist + new_patterns)
+        merged = sorted(allowlist + new_patterns)
         self.tools.setdefault(tool_name, {})["allowlist"] = merged
         return {"tools": {tool_name: {"allowlist": merged}}}
 
@@ -656,15 +683,21 @@ class VibeConfigSchema(ConfigSchema):
     def _inject_routed_model(self) -> VibeConfigSchema:
         alias = self.routed_default_model
         model = self.routed_model_config
-        inject = not self.active_model or self.active_model == alias
-        if (
-            inject
-            and alias
-            and model is not None
-            and model.alias == alias
-            and alias not in self.models
-        ):
+        if not (alias and model is not None and model.alias == alias):
+            return self
+
+        existing = self.models.get(alias)
+        if existing is None:
             object.__setattr__(self, "models", {**self.models, alias: model})
+        else:
+            user_overrides = {
+                field: getattr(existing, field) for field in existing.model_fields_set
+            }
+            object.__setattr__(
+                self,
+                "models",
+                {**self.models, alias: model.model_copy(update=user_overrides)},
+            )
         return self
 
     @model_validator(mode="after")

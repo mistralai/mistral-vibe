@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import os
 from typing import NamedTuple
 
-import pyperclip
 from textual.app import App
 from textual.widget import Widget
 from textual.widgets import Input, TextArea
@@ -38,6 +37,8 @@ def _normalize_newlines(text: str) -> str:
 
 
 def _copy_native(text: str) -> bool:
+    import pyperclip
+
     pyperclip.copy(text)
     try:
         return _normalize_newlines(pyperclip.paste()) == _normalize_newlines(text)

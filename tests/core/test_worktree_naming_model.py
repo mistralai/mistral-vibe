@@ -7,9 +7,9 @@ from typing import Any
 
 import pytest
 
-from vibe.core import worktree_naming_model
 from vibe.core.config.models import ProviderConfig
-from vibe.core.worktree_naming_model import suggest_worktree_name
+from vibe.core.git.worktree import naming_model as worktree_naming_model
+from vibe.core.git.worktree.naming_model import suggest_worktree_name
 
 
 @dataclass

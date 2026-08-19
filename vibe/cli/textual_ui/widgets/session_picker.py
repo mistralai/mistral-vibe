@@ -123,6 +123,13 @@ class SessionPickerApp(Container):
     class Cancelled(Message):
         pass
 
+    class SessionHighlighted(Message):
+        session_id: str | None
+
+        def __init__(self, session_id: str | None) -> None:
+            self.session_id = session_id
+            super().__init__()
+
     class SessionDeleteRequested(Message):
         option_id: str
         session_id: str
@@ -146,6 +153,10 @@ class SessionPickerApp(Container):
         self._current_session_id = current_session_id
         self._cwd = cwd
         self._delete_state: _DeleteState | None = None
+        self._initial_highlighted: int | None = next(
+            (i for i, s in enumerate(sessions) if _session_id(s) == current_session_id),
+            None,
+        )
 
     @property
     def has_sessions(self) -> bool:
@@ -259,7 +270,15 @@ class SessionPickerApp(Container):
         self._latest_messages.pop(option_id, None)
         if self._delete_state_matches(option_id):
             self._delete_state = None
-        self._option_list().remove_option(option_id)
+        option_list = self._option_list()
+        option_list.remove_option(option_id)
+        # Textual doesn't fire OptionHighlighted when the highlight moves due to
+        # removal, so notify the app manually.
+        option = option_list.highlighted_option
+        new_id = (
+            str(option.id) if option is not None and option.id is not None else None
+        )
+        self.post_message(self.SessionHighlighted(session_id=new_id))
         return True
 
     def add_sessions(
@@ -292,6 +311,22 @@ class SessionPickerApp(Container):
                 option_list.highlighted = index
                 return
 
+    def load_sessions(
+        self, sessions: list[PublicSession], latest_messages: dict[str, str]
+    ) -> None:
+        """Populate the picker after initial mount. Highlights current session if present."""
+        self.add_sessions(sessions, latest_messages)
+        option_list = self._option_list()
+        if option_list.highlighted is not None:
+            return
+        target_id = self._current_session_id
+        for index, session in enumerate(self._sessions):
+            if target_id is not None and _session_id(session) == target_id:
+                option_list.highlighted = index
+                return
+        if self._sessions:
+            option_list.highlighted = 0
+
     def _refresh_header(self) -> None:
         header = self.query_one(".sessionpicker-header", NoMarkupStatic)
         header.update(_build_header_text(self._cwd))
@@ -312,7 +347,10 @@ class SessionPickerApp(Container):
             yield NoMarkupStatic(
                 _build_header_text(self._cwd), classes="sessionpicker-header"
             )
-            yield NavigableOptionList(*options, id="sessionpicker-options")
+            option_list = NavigableOptionList(*options, id="sessionpicker-options")
+            if self._initial_highlighted is not None:
+                option_list.highlighted = self._initial_highlighted
+            yield option_list
             yield NoMarkupStatic(
                 shortcut_hint(
                     f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Select  "
@@ -322,7 +360,13 @@ class SessionPickerApp(Container):
             )
 
     def on_mount(self) -> None:
-        self.query_one(OptionList).focus()
+        option_list = self.query_one(OptionList)
+        option_list.focus()
+        option = option_list.highlighted_option
+        initial_id = (
+            str(option.id) if option is not None and option.id is not None else None
+        )
+        self.post_message(self.SessionHighlighted(session_id=initial_id))
 
     def on_option_list_option_highlighted(
         self, event: OptionList.OptionHighlighted
@@ -333,6 +377,7 @@ class SessionPickerApp(Container):
         option_id = str(event.option.id) if event.option.id is not None else None
         if self._delete_state is not None and self._delete_state.option_id != option_id:
             self._clear_delete_state()
+        self.post_message(self.SessionHighlighted(session_id=option_id))
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if self._delete_is_pending():

@@ -13,12 +13,12 @@ import pytest
 from tests.conftest import build_test_agent_loop
 from tests.stubs.app_server import build_test_app_server
 from vibe.app_server import stdio
+from vibe.app_server._legacy_composition import create_legacy_app_server
 from vibe.app_server._runtime import HarnessServer, RootOpenRequest
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.events import HistoryEntryAdded
 from vibe.app_server.models import PublicMessageEntry
 from vibe.app_server.protocol import ClientCapabilities, ClientInfo
-from vibe.app_server.server import AppServer
 from vibe.app_server.session import AppServerSession
 from vibe.app_server.transport import (
     InvalidJsonRpcMessage,
@@ -73,8 +73,26 @@ async def test_stdio_server_creates_the_harness_behind_its_transport(
     assert call is not None
     args, kwargs = call
     assert isinstance(args[0], StdioJsonRpcTransport)
-    assert kwargs == {"transport_kind": "stdio"}
+    assert kwargs == {"transport_kind": "stdio", "experimental_harness": False}
     harness.serve.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_stdio_server_forwards_experimental_harness_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = AsyncMock(spec=HarnessServer)
+    factory = AsyncMock(return_value=harness)
+    monkeypatch.setattr(stdio, "create_harness_server", factory)
+
+    await stdio.serve_stdio(
+        reader=BytesIO(), writer=BytesIO(), experimental_harness=True
+    )
+
+    call = factory.await_args
+    assert call is not None
+    _, kwargs = call
+    assert kwargs == {"transport_kind": "stdio", "experimental_harness": True}
 
 
 @pytest.mark.asyncio
@@ -257,10 +275,10 @@ async def test_stdio_server_uses_the_same_json_rpc_lifecycle() -> None:
     )
     output = BytesIO()
 
-    await AppServer(
+    await create_legacy_app_server(
         StdioJsonRpcTransport(reader, output),
-        transport_kind="stdio",
         open_root=open_root,
+        transport_kind="stdio",
     ).serve()
 
     responses = [json.loads(line) for line in output.getvalue().splitlines()]
@@ -364,10 +382,10 @@ async def test_stdio_session_start_maps_agent_config_workdir_to_runtime_cwd() ->
         b"".join(json.dumps(message).encode() + b"\n" for message in input_messages)
     )
 
-    await AppServer(
+    await create_legacy_app_server(
         StdioJsonRpcTransport(reader, BytesIO()),
-        transport_kind="stdio",
         open_root=open_root,
+        transport_kind="stdio",
     ).serve()
 
     assert len(captured) == 1

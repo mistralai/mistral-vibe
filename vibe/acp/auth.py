@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC
 import os
@@ -13,6 +12,7 @@ from keyring.errors import KeyringError
 from vibe.acp.exceptions import ConfigurationError, InternalError, InvalidRequestError
 from vibe.core.config import ProviderConfig, load_dotenv_values
 from vibe.core.config._defaults import (
+    DEFAULT_CONSOLE_BASE_URL,
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
 )
@@ -27,11 +27,14 @@ from vibe.setup.auth import (
     assess_auth_state,
 )
 from vibe.setup.auth.api_key_persistence import (
+    ProviderCredentialsPersistRequest,
+    ProviderCredentialsPersistResult,
     persist_api_key,
-    persist_provider_to_config,
+    persist_provider_credentials,
     remove_api_key,
     resolve_api_key_provider,
 )
+from vibe.setup.auth.whoami import resolve_tenant_domains
 from vibe.setup.onboarding.context import (
     OnboardingContext,
     is_valid_custom_domain,
@@ -61,7 +64,12 @@ class ApiKeyPersister(Protocol):
 type OnboardingContextLoader = Callable[[], OnboardingContext]
 type BrowserSignInServiceFactory = Callable[[ProviderConfig], BrowserSignInServicePort]
 type ApiKeyRemover = Callable[[ProviderConfig], None]
-type ProviderPersister = Callable[[ProviderConfig], bool]
+type CredentialsPersister = Callable[
+    [ProviderCredentialsPersistRequest], Awaitable[ProviderCredentialsPersistResult]
+]
+type TenantDomainResolver = Callable[
+    [ProviderConfig, str, str, str], Awaitable[tuple[ProviderConfig, str]]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +85,12 @@ def _custom_domain_of(provider: ProviderConfig) -> str | None:
     return base_url
 
 
+async def _default_credentials_persister(
+    request: ProviderCredentialsPersistRequest,
+) -> ProviderCredentialsPersistResult:
+    return await persist_provider_credentials(request)
+
+
 class AcpAuthController:
     def __init__(
         self,
@@ -85,14 +99,16 @@ class AcpAuthController:
         service_factory: BrowserSignInServiceFactory | None = None,
         api_key_persister: ApiKeyPersister = persist_api_key,
         api_key_remover: ApiKeyRemover = remove_api_key,
-        provider_persister: ProviderPersister = persist_provider_to_config,
+        credentials_persister: CredentialsPersister = _default_credentials_persister,
+        tenant_domain_resolver: TenantDomainResolver = resolve_tenant_domains,
         environ_before_dotenv_load: Mapping[str, str] | None = None,
     ) -> None:
         self._load_context = context_loader or OnboardingContext.load
         self._service_factory = service_factory or self._build_service
         self._persist_api_key = api_key_persister
         self._remove_api_key = api_key_remover
-        self._persist_provider = provider_persister
+        self._persist_credentials_impl = credentials_persister
+        self._resolve_tenant_domains = tenant_domain_resolver
         self._initial_environment = dict(
             environ_before_dotenv_load
             if environ_before_dotenv_load is not None
@@ -233,18 +249,48 @@ class AcpAuthController:
         self, provider: ProviderConfig, api_key: str
     ) -> dict[str, str]:
         custom_domain = _custom_domain_of(provider)
-        meta = {
+        meta: dict[str, str] = {
             "persistResult": self._persist_api_key(
                 resolve_api_key_provider(provider),
                 api_key,
                 custom_domain=custom_domain is not None,
             )
         }
-        if provider == self._load_context().provider:
+        context = self._load_context()
+        if provider == context.provider:
             return meta
-        # Writing config.toml is blocking file I/O; keep it off the ACP event loop.
-        persisted = await asyncio.to_thread(self._persist_provider, provider)
-        return {**meta, "persistProviderResult": "completed" if persisted else "failed"}
+
+        desired_console = custom_domain or DEFAULT_CONSOLE_BASE_URL
+        desired_vibe_base_url = context.vibe_base_url
+        # Only fetch tenant domains for on-prem consoles — the public Mistral
+        # console has no per-tenant redirection to discover.
+        if custom_domain is not None:
+            provider, desired_vibe_base_url = await self._resolve_tenant_domains(
+                provider, desired_console, api_key, context.vibe_base_url
+            )
+
+        request = ProviderCredentialsPersistRequest(
+            provider=provider,
+            console_base_url=(
+                desired_console if desired_console != context.console_base_url else None
+            ),
+            vibe_base_url=(
+                desired_vibe_base_url
+                if desired_vibe_base_url != context.vibe_base_url
+                else None
+            ),
+        )
+        result = await self._persist_credentials_impl(request)
+        meta["persistProviderResult"] = "completed" if result.provider else "failed"
+        if result.console_base_url is not None:
+            meta["persistConsoleBaseUrlResult"] = (
+                "completed" if result.console_base_url else "failed"
+            )
+        if result.vibe_base_url is not None:
+            meta["persistVibeBaseUrlResult"] = (
+                "completed" if result.vibe_base_url else "failed"
+            )
+        return meta
 
     def _resolve_sign_in_provider(self, arguments: dict[str, Any]) -> ProviderConfig:
         provider = self._enabled_provider()

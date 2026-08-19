@@ -1,8 +1,9 @@
 """Harden Textual's input path against malformed terminal bytes.
 
-Three defenses, applied by patching the platform driver's module globals. Each
-works around a Textual upstream limitation; remove the corresponding defense once
-the linked fix ships.
+Three defenses, applied by rebinding ``XTermParser`` in every imported
+``textual.drivers.*`` module (``WindowsDriver`` builds the parser in
+``textual.drivers.win32``, not its own module). Each works around a Textual
+upstream limitation; remove the corresponding defense once the linked fix ships.
 
 1. Drop malformed SGR mouse reports (e.g. ``\\x1b[<32;NaN;NaNM``). VS Code's
    integrated terminal emits these when xterm.js geometry is briefly invalid
@@ -14,9 +15,9 @@ the linked fix ships.
    Upstream: https://github.com/Textualize/textual/issues/6573
 
 2. Drop OSC colour *reports* such as ``\\x1b]11;rgb:1e1e/1e1e/2e2e\\x1b\\``.
-   These are the terminal's replies to the OSC 10/11/12 colour queries
-   Rich/Textual issue while rendering; they arrive on stdin but are never user
-   input, so Textual otherwise spills them into the focused input box.
+   These are the terminal's reply to the OSC 11 query ``_theme_detection`` writes
+   at startup; they arrive on stdin but are never user input, so Textual
+   otherwise spills them into the focused input box.
 
 3. Re-request SGR mouse mode when a legacy X10 report arrives. On a terminal
    reattach (tmux reattach / VS Code window reload) the terminal reverts to the
@@ -35,8 +36,9 @@ import re
 import sys
 
 from textual._xterm_parser import XTermParser
-from textual.driver import Driver
 from textual.message import Message
+
+from vibe.observability.logging import logger
 
 # SGR mouse reports whose payload is not numeric (e.g. `NaN`). The negative
 # lookahead allows digits, `;`, and `-` so that valid reports — including the
@@ -49,6 +51,8 @@ _MALFORMED_MOUSE = re.compile(r"\x1b\[<(?![-0-9;]*[Mm])[^Mm]*[Mm]")
 _OSC_COLOR_REPORT = re.compile(r"\x1b\][0-9]{1,3};rgb:[0-9a-fA-F/]+(?:\x07|\x1b\\)")
 _OSC_COLOR_PAYLOAD = frozenset("0123456789abcdefABCDEF/")
 _MAX_OSC_PARAMETER_DIGITS = 3
+
+_DRIVER_MODULE_PREFIX = "textual.drivers."
 
 _X10_MOUSE_INTRODUCER = "\x1b[M"
 _SGR_MOUSE_INTRODUCER = "\x1b[<"
@@ -147,8 +151,13 @@ class FilteringXTermParser(XTermParser):
             self._sgr_mouse_requested = True
 
 
-def patch_driver_parser(driver_class: type[Driver]) -> None:
-    # Replace the driver's XTermParser with our filtering subclass.
-    namespace = sys.modules[driver_class.__module__].__dict__
-    if "XTermParser" in namespace:
-        namespace["XTermParser"] = FilteringXTermParser
+def patch_driver_parser() -> None:
+    patched: list[str] = []
+    for name, module in list(sys.modules.items()):
+        if not name.startswith(_DRIVER_MODULE_PREFIX):
+            continue
+        if module.__dict__.get("XTermParser") is not XTermParser:
+            continue
+        module.__dict__["XTermParser"] = FilteringXTermParser
+        patched.append(name)
+    logger.debug("Installed filtering XTerm parser in modules=%s", patched)
