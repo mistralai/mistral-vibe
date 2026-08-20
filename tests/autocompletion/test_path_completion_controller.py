@@ -5,19 +5,23 @@ from pathlib import Path
 import pytest
 from textual import events
 
-from vibe.cli.autocompletion.base import CompletionResult, CompletionView
+from vibe.cli.autocompletion.base import (
+    CompletionEntry,
+    CompletionResult,
+    CompletionView,
+)
 from vibe.cli.autocompletion.completers import PathCompleter
 from vibe.cli.autocompletion.path_completion import PathCompletionController
 
 
 class StubView(CompletionView):
     def __init__(self) -> None:
-        self.suggestions: list[tuple[list[tuple[str, str]], int]] = []
+        self.suggestions: list[tuple[list[CompletionEntry], int]] = []
         self.clears = 0
         self.replacements: list[tuple[int, int, str]] = []
 
     def render_completion_suggestions(
-        self, suggestions: list[tuple[str, str]], selected_index: int
+        self, suggestions: list[CompletionEntry], selected_index: int
     ) -> None:
         self.suggestions.append((suggestions, selected_index))
 
@@ -69,7 +73,7 @@ def test_lists_root_entries(file_tree: Path) -> None:
 
     suggestions, selected = view.suggestions[-1]
     assert selected == 0
-    assert [alias for alias, _ in suggestions] == ["@README.md", "@src/"]
+    assert [s.label for s in suggestions] == ["@README.md", "@src/"]
 
 
 def test_suggests_hidden_entries_only_with_dot_prefix(file_tree: Path) -> None:
@@ -78,7 +82,7 @@ def test_suggests_hidden_entries_only_with_dot_prefix(file_tree: Path) -> None:
     controller.on_text_changed("@.", cursor_index=2)
 
     suggestions, _ = view.suggestions[-1]
-    assert suggestions[0][0] == "@.env"
+    assert suggestions[0].label == "@.env"
 
 
 def test_lists_nested_entries_when_prefixing_with_folder_name(file_tree: Path) -> None:
@@ -87,7 +91,7 @@ def test_lists_nested_entries_when_prefixing_with_folder_name(file_tree: Path) -
     controller.on_text_changed("@src/", cursor_index=5)
 
     suggestions, _ = view.suggestions[-1]
-    assert [alias for alias, _ in suggestions] == [
+    assert [s.label for s in suggestions] == [
         "@src/core/",
         "@src/main.py",
         "@src/utils/",
@@ -137,7 +141,7 @@ def test_navigates_and_cycles_across_suggestions(file_tree: Path) -> None:
     controller.on_text_changed("@src/", cursor_index=5)
     controller.on_key(events.Key("down", None), "@src/", 5)
     suggestions, selected_index = view.suggestions[-1]
-    assert [alias for alias, _ in suggestions] == [
+    assert [s.label for s in suggestions] == [
         "@src/core/",
         "@src/main.py",
         "@src/utils/",
@@ -170,7 +174,7 @@ def test_limits_suggestions_to_ten(file_tree: Path) -> None:
     controller.on_text_changed("@src/core/extra/", cursor_index=16)
     suggestions, selected_index = view.suggestions[-1]
     assert len(suggestions) == 10
-    assert [alias for alias, _ in suggestions] == [
+    assert [s.label for s in suggestions] == [
         "@src/core/extra/extra_file_1.py",
         "@src/core/extra/extra_file_10.py",
         "@src/core/extra/extra_file_11.py",
@@ -217,7 +221,7 @@ def test_lists_immediate_children_when_path_ends_with_slash(file_tree: Path) -> 
     controller.on_text_changed("@src/", cursor_index=5)
 
     suggestions, _ = view.suggestions[-1]
-    assert [alias for alias, _ in suggestions] == [
+    assert [s.label for s in suggestions] == [
         "@src/core/",
         "@src/main.py",
         "@src/utils/",

@@ -45,6 +45,13 @@ class LaunchContext(BaseModel):
 TelemetryCallType = Literal["main_call", "secondary_call"]
 
 
+class ExperimentAssignment(BaseModel):
+    experiment_id: str
+    experiment_name: str
+    variation_name: str
+    variation_id: int | None = None
+
+
 class TelemetryBaseMetadata(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
@@ -59,6 +66,7 @@ class TelemetryBaseMetadata(BaseModel):
     session_id: str | None = None
     parent_session_id: str | None = None
     experiments: dict[str, str] | None = None
+    experiment_assignments: list[ExperimentAssignment] | None = None
     user_plan: str | None = None
 
 

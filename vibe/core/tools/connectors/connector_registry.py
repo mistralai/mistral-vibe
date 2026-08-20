@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 _BOOTSTRAP_TIMEOUT = 30.0
 _BOOTSTRAP_CACHE_TTL_SECONDS = 10 * 60
+_SERVER_ERROR_STATUS = 500
 
 
 async def call_tool_http(
@@ -165,6 +166,10 @@ def _connector_bootstrap_cache_payload(connector: dict[str, Any]) -> dict[str, A
     }
     if isinstance(auth_action, dict):
         payload["auth_action"] = {"type": auth_action.get("type")}
+    # bootstrap_errors is consumed (surfaced to the user), so persist it; a warm
+    # cache hit must rebuild the per-connector error, not silently drop it.
+    if bootstrap_errors := connector.get("bootstrap_errors"):
+        payload["bootstrap_errors"] = bootstrap_errors
     return _strip_none(payload)
 
 
@@ -206,6 +211,38 @@ def _format_http_status_error(
     if body:
         detail += f"\nServer response: {body}"
     return detail
+
+
+def _format_connector_bootstrap_errors(bootstrap_errors: Any) -> str:
+    """Flatten a connector's per-bootstrap error payload into readable text."""
+    if isinstance(bootstrap_errors, list):
+        parts = [str(item).strip() for item in bootstrap_errors if str(item).strip()]
+        if parts:
+            return "; ".join(parts)
+    text = str(bootstrap_errors).strip()
+    return text or "Connector failed to bootstrap."
+
+
+def _bootstrap_error_message(exc: Exception) -> str:
+    """Return the real backend failure so developers can diagnose it."""
+    if http_err := _unwrap_http_status_error(exc):
+        status = http_err.response.status_code
+        try:
+            body = http_err.response.text[:500].strip()
+        except Exception:
+            body = ""
+        detail = f"Failed to load workspace connectors (HTTP {status})."
+        if body:
+            detail += f"\nServer response: {body}"
+        if status >= _SERVER_ERROR_STATUS:
+            detail += (
+                "\nThis looks like a temporary server issue — "
+                "retry with `/reload` in a few minutes."
+            )
+        return detail
+    message = str(exc).strip()
+    suffix = f": {message}" if message else ""
+    return f"Failed to load workspace connectors: {type(exc).__name__}{suffix}"
 
 
 def _unwrap_http_status_error(exc: Exception) -> httpx.HTTPStatusError | None:
@@ -363,6 +400,8 @@ class ConnectorRegistry:
         self._connector_connected: dict[str, bool] = {}
         self._connector_auth_action: dict[str, ConnectorAuthAction] = {}
         self._alias_to_id: dict[str, str] = {}
+        self._bootstrap_error: str | None = None
+        self._connector_errors: dict[str, str] = {}
         self._discover_lock = asyncio.Lock()
 
     def get_tools(self, *, force_refresh: bool = False) -> dict[str, type[BaseTool]]:
@@ -471,14 +510,21 @@ class ConnectorRegistry:
                 if data is None:
                     data = await self._fetch_bootstrap()
                     self._write_cached_bootstrap(data)
-            except Exception:
+            except Exception as exc:
                 logger.warning("Failed to bootstrap connectors", exc_info=True)
-                self._cache = {}
+                self._bootstrap_error = _bootstrap_error_message(exc)
+                # Leave the cache unset (None, not {}) so the next integration —
+                # e.g. triggered by `/reload` — actually re-hits the endpoint
+                # instead of short-circuiting on an empty cache.
+                self._cache = None
                 self._connector_names = []
                 self._connector_connected = {}
                 self._connector_auth_action = {}
+                self._connector_errors = {}
                 self._alias_to_id = {}
                 return {}
+
+            self._bootstrap_error = None
 
             unique_connectors = _deduplicate_connectors(data.get("connectors") or [])
 
@@ -487,6 +533,7 @@ class ConnectorRegistry:
             connector_names: list[str] = []
             connector_connected: dict[str, bool] = {}
             connector_auth_action: dict[str, ConnectorAuthAction] = {}
+            connector_errors: dict[str, str] = {}
 
             for connector_id, alias, connector in unique_connectors:
                 connector_names.append(alias)
@@ -499,6 +546,9 @@ class ConnectorRegistry:
                 if bootstrap_errors := connector.get("bootstrap_errors"):
                     logger.warning(
                         "Connector %r bootstrap errors: %s", name, bootstrap_errors
+                    )
+                    connector_errors[alias] = _format_connector_bootstrap_errors(
+                        bootstrap_errors
                     )
 
                 status = connector.get("status") or {}
@@ -521,6 +571,7 @@ class ConnectorRegistry:
             self._connector_names = connector_names
             self._connector_connected = connector_connected
             self._connector_auth_action = connector_auth_action
+            self._connector_errors = connector_errors
             self._alias_to_id = {alias: cid for cid, alias, _ in unique_connectors}
             self._cache = cache
 
@@ -534,6 +585,12 @@ class ConnectorRegistry:
 
     def get_connector_names(self) -> list[str]:
         return list(self._connector_names)
+
+    def bootstrap_error(self) -> str | None:
+        return self._bootstrap_error
+
+    def connector_error_for(self, alias: str) -> str | None:
+        return self._connector_errors.get(alias)
 
     def is_connected(self, name: str) -> bool:
         return self._connector_connected.get(name, False)
@@ -558,6 +615,7 @@ class ConnectorRegistry:
 
         tools_map: dict[str, type[BaseTool]] | None = None
         fresh_auth_action: ConnectorAuthAction | None = None
+        fresh_error: str | None = None
         found = False
         fetch_ok = False
         try:
@@ -573,6 +631,8 @@ class ConnectorRegistry:
                 fresh_auth_action = ConnectorAuthAction.from_payload(
                     connector.get("auth_action")
                 )
+                if bootstrap_errors := connector.get("bootstrap_errors"):
+                    fresh_error = _format_connector_bootstrap_errors(bootstrap_errors)
                 status = connector.get("status") or {}
                 if not status.get("is_ready", False):
                     break
@@ -597,6 +657,12 @@ class ConnectorRegistry:
         if fresh_auth_action is not None:
             self._connector_auth_action[alias] = fresh_auth_action
 
+        if fetch_ok and found:
+            if fresh_error is not None:
+                self._connector_errors[alias] = fresh_error
+            else:
+                self._connector_errors.pop(alias, None)
+
         if tools_map is None:
             self._cache.pop(connector_id, None)
             self._connector_connected[alias] = False
@@ -611,6 +677,7 @@ class ConnectorRegistry:
             self._cache.pop(connector_id, None)
         self._connector_connected.pop(alias, None)
         self._connector_auth_action.pop(alias, None)
+        self._connector_errors.pop(alias, None)
         self._alias_to_id.pop(alias, None)
         if alias in self._connector_names:
             self._connector_names.remove(alias)

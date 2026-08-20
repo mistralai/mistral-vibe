@@ -33,10 +33,17 @@ async def test_thinking_change_survives_later_config_change(config_dir: Path) ->
     )
     app = build_test_vibe_app(config=config)
 
-    async with app.run_test():
+    async with app.run_test() as pilot:
         await app.on_thinking_picker_app_thinking_selected(
             ThinkingPickerApp.ThinkingSelected("high")
         )
+        # The selection persists via the main queue (two-phase execution), so
+        # wait for the drain to finish before the next write — otherwise the
+        # thinking level is read before it lands on disk.
+        for _ in range(100):
+            if not app._queue.draining:
+                break
+            await pilot.pause(0.01)
         # A subsequent /config change must not clobber the thinking level.
         await app._persist_config_changes({"autocopy_to_clipboard": False})
 

@@ -6,7 +6,7 @@ Layout: `vibe/core` is the engine (agent loop, tools, LLM backends, config); `vi
 
 ## Architecture Decisions
 
-Before architecture-affecting changes, read the matching ADRs. If a change fits the current code but conflicts with ADR direction, flag it to the user before implementing.
+Before architecture-affecting changes, read the matching ADR. If a change fits the current code but conflicts with ADR direction, flag it to the user before implementing. When creating or editing an ADR, follow the `write-vibe-adr` skill.
 
 When creating or editing an ADR, follow the `write-vibe-adr` skill and keep the standard sections.
 
@@ -23,6 +23,7 @@ When creating or editing an ADR, follow the `write-vibe-adr` skill and keep the 
 | App-server ownership, RPCs, lifecycle, projections, effects, callbacks, client tools, or delivery adapters | [0009 App Server Boundary](docs/adr/0009-app-server-boundary.md) |
 | Textual `Content` rendering, styled text, markup parsing, or theme variables in widgets | [0010 Textual Content Rendering](docs/adr/0010-textual-content-rendering.md) |
 | App-server session backend interfaces, adapters, or runtime ownership | [0011 App Server Session Backends](docs/adr/0011-unified-harness-backend.md) |
+| Slash commands running while busy, side-channel commands, `QueuedItemKind.COMMAND`, or config persistence deferral via main queue | [0012 Two-Phase Slash Command Execution](docs/adr/0012-two-phase-slash-command-execution.md) |
 
 ## Commands
 
@@ -30,8 +31,6 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 
 - `uv run vibe` / `uv run vibe-acp` — the two entry points.
 - `uv run pytest` — full suite (parallel via `pytest-xdist`).
-- `uv run pytest tests/app_server/backend_contract` — shared app-server contract suite with the legacy backend.
-- `uv run --with-editable ../vibe_sdk/harness/runtimes/python pytest tests/app_server/backend_contract --experimental-harness` — Unified Harness contract frontier.
 - `uv run pyright` — strict type check.
 - `uv run ruff check --fix .` and `uv run ruff format .` — run both after every code change and report the files modified.
 - `uv run pre-commit run --all-files` — full lint pass. Install once with `uv tool install pre-commit && uv run pre-commit install`.
@@ -45,138 +44,9 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 - Abstract interfaces use the `_port.py` suffix (hexagonal-style ports).
 - Tests mirror the source layout: a test lives in the directory mirroring its source module's package. Tests for a `vibe/core` subpackage go under the matching `tests/core/<subpackage>/` (e.g. `vibe/core/utils/retry.py` → `tests/core/utils/test_retry.py`); tests for modules that sit directly in `vibe/core/` (e.g. `loop.py`, `types.py`) stay flat in `tests/core/`. No `__init__.py` is needed in test subdirectories — pytest runs in `--import-mode=importlib`. Test doubles in `tests/stubs/` are named `Fake*`.
 
-## Python style
-
-- Prefer `match` / `case` over long `if` / `elif` chains.
-- Use the walrus operator `:=` only when it shortens code and improves clarity.
-- Be a never-nester: early returns and guard clauses over nested blocks.
-- Modern type hints only: built-in generics (`list`, `dict`) and `|` unions. Never import `Optional`, `Union`, `Dict`, `List` from `typing`.
-- Use `pathlib.Path` (and `anyio.Path` in async paths) instead of `os.path`.
-- Use f-strings, comprehensions, and context managers; follow PEP 8.
-- Enums: `StrEnum` / `IntEnum` with `auto()` and UPPERCASE members. For type-mixing, the mix-in type comes before `Enum` in the bases. Add methods or `@property` rather than parallel lookup tables.
-- Write declarative, minimalist code: express intent, drop boilerplate.
-- Never call a private method from outside of its class in production code. Accessing private methods in tests is acceptable.
-- Avoid comments and docstrings, except for when there's a hard to spot corner case
-
-## Typing & imports
-
-- Pyright is strict and gates CI; fix types at the source.
-- No relative imports — `ban-relative-imports = "all"`. Always `from vibe.core.x import …`.
-- No inline `# type: ignore` or `# noqa`. Fix with refined signatures (TypeVar, Protocol), `isinstance` guards, `typing.cast` when control flow guarantees the type, or a small typed wrapper at the boundary.
-
-### `TYPE_CHECKING` and lazy imports
-
-Moving imports under `if TYPE_CHECKING:` or into function bodies cuts startup time but risks runtime `NameError`. Before merging any import-deferral change, run:
-
-- **Ruff `TC004`** (pre-commit hook) — per-file: flags `TYPE_CHECKING`-only names referenced at runtime.
-- **`uv run python scripts/check_import_contracts.py`** — runtime cross-file: imports every `from <mod> import <name>` across `vibe/` and `tests/` to verify it resolves; also rebuilds Pydantic models to catch lazily-failing field types. Catches cross-file re-exports `TC004` misses. Missing non-vibe deps are non-blocking warnings.
-- **`uv run scripts/suggest_lazy_imports.py`** — informational: reports deferral candidates (`TC001`–`TC003` + single-function heuristic). Not gated.
-
-## Pydantic
-
-- Parse external data via `model_validate`, `field_validator`, or `model_validator(mode="before")` — never ad-hoc `getattr` / `hasattr` walks or custom `from_sdk` constructors.
-- Set `ConfigDict(extra=…)` explicitly. Use `validation_alias` (or field aliases) for kebab-case TOML keys.
-- Discriminated unions (e.g. MCP `transport`): use sibling final classes plus a shared base/mixin, and compose with `Annotated[Union[...], Field(discriminator=...)]`. Never narrow the discriminator field in a subclass — it violates LSP and pyright will reject it.
-- Document `Raises:` only for exceptions the function actually raises (or that propagate from public API calls). Don't list speculative built-ins.
-
-## Async
-
-- `asyncio` is the orchestration runtime in the agent loop and tool execution. Use `asyncio.create_task` + queues for concurrent work, not blanket `gather`.
-- Never run CPU-heavy or I/O-bound code on the UI thread. The Textual TUI and the agent loop share one event loop, so anything blocking (large JSON/Pydantic serialization, `os.fsync`, subprocess calls, recursive globs) freezes the UI — offload it with `asyncio.to_thread`. Async file wrappers don't make blocking syscalls non-blocking.
-- Use `anyio.Path` for file I/O on async paths.
-- Streaming surfaces return `AsyncGenerator[Event, None]`, not coroutines.
-- Route core-to-TUI communication through `vibe.app_server`. Server requests such as approvals and user input become canonical Vibe events; neither the TUI nor app server may register callbacks, listeners, or message observers directly on the agent loop.
-- When Vibe owns an HTTP client, use `VibeAsyncHTTPClient` from `vibe.utils.http` instead of `httpx.AsyncClient` so proxy env vars are handled consistently. Its CIDR `NO_PROXY` matching applies only to IP-literal request hosts; do not resolve DNS before proxy selection. Mock outbound HTTP with `respx` in tests.
-
-## Tools
-
-- Subclass `BaseTool` from `vibe/core/tools/base.py` with a Pydantic args model and a `BaseToolConfig` generic parameter.
-- Implement `async def run(args, ctx: InvokeContext)` and yield events progressively.
-- Raise `ToolError` for user-facing failures; raise `ToolPermissionError` for authorization failures.
-- Declare permission with `ToolPermission` (`ALWAYS` / `ASK` / `NEVER`); honor it consistently.
-
-## Logging & errors
-
-- Use `from vibe.observability.logging import logger` — stdlib `logging` with `StructuredLogFormatter`, not `structlog`.
-- Configure via env: `LOG_LEVEL` (default `WARNING`), `LOG_MAX_BYTES`. Logs land in `~/.vibe/logs/vibe.log`.
-- Pass variables as `%s` positional args, not f-string interpolation: prefer `logger.error("Failed to fetch url=%s", url)` over `logger.error(f"Failed to fetch {url}")`. This defers formatting to the logging framework (only formats if the message is emitted) and keeps messages grep-friendly.
-- Define module-local exception hierarchies. Always chain with `raise NewError(...) from e`. Rich exceptions expose a `_fmt()` helper for human-readable output.
-
-## File I/O
-
-- Prefer `vibe.core.utils.io.read_safe` / `read_safe_async` / `decode_safe` over raw `Path.read_text()`, `Path.read_bytes().decode()`, or `open()`.
-- They return `ReadSafeResult(text, encoding)` and try UTF-8, then BOM detection, then locale, then `charset_normalizer` lazily.
-- Pass `raise_on_error=True` only when callers must distinguish corrupt files from valid ones; the default replaces undecodable bytes with U+FFFD.
-
-## Widgets
-
-- For selectable lists, use `NavigableOptionList` from `vibe/cli/textual_ui/widgets/navigable_option_list.py` instead of Textual's `OptionList`. It adds `j`/`k` cursor navigation on top of the arrow keys; the bare `OptionList` only handles arrows.
-- Keep feature-specific Textual state and helper functions with the feature's widget package. `app.py` should orchestrate mounting and message handling, not accumulate feature-local state models, defaulting helpers, or import factories.
-- Render tool headers as an explicit verb plus message in every state: progressive wording while a call is running, then a settled verb once any result arrives, including a failure. Preserve result metadata such as `(truncated)` or `(scratchpad)` immediately after the message and keep error details in the expandable result body.
-
-## TCSS
-
-- When a rule sets `color: $text-muted;`, pair it with a nested `&:ansi { text-style: dim; }` so the muted intent survives under ANSI themes.
-- Never use `ansi_*` colors (e.g. `ansi_red`, `ansi_bright_blue`). Use Textual theme variables like `$primary`, `$foreground`, `$surface`, `$error`, etc. — see https://textual.textualize.io/guide/design/. ANSI themes are derived from these variables automatically.
-- Keep truncation and overflow behavior declarative in TCSS. Do not add resize handlers or explicit widget-width calculations solely to force an ellipsis; accept clipping or overflow when Textual cannot express the layout reliably.
-
-## Cross-platform
-
-Vibe ships on Linux, macOS, and Windows, but **CI runs the test suite on Linux only**. The machine you develop on is not the machine that gates the PR — code and tests must pass on every platform, and must be *provably* correct on the platforms CI cannot exercise.
-
-- Never rely on host-specific behavior (shell, path separator, line ending, available binaries, `$SHELL`, case sensitivity). Assume the same code runs under `cmd.exe`, Git Bash, `zsh`, and `sh`.
-- Branch platform-specific logic behind the helpers in `vibe.core.utils.platform` (`is_windows()`, `resolve_windows_shell()`), not ad-hoc `sys.platform` checks. Keep POSIX-only assumptions (forward slashes, POSIX `shlex` escaping, `$SHELL`) out of shared paths and scope Windows-only handling to `is_windows()`.
-- Use `pathlib.Path` for path composition; never hardcode `/` or `\\`.
-- Test other-platform code paths **on Linux** by monkeypatching `sys.platform`, env vars, and probes like `shutil.which` — do not `@pytest.mark.skipif` them away. A Windows-only behavior with no Linux-runnable test is untested in CI.
-- When an assertion depends on the platform, force it explicitly (e.g. `monkeypatch.setattr(module, "is_windows", lambda: True)`) instead of letting the test pass only because of the host it happened to run on. A test that would flip its result on a different OS is a bug.
-- Treat terminal and PTY data as arbitrarily chunked streams: normalize CRLF before interpreting lone `\r` as an in-place redraw, buffer incomplete control sequences until their terminator arrives, and add Linux-runnable regression tests covering CRLF plus every split boundary of representative control sequences.
-
-## Tests
-
-- Stack: `pytest` + `pytest-asyncio` + `pytest-textual-snapshot` + `respx`.
-- Mark async tests with `@pytest.mark.asyncio`. Mock outbound HTTP with `respx`.
-- Rely on the autouse fixtures in `tests/conftest.py` (`config_dir`, `tmp_working_directory`) for filesystem and home-dir isolation.
-- No docstrings on test functions, methods, or classes — descriptive names like `test_create_user_returns_403_when_unauthorized` carry the intent. Pytest displays docstrings instead of node IDs when present, which hurts.
-- Tests are exempt from the `ANN` and `PLR` ruff rules (see `per-file-ignores`).
-- Changes to managed shell tools, managed shell backends, shell prompts, or shell dependencies require focused POSIX/common validation and passing Windows shell CI. If Windows shell CI is unavailable, the PR notes must include manual native Windows commands and results.
-- After app-server session behavior, backend adapters, or shared contract-fixture changes, run both backend contract commands. A failing Unified frontier is expected before parity; include its complete pytest summary in parity-related PRs.
-
-## Startup import cost
-
-CI gates cold-start module count via `vibe/scripts/check_startup_import_cost.py` (budgets in `vibe/scripts/startup_import_cost.vibe.toml`).
-
-- When a change touches imports or module structure on the path of `import vibe` or `from vibe.cli.textual_ui.app import VibeApp`, run `cd vibe && uv run scripts/check_startup_import_cost.py` and confirm the count stays within budget.
-- **Verify, do not bump.** An overshoot is a regression to investigate (lazy import, drop the dependency, defer the import) — not a reason to raise the budget. Only widen for a deliberate, PR-justified increase, and set to observed count + ~10% headroom, never the exact count.
-
-## Git
-
-- Never use `git commit --amend`, `git push --force`, or `git push --force-with-lease`.
-- Always create new commits and push with a plain `git push`.
-- Reconciling with the upstream of the current branch (e.g. push rejected because `origin/<current-branch>` advanced): rebase the current branch onto its upstream — do not merge the upstream branch into the current one, never force-push.
-- Reconciling with the base branch (e.g. `origin/main`) once the PR is open: merge the base branch into the current branch — do not rebase, since rebasing rewrites already-pushed history and would require a force-push.
-- Run git commands through `uv run` (e.g. `uv run git commit`, `uv run git push`) so pre-commit hooks resolve the project's venv — bare `git commit` fails pre-commit with `reportMissingImports` because pyright can't find third-party packages.
-
-## CI / GitHub Actions
-
-- Pin every `uses:` to a full **commit SHA** with an exact version comment: `uses: owner/action@<commit-sha> # vX.Y.Z`.
-- Resolve to the commit, not the annotated-tag object: take the `refs/tags/vX^{}` line from `git ls-remote --tags`, or `gh api repos/<owner>/<repo>/git/refs/tags/<tag> --jq .object` peeled to a commit. Check with `git cat-file -t <sha>` → `commit`, not `tag`. Never pin a moving major tag (`v9`).
-
-## Supply-chain pinning
-
-Every external input to the build, CI, or install path must be pinned to an immutable identifier — never a mutable tag or an unverified download. Add a human-readable comment next to each pin.
-
-- **Container images**: reference by `@sha256:<digest>`, never a bare tag (`:latest`, `:8`). Resolve the digest via the registry's `Docker-Content-Digest` header (`curl -sI -H 'Accept: application/vnd.oci.image.index.v1+json' <registry>/v2/<repo>/manifests/<tag>`). When the image lives inside a JSON matrix string, document the tag→digest mapping in an adjacent comment.
-- **pre-commit hooks** (`.pre-commit-config.yaml`): pin every `rev:` to a full commit SHA with a `# vX.Y.Z` comment. Run `pre-commit autoupdate --freeze` to refresh, and resolve to the peeled commit ref (`refs/tags/vX^{}`), not the annotated-tag object — same rule as `uses:` above.
-- **Build-system deps** (`pyproject.toml` `[build-system] requires`): pin `hatchling`, `hatch-vcs`, `editables` (and any addition) to exact `==` versions. These execute during source builds and are not covered by `uv.lock`.
-- **External binary downloads** (e.g. `patchelf` in `scripts/ci/`): never pipe an unverified download straight into `tar`/`sh`. Download to a temp file, verify `sha256sum -c` against a known-good hash keyed by version (and arch when relevant), then extract. Hard-fail when no hash is registered for the requested version/arch so a bump forces updating the hash.
-
-## Editor tip
-
-In Cursor / Pyright, the "Add import" quick fix is missing — use the workspace snippets `acpschema`, `acphelpers`, `vibetypes`, `vibeconfig` to insert the import line, then rename the symbol.
-
 ## Autoimprovement
 
-- Suggest to add new rules to AGENTS.md based on user input or PR comments, when a change request could be generalized as a rule.
-- Suggest updates to the README.md file according to feature changes or additions
+- When a change request can be generalized as a rule, prefer adding it to the relevant `.agents/skills/` SKILL.md rather than appending to AGENTS.md. AGENTS.md should stay small and universal; domain-specific conventions belong in skills so they load only when needed. Create a new skill when no existing one fits.
+- Suggest updates to the README.md file according to feature changes or additions.
 - Keep the builtin Vibe Skill (`vibe/core/skills/builtins/vibe.py`) up-to-date. It documents the CLI's features, such as args, flags, config options and persistence, commands, built-in agents, file discovery logic.
 - When adding or changing Vibe config fields, check whether Settings Manager's Vibe Code managed-config UI and Le Chat Web's backend allowlist/schema must be updated. If no update is needed, say so explicitly in the change notes.

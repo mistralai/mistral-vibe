@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -11,7 +11,7 @@ from tests.conftest import (
     build_test_vibe_config,
 )
 from vibe.cli.textual_ui.widgets.log_level_picker import LogLevelPickerApp
-from vibe.cli.textual_ui.widgets.messages import UserCommandMessage
+from vibe.cli.textual_ui.widgets.messages import ErrorMessage, UserCommandMessage
 from vibe.observability.logging import (
     _VibeFileHandler,
     get_effective_log_level,
@@ -21,6 +21,21 @@ from vibe.observability.logging import (
     logger as vibe_logger,
     set_session_override,
 )
+
+
+async def _wait_until(pilot, predicate: Callable[[], bool], *, tries: int = 50) -> bool:
+    for _ in range(tries):
+        await pilot.pause()
+        if predicate():
+            return True
+    return predicate()
+
+
+def _has_command_message(app, *needles: str) -> bool:
+    return any(
+        all(needle in message._content for needle in needles)
+        for message in app.query(UserCommandMessage)
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -61,9 +76,9 @@ async def test_picker_session_only_shows_feedback() -> None:
                 session_level="DEBUG", config_level=None, config_cleared=False
             )
         )
-        await pilot.pause()
-        messages = app.query(UserCommandMessage)
-        assert any("DEBUG" in m._content and "session" in m._content for m in messages)
+        assert await _wait_until(
+            pilot, lambda: _has_command_message(app, "DEBUG", "session")
+        )
 
     assert get_session_override() == "DEBUG"
 
@@ -83,10 +98,8 @@ async def test_picker_global_shows_feedback_and_persists() -> None:
                 session_level=None, config_level="ERROR", config_cleared=False
             )
         )
-        await pilot.pause()
-        messages = app.query(UserCommandMessage)
-        assert any(
-            "ERROR" in m._content and "config.toml" in m._content for m in messages
+        assert await _wait_until(
+            pilot, lambda: _has_command_message(app, "ERROR", "config.toml")
         )
 
     assert app.app_server.resources.config.current.log_level == "ERROR"
@@ -156,9 +169,9 @@ async def test_picker_config_cleared_removes_persisted_value() -> None:
                 session_level=None, config_level=None, config_cleared=True
             )
         )
-        await pilot.pause()
-        messages = app.query(UserCommandMessage)
-        assert any("config.toml cleared" in m._content for m in messages)
+        assert await _wait_until(
+            pilot, lambda: _has_command_message(app, "config.toml cleared")
+        )
 
     assert app.app_server.resources.config.current.log_level is None
 
@@ -179,8 +192,41 @@ async def test_picker_session_cleared_shows_feedback() -> None:
                 session_level=None, config_level=None, config_cleared=False
             )
         )
-        await pilot.pause()
-        messages = app.query(UserCommandMessage)
-        assert any("session override cleared" in m._content for m in messages)
+        assert await _wait_until(
+            pilot, lambda: _has_command_message(app, "session override cleared")
+        )
 
     assert get_session_override() is None
+
+
+@pytest.mark.asyncio
+async def test_picker_config_write_failure_surfaces_error(monkeypatch) -> None:
+    # When the inline (idle) config write fails, the picker must surface an
+    # error instead of reporting success.
+    config = build_test_vibe_config()
+    agent_loop = build_test_agent_loop(config=config)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+
+    async def _boom(*_args, **_kwargs) -> None:
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(app, "_persist_config_changes", _boom)
+
+    async with app.run_test() as pilot:
+        await app._handle_command("/log-level")
+        await pilot.pause()
+        picker = app.query_one(LogLevelPickerApp)
+        picker.post_message(
+            LogLevelPickerApp.Applied(
+                session_level=None, config_level="ERROR", config_cleared=False
+            )
+        )
+        await pilot.pause()
+
+        errors = app.query(ErrorMessage)
+        assert any(
+            "log-level" in str(m._error) or "disk on fire" in str(m._error)
+            for m in errors
+        )
+        success = app.query(UserCommandMessage)
+        assert not any("config.toml" in m._content for m in success)

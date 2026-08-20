@@ -18,12 +18,15 @@ from vibe.core.types import Backend, FileImageSource, ImageAttachment, LLMMessag
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 
 
-def _config_with_vision_flag(*, supports_images: bool) -> VibeConfigSchema:
+def _config_with_vision_flag(
+    *, supports_images: bool, display_name: str | None = None
+) -> VibeConfigSchema:
     models = [
         ModelConfig(
             name="mistral-vibe-cli-latest",
             provider="mistral",
             alias="devstral-latest",
+            display_name=display_name,
             supports_images=supports_images,
         )
     ]
@@ -95,6 +98,22 @@ async def test_act_raises_when_model_lacks_vision(
     # so a rejected turn leaves no trace in either.
     assert agent.rewind_manager._checkpointer.view().turns == []
     assert len(agent.messages) == initial_message_count
+
+
+@pytest.mark.asyncio
+async def test_vision_rejection_names_the_display_name(
+    png_attachment: ImageAttachment,
+) -> None:
+    config = _config_with_vision_flag(
+        supports_images=False, display_name="glm-5.2 (Mistral Hosted)"
+    )
+    agent = build_test_agent_loop(config=config, backend=FakeBackend([]))
+
+    with pytest.raises(ImagesNotSupportedError) as excinfo:
+        async for _ in agent.act("look", images=[png_attachment]):
+            pass
+
+    assert "glm-5.2 (Mistral Hosted)" in str(excinfo.value)
 
 
 @pytest.mark.asyncio

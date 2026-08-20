@@ -6,6 +6,7 @@ from vibe import __version__
 from vibe.core.telemetry.types import (
     AgentEntrypoint,
     AttachmentKind,
+    ExperimentAssignment,
     LaunchContext,
     TelemetryBaseMetadata,
     TelemetryCallType,
@@ -21,12 +22,14 @@ def build_base_metadata(
     launch_context: LaunchContext | None,
     session_id: str | None,
     parent_session_id: str | None = None,
-    experiments: dict[str, str] | None = None,
+    experiment_assignments: list[ExperimentAssignment] | None = None,
     user_plan: str | None = None,
 ) -> dict[str, Any]:
     launch_payload = (
         launch_context.telemetry_fields() if launch_context is not None else {}
     )
+    assignments = experiment_assignments or []
+    experiments = {a.experiment_id: a.variation_name for a in assignments}
     return cast(
         dict[str, Any],
         TelemetryBaseMetadata(
@@ -36,6 +39,7 @@ def build_base_metadata(
             session_id=session_id,
             parent_session_id=parent_session_id,
             experiments=experiments or None,
+            experiment_assignments=experiment_assignments or None,
             user_plan=user_plan,
             **launch_payload,
         ).model_dump(exclude_none=True),

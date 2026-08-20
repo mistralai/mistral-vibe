@@ -15,6 +15,7 @@ class ModelConfigView(ProtocolModel):
     alias: str
     thinking: ThinkingLevel
     supports_images: bool
+    display_name: str
 
 
 class TranscribeModelConfigView(ProtocolModel):
@@ -78,3 +79,13 @@ class ConfigView(ProtocolModel):
     transcription: TranscriptionConfigView
     speech: SpeechConfigView
     validation_warnings: list[str]
+
+    def model_display_name(self, alias: str) -> str:
+        """User-facing name for a configured alias, or the alias when unknown."""
+        return next(
+            (model.display_name for model in self.models if model.alias == alias), alias
+        )
+
+    @property
+    def default_model_display_name(self) -> str:
+        return self.model_display_name(self.default_model_alias)

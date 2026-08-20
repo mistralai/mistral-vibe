@@ -127,7 +127,7 @@ def prepare_prompt(
     model = agent_loop.config.get_active_model()
     if images and not model.supports_images:
         raise PromptPreparationError(
-            f"Model `{model.alias}` does not support images. "
+            f"Model `{model.display_name or model.alias}` does not support images. "
             "Switch with /model or remove the attachment."
         )
     title = None

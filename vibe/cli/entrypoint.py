@@ -340,7 +340,24 @@ def _suggest_worktree_name(prompt: str | None) -> str | None:
     return asyncio.run(suggest_worktree_name(prompt, cwd=Path.cwd()))
 
 
+def _set_process_title() -> None:
+    # Cosmetic: renames the process from "python3" to "Vibe CLI" in ps/top and
+    # Activity Monitor on Linux/macOS so it can be spotted and killed; concurrent
+    # instances are told apart by the process manager's PID column. No-op for
+    # Windows Task Manager. Must never block startup, hence the broad guard.
+    try:
+        import setproctitle
+
+        from vibe.cli._process_title import process_name
+
+        setproctitle.setproctitle(process_name())
+    except Exception:
+        pass
+
+
 def main() -> None:
+    _set_process_title()
+
     from vibe.core.utils.windows_asyncio import (
         silence_proactor_transport_teardown_warnings,
     )

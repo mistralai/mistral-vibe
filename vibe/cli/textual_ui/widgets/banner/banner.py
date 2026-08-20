@@ -164,7 +164,7 @@ class Banner(Static):
             mcp_total = mcp_servers_total
         active_model = config.active_model
         return BannerState(
-            active_model=f"{active_model.alias}[{active_model.thinking}]",
+            active_model=f"{active_model.display_name}[{active_model.thinking}]",
             model_pending=model_pending,
             models_count=len(config.models),
             mcp_servers_enabled=mcp_enabled,

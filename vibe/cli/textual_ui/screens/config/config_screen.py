@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from enum import StrEnum, auto
 from typing import ClassVar
 
 from textual import work
@@ -10,12 +12,7 @@ from textual.screen import ModalScreen
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option, OptionDoesNotExist
 
-from vibe.app_server.protocol import (
-    ConfigFieldKind,
-    ConfigFieldWire,
-    ConfigWriteOpWire,
-    ConfigWriteResponse,
-)
+from vibe.app_server.protocol import ConfigFieldKind, ConfigFieldWire, ConfigWriteOpWire
 from vibe.app_server.resources import ConfigResource
 from vibe.cli.textual_ui.constants import UNPINNED_ACTIVE_MODEL
 from vibe.cli.textual_ui.screens.config._common import (
@@ -39,6 +36,18 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.theme_picker import sorted_theme_names
 
 
+class ConfigWriteResult(StrEnum):
+    ACCEPTED = auto()
+    REJECTED = auto()
+    FAILURES = auto()
+    DEFERRED = auto()
+
+
+ConfigWriteCallback = Callable[
+    [list[ConfigWriteOpWire], str], Awaitable[ConfigWriteResult]
+]
+
+
 class ConfigScreen(ModalScreen[bool]):
     """Full-screen, searchable settings browser with per-layer origin display."""
 
@@ -51,9 +60,12 @@ class ConfigScreen(ModalScreen[bool]):
         Binding("ctrl+r", "reset", "Reset to default", show=False),
     ]
 
-    def __init__(self, config: ConfigResource) -> None:
+    def __init__(
+        self, config: ConfigResource, *, write_callback: ConfigWriteCallback
+    ) -> None:
         super().__init__(id=CONFIG_SCREEN_ID)
         self._config = config
+        self._write_callback = write_callback
         self._views: list[ConfigFieldWire] = []
         self._filtered: list[ConfigFieldWire] = []
         self._rendered_ids: list[str | None] = []
@@ -119,7 +131,10 @@ class ConfigScreen(ModalScreen[bool]):
         if view.name == "active_model":
             update["enum_choices"] = [UNPINNED_ACTIVE_MODEL, *field_choices]
             update["value_labels"] = {
-                UNPINNED_ACTIVE_MODEL: f"default (currently {config.default_model_alias})"
+                UNPINNED_ACTIVE_MODEL: (
+                    f"default (currently {config.default_model_display_name})"
+                ),
+                **{model.alias: model.display_name for model in config.models},
             }
         return view.model_copy(update=update)
 
@@ -279,20 +294,28 @@ class ConfigScreen(ModalScreen[bool]):
     async def _write(
         self, view: ConfigFieldWire, ops: list[ConfigWriteOpWire], *, reason: str
     ) -> None:
-        response: ConfigWriteResponse = await self._config.write(ops, reason=reason)
-        if response.rejected:
-            self.notify(
-                f"'{view.name}' rejected this value.", severity="error", markup=False
-            )
-            return
-        if response.failures:
-            self.notify(
-                f"Could not save '{view.name}'.", severity="error", markup=False
-            )
-            return
-        self._dirty = True
-        await self._sync_views()
-        self._refresh_options()
+        result = await self._write_callback(ops, reason)
+        match result:
+            case ConfigWriteResult.REJECTED:
+                self.notify(
+                    f"'{view.name}' rejected this value.",
+                    severity="error",
+                    markup=False,
+                )
+            case ConfigWriteResult.FAILURES:
+                self.notify(
+                    f"Could not save '{view.name}'.", severity="error", markup=False
+                )
+            case ConfigWriteResult.DEFERRED:
+                self.notify(
+                    f"'{view.name}' will apply when the session is idle.",
+                    severity="information",
+                    markup=False,
+                )
+            case ConfigWriteResult.ACCEPTED:
+                self._dirty = True
+                await self._sync_views()
+                self._refresh_options()
 
     async def _sync_views(self) -> None:
         response = await self._config.read_fields()

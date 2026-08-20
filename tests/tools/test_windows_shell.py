@@ -65,6 +65,7 @@ from vibe.core.tools.terminal_runtime import TerminalRuntime
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 from vibe.core.utils import is_windows
+from vibe.core.workspace import Workspace
 from vibe.utils import paths
 
 
@@ -156,8 +157,7 @@ def test_git_bash_normalizes_msys_drive_paths_before_workdir_check(
     outside_dirs = experimental_bash_module._collect_outside_dirs(
         ["cat /c/repo/file.txt"],
         command_cwd=tmp_path,
-        cwd=tmp_path,
-        project_roots=[],
+        workspace=Workspace.for_session(tmp_path),
         scratchpad_dir=None,
     )
 

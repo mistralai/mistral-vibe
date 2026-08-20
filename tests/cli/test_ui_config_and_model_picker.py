@@ -72,8 +72,45 @@ async def test_model_picker_shows_all_models() -> None:
         await pilot.pause(0.2)
 
         picker = app.query_one(ModelPickerApp)
-        assert picker._model_aliases == ["alpha", "beta", "gamma"]
+        assert [model.alias for model in picker._models] == ["alpha", "beta", "gamma"]
         assert picker._current_model == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_model_picker_shows_display_name_but_persists_alias() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="alpha"),
+        ModelConfig(
+            name="zai-glm-5-2",
+            provider="mistral",
+            alias="glm-5-2",
+            display_name="glm-5.2 (Mistral Hosted)",
+        ),
+    ]
+    config = build_test_vibe_config(models=models, active_model="alpha")
+    app = build_test_vibe_app(config=config)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_model()
+        await pilot.pause(0.2)
+
+        picker = app.query_one(ModelPickerApp)
+        assert [model.display_name for model in picker._models] == [
+            "alpha",
+            "glm-5.2 (Mistral Hosted)",
+        ]
+        option_list = picker.query_one(OptionList)
+        # Row 2 is the routed model, offset by the leading Default row.
+        assert "glm-5.2 (Mistral Hosted)" in str(
+            option_list.get_option_at_index(2).prompt
+        )
+
+        # Selecting it still persists the alias, not the label.
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+
+        assert app.config.active_model.alias == "glm-5-2"
 
 
 @pytest.mark.asyncio

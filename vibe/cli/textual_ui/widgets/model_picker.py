@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from rich.text import Text
@@ -18,6 +19,14 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 # Option id for the "Default" (unpinned) row. Kept distinct from any model alias
 # and non-empty so ``OptionList``'s truthiness guard still fires on select.
 DEFAULT_OPTION_ID = "\x00default"
+
+
+@dataclass(frozen=True)
+class ModelOption:
+    """A selectable model: ``alias`` is persisted, ``display_name`` is shown."""
+
+    alias: str
+    display_name: str
 
 
 def _build_option_text(label: str, is_current: bool, *, hint: str = "") -> Text:
@@ -49,18 +58,18 @@ class ModelPickerApp(Container):
 
     def __init__(
         self,
-        model_aliases: list[str],
+        models: list[ModelOption],
         current_model: str,
         *,
         is_pinned: bool,
-        default_alias: str,
+        default_display_name: str,
         **kwargs: Any,
     ) -> None:
         super().__init__(id="modelpicker-app", **kwargs)
-        self._model_aliases = model_aliases
+        self._models = models
         self._current_model = current_model
         self._is_pinned = is_pinned
-        self._default_alias = default_alias
+        self._default_display_name = default_display_name
 
     def _is_alias_current(self, alias: str) -> bool:
         return self._is_pinned and alias == self._current_model
@@ -71,15 +80,18 @@ class ModelPickerApp(Container):
                 _build_option_text(
                     "Default",
                     not self._is_pinned,
-                    hint=f"(currently {self._default_alias})",
+                    hint=f"(currently {self._default_display_name})",
                 ),
                 id=DEFAULT_OPTION_ID,
             ),
             *(
                 Option(
-                    _build_option_text(alias, self._is_alias_current(alias)), id=alias
+                    _build_option_text(
+                        model.display_name, self._is_alias_current(model.alias)
+                    ),
+                    id=model.alias,
                 )
-                for alias in self._model_aliases
+                for model in self._models
             ),
         ]
         with Vertical(id="modelpicker-content"):
@@ -98,8 +110,8 @@ class ModelPickerApp(Container):
         # Pre-select the current choice: the pinned model, else the Default row.
         highlighted = 0
         if self._is_pinned:
-            for i, alias in enumerate(self._model_aliases):
-                if alias == self._current_model:
+            for i, model in enumerate(self._models):
+                if model.alias == self._current_model:
                     highlighted = i + 1  # offset by the leading Default row
                     break
         option_list.highlighted = highlighted

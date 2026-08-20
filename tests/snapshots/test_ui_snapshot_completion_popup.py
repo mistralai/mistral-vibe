@@ -5,24 +5,29 @@ from textual.containers import Container
 from textual.pilot import Pilot
 
 from tests.snapshots.snap_compare import SnapCompare
+from vibe.cli.autocompletion.base import CompletionEntry
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
 
-FILE_MENTION_SUGGESTIONS: list[tuple[str, str]] = [
-    ("@vibe/cli/textual_ui/widgets/chat_input/completion_popup.py", ""),
-    ("@vibe/core/tools/builtins/very_long_deeply_nested_module_name.py", ""),
-    ("@tests/snapshots/test_ui_snapshot_completion_popup_fixtures.py", ""),
+FILE_MENTION_SUGGESTIONS: list[CompletionEntry] = [
+    CompletionEntry("@vibe/cli/textual_ui/widgets/chat_input/completion_popup.py", ""),
+    CompletionEntry(
+        "@vibe/core/tools/builtins/very_long_deeply_nested_module_name.py", ""
+    ),
+    CompletionEntry(
+        "@tests/snapshots/test_ui_snapshot_completion_popup_fixtures.py", ""
+    ),
 ]
 
-SLASH_COMMAND_SUGGESTIONS: list[tuple[str, str]] = [
-    (
+SLASH_COMMAND_SUGGESTIONS: list[CompletionEntry] = [
+    CompletionEntry(
         "/model",
         "Pick the model used for the conversation from every configured provider",
     ),
-    (
+    CompletionEntry(
         "/compact",
         "Summarize the conversation so far to reclaim context window headroom",
     ),
-    (
+    CompletionEntry(
         "/resume",
         "Reopen a previous local session and continue exactly where you left off",
     ),
@@ -37,7 +42,7 @@ class CompletionPopupTestApp(App):
             yield CompletionPopup()
 
 
-async def _show(pilot: Pilot, suggestions: list[tuple[str, str]]) -> None:
+async def _show(pilot: Pilot, suggestions: list[CompletionEntry]) -> None:
     pilot.app.query_one(CompletionPopup).update_suggestions(suggestions, selected=0)
     await pilot.pause(0.1)
 

@@ -1247,7 +1247,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             active_model = None
             model_name = None
         if images and active_model is not None and not active_model.supports_images:
-            raise ImagesNotSupportedError(active_model.alias)
+            raise ImagesNotSupportedError(
+                active_model.display_name or active_model.alias
+            )
         if self._active_turn is not None:
             raise AgentLoopStateError("A turn is already active")
         options = turn_options or AgentTurnOptions()

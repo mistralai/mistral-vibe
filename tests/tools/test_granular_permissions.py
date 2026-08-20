@@ -163,6 +163,33 @@ class TestBashGranularPermissions:
         ]
         assert len(outside) == 0
 
+    def test_the_boundary_comes_from_the_session_not_the_process(
+        self, tmp_path, monkeypatch
+    ):
+        # Every other test here chdirs the process into the session directory,
+        # so a tool reading the boundary off the process rather than off its own
+        # workspace still looks right. Under the app server the two differ, and
+        # then a file the session owns is judged foreign.
+        session = tmp_path / "session"
+        (session / "subdir").mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        config = BashToolConfig()
+        bash = Bash(config_getter=lambda: config, state=BaseToolState(), cwd=session)
+
+        result = bash.resolve_permission(
+            BashArgs(command=f"mkdir {session / 'subdir' / 'child'}")
+        )
+
+        assert isinstance(result, PermissionContext)
+        outside = [
+            rp
+            for rp in result.required_permissions
+            if rp.scope is PermissionScope.OUTSIDE_DIRECTORY
+        ]
+        assert len(outside) == 0
+
     def test_rm_uses_arity_based_pattern(self):
         bash = self._bash()
         result = bash.resolve_permission(BashArgs(command="rm -rf /tmp/something"))
@@ -901,7 +928,7 @@ class TestCollectOutsideDirs:
         monkeypatch.setattr(bash_module, "is_windows", lambda: False)
         seen_paths: list[str] = []
 
-        def is_within_workdir(path: str) -> bool:
+        def is_within_workdir(path: str, **_kwargs) -> bool:
             seen_paths.append(path)
             return False
 
@@ -915,7 +942,7 @@ class TestCollectOutsideDirs:
     def test_git_bash_drive_path_normalized_before_workdir_check(self, monkeypatch):
         seen_paths: list[str] = []
 
-        def is_within_workdir(path: str) -> bool:
+        def is_within_workdir(path: str, **_kwargs) -> bool:
             seen_paths.append(path)
             return False
 
@@ -935,6 +962,8 @@ class TestCollectOutsideDirs:
         # Backslash paths are a Windows concern; a POSIX shell would consume the
         # backslashes as escapes, so detection only applies under is_windows().
         monkeypatch.setattr(bash_module, "is_windows", lambda: True)
-        monkeypatch.setattr(bash_module, "is_path_within_workdir", lambda _: False)
+        monkeypatch.setattr(
+            bash_module, "is_path_within_workdir", lambda _, **_kwargs: False
+        )
         dirs = _collect_outside_dirs([f"cat {path}"])
         assert len(dirs) >= 1

@@ -195,6 +195,7 @@ class TestCommandRegistry:
         cmd_name, cmd, cmd_args = result
         assert cmd_name == "loop"
         assert cmd.handler == "_loop_command"
+        assert cmd.side_channel is False
         assert cmd_args == "30s ping"
 
     def test_exit_command_accepts_bare_synonyms(self) -> None:

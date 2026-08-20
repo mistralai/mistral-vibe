@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 
 class CompletionResult(StrEnum):
@@ -10,9 +10,14 @@ class CompletionResult(StrEnum):
     SUBMIT = "submit"
 
 
+class CompletionEntry(NamedTuple):
+    label: str
+    description: str
+
+
 class CompletionView(Protocol):
     def render_completion_suggestions(
-        self, suggestions: list[tuple[str, str]], selected_index: int
+        self, suggestions: list[CompletionEntry], selected_index: int
     ) -> None: ...
 
     def clear_completion_suggestions(self) -> None: ...

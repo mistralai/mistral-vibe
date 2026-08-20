@@ -22,6 +22,7 @@ from vibe.core.tools.permissions import (
     PermissionScope,
     RequiredPermission,
 )
+from vibe.core.workspace import Workspace
 from vibe.utils.paths import (
     normalize_windows_input_path,
     normalize_windows_path,
@@ -81,11 +82,13 @@ def resolve_tool_path(raw: str | None, cwd: Path) -> Path:
     return path.resolve() if path.is_absolute() else path
 
 
-def _configured_project_roots() -> list[Path]:
+def ambient_workspace() -> Workspace:
+    """Fallback workspace for a caller with no session, rooted at the process cwd."""
     try:
-        return get_harness_files_manager().project_roots
+        project_roots = get_harness_files_manager().project_roots
     except RuntimeError:
-        return []
+        project_roots = []
+    return Workspace.for_session(Path.cwd(), project_roots)
 
 
 def _resolve_display_target(path_str: str, cwd: Path) -> Path | None:
@@ -151,24 +154,18 @@ def resolve_path_permission(
 
 
 def is_path_within_workdir(
-    path_str: str, *, cwd: Path | None = None, project_roots: list[Path] | None = None
+    path_str: str, *, workspace: Workspace | None = None
 ) -> bool:
-    """Return True if the resolved path is inside cwd or any project root.
+    """Return True if the resolved path is inside the workspace's authorised roots.
 
-    Project roots come from the harness manager (trusted cwd + ``--add-dir``).
-    cwd is always in-bounds, even when the manager isn't initialized or when
-    the project source is disabled.
+    Omitting ``workspace`` resolves against the process cwd, not any session's.
     """
-    cwd = (cwd or Path.cwd()).resolve()
-    if project_roots is None:
-        project_roots = _configured_project_roots()
+    workspace = workspace or ambient_workspace()
     try:
-        resolved = _make_absolute(path_str, cwd).resolve()
+        resolved = _make_absolute(path_str, workspace.cwd).resolve()
     except (ValueError, OSError):
         return False
-    if resolved.is_relative_to(cwd.resolve()):
-        return True
-    return any(resolved.is_relative_to(root.resolve()) for root in project_roots)
+    return workspace.allows(resolved)
 
 
 def resolve_file_tool_permission(
@@ -179,8 +176,7 @@ def resolve_file_tool_permission(
     denylist: list[str],
     config_permission: ToolPermission,
     sensitive_patterns: list[str],
-    cwd: Path | None = None,
-    project_roots: list[Path] | None = None,
+    workspace: Workspace | None = None,
     scratchpad_dir: Path | None = None,
 ) -> PermissionContext | None:
     """Resolve permission for a file-based tool invocation.
@@ -188,9 +184,8 @@ def resolve_file_tool_permission(
     Checks scratchpad, then allowlist/denylist, then sensitive patterns, then workdir boundary.
     Returns PermissionContext with granular required_permissions when applicable.
     """
-    cwd = (cwd or Path.cwd()).resolve()
-    if project_roots is None:
-        project_roots = _configured_project_roots()
+    workspace = workspace or ambient_workspace()
+    cwd = workspace.cwd
 
     if is_scratchpad_path(path_str, scratchpad_dir=scratchpad_dir):
         return PermissionContext(permission=ToolPermission.ALWAYS)
@@ -220,7 +215,7 @@ def resolve_file_tool_permission(
             )
         )
 
-    if not is_path_within_workdir(path_str, cwd=cwd, project_roots=project_roots):
+    if not is_path_within_workdir(path_str, workspace=workspace):
         if config_permission == ToolPermission.NEVER:
             return PermissionContext(permission=ToolPermission.NEVER)
         resolved = file_path.resolve()

@@ -167,6 +167,7 @@ def _project_model_config(model: ModelConfig) -> ModelConfigView:
         alias=model.alias,
         thinking=model.thinking,
         supports_images=model.supports_images,
+        display_name=model.display_name or model.alias,
     )
 
 
@@ -274,12 +275,17 @@ def project_mcp(
 ) -> MCPState:
     tools = _project_mcp_tools(agent_loop)
     discovery_errors_set = set(discovery_errors) if discovery_errors else set()
+    connector_registry = agent_loop.connector_registry
+    connector_error = (
+        connector_registry.bootstrap_error() if connector_registry is not None else None
+    )
     return MCPState(
         sources=[
             *_project_mcp_servers(agent_loop, tools, discovery_errors_set),
             *_project_mcp_connectors(agent_loop, tools),
         ],
         discovery_errors=dict(discovery_errors or {}),
+        connector_error=connector_error,
     )
 
 
@@ -378,6 +384,11 @@ def _project_mcp_connectors(
                     status = MCPSourceStatus.NEEDS_SETUP
                 case _:
                     status = MCPSourceStatus.UNAVAILABLE
+        error = (
+            connector_registry.connector_error_for(name)
+            if connector_registry is not None
+            else None
+        )
         sources.append(
             MCPSourceSummary(
                 name=name,
@@ -388,6 +399,7 @@ def _project_mcp_connectors(
                     tools.get((MCPSourceKind.CONNECTOR, name), []),
                     key=lambda tool: tool.name,
                 ),
+                error=error,
             )
         )
     return sources

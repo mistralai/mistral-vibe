@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.app_server._projection import (
     project_config,
@@ -26,7 +27,7 @@ from vibe.app_server.models import (
     PublicReasoningEntry,
     ResourceContentBlock,
 )
-from vibe.core.config import MCPStdio, SessionLoggingConfig
+from vibe.core.config import ConnectorConfig, MCPStdio, SessionLoggingConfig
 from vibe.core.types import (
     FunctionCall,
     ImageAttachment,
@@ -190,6 +191,36 @@ def test_config_view_reports_unpinned_default_model() -> None:
     # The unpinned state resolves to the first configured model for display.
     assert config.default_model_alias == "alpha"
     assert config.active_model.alias == "alpha"
+
+
+def test_config_view_hydrates_display_name_from_alias() -> None:
+    from vibe.core.config import ModelConfig
+
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="alpha"),
+        ModelConfig(
+            name="zai-glm-5-2",
+            provider="mistral",
+            alias="glm-5-2",
+            display_name="glm-5.2 (Mistral Hosted)",
+        ),
+    ]
+    agent_loop = build_test_agent_loop(
+        config=build_test_vibe_config(models=models, active_model="alpha")
+    )
+
+    config = project_config(agent_loop)
+
+    # Models without a configured display name fall back to their alias, so the
+    # UI only ever reads ``display_name``.
+    assert [model.display_name for model in config.models] == [
+        "alpha",
+        "glm-5.2 (Mistral Hosted)",
+    ]
+    assert config.model_display_name("glm-5-2") == "glm-5.2 (Mistral Hosted)"
+    assert config.default_model_display_name == "alpha"
+    # An alias that names no configured model is echoed back unchanged.
+    assert config.model_display_name("unknown") == "unknown"
 
 
 def test_config_view_awaiting_experiment_model_on_cold_cache() -> None:
@@ -387,3 +418,41 @@ def test_persisted_compaction_boundary_projects_completed_checkpoint() -> None:
     assert checkpoint.kind == "compaction"
     assert checkpoint.message == "Context compacted"
     assert checkpoint.generation_status == "completed"
+
+
+def test_project_mcp_surfaces_connector_bootstrap_error() -> None:
+    agent_loop = build_test_agent_loop()
+    registry = FakeConnectorRegistry(
+        bootstrap_error="Failed to load workspace connectors (HTTP 502)."
+    )
+    agent_loop.connector_registry = registry
+
+    state = project_mcp(agent_loop)
+
+    assert state.connector_error == "Failed to load workspace connectors (HTTP 502)."
+
+
+def test_project_mcp_no_connector_error_when_healthy() -> None:
+    agent_loop = build_test_agent_loop()
+    agent_loop.connector_registry = FakeConnectorRegistry()
+
+    state = project_mcp(agent_loop)
+
+    assert state.connector_error is None
+
+
+def test_project_mcp_surfaces_per_connector_error() -> None:
+    config = build_test_vibe_config(
+        connectors=[ConnectorConfig(name="slack", disabled=False)]
+    )
+    agent_loop = build_test_agent_loop(config=config)
+    registry = FakeConnectorRegistry(
+        connectors={"slack": []},
+        connector_errors={"slack": "Slack OAuth token expired"},
+    )
+    agent_loop.connector_registry = registry
+
+    state = project_mcp(agent_loop)
+
+    slack = next(source for source in state.sources if source.name == "slack")
+    assert slack.error == "Slack OAuth token expired"

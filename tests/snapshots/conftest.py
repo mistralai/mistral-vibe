@@ -24,6 +24,13 @@ def _pin_banner_version(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _pin_process_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "vibe.cli.textual_ui.app.process_id_label", lambda: "[PID 00000]"
+    )
+
+
+@pytest.fixture(autouse=True)
 def _pin_spinner_frames(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stop spinners ticking, so a captured frame does not depend on timing.
 
