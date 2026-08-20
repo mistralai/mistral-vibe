@@ -137,6 +137,12 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="Approves all tool calls without prompting for the selected agent.",
     )
+    parser.add_argument(
+        "--auto-exit",
+        action="store_true",
+        default=False,
+        help="Automatically exit interactive mode after processing initial prompt.",
+    )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
     parser.add_argument(
         "--check-upgrade",
