@@ -144,7 +144,11 @@ from vibe.cli.textual_ui.widgets.chat_input.paste_image import (
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.textual_ui.widgets.collapsible import CollapsibleSection
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
-from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenState
+from vibe.cli.textual_ui.widgets.context_progress import (
+    ContextProgress,
+    TokenState,
+    _get_total_memory,
+)
 from vibe.cli.textual_ui.widgets.debug_console import DebugConsole
 from vibe.cli.textual_ui.widgets.feedback_bar import FeedbackBar
 from vibe.cli.textual_ui.widgets.inline_notice import InlineNotice
@@ -987,9 +991,21 @@ class VibeApp(App):  # noqa: PLR0904
             context_progress = ContextProgress()
             if has_session:
                 stats = self.app_server.resources.runtime.stats
+                try:
+                    import psutil
+
+                    memory_bytes = psutil.Process().memory_info().rss
+                except Exception:
+                    memory_bytes = _get_total_memory()
                 context_progress.tokens = TokenState(
                     max_tokens=self.app_server.resources.runtime.context_window,
                     current_tokens=stats.context_tokens,
+                    model_name=self.config.active_model.alias
+                    if self.config.active_model
+                    else "",
+                    session_cost=stats.session_cost,
+                    memory_bytes=memory_bytes,
+                    total_memory_bytes=_get_total_memory(),
                 )
             yield context_progress
 
@@ -1127,10 +1143,41 @@ class VibeApp(App):  # noqa: PLR0904
         gc.freeze()
 
     def _update_context_progress(self, event: StatsUpdated) -> None:
+        self._refresh_context_progress(event.params)
+
+    def _refresh_context_progress(
+        self, params: Any | None = None, *, model_name: str | None = None
+    ) -> None:
         context_progress = self.query_one(ContextProgress)
+        try:
+            import psutil
+
+            memory_bytes = psutil.Process().memory_info().rss
+        except Exception:
+            memory_bytes = _get_total_memory()
+
+        if params is not None:
+            max_tokens = params.context_window
+            current_tokens = params.stats.context_tokens
+            session_cost = params.stats.session_cost
+        else:
+            runtime = self.app_server.resources.runtime
+            max_tokens = runtime.context_window
+            current_tokens = runtime.stats.context_tokens
+            session_cost = runtime.stats.session_cost
+
+        if model_name is None:
+            model_name = (
+                self.config.active_model.alias if self.config.active_model else ""
+            )
+
         context_progress.tokens = TokenState(
-            max_tokens=event.params.context_window,
-            current_tokens=event.params.stats.context_tokens,
+            max_tokens=max_tokens,
+            current_tokens=current_tokens,
+            model_name=model_name,
+            session_cost=session_cost,
+            memory_bytes=memory_bytes,
+            total_memory_bytes=_get_total_memory(),
         )
 
     def _start_post_ready_startup(self) -> None:
@@ -1676,6 +1723,7 @@ class VibeApp(App):  # noqa: PLR0904
             return
         await self.app_server.resources.config.update({"active_model": message.alias})
         await self._reload_config()
+        self._refresh_context_progress(model_name=message.alias)
         await self._switch_to_input_app()
 
     async def on_model_picker_app_cancelled(
@@ -1986,6 +2034,7 @@ class VibeApp(App):  # noqa: PLR0904
                 await handler(cmd_args=cmd_args, command_message=command_message)
             else:
                 handler(cmd_args=cmd_args, command_message=command_message)
+            self._refresh_context_progress()
             return True
         return False
 
@@ -4455,13 +4504,6 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _refresh_profile_widgets(self) -> None:
         self._update_profile_widgets(self.app_server.resources.agents.active)
-
-    def _refresh_context_progress(self) -> None:
-        runtime = self.app_server.resources.runtime
-        self.query_one(ContextProgress).tokens = TokenState(
-            max_tokens=runtime.context_window,
-            current_tokens=runtime.stats.context_tokens,
-        )
 
     def _on_profile_changed(self) -> None:
         self._refresh_profile_widgets()
