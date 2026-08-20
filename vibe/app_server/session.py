@@ -113,6 +113,7 @@ class AppServerTurnError(RuntimeError):
 class SessionExitSummary:
     session_id: str | None
     usage: TokenUsage
+    session_cost: float = 0.0
 
 
 class AppServerSession:
@@ -271,8 +272,11 @@ class AppServerSession:
             if session_log.enabled and session_log.persisted
             else None
         )
+        stats = self.resources.runtime.stats
         return SessionExitSummary(
-            session_id=session_id, usage=self._state.usage_since_baseline()
+            session_id=session_id,
+            usage=self._state.usage_since_baseline(),
+            session_cost=stats.session_cost if hasattr(stats, "session_cost") else 0.0,
         )
 
     async def connect(self) -> None:
