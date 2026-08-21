@@ -222,6 +222,7 @@ class TurnController:
             params.session_id,
             turn.id,
             session_preview=session_preview(self._agent_loop),
+            reserved_entry_ids=[entry.id for entry in self.history],
         )
 
         def start_turn() -> None:
@@ -598,7 +599,7 @@ class TurnController:
         detail = ApprovalCallbackDetail(
             effect=projector.effect_detail(event.tool_call_id),
             required_permissions=list(event.required_permissions or []),
-            related_entry_id=event.tool_call_id,
+            related_entry_id=projector.effect_entry_id(event.tool_call_id),
         )
         output = await self._open_callback(
             event, detail, title=f"Allow {event.tool_name}?"
@@ -639,10 +640,16 @@ class TurnController:
             raise TypeError(
                 f"Unsupported user-input request: {type(event.args).__name__}"
             )
+        projector = self._projector
+        related_entry_id = (
+            event.tool_call_id
+            if projector is None
+            else projector.effect_entry_id(event.tool_call_id)
+        )
         output = await self._open_callback(
             event,
             UserInputCallbackDetail(
-                request=event.args, related_entry_id=event.tool_call_id
+                request=event.args, related_entry_id=related_entry_id
             ),
             title="User input required",
         )

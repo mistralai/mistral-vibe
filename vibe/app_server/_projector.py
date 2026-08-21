@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, assert_never, cast
 from uuid import uuid4
@@ -88,13 +89,19 @@ class ProjectedUpdate:
 
 class EventProjector:
     def __init__(
-        self, session_id: str, turn_id: str | None, *, session_preview: str = ""
+        self,
+        session_id: str,
+        turn_id: str | None,
+        *,
+        session_preview: str = "",
+        reserved_entry_ids: Iterable[str] = (),
     ) -> None:
         self.session_id = session_id
         self.turn_id = turn_id
         self._session_preview = session_preview
         self.history: list[PublicHistoryEntry] = []
         self._entries: dict[str, PublicHistoryEntry] = {}
+        self._reserved_entry_ids = set(reserved_entry_ids)
         self._assistant_entries: dict[str, str] = {}
         self._reasoning_entries: dict[str, str] = {}
         self._effect_entries: dict[str, str] = {}
@@ -245,10 +252,14 @@ class EventProjector:
             raise ValueError(f"History entry is not an effect: {tool_call_id}")
         return entry.detail
 
+    def effect_entry_id(self, tool_call_id: str) -> str:
+        return self._effect_entries.get(tool_call_id, tool_call_id)
+
     def start_effect(
         self, entry_id: str, *, title: str, detail: EffectDetail
     ) -> ProjectedUpdate:
-        if existing_id := self._effect_entries.get(entry_id):
+        existing_id = self._effect_entries.get(entry_id)
+        if existing_id is not None and not self._is_completed(existing_id):
             return self._patch(
                 existing_id,
                 [
@@ -259,10 +270,17 @@ class EventProjector:
                     )
                 ],
             )
-        self._effect_entries[entry_id] = entry_id
+        # Providers outside the official API routinely restart their tool call
+        # numbering (call_0, call_1, ...) on every completion, so the id can name
+        # an effect that already settled. Project the new call as its own entry
+        # instead of patching a frozen one.
+        projected_id = self._unique_entry_id(entry_id)
+        self._effect_entries[entry_id] = projected_id
         return self._add(
             PublicEffectEntry(
-                **self._entry_fields(entry_id, PublicEntryGenerationStatus.IN_PROGRESS),
+                **self._entry_fields(
+                    projected_id, PublicEntryGenerationStatus.IN_PROGRESS
+                ),
                 title=title,
                 detail=detail,
                 state=RunningEffectState(),
@@ -470,6 +488,29 @@ class EventProjector:
             "generation_status": generation_status,
         }
 
+    def _is_completed(self, entry_id: str) -> bool:
+        entry = self._entries.get(entry_id)
+        return (
+            entry is not None
+            and entry.generation_status is PublicEntryGenerationStatus.COMPLETED
+        )
+
+    def _unique_entry_id(self, entry_id: str) -> str:
+        """Return `entry_id`, or a suffixed variant when it is already taken.
+
+        Entry ids are session-scoped, while tool call ids are only unique within
+        one provider completion, so a reused id must not shadow a settled entry.
+        """
+        if not self._is_taken(entry_id):
+            return entry_id
+        attempt = 2
+        while self._is_taken(candidate := f"{entry_id}#{attempt}"):
+            attempt += 1
+        return candidate
+
+    def _is_taken(self, entry_id: str) -> bool:
+        return entry_id in self._entries or entry_id in self._reserved_entry_ids
+
     def _add(self, entry: PublicHistoryEntry) -> ProjectedUpdate:
         if entry.id in self._entries:
             raise ValueError(f"Duplicate public history entry: {entry.id}")
@@ -625,14 +666,14 @@ class EventProjector:
     ) -> list[ProjectedUpdate]:
         updates: list[ProjectedUpdate] = []
         entry_id = self._effect_entries.get(event.tool_call_id)
-        if entry_id is None:
-            entry_id = event.tool_call_id
+        if entry_id is None or self._is_completed(entry_id):
+            entry_id = self._unique_entry_id(event.tool_call_id)
             self._effect_entries[event.tool_call_id] = entry_id
-            updates.append(self._add(_result_only_effect(self, event)))
+            updates.append(self._add(_result_only_effect(self, event, entry_id)))
         entry = cast(PublicEffectEntry, self._entries[entry_id])
         output_text = _effect_output_text(entry)
         state = project_effect_state(event, output_text=output_text)
-        updates.append(self.complete_effect(entry_id, state))
+        updates.append(self.complete_effect(event.tool_call_id, state))
         return updates
 
     def _project_compaction_started(self, event: CompactStartEvent) -> ProjectedUpdate:
@@ -729,7 +770,7 @@ class EventProjector:
 
 
 def _result_only_effect(
-    projector: EventProjector, event: ToolResultEvent
+    projector: EventProjector, event: ToolResultEvent, entry_id: str
 ) -> PublicEffectEntry:
     display = EffectCallDisplay(
         summary=event.tool_name,
@@ -740,9 +781,7 @@ def _result_only_effect(
         status_text=f"Running {event.tool_name}",
     )
     return PublicEffectEntry(
-        **projector._entry_fields(
-            event.tool_call_id, PublicEntryGenerationStatus.IN_PROGRESS
-        ),
+        **projector._entry_fields(entry_id, PublicEntryGenerationStatus.IN_PROGRESS),
         title=event.tool_name,
         detail=GenericEffectDetail(
             tool_name=event.tool_name, input=None, display=display
