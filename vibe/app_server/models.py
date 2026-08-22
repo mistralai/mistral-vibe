@@ -4,7 +4,8 @@ from datetime import datetime
 from enum import StrEnum, auto
 from typing import Annotated, Literal
 
-from pydantic import Field, JsonValue, TypeAdapter
+from pydantic import ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic.alias_generators import to_camel
 
 from vibe.agents import AgentSafety, AgentType
 from vibe.app_server._effect_models import (
@@ -314,6 +315,12 @@ class ModelUsageSnapshot(ProtocolModel):
 
 
 class AgentStatsSnapshot(ProtocolModel):
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        extra="ignore",
+        populate_by_name=True,
+        serialize_by_alias=True,
+    )
     steps: int = 0
     session_prompt_tokens: int = 0
     session_completion_tokens: int = 0
@@ -326,7 +333,9 @@ class AgentStatsSnapshot(ProtocolModel):
     tool_calls_failed: int = 0
     tool_calls_succeeded: int = 0
     context_tokens: int = 0
-    context_breakdown: ContextBreakdownSnapshot = Field(default_factory=ContextBreakdownSnapshot)
+    context_breakdown: ContextBreakdownSnapshot = Field(
+        default_factory=ContextBreakdownSnapshot
+    )
     max_price: float | None = None
     session_start_time: float = 0.0
     last_turn_prompt_tokens: int = 0

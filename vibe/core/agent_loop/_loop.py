@@ -148,7 +148,6 @@ from vibe.core.types import (
     AvailableTool,
     BaseEvent,
     ChildSessionLink,
-    ModelUsageStats,
     CompactEndEvent,
     CompactStartEvent,
     ContextBreakdown,
@@ -161,6 +160,7 @@ from vibe.core.types import (
     LLMUsage,
     ManualShellContext,
     MessageList,
+    ModelUsageStats,
     PersistedToolResult,
     PlanReviewEndedEvent,
     PlanReviewRequestedEvent,
@@ -2808,7 +2808,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             self.stats.tokens_per_second = usage.completion_tokens / time_seconds
         turn_tot = usage.prompt_tokens + usage.completion_tokens
         self.stats.turn_token_history.append(turn_tot)
-        if len(self.stats.turn_token_history) > 8:
+        if len(self.stats.turn_token_history) > 8:  # noqa: PLR2004
             self.stats.turn_token_history.pop(0)
 
         model_name = getattr(self.config, "active_model", "default") or "default"

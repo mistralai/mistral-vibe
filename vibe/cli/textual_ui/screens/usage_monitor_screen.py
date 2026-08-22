@@ -10,6 +10,8 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
+from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
+
 _THOUSAND = 1_000
 _MILLION = 1_000_000
 
@@ -26,16 +28,21 @@ _SUB_BLOCKS = ("░", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█")
 _SPARK_CHARS = (" ", "▂", "▃", "▄", "▅", "▆", "▇", "█")
 
 
+_SUB_STEPS_MAX = 8
+_RISK_HIGH_THRESHOLD = 0.85
+_RISK_MEDIUM_THRESHOLD = 0.60
+
+
 def _make_bar(ratio: float, width: int = 24) -> str:
     clamped = max(0.0, min(1.0, ratio))
     if clamped <= 0:
         return "░" * width
 
-    total_sub_steps = clamped * width * 8
-    full_blocks = int(total_sub_steps // 8)
-    remainder = int(round(total_sub_steps % 8))
+    total_sub_steps = clamped * width * _SUB_STEPS_MAX
+    full_blocks = int(total_sub_steps // _SUB_STEPS_MAX)
+    remainder = int(round(total_sub_steps % _SUB_STEPS_MAX))
 
-    if remainder == 8:
+    if remainder == _SUB_STEPS_MAX:
         full_blocks += 1
         remainder = 0
 
@@ -50,9 +57,9 @@ def _make_bar(ratio: float, width: int = 24) -> str:
 
 
 def _risk_color(ratio: float) -> str:
-    if ratio >= 0.85:
+    if ratio >= _RISK_HIGH_THRESHOLD:
         return "bold red"
-    if ratio >= 0.60:
+    if ratio >= _RISK_MEDIUM_THRESHOLD:
         return "bold yellow"
     return "bold green"
 
@@ -79,15 +86,21 @@ class UsageMonitorScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Container(id="usage-monitor-dialog"):
-            yield Static(
-                "✦ ✦ ✦ MISTRAL VIBE LIVE USAGE MONITOR ✦ ✦ ✦", id="usage-monitor-header"
-            )
+            with Horizontal(id="usage-monitor-header-bar"):
+                yield PetitChat(animate=True, classes="observatory-cat")
+                yield Static(
+                    "MISTRAL VIBE LIVE USAGE MONITOR", id="usage-monitor-header"
+                )
             with Vertical(id="usage-monitor-content"):
                 yield Static("", id="usage-breakdown-bar")
                 yield Static("", id="usage-stats-body")
             with Horizontal(id="usage-monitor-footer"):
-                yield Static("[Esc/Ctrl+U] Close | [Ctrl+E] Export", id="usage-close-hint")
-                yield Button("Export (Ctrl+E)", variant="default", id="usage-export-btn")
+                yield Static(
+                    "[Esc/Ctrl+U] Close | [Ctrl+E] Export", id="usage-close-hint"
+                )
+                yield Button(
+                    "Export (Ctrl+E)", variant="default", id="usage-export-btn"
+                )
                 yield Button("Close (Esc)", variant="primary", id="usage-close-btn")
 
     def on_mount(self) -> None:
@@ -119,7 +132,7 @@ class UsageMonitorScreen(ModalScreen[None]):
         except Exception:
             pass
 
-    def _build_breakdown_markup(self, stats: Any, max_context: int) -> str:
+    def _build_breakdown_markup(self, stats: Any, max_context: int) -> str:  # noqa: PLR0914
         cb = getattr(stats, "context_breakdown", None)
         sys_t = getattr(cb, "system_prompt_tokens", 0) if cb else 0
         tool_t = getattr(cb, "tool_definitions_tokens", 0) if cb else 0
@@ -165,7 +178,9 @@ class UsageMonitorScreen(ModalScreen[None]):
   🟠 Active Skills:       {_format_tokens(skill_t):>6} ({(skill_t / tot) * 100:.1f}%)
   🟤 Conversation Turns: {_format_tokens(conv_t):>6} ({(conv_t / tot) * 100:.1f}%)"""
 
-    def _build_body_markup(self, stats: Any, max_context: int, max_price: float) -> str:
+    def _build_body_markup(  # noqa: PLR0914, PLR0915
+        self, stats: Any, max_context: int, max_price: float
+    ) -> str:
         ctx_ratio = min(1.0, stats.context_tokens / max_context) if max_context else 0
         ctx_color = _risk_color(ctx_ratio)
         raw_ctx_bar = _make_bar(ctx_ratio)
@@ -202,20 +217,32 @@ class UsageMonitorScreen(ModalScreen[None]):
         if model_dict:
             lines = []
             for m_name, m_stat in model_dict.items():
-                m_toks = getattr(m_stat, "prompt_tokens", 0) + getattr(m_stat, "completion_tokens", 0)
+                m_toks = getattr(m_stat, "prompt_tokens", 0) + getattr(
+                    m_stat, "completion_tokens", 0
+                )
                 m_cost = getattr(m_stat, "cost", 0.0)
                 m_turns = getattr(m_stat, "turns", 0)
-                lines.append(f"  🤖 {m_name:<18} {_format_tokens(m_toks):>6} tokens ({m_turns} turns) | ${m_cost:.4f}")
-            model_section = "\n\n[bold cyan]Model Usage Breakdown[/bold cyan]\n" + "\n".join(lines)
+                lines.append(
+                    f"  🤖 {m_name:<18} {_format_tokens(m_toks):>6} tokens ({m_turns} turns) | ${m_cost:.4f}"
+                )
+            model_section = (
+                "\n\n[bold cyan]Model Usage Breakdown[/bold cyan]\n" + "\n".join(lines)
+            )
 
         tools_dict = getattr(stats, "tool_token_breakdown", {})
         tool_section = ""
         if tools_dict:
             tot_calls = sum(tools_dict.values()) or 1
             lines = []
-            for tool, count in sorted(tools_dict.items(), key=lambda x: x[1], reverse=True)[:3]:
-                lines.append(f"  🛠️ {tool:<16} {count:>3} calls ({(count / tot_calls) * 100:.1f}%)")
-            tool_section = "\n\n[bold cyan]Top Tool Attributions[/bold cyan]\n" + "\n".join(lines)
+            for tool, count in sorted(
+                tools_dict.items(), key=lambda x: x[1], reverse=True
+            )[:3]:
+                lines.append(
+                    f"  🛠️ {tool:<16} {count:>3} calls ({(count / tot_calls) * 100:.1f}%)"
+                )
+            tool_section = (
+                "\n\n[bold cyan]Top Tool Attributions[/bold cyan]\n" + "\n".join(lines)
+            )
 
         import datetime
 
@@ -232,9 +259,7 @@ class UsageMonitorScreen(ModalScreen[None]):
             stats.session_prompt_tokens + stats.session_completion_tokens
         )
         avg_cost_per_tok = (
-            (stats.session_cost / total_session_toks)
-            if total_session_toks > 0
-            else 0.0
+            (stats.session_cost / total_session_toks) if total_session_toks > 0 else 0.0
         )
         instant_burn_cost_per_min = (
             burn_tok * avg_cost_per_tok if burn_tok > 0 else burn_cost

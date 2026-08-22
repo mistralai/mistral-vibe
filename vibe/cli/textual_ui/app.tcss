@@ -2131,13 +2131,35 @@ UsageMonitorScreen {
     padding: 0 2;
 }
 
-#usage-monitor-header {
+#usage-monitor-header-bar {
+    layers: title-base cat-overlay;
     width: 100%;
-    height: 1;
-    content-align: center middle;
-    text-style: bold;
-    color: $accent;
+    height: 3;
     margin-bottom: 1;
+}
+
+#usage-monitor-header {
+    layer: title-base;
+    width: 100%;
+    height: 3;
+    content-align: center middle;
+    text-align: center;
+    text-style: bold;
+    color: #ff7000;
+}
+
+.observatory-cat {
+    layer: cat-overlay;
+    dock: left;
+    width: 11;
+    height: 3;
+    color: #ff7000;
+}
+
+.observatory-cat .petit-chat {
+    width: 11;
+    height: 3;
+    color: #ff7000;
 }
 
 #usage-monitor-content {

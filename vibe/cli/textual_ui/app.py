@@ -1197,9 +1197,9 @@ class VibeApp(App):  # noqa: PLR0904
         stats = event.params.stats
         max_price = getattr(stats, "max_price", 0.0) or 0.0
         if not max_price:
-            session_opts = getattr(self.app_server, "_session_options", None) or getattr(
-                self.app_server, "session_options", None
-            )
+            session_opts = getattr(
+                self.app_server, "_session_options", None
+            ) or getattr(self.app_server, "session_options", None)
             if session_opts:
                 max_price = getattr(session_opts, "max_price", 0.0) or 0.0
 
@@ -1218,7 +1218,7 @@ class VibeApp(App):  # noqa: PLR0904
         args_str = str(kwargs.get("args") or "").strip().lower()
         if args_str == "export":
             screen = UsageMonitorScreen()
-            screen._app = self
+            screen._app = self  # pyright: ignore[reportAttributeAccessIssue]
             screen.action_export_json()
             return
         if isinstance(self.screen, UsageMonitorScreen):
