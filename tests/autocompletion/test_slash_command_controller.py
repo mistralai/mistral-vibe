@@ -11,6 +11,7 @@ from vibe.cli.autocompletion.base import (
 )
 from vibe.cli.autocompletion.completers import CommandCompleter
 from vibe.cli.autocompletion.slash_command import SlashCommandController
+from vibe.cli.commands import CommandRegistry
 
 
 class SuggestionEvent(NamedTuple):
@@ -349,3 +350,51 @@ def test_callable_entries_reflects_enabled_disabled_skills() -> None:
     controller.on_text_changed("/", cursor_index=1)
     suggestions, _ = view.suggestion_events[-1]
     assert [s.label for s in suggestions] == ["/review", "/deploy"]
+
+
+def _argument_controller(prefix: str) -> tuple[SlashCommandController, StubView]:
+    commands = [
+        CompletionEntry("/rename", "Rename the current session", True),
+        CompletionEntry("/reload", "Reload configuration"),
+    ]
+    completer = CommandCompleter(lambda: commands)
+    view = StubView()
+    controller = SlashCommandController(completer, view)
+    controller.on_text_changed(prefix, cursor_index=len(prefix))
+    view.suggestion_events.clear()
+    return controller, view
+
+
+def test_enter_accepts_a_command_needing_an_argument_without_submitting() -> None:
+    controller, view = _argument_controller("/rename")
+
+    result = controller.on_key(key_event("enter"), "/rename", cursor_index=7)
+
+    assert result is CompletionResult.HANDLED
+    assert view.replacements[-1].replacement == "/rename "
+
+
+def test_enter_still_submits_a_command_that_takes_no_argument() -> None:
+    controller, view = _argument_controller("/reload")
+
+    result = controller.on_key(key_event("enter"), "/reload", cursor_index=7)
+
+    assert result is CompletionResult.SUBMIT
+    assert view.replacements[-1].replacement == "/reload"
+
+
+def test_tab_accepts_a_command_needing_an_argument_and_leaves_a_space() -> None:
+    controller, view = _argument_controller("/rename")
+
+    result = controller.on_key(key_event("tab"), "/rename", cursor_index=7)
+
+    assert result is CompletionResult.HANDLED
+    assert view.replacements[-1].replacement == "/rename"
+
+
+def test_rename_is_registered_as_needing_an_argument() -> None:
+    # /rename reports `Usage: /rename <title>` when it runs with empty args, so
+    # the dropdown must not submit it. Guards the registration, not the flag.
+    registry = CommandRegistry()
+
+    assert registry.commands["rename"].requires_argument is True

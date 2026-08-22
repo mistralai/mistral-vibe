@@ -66,7 +66,18 @@ class SlashCommandController:
                 else:
                     result = CompletionResult.IGNORED
             case "enter":
-                if self._apply_selected_completion(text, cursor_index):
+                # Enter both accepts the highlighted completion and submits, so a
+                # command that needs an argument was unreachable from the
+                # dropdown: it submitted with empty args and reported its usage.
+                # Accept it followed by a space and let the user type the
+                # argument instead.
+                needs_argument = self._suggestions[
+                    self._selected_index
+                ].requires_argument
+                applied = self._apply_selected_completion(
+                    text, cursor_index, suffix=" " if needs_argument else ""
+                )
+                if applied and not needs_argument:
                     result = CompletionResult.SUBMIT
                 else:
                     result = CompletionResult.HANDLED
@@ -91,11 +102,13 @@ class SlashCommandController:
             self._suggestions, self._selected_index
         )
 
-    def _apply_selected_completion(self, text: str, cursor_index: int) -> bool:
+    def _apply_selected_completion(
+        self, text: str, cursor_index: int, *, suffix: str = ""
+    ) -> bool:
         if not self._suggestions:
             return False
 
-        alias = self._suggestions[self._selected_index].label
+        alias = self._suggestions[self._selected_index].label + suffix
         replacement_range = self._completer.get_replacement_range(text, cursor_index)
         if replacement_range is None:
             self.reset()
