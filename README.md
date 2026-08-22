@@ -1,8 +1,8 @@
+# Mistral Vibe × Accordion
+
 <p align="center">
   <img src="docs/assets/vibe-x-accordion-banner.png" alt="Vibe x Accordion — Context Visualization &amp; Intelligent Context Management" width="100%">
 </p>
-
-# Mistral Vibe × Accordion
 
 [![PyPI Version](https://img.shields.io/pypi/v/mistral-vibe)](https://pypi.org/project/mistral-vibe)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/release/python-3120/)
