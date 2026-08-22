@@ -827,3 +827,27 @@ class TestStatsEdgeCases:
         await agent.reload_with_initial_messages()
 
         assert agent.config.active_model == "devstral-small"
+
+    def test_context_breakdown_and_turn_cost(self) -> None:
+        stats = AgentStats(
+            steps=2,
+            session_prompt_tokens=2000,
+            session_completion_tokens=400,
+            last_turn_prompt_tokens=1000,
+            last_turn_completion_tokens=200,
+            last_turn_cached_tokens=500,
+            turn_token_history=[1200, 1200],
+            tool_token_breakdown={"bash": 3},
+            input_price_per_million=1.0,
+            output_price_per_million=3.0,
+            cached_input_price_per_million=0.2,
+        )
+        # prompt cost: (1000-500)*1 / 1e6 = 0.0005, cached: 500*0.2 / 1e6 = 0.0001, completion: 200*3 / 1e6 = 0.0006
+        # total turn cost = 0.0012
+        assert abs(stats.last_turn_cost - 0.0012) < 1e-6
+        assert stats.burn_rate_tokens_per_min >= 0.0
+        assert stats.burn_rate_cost_per_min >= 0.0
+        assert stats.cost_per_step > 0.0
+        assert stats.tokens_per_step == 1200.0
+        assert stats.turn_token_history == [1200, 1200]
+        assert stats.tool_token_breakdown["bash"] == 3

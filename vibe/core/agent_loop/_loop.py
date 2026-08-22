@@ -148,8 +148,10 @@ from vibe.core.types import (
     AvailableTool,
     BaseEvent,
     ChildSessionLink,
+    ModelUsageStats,
     CompactEndEvent,
     CompactStartEvent,
+    ContextBreakdown,
     ContextClearedEvent,
     ContextTooLongError,
     FunctionCall,
@@ -192,6 +194,7 @@ from vibe.utils import VIBE_WARNING_TAG
 from vibe.utils.api_keys import resolve_api_key
 from vibe.utils.cache_store import CacheStore, InMemoryCacheStore
 from vibe.utils.http import get_server_url_from_api_base, get_user_agent
+from vibe.utils.pricing import session_token_cost
 
 
 def _is_git_executable_available() -> bool:
@@ -2386,6 +2389,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         ):
             yield ev
         self.stats.tool_calls_succeeded += 1
+        tname = tool_call.tool_name
+        self.stats.tool_token_breakdown[tname] = (
+            self.stats.tool_token_breakdown.get(tname, 0) + 1
+        )
         logger.info(
             "Tool call completed tool=%s tool_call_id=%s duration_ms=%d outcome=%s",
             tool_call.tool_name,
@@ -2799,6 +2806,61 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.stats.context_tokens = usage.prompt_tokens + usage.completion_tokens
         if time_seconds > 0 and usage.completion_tokens > 0:
             self.stats.tokens_per_second = usage.completion_tokens / time_seconds
+        turn_tot = usage.prompt_tokens + usage.completion_tokens
+        self.stats.turn_token_history.append(turn_tot)
+        if len(self.stats.turn_token_history) > 8:
+            self.stats.turn_token_history.pop(0)
+
+        model_name = getattr(self.config, "active_model", "default") or "default"
+        if model_name not in self.stats.model_breakdown:
+            self.stats.model_breakdown[model_name] = ModelUsageStats()
+        m_stats = self.stats.model_breakdown[model_name]
+        m_stats.prompt_tokens += usage.prompt_tokens
+        m_stats.completion_tokens += usage.completion_tokens
+        m_stats.cached_tokens += usage.cached_tokens
+        m_stats.turns += 1
+        m_stats.cost = session_token_cost(
+            prompt_tokens=m_stats.prompt_tokens,
+            completion_tokens=m_stats.completion_tokens,
+            cached_tokens=m_stats.cached_tokens,
+            input_price_per_million=self.stats.input_price_per_million,
+            output_price_per_million=self.stats.output_price_per_million,
+            cached_input_price_per_million=self.stats.cached_input_price_per_million,
+        )
+
+        self._update_context_breakdown(usage.prompt_tokens)
+
+    def _update_context_breakdown(self, prompt_tokens: int) -> None:
+        if prompt_tokens <= 0:
+            return
+
+        sys_len = max(1, len(getattr(self.messages, "system_prompt", "") or ""))
+        rules_len = len(getattr(self.config, "user_rules", "") or "")
+        skills_len = len("".join(self.skill_manager.available_skills.keys()))
+        tools_len = len("".join(self.tool_manager.available_tools.keys()))
+        conv_len = max(
+            1,
+            sum(
+                len(str(m.content))
+                for m in self.messages
+                if getattr(m, "content", None)
+            ),
+        )
+        total_len = sys_len + rules_len + skills_len + tools_len + conv_len
+
+        s_tok = int(prompt_tokens * (sys_len / total_len))
+        r_tok = int(prompt_tokens * (rules_len / total_len))
+        k_tok = int(prompt_tokens * (skills_len / total_len))
+        t_tok = int(prompt_tokens * (tools_len / total_len))
+        c_tok = max(0, prompt_tokens - (s_tok + r_tok + k_tok + t_tok))
+
+        self.stats.context_breakdown = ContextBreakdown(
+            system_prompt_tokens=s_tok,
+            tool_definitions_tokens=t_tok,
+            rules_tokens=r_tok,
+            skills_tokens=k_tok,
+            conversation_tokens=c_tok,
+        )
 
     def _clean_message_history(self) -> None:
         ACCEPTABLE_HISTORY_SIZE = 2

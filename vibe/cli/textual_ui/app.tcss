@@ -2115,3 +2115,63 @@ FeedbackBar {
 .hook-severity-error .hook-system-icon {
     color: $error;
 }
+
+UsageMonitorScreen {
+    align: center middle;
+    background: $background 60%;
+}
+
+#usage-monitor-dialog {
+    width: 78;
+    height: auto;
+    max-height: 95%;
+    overflow-y: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 0 2;
+}
+
+#usage-monitor-header {
+    width: 100%;
+    height: 1;
+    content-align: center middle;
+    text-style: bold;
+    color: $accent;
+    margin-bottom: 1;
+}
+
+#usage-monitor-content {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+#usage-breakdown-bar {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+#usage-stats-body {
+    width: 100%;
+    height: auto;
+}
+
+#usage-monitor-footer {
+    width: 100%;
+    height: 3;
+    align: right middle;
+    border-top: solid $panel;
+    padding-top: 1;
+}
+
+#usage-close-hint {
+    width: 1fr;
+    color: $text-muted;
+}
+
+#usage-export-btn, #usage-close-btn {
+    min-width: 14;
+    margin-left: 1;
+}
+

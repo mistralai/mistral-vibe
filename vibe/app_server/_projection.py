@@ -32,6 +32,8 @@ from vibe.app_server.models import (
     ConfigIssue,
     ConnectorCounts,
     ContentBlock,
+    ContextBreakdownSnapshot,
+    ModelUsageSnapshot,
     DebugLogEntry,
     DebugLogPage,
     EffectCallDisplay,
@@ -209,6 +211,14 @@ def _project_tts_provider(provider: TTSProviderConfig) -> AudioProviderView:
 
 def project_stats(agent_loop: AgentLoop) -> AgentStatsSnapshot:
     stats = agent_loop.stats
+    cb = stats.context_breakdown
+    cb_snapshot = ContextBreakdownSnapshot(
+        system_prompt_tokens=cb.system_prompt_tokens,
+        tool_definitions_tokens=cb.tool_definitions_tokens,
+        rules_tokens=cb.rules_tokens,
+        skills_tokens=cb.skills_tokens,
+        conversation_tokens=cb.conversation_tokens,
+    )
     return AgentStatsSnapshot(
         steps=stats.steps,
         session_prompt_tokens=stats.session_prompt_tokens,
@@ -222,11 +232,26 @@ def project_stats(agent_loop: AgentLoop) -> AgentStatsSnapshot:
         tool_calls_failed=stats.tool_calls_failed,
         tool_calls_succeeded=stats.tool_calls_succeeded,
         context_tokens=stats.context_tokens,
+        context_breakdown=cb_snapshot,
+        max_price=getattr(agent_loop, "_max_price", None),
+        session_start_time=stats.session_start_time,
         last_turn_prompt_tokens=stats.last_turn_prompt_tokens,
         last_turn_completion_tokens=stats.last_turn_completion_tokens,
         last_turn_cached_tokens=stats.last_turn_cached_tokens,
         last_turn_duration=stats.last_turn_duration,
         tokens_per_second=stats.tokens_per_second,
+        turn_token_history=stats.turn_token_history.copy(),
+        tool_token_breakdown=stats.tool_token_breakdown.copy(),
+        model_breakdown={
+            name: ModelUsageSnapshot(
+                prompt_tokens=m.prompt_tokens,
+                completion_tokens=m.completion_tokens,
+                cached_tokens=m.cached_tokens,
+                cost=m.cost,
+                turns=m.turns,
+            )
+            for name, m in stats.model_breakdown.items()
+        },
     )
 
 

@@ -139,6 +139,7 @@ from vibe.cli.textual_ui.notifications import (
 )
 from vibe.cli.textual_ui.quit_manager import QuitManager
 from vibe.cli.textual_ui.scheduled_loop_runner import ScheduledLoopCommands
+from vibe.cli.textual_ui.screens.usage_monitor_screen import UsageMonitorScreen
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputBody, ChatInputContainer
@@ -624,6 +625,7 @@ class VibeApp(App):  # noqa: PLR0904
         Binding(
             "ctrl+g", "open_plan_in_editor", "Edit Plan", show=False, priority=False
         ),
+        Binding("ctrl+u", "show_usage_monitor", "Usage Monitor", show=False),
         Binding("ctrl+backslash", "toggle_debug_console", "Debug Console", show=False),
     ]
 
@@ -1192,10 +1194,40 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _update_context_progress(self, event: StatsUpdated) -> None:
         context_progress = self.query_one(ContextProgress)
+        stats = event.params.stats
+        max_price = getattr(stats, "max_price", 0.0) or 0.0
+        if not max_price:
+            session_opts = getattr(self.app_server, "_session_options", None) or getattr(
+                self.app_server, "session_options", None
+            )
+            if session_opts:
+                max_price = getattr(session_opts, "max_price", 0.0) or 0.0
+
         context_progress.tokens = TokenState(
             max_tokens=event.params.context_window,
-            current_tokens=event.params.stats.context_tokens,
+            current_tokens=stats.context_tokens,
+            session_cost=stats.session_cost,
+            burn_rate_tokens_per_min=getattr(stats, "burn_rate_tokens_per_min", 0.0),
+            max_price=max_price,
+            session_start_time=getattr(stats, "session_start_time", 0.0),
         )
+        if isinstance(self.screen, UsageMonitorScreen):
+            self.screen.refresh_stats()
+
+    async def _show_usage_monitor(self, **kwargs: Any) -> None:
+        args_str = str(kwargs.get("args") or "").strip().lower()
+        if args_str == "export":
+            screen = UsageMonitorScreen()
+            screen._app = self
+            screen.action_export_json()
+            return
+        if isinstance(self.screen, UsageMonitorScreen):
+            self.screen.dismiss()
+        else:
+            await self.push_screen(UsageMonitorScreen())
+
+    def action_show_usage_monitor(self) -> None:
+        self.run_worker(self._show_usage_monitor(), exclusive=True)
 
     def _start_post_ready_startup(self) -> None:
         self.run_worker(self._complete_post_ready_startup(), exclusive=False)

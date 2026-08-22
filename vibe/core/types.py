@@ -7,6 +7,7 @@ import copy
 from enum import StrEnum, auto
 from pathlib import Path
 import threading
+import time
 from typing import TYPE_CHECKING, Annotated, Any, Literal, overload
 from uuid import uuid4
 
@@ -43,9 +44,38 @@ class ScheduledLoop(BaseModel):
     created_at: float
 
 
+class ContextBreakdown(BaseModel):
+    system_prompt_tokens: int = 0
+    tool_definitions_tokens: int = 0
+    rules_tokens: int = 0
+    skills_tokens: int = 0
+    conversation_tokens: int = 0
+
+    @computed_field
+    @property
+    def total_tokens(self) -> int:
+        return (
+            self.system_prompt_tokens
+            + self.tool_definitions_tokens
+            + self.rules_tokens
+            + self.skills_tokens
+            + self.conversation_tokens
+        )
+
+
 class Backend(StrEnum):
     MISTRAL = auto()
     GENERIC = auto()
+
+
+class ModelUsageStats(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    cost: float = 0.0
+    turns: int = 0
 
 
 class AgentStats(BaseModel):
@@ -60,12 +90,17 @@ class AgentStats(BaseModel):
     tool_calls_succeeded: int = 0
 
     context_tokens: int = 0
+    context_breakdown: ContextBreakdown = Field(default_factory=ContextBreakdown)
+    session_start_time: float = Field(default_factory=time.monotonic)
 
     last_turn_prompt_tokens: int = 0
     last_turn_completion_tokens: int = 0
     last_turn_cached_tokens: int = 0
     last_turn_duration: float = 0.0
     tokens_per_second: float = 0.0
+    turn_token_history: list[int] = Field(default_factory=list)
+    tool_token_breakdown: dict[str, int] = Field(default_factory=dict)
+    model_breakdown: dict[str, ModelUsageStats] = Field(default_factory=dict)
 
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
@@ -120,6 +155,53 @@ class AgentStats(BaseModel):
             output_price_per_million=self.output_price_per_million,
             cached_input_price_per_million=self.cached_input_price_per_million,
         )
+
+    @computed_field
+    @property
+    def last_turn_cost(self) -> float:
+        """Cost of the most recent turn in dollars."""
+        return session_token_cost(
+            prompt_tokens=self.last_turn_prompt_tokens,
+            completion_tokens=self.last_turn_completion_tokens,
+            cached_tokens=self.last_turn_cached_tokens,
+            input_price_per_million=self.input_price_per_million,
+            output_price_per_million=self.output_price_per_million,
+            cached_input_price_per_million=self.cached_input_price_per_million,
+        )
+
+    @computed_field
+    @property
+    def burn_rate_tokens_per_min(self) -> float:
+        """Active LLM generation burn rate in tokens per minute."""
+        if self.tokens_per_second > 0:
+            return self.tokens_per_second * 60.0
+        if self.last_turn_duration > 0:
+            return (self.last_turn_total_tokens / self.last_turn_duration) * 60.0
+        elapsed = time.monotonic() - self.session_start_time
+        if elapsed <= 0:
+            return 0.0
+        return (self.session_total_llm_tokens / elapsed) * 60.0
+
+    @computed_field
+    @property
+    def burn_rate_cost_per_min(self) -> float:
+        """USD cost throughput per minute."""
+        elapsed = time.monotonic() - self.session_start_time
+        if elapsed <= 0:
+            return 0.0
+        return (self.session_cost / elapsed) * 60.0
+
+    @computed_field
+    @property
+    def cost_per_step(self) -> float:
+        """Average cost per turn step."""
+        return self.session_cost / self.steps if self.steps > 0 else 0.0
+
+    @computed_field
+    @property
+    def tokens_per_step(self) -> float:
+        """Average total tokens per turn step."""
+        return self.session_total_llm_tokens / self.steps if self.steps > 0 else 0.0
 
     def update_pricing(
         self,
