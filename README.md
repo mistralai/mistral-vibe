@@ -338,6 +338,20 @@ If a model response is interrupted by a backend error, use `/retry` to continue
 from the partial response. Add optional guidance after the command, for example
 `/retry keep the conclusion concise`.
 
+Use `/usage` to review spend across local session history (not just the current
+session). Optional windows and export:
+
+```
+> /usage
+> /usage 7d
+> /usage 30d --csv ~/vibe-usage.csv
+> /usage all --insight
+```
+
+`/usage` is read-only over files under your Vibe session log directory (honors
+`$VIBE_HOME`). `--insight` asks a Mistral model for a one-line spend takeaway
+when `MISTRAL_API_KEY` is available.
+
 ### Custom Slash Commands via Skills
 
 You can define your own slash commands through the skills system. Skills are reusable components that extend Vibe's functionality.

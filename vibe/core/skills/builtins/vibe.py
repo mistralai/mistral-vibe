@@ -734,6 +734,9 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
   are passed to the model for the continuation. Relevant error messages also
   hint at this command.
 - `/status` - Display agent statistics
+- `/usage [7d|30d|all] [--csv path] [--insight]` - Aggregate cost and token
+  usage across local session logs (by day and by model). Optional Mistral
+  insight line with `--insight`.
 - `/whoami` - Display the Mistral signed-in user, workspace, and plan
 - `/voice` - Configure voice settings
 - `/mcp` - Display MCP servers and connector status; pass a server or connector

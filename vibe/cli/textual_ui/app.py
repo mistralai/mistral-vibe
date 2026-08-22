@@ -3285,6 +3285,64 @@ class VibeApp(App):  # noqa: PLR0904
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
 
+    async def _show_usage(self, cmd_args: str = "", **kwargs: Any) -> None:
+        # ADR 0009 note: delivery surfaces normally talk to core only through
+        # app-server resources. `/usage` is an intentional exception — a
+        # stateless, read-only scan of local session logs (no live session
+        # state). A dedicated app-server RPC would be the by-the-book follow-up
+        # if this needs to be exposed to ACP/programmatic clients later.
+        # ConfigView also does not expose session_logging, so we read the
+        # default SESSION_LOG_DIR (honors $VIBE_HOME). Custom
+        # session_logging.save_dir overrides in config.toml are not resolved yet.
+        from vibe.core.paths import SESSION_LOG_DIR
+        from vibe.core.session.usage_report import (
+            build_usage_report,
+            format_usage_csv,
+            format_usage_markdown,
+            generate_usage_insight,
+            parse_usage_args,
+        )
+
+        parsed = parse_usage_args(cmd_args)
+        if parsed.error:
+            await self._mount_and_scroll(UserCommandMessage(parsed.error))
+            return
+
+        report = build_usage_report(
+            SESSION_LOG_DIR.path, session_prefix="session", since=parsed.since
+        )
+
+        if parsed.csv_path is not None:
+            try:
+                parsed.csv_path.parent.mkdir(parents=True, exist_ok=True)
+                parsed.csv_path.write_text(format_usage_csv(report), encoding="utf-8")
+            except OSError as exc:
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        f"Failed to write CSV to `{parsed.csv_path}`: {exc}"
+                    )
+                )
+                return
+
+        insight: str | None = None
+        if parsed.insight and report.session_count > 0:
+            loading = LoadingWidget(status="Generating insight", show_hint=False)
+            await self._loading_area.mount(loading)
+            try:
+                insight = await asyncio.to_thread(generate_usage_insight, report)
+            finally:
+                if loading.parent:
+                    await loading.remove()
+            if insight is None:
+                insight = (
+                    "_Insight unavailable (set `MISTRAL_API_KEY` or try again later)._"
+                )
+
+        message = format_usage_markdown(report, insight=insight)
+        if parsed.csv_path is not None:
+            message = f"{message}\n\nCSV written to `{parsed.csv_path}`."
+        await self._mount_and_scroll(UserCommandMessage(message))
+
     async def _show_whoami(self, **kwargs: Any) -> None:
         loading = LoadingWidget(status="Loading", show_hint=False)
         await self._loading_area.mount(loading)
