@@ -1,9 +1,19 @@
-# Mistral Vibe
+<p align="center">
+  <img src="docs/assets/vibe-x-accordion-banner.png" alt="Vibe x Accordion — Context Visualization &amp; Intelligent Context Management" width="100%">
+</p>
+
+# Mistral Vibe × Accordion
 
 [![PyPI Version](https://img.shields.io/pypi/v/mistral-vibe)](https://pypi.org/project/mistral-vibe)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/release/python-3120/)
 [![CI Status](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml/badge.svg)](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/mistralai/mistral-vibe)](https://github.com/mistralai/mistral-vibe/blob/main/LICENSE)
+
+> This is [a-Fig/Vibe-X-Accordion](https://github.com/a-Fig/Vibe-X-Accordion), a fork of
+> [mistralai/mistral-vibe](https://github.com/mistralai/mistral-vibe) that adds a bridge to
+> [Accordion](https://github.com/a-Fig/Accordion) for live context visualization and
+> intelligent context (folding/unfold/recall) management. Everything below is upstream Vibe
+> documentation, plus a new **[Vibe + Accordion Setup](#vibe--accordion-setup)** section.
 
 ```
 ██████████████████░░
@@ -62,6 +72,14 @@ pip install mistral-vibe
   - [Interactive User Questions](#interactive-user-questions)
 - [Terminal Requirements](#terminal-requirements)
 - [Quick Start](#quick-start)
+- [Vibe + Accordion Setup](#vibe--accordion-setup)
+  - [Prerequisites](#prerequisites)
+  - [1. Build Accordion's sidecar and app](#1-build-accordions-sidecar-and-app)
+  - [2. Install Vibe's Python environment](#2-install-vibes-python-environment)
+  - [3. Point Vibe at your Accordion checkout](#3-point-vibe-at-your-accordion-checkout)
+  - [4. Run it](#4-run-it)
+  - [5. Verify the bridge](#5-verify-the-bridge)
+  - [Known limitations](#known-limitations)
 - [Usage](#usage)
   - [Interactive Mode](#interactive-mode)
   - [Trust Folder System](#trust-folder-system)
@@ -224,6 +242,146 @@ Most modern terminals should work, but older or minimal terminal emulators may h
 
    🤖 I found the following "TODO" comments in your project.
    ```
+
+## Vibe + Accordion Setup
+
+[Accordion](https://github.com/a-Fig/Accordion) is a context-visualization and
+intelligent-context-management tool. This fork adds a bridge so a Vibe session shows up
+live in Accordion's UI, and Accordion can drive Vibe's context (fold/unfold/recall)
+instead of Vibe's own auto-compaction.
+
+The two projects are separate checkouts on your machine, wired together with an env var
+or config entry — nothing is published/installable yet, so this is a source setup, not a
+package install.
+
+> [!NOTE]
+> This integration is a working developer setup, not a polished release. See
+> [Known limitations](#known-limitations) below, and the deeper technical docs at
+> [`accordion_vibe/README.md`](accordion_vibe/README.md) (this repo) and
+> [`docs/sidecar-protocol.md`](https://github.com/a-Fig/Accordion/blob/vibe/docs/sidecar-protocol.md)
+> (in the Accordion repo, on its `vibe` branch) if you're going to work on the bridge itself.
+
+### Prerequisites
+
+- **Node.js 20+** (22+ recommended) — to build Accordion's sidecar and app
+- **Rust via [rustup](https://rustup.rs/)** plus your platform's Tauri prerequisites
+  (WebView2 + MSVC Build Tools on Windows, Xcode Command Line Tools on macOS) — only
+  needed if you want the Accordion desktop app, not just the browser UI
+- **[uv](https://docs.astral.sh/uv/)** — to install this fork's Python environment
+  ```bash
+  # Windows
+  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+  # Linux / macOS
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+- A **Mistral API key** — same requirement as plain Vibe, unrelated to Accordion
+- Both repos checked out side by side, e.g.:
+  ```
+  vibe-accordion/
+  ├── accordion/      # a-Fig/Accordion
+  └── mistral-vibe/   # this repo
+  ```
+
+### 1. Build Accordion's sidecar and app
+
+From your `accordion` checkout:
+
+```bash
+cd accordion/extension
+npm install
+npm run build:sidecar        # -> extension/sidecar.mjs
+
+cd ../app
+npm install
+npm run build                # -> app/build (browser UI)
+npm run tauri build -- --no-bundle   # -> app/src-tauri/target/release/app(.exe) — optional, desktop app
+```
+
+`sidecar.mjs` is a generated, gitignored artifact — it isn't shipped anywhere, you build
+it locally. **Rebuild it (and the app) after pulling changes to `accordion/core`,
+`accordion/extension`, or `accordion/app`** — a stale sidecar will silently keep speaking
+an old protocol version against the new Vibe fork.
+
+### 2. Install Vibe's Python environment
+
+From this repo (`mistral-vibe`):
+
+```bash
+uv sync --all-extras
+```
+
+### 3. Point Vibe at your Accordion checkout
+
+Either an environment variable for the current session:
+
+```bash
+export ACCORDION_REPO=/path/to/accordion
+```
+
+or a persistent entry in `~/.vibe/config.toml`:
+
+```toml
+[accordion]
+repo = "/path/to/accordion"
+app  = "/path/to/accordion/app/src-tauri/target/release/app.exe"   # optional
+```
+
+The env var wins if both are set. **Use `ACCORDION_REPO`, not `ACCORDION_HOME`** —
+`ACCORDION_HOME` is already claimed by the Accordion extension itself (it relocates
+`~/.accordion/`'s state directory), and the bridge strips it from the sidecar's
+environment regardless. With neither the env var nor the config section set, this fork
+behaves byte-for-byte like upstream Vibe — no sidecar is spawned, and `unfold`/`recall`
+tools don't exist.
+
+### 4. Run it
+
+```bash
+cd mistral-vibe
+uv run vibe
+```
+
+If the bridge attaches successfully, the session appears under a new **vibe** source tab
+in Accordion's Sessions sidebar, and the agent gains `unfold`/`recall` tools
+automatically. Type `/accordion` inside Vibe to open the desktop app (if configured), or
+print the door URL (default `http://127.0.0.1:24317/…`) to open the browser UI instead.
+
+**Folding is off by default** — turn it on from Accordion's header UI. While it's on,
+Vibe's own auto-compaction is suspended in favor of Accordion managing context; turning it
+off restores Vibe's native behavior.
+
+### 5. Verify the bridge
+
+```bash
+uv run pytest tests/accordion_vibe
+```
+
+To run the same tests against your actual built sidecar instead of a test double:
+
+```bash
+ACCORDION_E2E_REPO=/path/to/accordion uv run pytest tests/accordion_vibe
+```
+
+Sidecar stderr is logged per-session to `~/.accordion/logs/vibe-sidecar-<session>.log` if
+something isn't connecting.
+
+### Known limitations
+
+- **Blocking-write risk on large sessions.** The bridge writes context to the sidecar
+  over a blocking stdin pipe; a very large session (six figures of tokens) combined with
+  a stalled sidecar can freeze Vibe's event loop. This is an unfixed finding from an
+  internal review — worth knowing before relying on this for long sessions.
+- **LLM-backed conductors are display-only.** Accordion conductors that need to call an
+  LLM (`compaction-naive`, `handoff`, `thermocline`, `triptych`) aren't wired to actually
+  run from Vibe yet; only `doorman` fully works through this bridge.
+- **No packaged install.** Both checkouts must exist locally and the sidecar/app must be
+  built by hand — there's no npm-installable path yet (unlike pi's
+  `pi install npm:@a-fig/accordion`).
+- **Vibe transcripts aren't browsable from Accordion**, unlike Claude Code sessions.
+- **`session_start.reason` is always `"start"`** — Accordion can't currently tell a
+  resumed Vibe session from a brand-new one.
+
+See [`accordion_vibe/README.md`](accordion_vibe/README.md) for the full hook-by-hook
+bridge contract.
 
 ## Usage
 
