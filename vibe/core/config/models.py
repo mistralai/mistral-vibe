@@ -53,6 +53,25 @@ class ProjectContextConfig(BaseSettings):
     timeout_seconds: float = 2.0
 
 
+class AccordionConfig(BaseSettings):
+    """Opt-in bridge to an Accordion checkout (see ``accordion_vibe/``).
+
+    Leaving ``repo`` empty (with ``ACCORDION_REPO`` unset) keeps the bridge
+    inert and vibe byte-for-byte upstream. The field is ``repo`` and not
+    ``home`` on purpose: ``ACCORDION_HOME`` already means something else to
+    Accordion itself (where its ``~/.accordion/`` state lives).
+
+    ``env_prefix`` is load-bearing, not decoration: without it BaseSettings
+    would populate a field named ``home`` from the bare ``HOME`` variable,
+    which is set on every POSIX machine.
+    """
+
+    model_config = SettingsConfigDict(extra="ignore", env_prefix="ACCORDION_")
+
+    repo: str = ""
+    app: str = ""
+
+
 class ExperimentsConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 

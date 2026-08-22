@@ -36,6 +36,7 @@ from vibe.core.config._defaults import (
 # lives in vibe.config_values.
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.models import (
+    AccordionConfig,
     ConnectorConfig,
     ExperimentsConfig,
     MCPServer,
@@ -520,6 +521,9 @@ class VibeConfigSchema(ConfigSchema):
     )
     experiments: Annotated[ExperimentsConfig, WithReplaceMerge()] = Field(
         default_factory=ExperimentsConfig
+    )
+    accordion: Annotated[AccordionConfig, WithReplaceMerge()] = Field(
+        default_factory=AccordionConfig
     )
 
     def resolve_default_model_alias(self) -> str:

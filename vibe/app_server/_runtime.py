@@ -207,7 +207,10 @@ class _AgentLoopBlueprint:
     await_experiment_model: bool = False
 
     def build(self) -> AgentLoop:
-        return AgentLoop(
+        from accordion_vibe import build_agent_loop
+
+        return build_agent_loop(
+            AgentLoop,
             config_orchestrator=self.config_orchestrator,
             agent_name=self.agent_name,
             max_turns=self.policy.max_turns,

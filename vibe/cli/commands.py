@@ -14,6 +14,10 @@ class CommandContext:
 
 CommandAvailability = Callable[[CommandContext], bool]
 
+# Handler prefix for commands an extension sidecar announced. No such attribute
+# can exist on the app, so dispatch falls through to the generic handler.
+EXTENSION_HANDLER_PREFIX = "extension:"
+
 
 @dataclass
 class Command:
@@ -28,6 +32,21 @@ class Command:
     # about to tear down.
     flushes_pending: bool = False
     is_available: CommandAvailability | None = None
+
+
+def _sidecar_commands() -> dict[str, Command]:
+    """Slash commands an attached extension sidecar registered, if any."""
+    from accordion_vibe import extension_commands
+
+    return {
+        name: Command(
+            aliases=frozenset([f"/{name}"]),
+            description=description,
+            handler=f"{EXTENSION_HANDLER_PREFIX}{name}",
+            side_channel=True,
+        )
+        for name, description in extension_commands()
+    }
 
 
 class CommandRegistry:
@@ -228,6 +247,7 @@ class CommandRegistry:
                 handler="_show_theme",
                 side_channel=True,
             ),
+            **_sidecar_commands(),
         }
 
     @property

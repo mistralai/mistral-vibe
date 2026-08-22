@@ -104,7 +104,12 @@ from vibe.cli.clipboard import (
     copy_selection_to_clipboard,
     copy_text_to_clipboard,
 )
-from vibe.cli.commands import Command, CommandContext, CommandRegistry
+from vibe.cli.commands import (
+    EXTENSION_HANDLER_PREFIX,
+    Command,
+    CommandContext,
+    CommandRegistry,
+)
 from vibe.cli.lazy_audio_managers import (
     check_audio_available,
     create_default_narrator_manager,
@@ -2194,12 +2199,29 @@ class VibeApp(App):  # noqa: PLR0904
         )
         command_message = SlashCommandMessage(display_text)
         await self._mount_and_scroll(command_message)
+        if command.handler.startswith(EXTENSION_HANDLER_PREFIX):
+            await self._run_extension_command(
+                command.handler.removeprefix(EXTENSION_HANDLER_PREFIX), cmd_args
+            )
+            return True
         handler = getattr(self, command.handler)
         if asyncio.iscoroutinefunction(handler):
             await handler(cmd_args=cmd_args, command_message=command_message)
         else:
             handler(cmd_args=cmd_args, command_message=command_message)
         return True
+
+    async def _run_extension_command(self, name: str, cmd_args: str) -> None:
+        """Dispatch a sidecar-registered slash command and show its output."""
+        from accordion_vibe import run_extension_command
+
+        ok, error, notices = await asyncio.to_thread(
+            run_extension_command, name, cmd_args
+        )
+        for message, level in notices:
+            self.notify(message, severity=level, markup=False)
+        if not ok and error:
+            self.notify(error, severity="error", markup=False)
 
     def _get_skill_entries(self) -> list[tuple[str, str]]:
         return [
