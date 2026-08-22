@@ -61,10 +61,14 @@ class SessionLoader:
             metadata = json.loads(read_safe(metadata_path).text)
             if not isinstance(metadata, dict):
                 return None
+            environment = metadata.get("environment")
+            if environment is None:
+                environment = {}
+            if not isinstance(environment, dict):
+                return None
+            metadata["environment"] = environment
             if working_directory is not None:
-                session_working_directory = (metadata.get("environment") or {}).get(
-                    "working_directory"
-                )
+                session_working_directory = environment.get("working_directory")
                 if not SessionLoader._same_working_directory(
                     session_working_directory, working_directory
                 ):
@@ -74,10 +78,7 @@ class SessionLoader:
         except (OSError, json.JSONDecodeError):
             return None
 
-        if not SessionLoader._log_is_loadable(messages, metadata):
-            return None
-
-        return metadata
+        return metadata if SessionLoader._log_is_loadable(messages, metadata) else None
 
     @staticmethod
     def _log_is_loadable(
