@@ -98,7 +98,7 @@ dependencies = [
     "pywinpty==3.0.5 ; sys_platform == 'win32'",
     "pyyaml==6.0.3",
     "referencing==0.37.0",
-    "requests==2.34.2",
+    "requests",
     "rich==15.0.0",
     "rpds-py==0.30.0",
     "secretstorage==3.5.0 ; sys_platform == 'linux'",
