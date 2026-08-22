@@ -67,6 +67,14 @@ def _release(cwd: Path, session_id: str | None = None) -> WorktreeRelease:
     return managed.release(session_id)
 
 
+def _write_post_checkout_hook(repo: Repo, marker: Path) -> None:
+    hooks = Path(repo.git_dir) / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    hook = hooks / "post-checkout"
+    hook.write_text(f'#!/bin/sh\necho ran > "{marker}"\n')
+    hook.chmod(0o755)
+
+
 def _init_repo(root: Path, *, separate_git_dir: Path | None = None) -> Repo:
     repo = Repo.init(
         root,
@@ -105,6 +113,43 @@ def _claim(repo: Repo, name: str) -> WorktreeClaim:
     paths = git_repo_module.GitRepo(repo).paths
     bucket = managed_bucket_name(paths.repo_root, paths.common_git_dir)
     return WorktreeClaim(bucket=bucket, name=name)
+
+
+def test_worktree_creation_does_not_run_repository_hooks(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    marker = tmp_path / "hook-ran"
+    _write_post_checkout_hook(repo, marker)
+    # Control: `git worktree add` is what runs post-checkout, so confirm this
+    # environment executes the hook at all. Without it the assertion below
+    # could pass on a machine that never runs hooks.
+    subprocess.run(
+        ["git", "worktree", "add", str(tmp_path / "control"), "-b", "control"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    if not marker.exists():
+        pytest.skip("git hooks do not execute in this environment")
+    marker.unlink()
+
+    worktree = _prepare("hooked-worktree", tmp_path, branch="feat/hooked")
+
+    assert not marker.exists()
+    assert Path(worktree.root).is_dir()
+
+
+def test_worktree_reuse_of_existing_branch_does_not_run_repository_hooks(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    repo.create_head("feat/existing")
+    marker = tmp_path / "hook-ran"
+    _write_post_checkout_hook(repo, marker)
+
+    worktree = _prepare("existing-worktree", tmp_path, branch="feat/existing")
+
+    assert not marker.exists()
+    assert Path(worktree.root).is_dir()
 
 
 def test_creates_named_worktree_for_separate_branch(tmp_path: Path) -> None:

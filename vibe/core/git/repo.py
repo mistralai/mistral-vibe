@@ -29,6 +29,16 @@ _FETCH_TIMEOUT_SECONDS = 10
 # notices. Failing is the right answer for a refresh the caller treats as
 # optional.
 _NON_INTERACTIVE_GIT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+# `git worktree add` checks the new tree out, which runs the repository's own
+# post-checkout hook. Worktree creation happens before any trust prompt, so a
+# malicious repository the user merely opened could otherwise get a hook
+# executed with the user's full privileges. -c on the command line takes
+# precedence over the repository's config, so the repository being checked out
+# cannot override this. The value is an absolute path that cannot exist rather
+# than an empty one, because git resolves a relative core.hooksPath against the
+# directory the hooks would run in -- which is the untrusted worktree itself.
+# This mirrors the `-c core.fsmonitor=` guard in vibe/core/system_prompt.py.
+_NO_HOOKS_CONFIG = "core.hooksPath=/nonexistent-vibe-disabled-git-hooks"
 
 
 @dataclass(frozen=True)
@@ -236,9 +246,9 @@ class GitRepo:
                 # a repository with no remote to start from.
                 if start_point is not None:
                     create.append(start_point)
-                self._repo.git.worktree(*create)
+                self._repo.git(c=_NO_HOOKS_CONFIG).worktree(*create)
             else:
-                self._repo.git.worktree("add", str(target), branch)
+                self._repo.git(c=_NO_HOOKS_CONFIG).worktree("add", str(target), branch)
         except self._gitpy.git_command_error as e:
             raise GitError(
                 f"Failed to create worktree {target.name!r} for branch {branch!r}: {e}"
