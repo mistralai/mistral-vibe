@@ -254,10 +254,14 @@ class TestFormatters:
         )
         report = build_usage_report(tmp_path, since=date(2026, 8, 1))
         text = format_usage_markdown(report, insight="Spend spiked on medium.")
+        assert "### Cost by day" in text
+        assert "### Cost by model" in text
         assert "### By day" in text
         assert "### By model" in text
         assert "devstral-2" in text
-        assert "▁" in text or "█" in text or "▇" in text
+        assert "█" in text
+        assert "░" in text
+        assert "▁" in text or "▇" in text
         assert "Spend spiked on medium." in text
         assert "since 2026-08-01" in text
 

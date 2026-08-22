@@ -289,6 +289,35 @@ def _bar(value: float, maximum: float, *, width: int = 8) -> str:
     return (_BAR_CHARS[level] * filled).ljust(width, _BAR_CHARS[0])
 
 
+def _horizontal_bar(value: float, maximum: float, *, width: int = 24) -> str:
+    """Solid unicode bar for TUI-friendly charts (█ filled, ░ empty)."""
+    if width <= 0:
+        return ""
+    if maximum <= 0 or value <= 0:
+        return "░" * width
+    filled = max(1, int(round(min(value / maximum, 1.0) * width)))
+    return ("█" * filled) + ("░" * (width - filled))
+
+
+def _chart_block(
+    title: str, rows: list[tuple[str, float, UsageBucket]], *, label_width: int
+) -> list[str]:
+    """Render a fenced horizontal bar chart — displays reliably in the TUI."""
+    if not rows:
+        return []
+    maximum = max((cost for _, cost, _ in rows), default=0.0)
+    lines = [f"### {title}", "", "```"]
+    for label, cost, bucket in rows:
+        bar = _horizontal_bar(cost, maximum)
+        padded = label[:label_width].ljust(label_width)
+        lines.append(
+            f"{padded}  ${cost:>8.4f}  {bar}  "
+            f"({bucket.sessions} sess, {bucket.total_tokens:,} tok)"
+        )
+    lines.extend(["```", ""])
+    return lines
+
+
 def _window_label(since: date | None) -> str:
     if since is None:
         return "all time"
@@ -325,6 +354,21 @@ def format_usage_markdown(report: UsageReport, *, insight: str | None = None) ->
     if report.skipped_files:
         lines.append(f"- **Skipped unreadable logs**: {report.skipped_files:,}")
     lines.append("")
+
+    day_rows = [
+        (day, report.by_day[day].cost, report.by_day[day])
+        for day in sorted(report.by_day)
+    ]
+    model_rows = [
+        (model, bucket.cost, bucket)
+        for model, bucket in sorted(
+            report.by_model.items(), key=lambda item: (-item[1].cost, item[0])
+        )
+    ]
+    # Charts first: fenced code blocks render more reliably than markdown tables
+    # in the Textual TUI, and they give a clear visual for demos.
+    lines.extend(_chart_block("Cost by day", day_rows, label_width=12))
+    lines.extend(_chart_block("Cost by model", model_rows, label_width=22))
 
     max_day_cost = max((b.cost for b in report.by_day.values()), default=0.0)
     lines.extend([
