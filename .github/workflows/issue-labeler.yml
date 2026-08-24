@@ -1,0 +1,64 @@
+name: Issue Labeler
+
+on:
+    issues:
+        types: [opened]
+
+jobs:
+    label-component:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            issues: write
+        steps:
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+            - name: Parse bug report form
+              id: parse-bug
+              uses: stefanbuck/github-issue-parser@cb6e97157cbf851e3a393ff8d57c93a484cc323f # v3.2.5
+              with:
+                  template-path: .github/ISSUE_TEMPLATE/bug-report.yml
+              continue-on-error: true
+
+            - name: Parse feature request form
+              id: parse-feature
+              uses: stefanbuck/github-issue-parser@cb6e97157cbf851e3a393ff8d57c93a484cc323f # v3.2.5
+              with:
+                  template-path: .github/ISSUE_TEMPLATE/feature-request.yml
+              continue-on-error: true
+
+            - name: Apply component label
+              uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+              env:
+                  BUG_COMPONENT: ${{ steps.parse-bug.outputs.issueparser_component }}
+                  FEATURE_COMPONENT: ${{ steps.parse-feature.outputs.issueparser_component }}
+              with:
+                  script: |
+                      const bugComponent = process.env.BUG_COMPONENT;
+                      const featureComponent = process.env.FEATURE_COMPONENT;
+                      const component = bugComponent || featureComponent;
+
+                      if (!component) {
+                        console.log('No component field found, skipping labeling');
+                        return;
+                      }
+
+                      const componentLabels = new Map([
+                        ['CLI', 'CLI'],
+                        ['ACP', 'ACP'],
+                        ['VS Code extension', 'VS Code extension'],
+                      ]);
+                      const label = componentLabels.get(component);
+
+                      if (!label) {
+                        console.log(`Unknown component '${component}', skipping labeling`);
+                        return;
+                      }
+
+                      await github.rest.issues.addLabels({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: context.issue.number,
+                        labels: [label],
+                      });
+                      console.log(`Added label: ${label}`);

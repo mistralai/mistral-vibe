@@ -1,0 +1,53 @@
+name: Release to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  release-pypy:
+    name: Release to Pypi
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mistral-vibe
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - name: Install dependencies
+        run: uv sync --locked --dev
+
+      - name: Inject Sentry DSN
+        shell: bash
+        env:
+          CLI_SENTRY_DSN: ${{ secrets.CLI_SENTRY_DSN }}
+          ACP_SENTRY_DSN: ${{ secrets.ACP_SENTRY_DSN }}
+          REQUIRE_SENTRY_DSN: "true"
+        run: bash ./scripts/ci/inject-sentry-dsn.sh
+
+      - name: Build package
+        run: uv build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish distribution to PyPI
+        if: github.repository == 'mistralai/mistral-vibe'
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
