@@ -69,11 +69,18 @@ class ContextProgress(NoMarkupStatic):
         else:
             timer_str = ""
 
-        text = (
-            f"✨ {_format_token_count(new_state.current_tokens)}/"
-            f"{_format_token_count(new_state.max_tokens)} ({ratio:.0%})"
-            f"{cost_str}{burn_str}{timer_str}"
-        )
+        has_telemetry = bool(cost_str or burn_str or timer_str)
+        if has_telemetry:
+            text = (
+                f"✨ {_format_token_count(new_state.current_tokens)}/"
+                f"{_format_token_count(new_state.max_tokens)} ({ratio:.0%})"
+                f"{cost_str}{burn_str}{timer_str}"
+            )
+        else:
+            text = (
+                f"{_format_token_count(new_state.current_tokens)}/"
+                f"{_format_token_count(new_state.max_tokens)} tokens ({ratio:.0%})"
+            )
         self.update(text)
 
     async def _on_click(self, event: Any) -> None:
