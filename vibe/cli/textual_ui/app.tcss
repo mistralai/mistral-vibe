@@ -105,6 +105,19 @@ TextArea > .text-area--cursor {
     background: transparent;
 }
 
+#process-title {
+    width: auto;
+    height: auto;
+    background: transparent;
+    padding: 0;
+    margin: 0 0 0 1;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
 #messages {
     layout: stream;
     width: 100%;
@@ -1475,7 +1488,7 @@ NarratorStatus {
 }
 
 #banner-model {
-    color: $secondary;
+    color: $foreground;
     width: auto;
 }
 

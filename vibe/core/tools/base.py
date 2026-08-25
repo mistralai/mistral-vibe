@@ -33,6 +33,7 @@ from vibe.core.tools.models import (
 )
 from vibe.core.tools.terminal_runtime import TerminalRuntime
 from vibe.core.types import ToolStreamEvent
+from vibe.core.workspace import Workspace
 from vibe.observability.logging import logger
 from vibe.utils.io import read_safe
 
@@ -189,6 +190,12 @@ class BaseTool[
             except RuntimeError:
                 harness_files = HarnessFilesManager(sources=(), cwd=self.cwd)
         self.harness_files = replace(harness_files, cwd=self.cwd)
+        # project_roots omits an untrusted cwd, since config is only discovered
+        # under trusted roots. for_session adds it back, so such a directory
+        # stays writable without becoming a place config is read from.
+        self.workspace = Workspace.for_session(
+            self.cwd, self.harness_files.project_roots
+        )
         self.scratchpad_dir = scratchpad_dir
         self.terminal_runtime = terminal_runtime or TerminalRuntime()
 

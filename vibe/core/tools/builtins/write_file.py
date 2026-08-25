@@ -106,8 +106,7 @@ class WriteFile(
             denylist=self.config.denylist,
             config_permission=self.config.permission,
             sensitive_patterns=self.config.sensitive_patterns,
-            cwd=self.cwd,
-            project_roots=self.harness_files.project_roots,
+            workspace=self.workspace,
             scratchpad_dir=self.scratchpad_dir,
         )
 

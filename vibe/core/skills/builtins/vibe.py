@@ -826,11 +826,24 @@ Image attachments:
 
 Messages submitted while the agent or a `!`-bash command is running are
 queued instead of cancelling the in-flight work, and drain in FIFO order
-once the job finishes. Prompts (plain, `/skill ...`, `@`-mentions) and
-`!bash` commands can be queued; slash commands and `&teleport` are
-rejected with a toast. **Ctrl+C** pops the last queued item (LIFO);
-**Esc** interrupts the running job and pauses the queue; pressing Enter
-(empty or not) on a paused queue resumes draining.
+once the job finishes. Prompts (plain, `/skill ...`, `@`-mentions),
+`!bash` commands, and non-side-channel slash commands can be queued;
+`&teleport` is rejected with a toast. **Ctrl+C** pops the last queued
+item (LIFO); **Esc** interrupts the running job and pauses the queue;
+pressing Enter (empty or not) on a paused queue resumes draining.
+
+Allowlisted slash commands (`side_channel=True`) run immediately via a
+side channel while the agent or bash is busy — they open pickers,
+display info, or apply visual changes without waiting. Only one
+side-channel command runs at a time. Commands that persist config
+changes (theme, model, thinking, voice, proxy) enqueue the persist
+step on the main queue as a `COMMAND` item with a callable payload;
+the queue drains when idle, so config writes never conflict.
+
+Commands not on the side-channel allowlist (e.g. `/clear`, `/compact`,
+`/rewind`, `/resume`, `/reload`, `/leanstall`, `/unleanstall`, `/teleport`,
+`/remote-project`, `/retry`) are enqueued on the main queue and execute
+when the session is idle.
 
 ## Skills System
 

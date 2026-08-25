@@ -16,17 +16,24 @@ from vibe.cli.textual_ui.widgets.messages import (
     BashOutputMessage,
     ErrorMessage,
     QueueHeaderMessage,
+    SlashCommandMessage,
     UserMessage,
 )
 from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from vibe.app_server.config import ModelConfigView
+    from vibe.cli.commands import Command
 
 
 class QueuedItemKind(StrEnum):
     PROMPT = auto()
     BASH = auto()
+    COMMAND = auto()
+
+
+async def _noop_async() -> None:
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +42,21 @@ class QueuedItem:
     content: str
     skill_name: str | None = None
     prepared_prompt: PreparedPrompt | None = None
+    # When set, content is cosmetic (display only) and the callback is what
+    # actually executes at drain time. When None, content is replayed via
+    # _dispatch_idle_input.
+    command_payload: Callable[[], Awaitable[None]] | None = None
+    # Invoked if this item is discarded before it drains (e.g. via Ctrl+C
+    # pop_last) so the caller can revert any speculative state it applied at
+    # enqueue time and clear its pending flag. Without this the payload's
+    # finally never runs, so the speculative change would stay applied but
+    # unpersisted. Defaults to a noop so callers that have nothing to revert
+    # need not pass anything.
+    on_discard: Callable[[], Awaitable[None]] = _noop_async
+    # Set on lifecycle commands that reset the conversation (e.g. /clear). At
+    # drain time the queue drops any prompts queued before such a command
+    # instead of running an LLM turn on the widgets the command tears down.
+    flushes_pending: bool = False
 
 
 @dataclass(slots=True)
@@ -74,6 +96,24 @@ class MessageQueue:
 
     def append_bash(self, content: str) -> None:
         self._items.append(QueuedItem(QueuedItemKind.BASH, content))
+
+    def append_command(
+        self,
+        content: str,
+        *,
+        command_payload: Callable[[], Awaitable[None]] | None = None,
+        on_discard: Callable[[], Awaitable[None]] | None = None,
+        flushes_pending: bool = False,
+    ) -> None:
+        self._items.append(
+            QueuedItem(
+                QueuedItemKind.COMMAND,
+                content,
+                command_payload=command_payload,
+                on_discard=on_discard or _noop_async,
+                flushes_pending=flushes_pending,
+            )
+        )
 
     def prepend_prompts(self, items: list[QueuedItem]) -> None:
         if not items:
@@ -124,8 +164,14 @@ class QueuePorts:
     start_agent_turn: Callable[..., asyncio.Task]
     await_agent_turn: Callable[[], Awaitable[None]]
     run_bash: Callable[..., asyncio.Task]
+    run_command: Callable[[str, Callable[[], Awaitable[None]] | None], Awaitable[None]]
     maybe_show_feedback_bar: Callable[[], Awaitable[None]]
     send_skill_telemetry: Callable[[str | None], None]
+    # Awaited after a queued command runs, in case it opened a picker (e.g.
+    # /mcp, /resume) that must block the drain until the user dismisses it.
+    # No-op when no picker is open, so commands that don't open a picker
+    # return immediately.
+    await_input_app: Callable[[], Awaitable[None]] = _noop_async
 
 
 @dataclass(slots=True)
@@ -224,10 +270,33 @@ class QueueController:
         await self._ports.mount_and_scroll(widget, after=anchor)
         self._push_loading_queue_count()
 
+    async def enqueue_command(
+        self,
+        content: str,
+        *,
+        command_payload: Callable[[], Awaitable[None]] | None = None,
+        on_discard: Callable[[], Awaitable[None]] | None = None,
+        flushes_pending: bool = False,
+    ) -> None:
+        self._queue.append_command(
+            content,
+            command_payload=command_payload,
+            on_discard=on_discard,
+            flushes_pending=flushes_pending,
+        )
+        await self._ensure_header()
+        widget = SlashCommandMessage(content, pending=True)
+        anchor = self._last_queue_anchor()
+        self._widgets.append(widget)
+        await self._ports.mount_and_scroll(widget, after=anchor)
+        self._push_loading_queue_count()
+        self.start_drain_if_needed()
+
     async def pop_last(self) -> bool:
         item = self._queue.pop_last()
         if item is None:
             return False
+        await item.on_discard()
         widget = self._widgets.pop() if self._widgets else None
         if widget is not None:
             await widget.remove()
@@ -296,6 +365,10 @@ class QueueController:
     async def _drain(self) -> None:
         try:
             while self._drain_enabled and self._queue and not self._queue.paused:
+                # Block while a side-channel picker (e.g. /theme opened while
+                # busy) is on screen, so the drain doesn't run a queued turn
+                # behind it. Returns immediately when the input app is active.
+                await self._ports.await_input_app()
                 await self._remove_header()
                 pending = await self._consume_until_bash_or_empty()
                 if not pending:
@@ -325,6 +398,22 @@ class QueueController:
                     await widget.remove()
                 if not await self._run_bash(item.content):
                     return []
+            elif item.kind == QueuedItemKind.COMMAND:
+                # Commands are side effects, not turn boundaries. Keep
+                # preceding prompts so they still get an LLM turn, and wait
+                # if the command started an agent (e.g. /compact, /retry) or
+                # opened a picker (e.g. /mcp, /resume) that must block the drain
+                # until the user dismisses it. A flushes_pending command
+                # (e.g. /clear) resets the conversation, so drop any prompts
+                # queued before it instead of running a turn on the widgets it
+                # is about to tear down.
+                if item.flushes_pending and pending:
+                    pending = []
+                if widget is not None:
+                    await widget.remove()
+                await self._ports.run_command(item.content, item.command_payload)
+                await self._await_tail_turn()
+                await self._ports.await_input_app()
             elif isinstance(widget, UserMessage):
                 pending.append(_Pending(item, widget))
         return pending
@@ -375,7 +464,7 @@ class QueueController:
         await self._ports.mount_and_scroll(
             ErrorMessage(
                 shortcut_hint(
-                    f"Model `{active_model.alias}` does not support images. "
+                    f"Model `{active_model.display_name}` does not support images. "
                     f"Switch with /model, then press {shortcut('Enter')} "
                     "to resume the queue."
                 ),
@@ -428,3 +517,81 @@ class QueueController:
         for prev, curr in zip(widgets, widgets[1:], strict=False):
             prev.set_show_separator(False)
             curr.set_follows_previous(True)
+
+
+@dataclass(frozen=True)
+class SideChannelPorts:
+    """Callbacks for side-channel slash command execution.
+
+    The side channel runs allowlisted slash commands while the agent or bash
+    is busy. It does not wait for the agent to become idle — that's the point.
+    Commands that need idle (lifecycle ops, config reloads) go to the main
+    queue instead. Commands that persist config defer to the main queue via
+    a COMMAND item with payload.
+    """
+
+    invoke_command: Callable[[str, Command, str, str], Awaitable[bool]]
+
+
+@dataclass(slots=True)
+class SideChannelItem:
+    cmd_name: str
+    command: Command
+    cmd_args: str
+    display_text: str
+
+
+class SideChannelController:
+    """Single-slot runner for side-channel slash commands.
+
+    Only one side-channel command runs at a time; new submissions are rejected
+    while one is in flight. Does not check ``agent_running`` or ``bash_task`` —
+    the whole purpose is concurrency with the agent loop.
+
+    Commands that need to persist config changes enqueue a COMMAND item on
+    the main queue with a payload. The main queue drains when idle, so
+    persistence never hits CONFLICT.
+    """
+
+    def __init__(self, ports: SideChannelPorts) -> None:
+        self._ports = ports
+        self._task: asyncio.Task | None = None
+        self._enabled = True
+
+    def __bool__(self) -> bool:
+        return self.draining
+
+    def __len__(self) -> int:
+        return 1 if self.draining else 0
+
+    @property
+    def draining(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def enqueue(
+        self, cmd_name: str, command: Command, cmd_args: str, display_text: str
+    ) -> bool:
+        if not self._enabled or self.draining:
+            return False
+        item = SideChannelItem(cmd_name, command, cmd_args, display_text)
+        self._task = asyncio.create_task(self._run(item))
+        return True
+
+    async def _run(self, item: SideChannelItem) -> None:
+        try:
+            await self._ports.invoke_command(
+                item.cmd_name, item.command, item.cmd_args, item.display_text
+            )
+        except Exception:
+            logger.exception("Side-channel command failed")
+        finally:
+            self._task = None
+
+    async def shutdown(self) -> None:
+        self._enabled = False
+        task = self._task
+        if task is None or task.done():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task

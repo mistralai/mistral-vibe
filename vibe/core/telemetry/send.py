@@ -15,6 +15,7 @@ from vibe.core.llm.format import ResolvedToolCall
 from vibe.core.telemetry.build_metadata import build_base_metadata
 from vibe.core.telemetry.types import (
     AttachmentKind,
+    ExperimentAssignment,
     LaunchContext,
     ProjectPickerTelemetryPayload,
     RemoteProjectOutcome,
@@ -77,7 +78,7 @@ class TelemetryClient:
         session_id_getter: Callable[[], str | None] | None = None,
         parent_session_id_getter: Callable[[], str | None] | None = None,
         launch_context: LaunchContext | None = None,
-        experiments_getter: Callable[[], dict[str, str]] | None = None,
+        experiments_getter: Callable[[], list[ExperimentAssignment]] | None = None,
         user_plan_getter: Callable[[], str | None] | None = None,
     ) -> None:
         self._config_getter = config_getter
@@ -139,14 +140,14 @@ class TelemetryClient:
         return self._user_plan_getter()
 
     def build_client_event_metadata(self) -> dict[str, Any]:
-        experiments = (
+        experiment_assignments = (
             self._experiments_getter() if self._experiments_getter is not None else None
         )
         return build_base_metadata(
             launch_context=self._launch_context,
             session_id=self.session_id,
             parent_session_id=self.parent_session_id,
-            experiments=experiments,
+            experiment_assignments=experiment_assignments,
             user_plan=self.user_plan,
         )
 

@@ -18,11 +18,18 @@ from vibe.cli.textual_ui.widgets.spinner_text import SpinnerText
 
 
 def _make_config(
-    active_model: str = "test-model", thinking: ThinkingLevel = "off"
+    active_model: str = "test-model",
+    thinking: ThinkingLevel = "off",
+    display_name: str | None = None,
 ) -> ConfigView:
     config = build_test_app_config()
     model = config.active_model.model_copy(
-        update={"name": active_model, "alias": active_model, "thinking": thinking}
+        update={
+            "name": active_model,
+            "alias": active_model,
+            "thinking": thinking,
+            "display_name": display_name or active_model,
+        }
     )
     return config.model_copy(
         update={
@@ -94,6 +101,16 @@ class TestBannerInitialState:
         banner = Banner(config=_make_config(thinking="max"), skills_count=0)
 
         assert banner._initial_state.active_model == "test-model[max]"
+
+    def test_banner_shows_display_name(self) -> None:
+        banner = Banner(
+            config=_make_config(
+                active_model="glm-5-2", display_name="glm-5.2 (Mistral Hosted)"
+            ),
+            skills_count=0,
+        )
+
+        assert banner._initial_state.active_model == "glm-5.2 (Mistral Hosted)[off]"
 
     def test_format_meta_counts_includes_connectors(self) -> None:
         banner = Banner(config=_make_config(), skills_count=0)

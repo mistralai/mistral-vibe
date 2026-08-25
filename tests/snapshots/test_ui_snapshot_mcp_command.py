@@ -217,6 +217,32 @@ class SnapshotTestAppConnectorsOnly(BaseSnapshotTestApp):
         super().__init__(agent_loop=_build_connector_agent_loop(config, registry))
 
 
+class SnapshotTestAppConnectorBootstrapError(BaseSnapshotTestApp):
+    def __init__(self) -> None:
+        config = default_config(mcp_servers=[])
+        registry = FakeConnectorRegistry(
+            bootstrap_error=(
+                "Failed to load workspace connectors (HTTP 502).\n"
+                "Server response: Bad Gateway\n"
+                "This looks like a temporary server issue — "
+                "retry with `/reload` in a few minutes."
+            )
+        )
+        super().__init__(agent_loop=_build_connector_agent_loop(config, registry))
+
+
+class SnapshotTestAppConnectorPerConnectorError(BaseSnapshotTestApp):
+    def __init__(self) -> None:
+        config = default_config(
+            mcp_servers=[], connectors=[ConnectorConfig(name="slack", disabled=False)]
+        )
+        registry = FakeConnectorRegistry(
+            connectors={"slack": []},
+            connector_errors={"slack": "Slack OAuth token expired (HTTP 400)"},
+        )
+        super().__init__(agent_loop=_build_connector_agent_loop(config, registry))
+
+
 class SnapshotTestAppConnectorsMixedState(BaseSnapshotTestApp):
     def __init__(self) -> None:
         config = default_config(
@@ -248,6 +274,34 @@ def test_snapshot_mcp_with_connectors_overview(snap_compare: SnapCompare) -> Non
 
     assert snap_compare(
         "test_ui_snapshot_mcp_command.py:SnapshotTestAppWithConnectors",
+        terminal_size=(120, 36),
+        run_before=run_before,
+    )
+
+
+def test_snapshot_mcp_connector_bootstrap_error(snap_compare: SnapCompare) -> None:
+
+    async def run_before(pilot: Pilot) -> None:
+        await _run_mcp_command(pilot, "/mcp")
+
+    assert snap_compare(
+        "test_ui_snapshot_mcp_command.py:SnapshotTestAppConnectorBootstrapError",
+        terminal_size=(120, 36),
+        run_before=run_before,
+    )
+
+
+def test_snapshot_mcp_connector_detail_shows_bootstrap_error(
+    snap_compare: SnapCompare,
+) -> None:
+
+    async def run_before(pilot: Pilot) -> None:
+        await _run_mcp_command(pilot, "/mcp")
+        await pilot.press("enter")  # drill into the failing connector
+        await pilot.pause(0.1)
+
+    assert snap_compare(
+        "test_ui_snapshot_mcp_command.py:SnapshotTestAppConnectorPerConnectorError",
         terminal_size=(120, 36),
         run_before=run_before,
     )

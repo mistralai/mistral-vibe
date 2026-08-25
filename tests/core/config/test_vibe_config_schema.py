@@ -182,6 +182,27 @@ def test_routed_model_config_is_injected() -> None:
     assert config.models.get(_ROUTED_TEST_ALIAS) == _ROUTED_TEST_MODEL
 
 
+def test_routed_model_display_name_is_injected() -> None:
+    routed = _ROUTED_TEST_MODEL.model_copy(
+        update={"display_name": "glm-5.2 (Mistral Hosted)"}
+    )
+    config = VibeConfigSchema.model_validate({
+        "routed_default_model": _ROUTED_TEST_ALIAS,
+        "routed_model_config": routed.model_dump_json(),
+    })
+
+    assert config.get_active_model().display_name == "glm-5.2 (Mistral Hosted)"
+
+
+def test_model_display_name_is_optional() -> None:
+    config = VibeConfigSchema.model_validate({
+        "routed_default_model": _ROUTED_TEST_ALIAS,
+        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
+    })
+
+    assert config.get_active_model().display_name is None
+
+
 def test_routed_model_not_injected_without_config() -> None:
     from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
 

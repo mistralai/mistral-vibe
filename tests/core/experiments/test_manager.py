@@ -138,8 +138,49 @@ async def test_assignments_serializes_json_object_arm() -> None:
     await manager.initialize(_attrs())
 
     assignments = manager.assignments()
-    label = assignments[ExperimentName.CLI_MODEL_ROUTING.value]
-    assert json.loads(label) == payload
+    assert len(assignments) == 1
+    assert assignments[0].experiment_id == ExperimentName.CLI_MODEL_ROUTING.value
+    assert json.loads(assignments[0].variation_name) == payload
+    assert assignments[0].variation_id == 1
+
+
+@pytest.mark.asyncio
+async def test_assignments_dedupes_multiple_tracks_for_one_feature() -> None:
+    response = _response({
+        ExperimentName.SYSTEM_PROMPT.value: {
+            "defaultValue": "cli",
+            "rules": [
+                {
+                    "tracks": [
+                        {
+                            "experiment": {"key": ExperimentName.SYSTEM_PROMPT.value},
+                            "result": {
+                                "variationId": 0,
+                                "value": "cli",
+                                "inExperiment": True,
+                            },
+                        },
+                        {
+                            "experiment": {"key": ExperimentName.SYSTEM_PROMPT.value},
+                            "result": {
+                                "variationId": 1,
+                                "value": "explore",
+                                "inExperiment": True,
+                            },
+                        },
+                    ]
+                }
+            ],
+        }
+    })
+    manager = ExperimentManager(client=_StubClient(response))
+    await manager.initialize(_attrs())
+
+    assignments = manager.assignments()
+    assert len(assignments) == 1
+    assert assignments[0].experiment_id == ExperimentName.SYSTEM_PROMPT.value
+    assert assignments[0].variation_id == 1
+    assert assignments[0].variation_name == "explore"
 
 
 @pytest.mark.asyncio
@@ -152,7 +193,7 @@ async def test_assignments_returns_empty_without_confirmed_assignment() -> None:
     })
     manager = ExperimentManager(client=_StubClient(response))
     await manager.initialize(_attrs())
-    assert manager.assignments() == {}
+    assert manager.assignments() == []
 
 
 @pytest.mark.asyncio
@@ -165,7 +206,7 @@ async def test_config_variants_include_forced_rule_without_assignment() -> None:
     })
     manager = ExperimentManager(client=_StubClient(response))
     await manager.initialize(_attrs())
-    assert manager.assignments() == {}
+    assert manager.assignments() == []
     assert manager.config_variants() == {ExperimentName.SYSTEM_PROMPT.value: "explore"}
 
 
@@ -203,7 +244,12 @@ async def test_assignments_returns_confirmed_assignment() -> None:
     })
     manager = ExperimentManager(client=_StubClient(response))
     await manager.initialize(_attrs())
-    assert manager.assignments() == {ExperimentName.SYSTEM_PROMPT.value: "explore"}
+    assignments = manager.assignments()
+    assert len(assignments) == 1
+    assert assignments[0].experiment_id == ExperimentName.SYSTEM_PROMPT.value
+    assert assignments[0].experiment_name == ExperimentName.SYSTEM_PROMPT.value
+    assert assignments[0].variation_name == "explore"
+    assert assignments[0].variation_id == 1
 
 
 @pytest.mark.asyncio
@@ -252,7 +298,10 @@ async def test_assignments_uses_resolved_variant_value() -> None:
     manager = ExperimentManager(client=_StubClient(response))
     await manager.initialize(_attrs())
     assignments = manager.assignments()
-    assert assignments == {ExperimentName.SYSTEM_PROMPT.value: "cli_v2"}
+    assert len(assignments) == 1
+    assert assignments[0].experiment_id == ExperimentName.SYSTEM_PROMPT.value
+    assert assignments[0].variation_name == "cli_v2"
+    assert assignments[0].variation_id == 1
 
 
 @pytest.mark.asyncio
@@ -282,7 +331,11 @@ async def test_assignments_prefers_track_result_value() -> None:
     })
     manager = ExperimentManager(client=_StubClient(response))
     await manager.initialize(_attrs())
-    assert manager.assignments() == {ExperimentName.SYSTEM_PROMPT.value: "cli_v3"}
+    assignments = manager.assignments()
+    assert len(assignments) == 1
+    assert assignments[0].experiment_id == ExperimentName.SYSTEM_PROMPT.value
+    assert assignments[0].variation_name == "cli_v3"
+    assert assignments[0].variation_id == 1
 
 
 @pytest.mark.asyncio
@@ -314,15 +367,18 @@ async def test_assignments_keys_on_feature_id_when_experiment_key_differs() -> N
     manager = ExperimentManager(client=_StubClient(response))
     await manager.initialize(_attrs())
     assignments = manager.assignments()
-    assert assignments == {ExperimentName.SYSTEM_PROMPT.value: "cli_v2"}
-    assert "vibe-code-cli-system-prompt" not in assignments
+    assert len(assignments) == 1
+    assert assignments[0].experiment_id == ExperimentName.SYSTEM_PROMPT.value
+    assert assignments[0].experiment_name == "vibe-code-cli-system-prompt"
+    assert assignments[0].variation_name == "cli_v2"
+    assert assignments[0].variation_id == 1
 
 
 @pytest.mark.asyncio
 async def test_initialize_does_nothing_on_failed_eval() -> None:
     manager = ExperimentManager(client=_StubClient(None))
     await manager.initialize(_attrs())
-    assert manager.assignments() == {}
+    assert manager.assignments() == []
     for name in ExperimentName:
         assert manager.get_variant(name) == DEFAULT_VARIANTS[name]
 
@@ -401,7 +457,11 @@ def test_hydrate_makes_get_variant_match_initialized_manager() -> None:
     hydrated = ExperimentManager(client=_StubClient(None))
     hydrated.hydrate(response)
     assert hydrated.get_variant(ExperimentName.SYSTEM_PROMPT) == "cli_v2"
-    assert hydrated.assignments() == {ExperimentName.SYSTEM_PROMPT.value: "cli_v2"}
+    hydrated_assignments = hydrated.assignments()
+    assert len(hydrated_assignments) == 1
+    assert hydrated_assignments[0].experiment_id == ExperimentName.SYSTEM_PROMPT.value
+    assert hydrated_assignments[0].variation_name == "cli_v2"
+    assert hydrated_assignments[0].variation_id == 1
 
 
 @pytest.mark.asyncio
@@ -475,7 +535,7 @@ async def test_assignments_excludes_tracks_not_in_experiment() -> None:
     manager = ExperimentManager(client=_StubClient(response))
     await manager.initialize(_attrs())
 
-    assert manager.assignments() == {}
+    assert manager.assignments() == []
 
 
 @pytest.mark.asyncio
@@ -501,7 +561,7 @@ async def test_assignments_excludes_tracks_with_missing_in_experiment() -> None:
     manager = ExperimentManager(client=_StubClient(response))
     await manager.initialize(_attrs())
 
-    assert manager.assignments() == {}
+    assert manager.assignments() == []
 
 
 @pytest.mark.asyncio

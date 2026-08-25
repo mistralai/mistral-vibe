@@ -6,6 +6,8 @@ from rich.cells import cell_len
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Static
 
+from vibe.cli.autocompletion.base import CompletionEntry
+
 COMPLETION_POPUP_MAX_HEIGHT = 12
 COMPLETION_POPUP_PADDING_X = 1
 SELECTED_CLASS = "completion-selected"
@@ -27,10 +29,10 @@ class CompletionPopup(VerticalScroll):
         self.styles.max_height = COMPLETION_POPUP_MAX_HEIGHT
         self.styles.padding = (0, COMPLETION_POPUP_PADDING_X)
         self.can_focus = False
-        self._suggestions: list[tuple[str, str]] = []
+        self._suggestions: list[CompletionEntry] = []
 
     def update_suggestions(
-        self, suggestions: list[tuple[str, str]], selected: int
+        self, suggestions: list[CompletionEntry], selected: int
     ) -> None:
         if not suggestions:
             self.hide()
@@ -43,23 +45,23 @@ class CompletionPopup(VerticalScroll):
         self._select(rows, selected)
         self.styles.display = "block"
 
-    def _rebuild(self, suggestions: list[tuple[str, str]]) -> list[_CompletionRow]:
+    def _rebuild(self, suggestions: list[CompletionEntry]) -> list[_CompletionRow]:
         self.remove_children()
         self._suggestions = suggestions
-        has_descriptions = any(description for _, description in suggestions)
+        has_descriptions = any(entry.description for entry in suggestions)
         self.set_class(not has_descriptions, NO_DESCRIPTION_CLASS)
         command_width = max(
-            cell_len(self._display_label(label)) for label, _ in suggestions
+            cell_len(self._display_label(entry.label)) for entry in suggestions
         )
         rows: list[_CompletionRow] = []
-        for label, description in suggestions:
+        for entry in suggestions:
             command = _CompletionItem(
-                self._display_label(label), classes="completion-command"
+                self._display_label(entry.label), classes="completion-command"
             )
             if has_descriptions:
                 command.styles.width = command_width
             description_cell = _CompletionItem(
-                description, classes="completion-description"
+                entry.description, classes="completion-description"
             )
             rows.append(_CompletionRow(command, description_cell))
         self.mount_all(rows)

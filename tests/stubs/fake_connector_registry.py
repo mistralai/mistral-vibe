@@ -17,11 +17,15 @@ class FakeConnectorRegistry(ConnectorRegistry):
         self,
         connectors: dict[str, list[RemoteTool]] | None = None,
         auth_actions: dict[str, ConnectorAuthAction] | None = None,
+        bootstrap_error: str | None = None,
+        connector_errors: dict[str, str] | None = None,
     ) -> None:
         super().__init__(api_key="fake-key")
         self._fake_connectors = connectors or {}
         self._fake_auth_actions = auth_actions or {}
         self._build_cache()
+        self._bootstrap_error = bootstrap_error
+        self._connector_errors = connector_errors or {}
 
     def _build_cache(self) -> None:
         self._cache = {}

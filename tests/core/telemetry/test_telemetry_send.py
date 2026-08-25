@@ -20,6 +20,7 @@ from vibe.core.telemetry.build_metadata import (
 from vibe.core.telemetry.send import TelemetryClient, _extract_file_extension
 from vibe.core.telemetry.types import (
     AttachmentKind,
+    ExperimentAssignment,
     LaunchContext,
     TelemetryRequestMetadata,
     TerminalEmulator,
@@ -834,9 +835,14 @@ class TestTelemetryClient:
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
         config = build_test_vibe_config(enable_telemetry=True)
+        assignment = ExperimentAssignment(
+            experiment_id="vibe_cli_managed_shell_tools",
+            experiment_name="vibe_cli_managed_shell_tools",
+            variation_name="managed",
+            variation_id=1,
+        )
         client = TelemetryClient(
-            config_getter=lambda: config,
-            experiments_getter=lambda: {"vibe_cli_managed_shell_tools": "managed"},
+            config_getter=lambda: config, experiments_getter=lambda: [assignment]
         )
 
         client.send_new_session(
@@ -848,6 +854,14 @@ class TestTelemetryClient:
         properties = telemetry_events[0]["properties"]
         assert "experimental_bash_tool" not in properties
         assert properties["experiments"] == {"vibe_cli_managed_shell_tools": "managed"}
+        assert properties["experiment_assignments"] == [
+            {
+                "experiment_id": "vibe_cli_managed_shell_tools",
+                "experiment_name": "vibe_cli_managed_shell_tools",
+                "variation_name": "managed",
+                "variation_id": 1,
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_send_session_closed_payload(

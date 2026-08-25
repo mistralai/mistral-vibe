@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, replace
 from enum import StrEnum, auto
+from functools import partial
 import gc
 import os
 from pathlib import Path
@@ -31,7 +32,12 @@ from textual.worker import Worker, WorkerFailed, WorkerState
 
 from vibe import __version__ as CORE_VERSION
 from vibe.app_server import AppServerHost, AppServerSession, SessionExitSummary
-from vibe.app_server.config import THINKING_LEVELS, ConfigView, ModelConfigView
+from vibe.app_server.config import (
+    THINKING_LEVELS,
+    ConfigView,
+    ModelConfigView,
+    ThinkingLevel,
+)
 from vibe.app_server.events import (
     AppServerEvent,
     CallbackRequested,
@@ -91,13 +97,14 @@ from vibe.app_server.protocol import (
     ProtocolErrorCode,
 )
 from vibe.app_server.session import AppServerTurnError
+from vibe.cli._process_title import process_id_label
 from vibe.cli.clipboard import (
     NATIVE_COPY_HINT,
     ClipboardCopyResult,
     copy_selection_to_clipboard,
     copy_text_to_clipboard,
 )
-from vibe.cli.commands import CommandContext, CommandRegistry
+from vibe.cli.commands import Command, CommandContext, CommandRegistry
 from vibe.cli.lazy_audio_managers import (
     check_audio_available,
     create_default_narrator_manager,
@@ -118,7 +125,13 @@ from vibe.cli.textual_ui.mcp_commands import (
     parse_mcp_add_args,
     parse_mcp_subcommand,
 )
-from vibe.cli.textual_ui.message_queue import MessageQueue, QueueController, QueuePorts
+from vibe.cli.textual_ui.message_queue import (
+    MessageQueue,
+    QueueController,
+    QueuePorts,
+    SideChannelController,
+    SideChannelPorts,
+)
 from vibe.cli.textual_ui.notifications import (
     NotificationContext,
     NotificationPort,
@@ -173,7 +186,7 @@ from vibe.cli.textual_ui.widgets.messages import (
     WarningMessage,
     WhatsNewMessage,
 )
-from vibe.cli.textual_ui.widgets.model_picker import ModelPickerApp
+from vibe.cli.textual_ui.widgets.model_picker import ModelOption, ModelPickerApp
 from vibe.cli.textual_ui.widgets.narrator_status import NarratorStatus
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
@@ -274,6 +287,7 @@ _MAX_INCOMPLETE_STREAM_RETRIES = 2
 
 
 if TYPE_CHECKING:
+    from vibe.cli.textual_ui.screens.config import ConfigWriteResult
     from vibe.cli.textual_ui.widgets.connector_auth_app import ConnectorAuthApp
     from vibe.cli.textual_ui.widgets.mcp_app import MCPApp
     from vibe.cli.textual_ui.widgets.mcp_oauth_app import MCPOAuthApp
@@ -663,7 +677,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._interrupt_requested = False
         self._agent_task: asyncio.Task | None = None
         self._bash_task: asyncio.Task | None = None
-        self._queue = QueueController(self._build_queue_ports())
+        self._init_controllers()
 
         self._loading_widget: LoadingWidget | None = None
         self._active_callback: PublicCallbackEntry | None = None
@@ -778,6 +792,12 @@ class VibeApp(App):  # noqa: PLR0904
         # input box before app_server exists, so a submit awaits this instead of
         # crashing on the unbound property.
         self._session_ready = asyncio.Event()
+        # Set while the chat input (BottomApp.Input) is the active bottom app.
+        # Cleared when a picker/modal mounts via _switch_from_input; the queue
+        # drain awaits it after a queued command so a picker command (e.g. /mcp,
+        # /resume) blocks drainage until the user dismisses it.
+        self._input_app_ready = asyncio.Event()
+        self._input_app_ready.set()
         self._picker = _PickerState()
         # Guards against double-display of MCP/startup notices across the
         # readiness-watch and finish-resume-notices race; unrelated to picker preview.
@@ -807,9 +827,32 @@ class VibeApp(App):  # noqa: PLR0904
             start_agent_turn=self._start_queued_agent_turn,
             await_agent_turn=self._await_agent_turn,
             run_bash=self._start_queued_bash,
+            run_command=self._run_queued_command,
+            await_input_app=self._await_input_app,
             maybe_show_feedback_bar=self._maybe_show_feedback_bar,
             send_skill_telemetry=self._send_skill_telemetry,
         )
+
+    def _init_controllers(self) -> None:
+        self._queue = QueueController(self._build_queue_ports())
+        self._side_channel = SideChannelController(
+            SideChannelPorts(invoke_command=self._invoke_resolved_command)
+        )
+        self._pending_theme: str | None = None
+        self._pending_model: str | None = None
+        self._pending_thinking: ThinkingLevel | None = None
+
+    @property
+    def _effective_theme(self) -> str:
+        return self._pending_theme or self.config.theme
+
+    @property
+    def _effective_model_alias(self) -> str:
+        return self._pending_model or self.config.active_model.alias
+
+    @property
+    def _effective_thinking(self) -> ThinkingLevel:
+        return self._pending_thinking or self.config.active_model.thinking
 
     def _active_model_or_none(self) -> ModelConfigView | None:
         return self.config.active_model
@@ -878,11 +921,31 @@ class VibeApp(App):  # noqa: PLR0904
             return
         await agent_task
 
+    async def _await_input_app(self) -> None:
+        # Blocks while a picker/modal opened by a queued command is still on
+        # screen; returns immediately when the chat input is the active bottom
+        # app. See QueuePorts.await_input_app.
+        await self._input_app_ready.wait()
+
     def _start_queued_bash(self, command: str) -> asyncio.Task:
         self._bash_task = asyncio.create_task(
             self._handle_bash_command(command, start_drain_on_finish=False)
         )
         return self._bash_task
+
+    async def _run_queued_command(
+        self, content: str, payload: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        try:
+            if payload is None:
+                await self._dispatch_idle_input(content)
+            else:
+                await payload()
+        except Exception as exc:
+            logger.warning("Queued command failed: %s", content, exc_info=exc)
+            await self._mount_and_scroll(
+                ErrorMessage(f"Failed to apply: {content} — {exc}")
+            )
 
     def _build_command_registry(self) -> CommandRegistry:
         context = self._command_context()
@@ -983,6 +1046,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         with Horizontal(id="bottom-bar"):
             yield PathDisplay(self.app_server.cwd if has_session else str(Path.cwd()))
+            yield NoMarkupStatic(process_id_label(), id="process-title")
             yield NoMarkupStatic(id="spacer")
             context_progress = ContextProgress()
             if has_session:
@@ -1346,15 +1410,17 @@ class VibeApp(App):  # noqa: PLR0904
             self._whats_new_message = None
 
         if self._input_queue.paused:
-            if not await self._handle_paused_submit(value):
-                self._restore_input_if_empty(input_widget, value)
+            if not await self._try_side_channel_command(value, input_widget):
+                if not await self._handle_paused_submit(value):
+                    self._restore_input_if_empty(input_widget, value)
             return
 
         if self._is_busy():
-            if not await self._handle_queue_submit(
-                value, reject_hint=_REJECT_HINT_BUSY
-            ):
-                self._restore_input_if_empty(input_widget, value)
+            if not await self._try_side_channel_command(value, input_widget):
+                if not await self._handle_queue_submit(
+                    value, reject_hint=_REJECT_HINT_BUSY
+                ):
+                    self._restore_input_if_empty(input_widget, value)
             return
 
         await self._dispatch_idle_input(value)
@@ -1373,6 +1439,23 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _warn_not_queueable(self, message: str) -> None:
         self.notify(message, severity="warning", markup=False)
+
+    async def _try_side_channel_command(
+        self, value: str, input_widget: ChatInputContainer
+    ) -> bool:
+        resolved = self.commands.parse_command(value)
+        if resolved is None:
+            return False
+        cmd_name, command, cmd_args = resolved
+        if not command.side_channel:
+            return False
+        display = self._command_display(value, cmd_name)
+        if not self._side_channel.enqueue(cmd_name, command, cmd_args, display):
+            self._warn_not_queueable(
+                "A slash command is already running — wait for it to finish."
+            )
+            self._restore_input_if_empty(input_widget, value)
+        return True
 
     async def _dispatch_idle_input(self, value: str) -> None:
         # Plain prompts are guarded by the readiness await in
@@ -1416,10 +1499,9 @@ class VibeApp(App):  # noqa: PLR0904
                 self._warn_not_queueable(f"Teleport cannot be queued — {reject_hint}")
                 return False
             case SlashCommand():
-                self._warn_not_queueable(
-                    f"Slash commands cannot be queued — {reject_hint}"
-                )
-                return False
+                resolved = self.commands.parse_command(value)
+                flushes = bool(resolved is not None and resolved[1].flushes_pending)
+                await self._queue.enqueue_command(value, flushes_pending=flushes)
             case Skill(command=command, name=name):
                 return await self._enqueue_prompt_with_resources(
                     command, skill_name=name
@@ -1565,6 +1647,47 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         await self.app_server.resources.config.update(changes)
 
+    async def _persist_proxy(self, changes: dict[str, str | None]) -> None:
+        await self.app_server.resources.config.update_proxy(changes)
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                "Proxy settings saved. Restart the CLI for changes to take effect."
+            )
+        )
+
+    async def _persist_voice_settings(
+        self,
+        changes: dict[str, str | bool],
+        previous_voice_enabled: bool,
+        audio_error: str | None,
+    ) -> None:
+        await self._persist_config_changes(changes)
+        voice_enabled = self.config.voice_mode_enabled
+        if voice_enabled != previous_voice_enabled:
+            try:
+                self._voice_manager.apply_enabled(voice_enabled)
+            except Exception as exc:
+                logger.warning("Failed to apply voice mode locally", exc_info=exc)
+                audio_error = str(exc)
+            self.app_server.resources.telemetry.record(
+                "vibe.voice_mode_toggled", {"enabled": voice_enabled}
+            )
+            message = (
+                "Voice mode enabled. Press **Ctrl+R** to start recording."
+                if voice_enabled
+                else "Voice mode disabled."
+            )
+            await self._mount_and_scroll(UserCommandMessage(message))
+        self._narrator_manager.sync()
+        self._refresh_command_registry()
+        if audio_error:
+            self.notify(
+                f"Audio setting saved, but audio is unavailable: {audio_error}",
+                severity="warning",
+                timeout=15,
+                markup=False,
+            )
+
     async def _remove_config_field(self, field: str) -> None:
         response = await self.app_server.resources.config.write(
             [ConfigWriteOpWire(op="remove", path=f"/{field}")],
@@ -1633,34 +1756,15 @@ class VibeApp(App):  # noqa: PLR0904
             or changes.get("narrator_enabled") is True
             else None
         )
-        await self._persist_config_changes(changes)
-
-        voice_enabled = self.config.voice_mode_enabled
-        if voice_enabled != previous_voice_enabled:
-            try:
-                self._voice_manager.apply_enabled(voice_enabled)
-            except Exception as exc:
-                logger.warning("Failed to apply voice mode locally", exc_info=exc)
-                audio_error = str(exc)
-            self.app_server.resources.telemetry.record(
-                "vibe.voice_mode_toggled", {"enabled": voice_enabled}
-            )
-            message = (
-                "Voice mode enabled. Press **Ctrl+R** to start recording."
-                if voice_enabled
-                else "Voice mode disabled."
-            )
-            await self._mount_and_scroll(UserCommandMessage(message))
-
-        self._narrator_manager.sync()
-        self._refresh_command_registry()
-        if audio_error:
-            self.notify(
-                f"Audio setting saved, but audio is unavailable: {audio_error}",
-                severity="warning",
-                timeout=15,
-                markup=False,
-            )
+        await self._queue.enqueue_command(
+            "voice settings",
+            command_payload=partial(
+                self._persist_voice_settings,
+                changes,
+                previous_voice_enabled,
+                audio_error,
+            ),
+        )
 
     async def on_model_picker_app_model_selected(
         self, message: ModelPickerApp.ModelSelected
@@ -1674,9 +1778,23 @@ class VibeApp(App):  # noqa: PLR0904
             )
             await self._switch_to_input_app()
             return
-        await self.app_server.resources.config.update({"active_model": message.alias})
-        await self._reload_config()
+        self._pending_model = message.alias
+        await self._queue.enqueue_command(
+            f"model {message.alias}",
+            command_payload=partial(self._persist_model, message.alias),
+            on_discard=partial(self._discard_model),
+        )
         await self._switch_to_input_app()
+
+    async def _persist_model(self, alias: str) -> None:
+        try:
+            await self.app_server.resources.config.update({"active_model": alias})
+            await self._reload_config()
+        finally:
+            self._pending_model = None
+
+    async def _discard_model(self) -> None:
+        self._pending_model = None
 
     async def on_model_picker_app_cancelled(
         self, _event: ModelPickerApp.Cancelled
@@ -1827,9 +1945,23 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_thinking_picker_app_thinking_selected(
         self, message: ThinkingPickerApp.ThinkingSelected
     ) -> None:
-        await self.app_server.resources.config.set_thinking(message.level)
-        await self._reload_config()
+        self._pending_thinking = message.level
+        await self._queue.enqueue_command(
+            f"thinking {message.level}",
+            command_payload=partial(self._persist_thinking, message.level),
+            on_discard=partial(self._discard_thinking),
+        )
         await self._switch_to_input_app()
+
+    async def _persist_thinking(self, level: ThinkingLevel) -> None:
+        try:
+            await self.app_server.resources.config.set_thinking(level)
+            await self._reload_config()
+        finally:
+            self._pending_thinking = None
+
+    async def _discard_thinking(self) -> None:
+        self._pending_thinking = None
 
     async def on_thinking_picker_app_cancelled(
         self, _event: ThinkingPickerApp.Cancelled
@@ -1848,12 +1980,40 @@ class VibeApp(App):  # noqa: PLR0904
             set_session_override(None)
             if previous_chain.session:
                 parts.append("session override cleared")
-        if message.config_level:
-            await self._persist_config_changes({"log_level": message.config_level})
-            parts.append(f"config.toml → {message.config_level}")
-        elif message.config_cleared:
-            await self._remove_config_field("log_level")
-            parts.append("config.toml cleared")
+        config_feedback: str | None = None
+        deferred = False
+        try:
+            if message.config_level:
+                deferred = await self._defer_or_run_log_level_config(
+                    level=message.config_level, clear=False
+                )
+                config_feedback = f"config.toml → {message.config_level}"
+            elif message.config_cleared:
+                deferred = await self._defer_or_run_log_level_config(
+                    level=None, clear=True
+                )
+                config_feedback = "config.toml cleared"
+        except Exception as exc:
+            # The inline (idle) write failed; the deferred (busy) path enqueues
+            # and surfaces its own error at drain time via _run_queued_command.
+            logger.warning("Failed to persist log-level config", exc_info=exc)
+            await self._switch_to_input_app()
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to persist log-level config: {exc}",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+        if config_feedback is not None:
+            # A deferred write's outcome is unknown until it drains, so don't
+            # claim it's done; the session override (already shown) is the live
+            # effect meanwhile.
+            parts.append(
+                f"{config_feedback} (applies when idle)"
+                if deferred
+                else config_feedback
+            )
         chain = get_log_level_chain()
         feedback = (
             "  ".join(parts) + f"  (effective: {chain.effective})"
@@ -1862,6 +2022,38 @@ class VibeApp(App):  # noqa: PLR0904
         )
         await self._switch_to_input_app()
         await self._mount_and_scroll(UserCommandMessage(feedback))
+
+    async def _defer_or_run_log_level_config(
+        self, *, level: str | None, clear: bool
+    ) -> bool:
+        # The session override above is instant and is the effective change for
+        # this session. The config.toml write is durability and requires idle
+        # (config/write rejects with CONFLICT while a turn is in flight), so when
+        # the picker was opened via the side channel while busy, defer the write
+        # to the main queue. No on_discard: a discarded durable write leaves the
+        # session override in place, which is the intended session-scoped effect.
+        # Returns True when the write was deferred (success unknown at call
+        # time), False when it ran inline and succeeded.
+        payload = partial(self._persist_log_level_config, level=level, clear=clear)
+        if self._is_busy() or self._queue:
+            await self._queue.enqueue_command(
+                "log-level config", command_payload=payload
+            )
+            return True
+        await self._persist_log_level_config(level=level, clear=clear)
+        return False
+
+    async def _persist_log_level_config(
+        self, *, level: str | None, clear: bool
+    ) -> None:
+        # Propagates: when run via the queue, _run_queued_command mounts an
+        # ErrorMessage; when run directly (idle), the caller in
+        # on_log_level_picker_app_applied catches and surfaces it. Either way
+        # the user sees the failure instead of a premature success.
+        if clear:
+            await self._remove_config_field("log_level")
+        else:
+            await self._persist_config_changes({"log_level": level})
 
     async def on_theme_picker_app_theme_previewed(
         self, message: ThemePickerApp.ThemePreviewed
@@ -1872,11 +2064,31 @@ class VibeApp(App):  # noqa: PLR0904
         self, message: ThemePickerApp.ThemeSelected
     ) -> None:
         await self._apply_theme(message.theme)
-        try:
-            await self.app_server.resources.config.update({"theme": message.theme})
-        finally:
-            await self._apply_theme(self.config.theme)
+        self._pending_theme = message.theme
+        await self._queue.enqueue_command(
+            f"theme {message.theme}",
+            command_payload=partial(self._persist_theme, message.theme),
+            on_discard=partial(self._discard_theme, message.theme),
+        )
         await self._switch_to_input_app()
+
+    async def _persist_theme(self, theme: str) -> None:
+        try:
+            await self.app_server.resources.config.update({"theme": theme})
+        except Exception:
+            # On failure the persisted theme is unchanged, so revert the
+            # visual theme that was applied speculatively at selection time.
+            logger.exception("Failed to persist theme %s", theme)
+            await self._apply_theme(self.config.theme)
+        finally:
+            self._pending_theme = None
+
+    async def _discard_theme(self, theme: str) -> None:
+        # The queued persist was discarded (e.g. Ctrl+C) before it could run,
+        # so the speculative apply must be reverted the same way a failed
+        # write reverts it.
+        self._pending_theme = None
+        await self._apply_theme(self.config.theme)
 
     async def on_theme_picker_app_cancelled(
         self, message: ThemePickerApp.Cancelled
@@ -1951,43 +2163,43 @@ class VibeApp(App):  # noqa: PLR0904
         if not message.saved:
             await self._mount_and_scroll(UserCommandMessage("Proxy setup cancelled."))
         else:
-            try:
-                await self.app_server.resources.config.update_proxy(message.changes)
-            except Exception as exc:
-                await self._mount_and_scroll(
-                    ErrorMessage(f"Failed to save proxy settings: {exc}")
-                )
-            else:
-                await self._mount_and_scroll(
-                    UserCommandMessage(
-                        "Proxy settings saved. Restart the CLI for changes to take effect."
-                    )
-                )
+            await self._queue.enqueue_command(
+                "proxy settings",
+                command_payload=partial(self._persist_proxy, message.changes),
+            )
 
         await self._switch_to_input_app()
 
     async def _handle_command(self, user_input: str) -> bool:
-        if resolved := self.commands.parse_command(user_input):
-            cmd_name, command, cmd_args = resolved
-            self.app_server.resources.telemetry.record(
-                "vibe.slash_command_used",
-                {"command": cmd_name.lstrip("/"), "command_type": "builtin"},
-            )
-            command_text = user_input.strip()
-            display = (
-                command_text.removeprefix("/")
-                if command_text.startswith("/")
-                else cmd_name
-            )
-            command_message = SlashCommandMessage(display)
-            await self._mount_and_scroll(command_message)
-            handler = getattr(self, command.handler)
-            if asyncio.iscoroutinefunction(handler):
-                await handler(cmd_args=cmd_args, command_message=command_message)
-            else:
-                handler(cmd_args=cmd_args, command_message=command_message)
-            return True
-        return False
+        resolved = self.commands.parse_command(user_input)
+        if not resolved:
+            return False
+        cmd_name, command, cmd_args = resolved
+        display = self._command_display(user_input, cmd_name)
+        return await self._invoke_resolved_command(cmd_name, command, cmd_args, display)
+
+    @staticmethod
+    def _command_display(user_input: str, cmd_name: str) -> str:
+        command_text = user_input.strip()
+        return (
+            command_text.removeprefix("/") if command_text.startswith("/") else cmd_name
+        )
+
+    async def _invoke_resolved_command(
+        self, cmd_name: str, command: Command, cmd_args: str, display_text: str
+    ) -> bool:
+        self.app_server.resources.telemetry.record(
+            "vibe.slash_command_used",
+            {"command": cmd_name.lstrip("/"), "command_type": "builtin"},
+        )
+        command_message = SlashCommandMessage(display_text)
+        await self._mount_and_scroll(command_message)
+        handler = getattr(self, command.handler)
+        if asyncio.iscoroutinefunction(handler):
+            await handler(cmd_args=cmd_args, command_message=command_message)
+        else:
+            handler(cmd_args=cmd_args, command_message=command_message)
+        return True
 
     def _get_skill_entries(self) -> list[tuple[str, str]]:
         return [
@@ -3012,10 +3224,18 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         state = await self.app_server.resources.mcp.read()
-        if not state.sources:
+        if state.connector_error:
             await self._mount_and_scroll(
-                UserCommandMessage("No MCP servers or connectors configured.")
+                ErrorMessage(
+                    f"Could not load workspace connectors.\n{state.connector_error}",
+                    collapsed=False,
+                )
             )
+        if not state.sources:
+            if not state.connector_error:
+                await self._mount_and_scroll(
+                    UserCommandMessage("No MCP servers or connectors configured.")
+                )
             return
 
         if self._current_bottom_app == BottomApp.MCP:
@@ -3117,7 +3337,51 @@ class VibeApp(App):  # noqa: PLR0904
             if dirty:
                 self.run_worker(self._reload_config())
 
-        self.push_screen(ConfigScreen(self.app_server.resources.config), _on_close)
+        self.push_screen(
+            ConfigScreen(
+                self.app_server.resources.config, write_callback=self._patch_config
+            ),
+            _on_close,
+        )
+
+    async def _patch_config(
+        self, ops: list[ConfigWriteOpWire], reason: str
+    ) -> ConfigWriteResult:
+        from vibe.cli.textual_ui.screens.config import ConfigWriteResult
+
+        if self._is_busy() or self._queue:
+            await self._queue.enqueue_command(
+                f"config patch ({reason})",
+                command_payload=partial(self._run_config_patch, ops, reason),
+            )
+            return ConfigWriteResult.DEFERRED
+
+        response = await self.app_server.resources.config.write(ops, reason=reason)
+        if response.rejected:
+            return ConfigWriteResult.REJECTED
+        if response.failures:
+            return ConfigWriteResult.FAILURES
+        return ConfigWriteResult.ACCEPTED
+
+    async def _run_config_patch(
+        self, ops: list[ConfigWriteOpWire], reason: str
+    ) -> None:
+        response = await self.app_server.resources.config.write(ops, reason=reason)
+        if response.rejected:
+            raise AppServerResponseError(
+                ProtocolError(
+                    code=ProtocolErrorCode.INVALID_PARAMS,
+                    message="Invalid configuration edit",
+                )
+            )
+        if response.failures:
+            raise AppServerResponseError(
+                ProtocolError(
+                    code=ProtocolErrorCode.INTERNAL_ERROR,
+                    message="; ".join(response.failures),
+                )
+            )
+        await self._reload_config()
 
     async def _show_model(self, **kwargs: Any) -> None:
         """Switch to the model picker in the bottom panel."""
@@ -3504,12 +3768,12 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
             if stripped_count > 0:
-                model_alias = self.config.active_model.alias
+                model_name = self.config.active_model.display_name
                 noun = "image" if stripped_count == 1 else "images"
                 await self._mount_and_scroll(
                     WarningMessage(
                         f"{stripped_count} {noun} from earlier turns will be omitted "
-                        f"when sending to {model_alias} (no vision support)."
+                        f"when sending to {model_name} (no vision support)."
                     )
                 )
         except Exception as e:
@@ -3727,6 +3991,7 @@ class VibeApp(App):  # noqa: PLR0904
             self._current_bottom_app = BottomApp[
                 type(widget).__name__.removesuffix("App")
             ]
+            self._input_app_ready.clear()
             await bottom_container.mount(widget)
 
         self.call_after_refresh(widget.focus)
@@ -3767,6 +4032,7 @@ class VibeApp(App):  # noqa: PLR0904
             self._current_bottom_app = BottomApp[
                 type(widget).__name__.removesuffix("App")
             ]
+            self._input_app_ready.clear()
             await bottom_container.mount(widget)
             for old_widget in old_widgets:
                 await old_widget.remove()
@@ -3810,14 +4076,17 @@ class VibeApp(App):  # noqa: PLR0904
         if self._current_bottom_app == BottomApp.ModelPicker:
             return
 
-        model_aliases = [model.alias for model in self.config.models]
-        current_model = self.config.active_model.alias
+        models = [
+            ModelOption(alias=model.alias, display_name=model.display_name)
+            for model in self.config.models
+        ]
+        current_model = self._effective_model_alias
         await self._switch_from_input(
             ModelPickerApp(
-                model_aliases=model_aliases,
+                models=models,
                 current_model=current_model,
                 is_pinned=self.config.active_model_pinned,
-                default_alias=self.config.default_model_alias,
+                default_display_name=self.config.default_model_display_name,
             )
         )
 
@@ -3825,7 +4094,7 @@ class VibeApp(App):  # noqa: PLR0904
         if self._current_bottom_app == BottomApp.ThinkingPicker:
             return
 
-        current_thinking = self.config.active_model.thinking
+        current_thinking = self._effective_thinking
         await self._switch_from_input(
             ThinkingPickerApp(
                 thinking_levels=THINKING_LEVELS, current_thinking=current_thinking
@@ -3843,7 +4112,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         await self._switch_from_input(
             ThemePickerApp(
-                theme_names=sorted_theme_names(), current_theme=self.config.theme
+                theme_names=sorted_theme_names(), current_theme=self._effective_theme
             )
         )
 
@@ -3893,6 +4162,7 @@ class VibeApp(App):  # noqa: PLR0904
             self._chat_input_container.display = True
             self._current_bottom_app = BottomApp.Input
             self._refresh_profile_widgets()
+        self._input_app_ready.set()
 
         for app in BottomApp:
             if app != BottomApp.Input:
@@ -4625,6 +4895,7 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _begin_shutdown(self) -> None:
         await self._queue.shutdown()
+        await self._side_channel.shutdown()
 
     def _force_quit(self) -> None:
         if self._force_quit_task is not None and not self._force_quit_task.done():

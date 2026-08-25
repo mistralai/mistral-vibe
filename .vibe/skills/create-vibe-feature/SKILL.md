@@ -46,6 +46,15 @@ If a change fits the current code but conflicts with ADR direction, flag it to t
 6. Keep startup and interactive latency in mind. Avoid eager imports, broad scans, and network or subprocess work unless the configured feature needs them.
 7. Update docs or built-in skill guidance when the feature changes user-visible CLI behavior, config, commands, agents, persistence, or discovery.
 
+## Tools
+
+When adding or modifying a tool:
+
+- Subclass `BaseTool` from `vibe/core/tools/base.py` with a Pydantic args model and a `BaseToolConfig` generic parameter.
+- Implement `async def run(args, ctx: InvokeContext)` and yield events progressively.
+- Raise `ToolError` for user-facing failures; raise `ToolPermissionError` for authorization failures.
+- Declare permission with `ToolPermission` (`ALWAYS` / `ASK` / `NEVER`); honor it consistently.
+
 ## Consistency Checks
 
 - Core code should not import Textual, ACP schemas, setup UI, or other delivery-surface details.

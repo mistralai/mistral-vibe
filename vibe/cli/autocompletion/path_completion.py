@@ -6,7 +6,11 @@ from threading import Lock
 
 from textual import events
 
-from vibe.cli.autocompletion.base import CompletionResult, CompletionView
+from vibe.cli.autocompletion.base import (
+    CompletionEntry,
+    CompletionResult,
+    CompletionView,
+)
 from vibe.cli.autocompletion.completers import PathCompleter
 
 MAX_SUGGESTIONS_COUNT = 10
@@ -18,7 +22,7 @@ class PathCompletionController:
     def __init__(self, completer: PathCompleter, view: CompletionView) -> None:
         self._completer = completer
         self._view = view
-        self._suggestions: list[tuple[str, str]] = []
+        self._suggestions: list[CompletionEntry] = []
         self._selected_index = 0
         self._pending_future: Future | None = None
         self._last_query: tuple[str, int] | None = None
@@ -91,7 +95,7 @@ class PathCompletionController:
 
     def _compute_completions(
         self, text: str, cursor_index: int
-    ) -> list[tuple[str, str]]:
+    ) -> list[CompletionEntry]:
         return self._completer.get_completion_items(text, cursor_index)
 
     def _handle_completion_result(self, future: Future, query: tuple[str, int]) -> None:
@@ -108,7 +112,7 @@ class PathCompletionController:
                 self._pending_future = None
                 self._last_query = None
 
-    def _update_suggestions(self, suggestions: list[tuple[str, str]]) -> None:
+    def _update_suggestions(self, suggestions: list[CompletionEntry]) -> None:
         if len(suggestions) > MAX_SUGGESTIONS_COUNT:
             suggestions = suggestions[:MAX_SUGGESTIONS_COUNT]
 
@@ -170,7 +174,7 @@ class PathCompletionController:
         if not self._suggestions:
             return False
 
-        completion, _ = self._suggestions[self._selected_index]
+        completion = self._suggestions[self._selected_index].label
         replacement_range = self._completer.get_replacement_range(text, cursor_index)
         if replacement_range is None:
             self.reset()

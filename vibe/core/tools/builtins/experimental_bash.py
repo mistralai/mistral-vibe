@@ -57,6 +57,7 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import ToolPath, is_path_within_workdir, resolve_tool_path
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows
+from vibe.core.workspace import Workspace
 from vibe.observability.logging import logger
 from vibe.utils.io import decode_console_safe
 from vibe.utils.tool_presentation import ToolEffectKind
@@ -367,8 +368,7 @@ def _collect_outside_dirs(
     command_parts: list[str],
     *,
     command_cwd: Path,
-    cwd: Path,
-    project_roots: list[Path],
+    workspace: Workspace,
     scratchpad_dir: Path | None,
     path_commands: Collection[str] = _PATH_COMMANDS,
     case_sensitive_commands: bool = True,
@@ -376,7 +376,7 @@ def _collect_outside_dirs(
 ) -> set[str]:
     dirs: set[str] = set()
     if not is_path_within_workdir(
-        str(command_cwd), cwd=cwd, project_roots=project_roots
+        str(command_cwd), workspace=workspace
     ) and not is_scratchpad_path(str(command_cwd), scratchpad_dir=scratchpad_dir):
         dirs.add(str(command_cwd))
 
@@ -398,9 +398,7 @@ def _collect_outside_dirs(
 
             resolved = resolve_tool_path(token, command_cwd)
 
-            if is_path_within_workdir(
-                str(resolved), cwd=cwd, project_roots=project_roots
-            ):
+            if is_path_within_workdir(str(resolved), workspace=workspace):
                 continue
             if is_scratchpad_path(str(resolved), scratchpad_dir=scratchpad_dir):
                 continue
@@ -1452,6 +1450,7 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
 
         cwd: Path
         harness_files: HarnessFilesManager
+        workspace: Workspace
         scratchpad_dir: Path | None
 
     @staticmethod
@@ -1634,8 +1633,7 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         outside_dirs = _collect_outside_dirs(
             command_parts,
             command_cwd=command_cwd,
-            cwd=self.cwd,
-            project_roots=self.harness_files.project_roots,
+            workspace=self.workspace,
             scratchpad_dir=self.scratchpad_dir,
         )
         context_required = required_context_permissions or []

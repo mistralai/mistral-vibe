@@ -113,6 +113,8 @@ def _build_attributes(
     )
     organization_kind = whoami.organization_kind if whoami else None
     customer_id = whoami.customer_id if whoami else None
+    plan_type = whoami.plan_type.value if whoami else None
+    plan_name = whoami.plan_name if whoami else None
     workspace_id = identity.workspace.id if identity and identity.workspace else None
     user_id = identity.id if identity else None
     return ExperimentAttributes(
@@ -128,4 +130,6 @@ def _build_attributes(
         organizationKind=organization_kind,
         workspaceId=workspace_id,
         customerId=customer_id,
+        planType=plan_type,
+        planName=plan_name,
     )

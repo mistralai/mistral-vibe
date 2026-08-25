@@ -57,6 +57,7 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import ToolPath, is_path_within_workdir, resolve_tool_path
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows, kill_async_subprocess
+from vibe.core.workspace import Workspace
 from vibe.observability.logging import logger
 from vibe.utils.io import decode_console_safe
 from vibe.utils.tool_presentation import ToolEffectKind
@@ -568,8 +569,7 @@ def _windows_path_parent(
     token: str,
     *,
     command_cwd: Path,
-    cwd: Path,
-    project_roots: list[Path],
+    workspace: Workspace,
     scratchpad_dir: Path | None,
     environment: dict[str, str],
 ) -> tuple[str | None, bool]:
@@ -600,9 +600,9 @@ def _windows_path_parent(
         resolved = command_cwd / resolved
     resolved = resolved.resolve()
 
-    if is_path_within_workdir(
-        str(resolved), cwd=cwd, project_roots=project_roots
-    ) or is_scratchpad_path(str(resolved), scratchpad_dir=scratchpad_dir):
+    if is_path_within_workdir(str(resolved), workspace=workspace) or is_scratchpad_path(
+        str(resolved), scratchpad_dir=scratchpad_dir
+    ):
         return None, False
     return str(resolved) if resolved.is_dir() else str(resolved.parent), False
 
@@ -611,15 +611,14 @@ def _analyze_windows_paths(
     command_parts: list[str],
     *,
     command_cwd: Path,
-    cwd: Path,
-    project_roots: list[Path],
+    workspace: Workspace,
     scratchpad_dir: Path | None,
     environment: dict[str, str],
 ) -> tuple[set[str], set[str]]:
     dirs: set[str] = set()
     dynamic_paths: set[str] = set()
     if not is_path_within_workdir(
-        str(command_cwd), cwd=cwd, project_roots=project_roots
+        str(command_cwd), workspace=workspace
     ) and not is_scratchpad_path(str(command_cwd), scratchpad_dir=scratchpad_dir):
         dirs.add(str(command_cwd))
 
@@ -627,8 +626,7 @@ def _analyze_windows_paths(
         parent, dynamic = _windows_path_parent(
             token,
             command_cwd=command_cwd,
-            cwd=cwd,
-            project_roots=project_roots,
+            workspace=workspace,
             scratchpad_dir=scratchpad_dir,
             environment=environment,
         )
@@ -794,8 +792,7 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         outside_dirs, dynamic_paths = _analyze_windows_paths(
             command_parts,
             command_cwd=command_cwd,
-            cwd=self.cwd,
-            project_roots=self.harness_files.project_roots,
+            workspace=self.workspace,
             scratchpad_dir=self.scratchpad_dir,
             environment={**os.environ, **(env or {})},
         )

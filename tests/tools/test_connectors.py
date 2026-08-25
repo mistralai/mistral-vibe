@@ -572,6 +572,118 @@ class TestBootstrapDiscovery:
         assert tools == {}
         assert registry.connector_count == 0
 
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_bootstrap_http_error_records_bootstrap_error(self) -> None:
+        respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(502, text="Bad Gateway")
+        )
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+
+        error = registry.bootstrap_error()
+        assert error is not None
+        assert "502" in error
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_failed_bootstrap_retries_on_next_get_tools(self) -> None:
+        # A failed bootstrap must not be cached, so the next integrate (e.g.
+        # triggered by `/reload`) actually re-hits the endpoint.
+        route = respx.get(_BOOTSTRAP_URL).mock(
+            side_effect=[
+                httpx.Response(502, text="Bad Gateway"),
+                httpx.Response(
+                    200,
+                    json=_make_bootstrap_response([
+                        _make_connector_payload(
+                            name="wiki", tools=[_make_tool_payload("search")]
+                        )
+                    ]),
+                ),
+            ]
+        )
+
+        registry = ConnectorRegistry(api_key="test-key")
+        first = await registry.get_tools_async()
+        assert first == {}
+        assert registry.bootstrap_error() is not None
+
+        second = await registry.get_tools_async()
+        assert "connector_wiki_search" in second
+        assert registry.bootstrap_error() is None
+        assert route.call_count == 2
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_bootstrap_5xx_error_suggests_reload(self) -> None:
+        respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(502, text="Bad Gateway")
+        )
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+
+        error = registry.bootstrap_error() or ""
+        assert "502" in error
+        assert "/reload" in error
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_bootstrap_4xx_error_omits_reload(self) -> None:
+        respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(403, text="Forbidden")
+        )
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+
+        error = registry.bootstrap_error() or ""
+        assert "403" in error
+        assert "/reload" not in error
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_successful_bootstrap_has_no_error(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(tools=[_make_tool_payload("search")])
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+
+        assert registry.bootstrap_error() is None
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_per_connector_bootstrap_error_is_recorded(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="conn-slack",
+                name="slack",
+                is_ready=False,
+                bootstrap_errors=["Slack OAuth token expired"],
+            ),
+            _make_connector_payload(
+                connector_id="conn-wiki",
+                name="wiki",
+                tools=[_make_tool_payload("search")],
+            ),
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+
+        slack_error = registry.connector_error_for("slack")
+        assert slack_error is not None
+        assert "Slack OAuth token expired" in slack_error
+        assert registry.connector_error_for("wiki") is None
+        # The endpoint itself succeeded, so there is no whole-request error.
+        assert registry.bootstrap_error() is None
+
     @pytest.mark.asyncio
     async def test_fresh_bootstrap_cache_avoids_http(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
@@ -739,16 +851,64 @@ class TestBootstrapDiscovery:
         cache_text = (tmp_path / _BOOTSTRAP_CACHE_FILE_NAME).read_text()
         assert "Private display name" not in cache_text
         assert "Private connector description" not in cache_text
-        assert "private error detail" not in cache_text
         assert "https://secret.example.com" not in cache_text
         assert "tool-secret" not in cache_text
 
         cache = json.loads(cache_text)
         entry = next(iter(cache.values()))
         connector = entry["payload"]["connectors"][0]
-        assert set(connector) == {"id", "name", "status", "tools", "auth_action"}
+        # bootstrap_errors is a consumed field (surfaced to the user), so it is
+        # persisted; a warm cache hit must rebuild the per-connector error.
+        assert set(connector) == {
+            "id",
+            "name",
+            "status",
+            "tools",
+            "auth_action",
+            "bootstrap_errors",
+        }
         assert connector["auth_action"] == {"type": "oauth"}
+        assert connector["bootstrap_errors"] == ["private error detail"]
         assert set(connector["tools"][0]) == {"name", "description", "inputSchema"}
+
+    @pytest.mark.asyncio
+    async def test_fresh_bootstrap_cache_preserves_connector_errors(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                name="slack",
+                is_ready=False,
+                bootstrap_errors=["Slack OAuth token expired"],
+            )
+        ])
+
+        with (
+            patch.object(connector_registry_module.time, "time", return_value=1_000),
+            respx.mock,
+        ):
+            respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            first = ConnectorRegistry(api_key="test-key")
+            await first.get_tools_async()
+            assert "Slack OAuth token expired" in (
+                first.connector_error_for("slack") or ""
+            )
+
+        with (
+            patch.object(connector_registry_module.time, "time", return_value=1_100),
+            respx.mock(assert_all_called=False) as router,
+        ):
+            route = router.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(500, text="should not be called")
+            )
+            second = ConnectorRegistry(api_key="test-key")
+            await second.get_tools_async()
+
+        assert not route.called
+        assert second.connector_error_for("slack") == "Slack OAuth token expired"
 
     @pytest.mark.asyncio
     async def test_bootstrap_cache_uses_dedicated_file(
@@ -875,6 +1035,73 @@ class TestBootstrapDiscovery:
         refreshed = await registry.refresh_connector_async("wiki")
         assert "connector_wiki_search" in refreshed
         assert "connector_wiki_write" in refreshed
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_refresh_records_connector_bootstrap_error(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1", name="wiki", tools=[_make_tool_payload("search")]
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+        assert registry.connector_error_for("wiki") is None
+
+        refresh_payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1",
+                name="wiki",
+                is_ready=False,
+                tools=[],
+                bootstrap_errors=["tools_or_system_prompt_failed: timeout"],
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(200, json=refresh_payload)
+        )
+
+        refreshed = await registry.refresh_connector_async("wiki")
+
+        assert refreshed == {}
+        assert not registry.is_connected("wiki")
+        wiki_error = registry.connector_error_for("wiki")
+        assert wiki_error is not None
+        assert "timeout" in wiki_error
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_refresh_clears_connector_bootstrap_error(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1",
+                name="wiki",
+                is_ready=False,
+                tools=[],
+                bootstrap_errors=["temporary upstream error"],
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+        assert registry.connector_error_for("wiki") is not None
+
+        refresh_payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1", name="wiki", tools=[_make_tool_payload("search")]
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(200, json=refresh_payload)
+        )
+
+        refreshed = await registry.refresh_connector_async("wiki")
+
+        assert "connector_wiki_search" in refreshed
+        assert registry.connector_error_for("wiki") is None
 
 
 # ---------------------------------------------------------------------------

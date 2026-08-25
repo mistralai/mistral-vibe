@@ -523,11 +523,13 @@ class MCPSourceSummary(ProtocolModel):
     transport: str
     status: MCPSourceStatus
     tools: list[MCPToolSummary] = Field(default_factory=list)
+    error: str | None = None
 
 
 class MCPState(ProtocolModel):
     sources: list[MCPSourceSummary] = Field(default_factory=list)
     discovery_errors: dict[str, str] = Field(default_factory=dict)
+    connector_error: str | None = None
 
     @property
     def needs_auth(self) -> list[str]:

@@ -20,12 +20,13 @@ from vibe.utils.images import MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 
 
-def _vision_config(*, supports_images: bool = True):
+def _vision_config(*, supports_images: bool = True, display_name: str | None = None):
     models = [
         ModelConfig(
             name="mistral-vibe-cli-latest",
             provider="mistral",
             alias="devstral-latest",
+            display_name=display_name,
             supports_images=supports_images,
         )
     ]
@@ -97,7 +98,24 @@ def test_prepare_prompt_rejects_images_for_text_model(
     (tmp_path / "shot.png").write_bytes(PNG_BYTES)
     agent_loop = build_test_agent_loop(config=_vision_config(supports_images=False))
 
-    with pytest.raises(PromptPreparationError, match="does not support images"):
+    with pytest.raises(PromptPreparationError, match="`devstral-latest`"):
+        prepare_prompt(agent_loop, "look at @shot.png")
+
+
+def test_prepare_prompt_rejection_names_the_display_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "shot.png").write_bytes(PNG_BYTES)
+    agent_loop = build_test_agent_loop(
+        config=_vision_config(
+            supports_images=False, display_name="glm-5.2 (Mistral Hosted)"
+        )
+    )
+
+    with pytest.raises(
+        PromptPreparationError, match=r"`glm-5\.2 \(Mistral Hosted\)` does not support"
+    ):
         prepare_prompt(agent_loop, "look at @shot.png")
 
 

@@ -28,10 +28,15 @@ from vibe.core.tools.permissions import (
     RequiredPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import is_path_within_workdir, resolve_tool_path
+from vibe.core.tools.utils import (
+    ambient_workspace,
+    is_path_within_workdir,
+    resolve_tool_path,
+)
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows, kill_async_subprocess
 from vibe.core.utils.shell import spawn_shell_command, uses_posix_shell
+from vibe.core.workspace import Workspace
 from vibe.utils.io import decode_console_safe
 from vibe.utils.paths import normalize_windows_path
 from vibe.utils.tool_presentation import ToolEffectKind
@@ -190,8 +195,7 @@ def _split_command_tokens(command: str) -> list[str]:
 def _collect_outside_dirs(
     command_parts: list[str],
     *,
-    cwd: Path | None = None,
-    project_roots: list[Path] | None = None,
+    workspace: Workspace | None = None,
     scratchpad_dir: Path | None = None,
 ) -> set[str]:
     """Collect parent directories referenced outside the workdir.
@@ -208,14 +212,11 @@ def _collect_outside_dirs(
     look like /c/Users/... even though os.sep is "\\" there. Git Bash also
     accepts backslash-separated Windows paths.
     """
-    resolved_cwd = (cwd or Path.cwd()).resolve()
+    workspace = workspace or ambient_workspace()
+    resolved_cwd = workspace.cwd
 
     def is_within_workdir(path: str) -> bool:
-        if project_roots is None:
-            return is_path_within_workdir(path)
-        return is_path_within_workdir(
-            path, cwd=resolved_cwd, project_roots=project_roots
-        )
+        return is_path_within_workdir(path, workspace=workspace)
 
     dirs: set[str] = set()
     for part in command_parts:
@@ -510,10 +511,7 @@ class Bash(
         ):
             return guardrail_permission
         outside_dirs = _collect_outside_dirs(
-            command_parts,
-            cwd=self.cwd,
-            project_roots=self.harness_files.project_roots,
-            scratchpad_dir=self.scratchpad_dir,
+            command_parts, workspace=self.workspace, scratchpad_dir=self.scratchpad_dir
         )
         if (
             self._is_unconditionally_allowed(command_parts, outside_dirs)

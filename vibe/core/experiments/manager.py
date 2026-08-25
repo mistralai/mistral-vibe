@@ -11,6 +11,7 @@ from vibe.core.experiments.models import (
     FeatureDefinition,
     TrackData,
 )
+from vibe.core.telemetry.types import ExperimentAssignment
 from vibe.observability.logging import logger
 
 
@@ -85,7 +86,9 @@ class ExperimentManager:
 
     def config_variants(self) -> dict[str, str]:
         """Return experiment values allowed to override config layers."""
-        result = self.assignments()
+        result: dict[str, str] = {
+            a.experiment_id: a.variation_name for a in self.assignments()
+        }
         if self._response is None:
             return result
 
@@ -99,20 +102,32 @@ class ExperimentManager:
                 result[name.value] = variant
         return result
 
-    def assignments(self) -> dict[str, str]:
-        """Return confirmed experiment exposures for telemetry only."""
-        result: dict[str, str] = {}
+    def assignments(self) -> list[ExperimentAssignment]:
+        """Return confirmed experiment exposures for telemetry only.
+
+        At most one assignment per experiment_id (last confirmed track wins).
+        The dbt exposures model treats one row per (session_id, experiment_id),
+        so a duplicated experiment_id would read as a GrowthBook
+        multiple-exposure conflict.
+        """
+        by_experiment: dict[str, ExperimentAssignment] = {}
         if self._response is None:
-            return {}
+            return []
         for feature_key, feature in self._response.features.items():
             for rule in feature.rules:
                 for track in rule.tracks:
                     if not track.result.inExperiment:
                         continue
-                    label = self._variant_label(feature, track)
-                    if label:
-                        result[feature_key] = label
-        return result
+                    variation_name = self._variant_label(feature, track)
+                    if not variation_name:
+                        continue
+                    by_experiment[feature_key] = ExperimentAssignment(
+                        experiment_id=feature_key,
+                        experiment_name=track.experiment.key,
+                        variation_name=variation_name,
+                        variation_id=track.result.variationId,
+                    )
+        return list(by_experiment.values())
 
     @staticmethod
     def _forced_variant_or_none(feature: FeatureDefinition) -> str | None:

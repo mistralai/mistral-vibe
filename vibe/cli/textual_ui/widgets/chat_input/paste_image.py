@@ -140,7 +140,7 @@ async def handle_clipboard_image_paste(
     active_model = app.config.active_model
     if not active_model.supports_images:
         app.notify(
-            f"Model `{active_model.alias}` does not support images. "
+            f"Model `{active_model.display_name}` does not support images. "
             f"Switch with /model or ask me to enable image support for this model.",
             severity="warning",
         )

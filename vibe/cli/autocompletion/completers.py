@@ -4,6 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar, NamedTuple
 
+from vibe.cli.autocompletion.base import CompletionEntry
 from vibe.cli.autocompletion.file_indexer import FileIndexer, IndexEntry
 from vibe.cli.autocompletion.file_indexer.store import (
     ASCII_CODEPOINT_LIMIT,
@@ -19,9 +20,10 @@ class Completer:
     def get_completions(self, text: str, cursor_pos: int) -> list[str]:
         return []
 
-    def get_completion_items(self, text: str, cursor_pos: int) -> list[tuple[str, str]]:
+    def get_completion_items(self, text: str, cursor_pos: int) -> list[CompletionEntry]:
         return [
-            (completion, "") for completion in self.get_completions(text, cursor_pos)
+            CompletionEntry(completion, "")
+            for completion in self.get_completions(text, cursor_pos)
         ]
 
     def get_replacement_range(
@@ -31,14 +33,18 @@ class Completer:
 
 
 class CommandCompleter(Completer):
-    def __init__(self, entries: Callable[[], list[tuple[str, str]]]) -> None:
+    def __init__(self, entries: Callable[[], list[CompletionEntry]]) -> None:
         self._get_entries = entries
 
-    def _build_lookup(self) -> tuple[list[str], dict[str, str]]:
+    def _build_lookup(
+        self,
+    ) -> tuple[list[str], dict[str, str], dict[str, CompletionEntry]]:
         descriptions: dict[str, str] = {}
-        for alias, description in self._get_entries():
-            descriptions[alias] = description
-        return list(descriptions.keys()), descriptions
+        entry_by_alias: dict[str, CompletionEntry] = {}
+        for entry in self._get_entries():
+            descriptions[entry.label] = entry.description
+            entry_by_alias[entry.label] = entry
+        return list(descriptions.keys()), descriptions, entry_by_alias
 
     def _head_word(self, text: str, cursor_pos: int) -> str:
         head = text.split(" ", 1)[0]
@@ -66,19 +72,21 @@ class CommandCompleter(Completer):
         if not text.startswith("/"):
             return []
 
-        aliases, _ = self._build_lookup()
+        aliases, _, _ = self._build_lookup()
         search_str = "/" + self._head_word(text, cursor_pos)
         return self._fuzzy_filter(aliases, search_str)
 
-    def get_completion_items(self, text: str, cursor_pos: int) -> list[tuple[str, str]]:
+    def get_completion_items(self, text: str, cursor_pos: int) -> list[CompletionEntry]:
         if not text.startswith("/"):
             return []
 
-        aliases, descriptions = self._build_lookup()
+        _, descriptions, entry_by_alias = self._build_lookup()
         search_str = "/" + self._head_word(text, cursor_pos)
         return [
-            (alias, descriptions.get(alias, ""))
-            for alias in self._fuzzy_filter(aliases, search_str)
+            entry_by_alias.get(
+                alias, CompletionEntry(alias, descriptions.get(alias, ""))
+            )
+            for alias in self._fuzzy_filter(list(entry_by_alias.keys()), search_str)
         ]
 
     def get_replacement_range(
@@ -441,9 +449,9 @@ class PathCompleter(Completer):
     def get_completions(self, text: str, cursor_pos: int) -> list[str]:
         return self._collect_matches(text, cursor_pos)
 
-    def get_completion_items(self, text: str, cursor_pos: int) -> list[tuple[str, str]]:
+    def get_completion_items(self, text: str, cursor_pos: int) -> list[CompletionEntry]:
         matches = self._collect_matches(text, cursor_pos)
-        return [(completion, "") for completion in matches]
+        return [CompletionEntry(completion, "") for completion in matches]
 
     def get_replacement_range(
         self, text: str, cursor_pos: int

@@ -304,6 +304,13 @@ class MCPApp(Container):
         self._viewing_kind = source.kind
         prefix = "Connector" if source.kind is MCPSourceKind.CONNECTOR else "MCP Server"
         self.query_one("#mcp-title", NoMarkupStatic).update(f"{prefix}: {source.name}")
+        if source.error:
+            self._set_help_text(_DETAIL_VIEW_HELP_NO_TOOLS)
+            option_list.add_option(Option("Failed to bootstrap", disabled=True))
+            option_list.add_option(
+                Option(Text(source.error, style="dim"), disabled=True)
+            )
+            return
         if source.status is MCPSourceStatus.NEEDS_AUTH:
             self._set_help_text(_DETAIL_VIEW_HELP_NO_TOOLS)
             if source.kind is MCPSourceKind.CONNECTOR:

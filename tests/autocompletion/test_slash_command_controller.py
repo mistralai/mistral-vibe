@@ -4,18 +4,17 @@ from typing import NamedTuple
 
 from textual import events
 
-from vibe.cli.autocompletion.base import CompletionResult, CompletionView
+from vibe.cli.autocompletion.base import (
+    CompletionEntry,
+    CompletionResult,
+    CompletionView,
+)
 from vibe.cli.autocompletion.completers import CommandCompleter
 from vibe.cli.autocompletion.slash_command import SlashCommandController
 
 
-class Suggestion(NamedTuple):
-    alias: str
-    description: str
-
-
 class SuggestionEvent(NamedTuple):
-    suggestions: list[Suggestion]
+    suggestions: list[CompletionEntry]
     selected_index: int
 
 
@@ -32,10 +31,11 @@ class StubView(CompletionView):
         self.replacements: list[Replacement] = []
 
     def render_completion_suggestions(
-        self, suggestions: list[tuple[str, str]], selected_index: int
+        self, suggestions: list[CompletionEntry], selected_index: int
     ) -> None:
-        typed = [Suggestion(alias, description) for alias, description in suggestions]
-        self.suggestion_events.append(SuggestionEvent(typed, selected_index))
+        self.suggestion_events.append(
+            SuggestionEvent(list(suggestions), selected_index)
+        )
 
     def clear_completion_suggestions(self) -> None:
         self.reset_count += 1
@@ -54,14 +54,14 @@ def make_controller(
     *, prefix: str | None = None
 ) -> tuple[SlashCommandController, StubView]:
     commands = [
-        ("/config", "Show current configuration"),
-        ("/compact", "Compact history"),
-        ("/help", "Display help"),
-        ("/config", "Override description"),
-        ("/summarize", "Summarize history"),
-        ("/logpath", "Show log path"),
-        ("/exit", "Exit application"),
-        ("/vim", "Toggle vim keybindings"),
+        CompletionEntry("/config", "Show current configuration"),
+        CompletionEntry("/compact", "Compact history"),
+        CompletionEntry("/help", "Display help"),
+        CompletionEntry("/config", "Override description"),
+        CompletionEntry("/summarize", "Summarize history"),
+        CompletionEntry("/logpath", "Show log path"),
+        CompletionEntry("/exit", "Exit application"),
+        CompletionEntry("/vim", "Toggle vim keybindings"),
     ]
     completer = CommandCompleter(lambda: commands)
     view = StubView()
@@ -83,8 +83,8 @@ def test_on_text_change_emits_matching_suggestions_in_insertion_order_and_ignore
 
     suggestions, selected = view.suggestion_events[-1]
     assert suggestions == [
-        Suggestion("/config", "Override description"),
-        Suggestion("/compact", "Compact history"),
+        CompletionEntry("/config", "Override description"),
+        CompletionEntry("/compact", "Compact history"),
     ]
     assert selected == 0
 
@@ -95,7 +95,7 @@ def test_on_text_change_filters_suggestions_case_insensitively() -> None:
     controller.on_text_changed("/CO", cursor_index=3)
 
     suggestions, _ = view.suggestion_events[-1]
-    assert [suggestion.alias for suggestion in suggestions] == ["/config", "/compact"]
+    assert [suggestion.label for suggestion in suggestions] == ["/config", "/compact"]
 
 
 def test_on_text_change_clears_suggestions_when_no_matches() -> None:
@@ -116,7 +116,7 @@ def test_on_text_change_limits_the_number_of_results_and_preserves_insertion_ord
 
     suggestions, selected_index = view.suggestion_events[-1]
     assert len(suggestions) == 7
-    assert [suggestion.alias for suggestion in suggestions] == [
+    assert [suggestion.label for suggestion in suggestions] == [
         "/help",
         "/config",
         "/compact",
@@ -187,7 +187,7 @@ def test_on_key_down_and_up_cycle_selection() -> None:
     controller.on_key(key_event("up"), text="/c", cursor_index=2)
     suggestions, selected_index = view.suggestion_events[-1]
     assert selected_index == 1
-    assert [suggestion.alias for suggestion in suggestions] == ["/config", "/compact"]
+    assert [suggestion.label for suggestion in suggestions] == ["/config", "/compact"]
 
 
 def test_on_key_enter_submits_selected_completion() -> None:
@@ -207,10 +207,13 @@ def test_callable_entries_updates_completions_dynamically() -> None:
 
     This simulates config reload where available skills change.
     """
-    available_skills: list[tuple[str, str]] = []
+    available_skills: list[CompletionEntry] = []
 
-    def get_entries() -> list[tuple[str, str]]:
-        base_commands = [("/help", "Display help"), ("/config", "Show configuration")]
+    def get_entries() -> list[CompletionEntry]:
+        base_commands = [
+            CompletionEntry("/help", "Display help"),
+            CompletionEntry("/config", "Show configuration"),
+        ]
         return base_commands + available_skills
 
     completer = CommandCompleter(get_entries)
@@ -220,20 +223,20 @@ def test_callable_entries_updates_completions_dynamically() -> None:
     # Initially, only base commands are available
     controller.on_text_changed("/", cursor_index=1)
     suggestions, _ = view.suggestion_events[-1]
-    assert [s.alias for s in suggestions] == ["/help", "/config"]
+    assert [s.label for s in suggestions] == ["/help", "/config"]
 
     # Simulate config reload: add a skill
-    available_skills.append(("/summarize", "Summarize the conversation"))
+    available_skills.append(CompletionEntry("/summarize", "Summarize the conversation"))
 
     # Now completions should include the new skill
     controller.on_text_changed("/", cursor_index=1)
     suggestions, _ = view.suggestion_events[-1]
-    assert [s.alias for s in suggestions] == ["/help", "/config", "/summarize"]
+    assert [s.label for s in suggestions] == ["/help", "/config", "/summarize"]
 
     # And searching for "/s" should find the new skill
     controller.on_text_changed("/s", cursor_index=2)
     suggestions, _ = view.suggestion_events[-1]
-    assert [s.alias for s in suggestions] == ["/summarize"]
+    assert [s.label for s in suggestions] == ["/summarize"]
     assert suggestions[0].description == "Summarize the conversation"
 
 
@@ -265,14 +268,14 @@ def test_on_text_change_matches_substring_not_just_prefix() -> None:
     controller.on_text_changed("/path", cursor_index=5)
 
     suggestions, _ = view.suggestion_events[-1]
-    assert any(s.alias == "/logpath" for s in suggestions)
+    assert any(s.label == "/logpath" for s in suggestions)
 
 
 def test_on_text_change_matches_middle_segment_of_hyphenated_command() -> None:
     commands = [
-        ("/foo-bar-skill", "A skill"),
-        ("/baz-bar-other", "Another skill"),
-        ("/unrelated", "No match"),
+        CompletionEntry("/foo-bar-skill", "A skill"),
+        CompletionEntry("/baz-bar-other", "Another skill"),
+        CompletionEntry("/unrelated", "No match"),
     ]
     completer = CommandCompleter(lambda: commands)
     view = StubView()
@@ -281,7 +284,7 @@ def test_on_text_change_matches_middle_segment_of_hyphenated_command() -> None:
     controller.on_text_changed("/bar", cursor_index=4)
 
     suggestions, _ = view.suggestion_events[-1]
-    aliases = [s.alias for s in suggestions]
+    aliases = [s.label for s in suggestions]
     assert "/foo-bar-skill" in aliases
     assert "/baz-bar-other" in aliases
     assert "/unrelated" not in aliases
@@ -293,11 +296,14 @@ def test_on_text_change_fuzzy_matches_scattered_characters() -> None:
     controller.on_text_changed("/sm", cursor_index=3)
 
     suggestions, _ = view.suggestion_events[-1]
-    assert any(s.alias == "/summarize" for s in suggestions)
+    assert any(s.label == "/summarize" for s in suggestions)
 
 
 def test_on_text_change_fuzzy_ranks_prefix_matches_higher() -> None:
-    commands = [("/zoo-config", "Zoo config"), ("/config", "Main config")]
+    commands = [
+        CompletionEntry("/zoo-config", "Zoo config"),
+        CompletionEntry("/config", "Main config"),
+    ]
     completer = CommandCompleter(lambda: commands)
     view = StubView()
     controller = SlashCommandController(completer, view)
@@ -305,7 +311,7 @@ def test_on_text_change_fuzzy_ranks_prefix_matches_higher() -> None:
     controller.on_text_changed("/config", cursor_index=7)
 
     suggestions, _ = view.suggestion_events[-1]
-    aliases = [s.alias for s in suggestions]
+    aliases = [s.label for s in suggestions]
     assert aliases.index("/config") < aliases.index("/zoo-config")
 
 
@@ -318,13 +324,13 @@ def test_callable_entries_reflects_enabled_disabled_skills() -> None:
     enabled_skills: set[str] = {"commit", "review"}
 
     all_skills = [
-        ("/commit", "Create a git commit"),
-        ("/review", "Review code changes"),
-        ("/deploy", "Deploy to production"),
+        CompletionEntry("/commit", "Create a git commit"),
+        CompletionEntry("/review", "Review code changes"),
+        CompletionEntry("/deploy", "Deploy to production"),
     ]
 
-    def get_entries() -> list[tuple[str, str]]:
-        return [(name, desc) for name, desc in all_skills if name[1:] in enabled_skills]
+    def get_entries() -> list[CompletionEntry]:
+        return [s for s in all_skills if s.label[1:] in enabled_skills]
 
     completer = CommandCompleter(get_entries)
     view = StubView()
@@ -333,7 +339,7 @@ def test_callable_entries_reflects_enabled_disabled_skills() -> None:
     # Initially only commit and review are enabled
     controller.on_text_changed("/", cursor_index=1)
     suggestions, _ = view.suggestion_events[-1]
-    assert [s.alias for s in suggestions] == ["/commit", "/review"]
+    assert [s.label for s in suggestions] == ["/commit", "/review"]
 
     # Simulate config reload: enable deploy, disable commit
     enabled_skills.discard("commit")
@@ -342,4 +348,4 @@ def test_callable_entries_reflects_enabled_disabled_skills() -> None:
     # Now completions should reflect the change
     controller.on_text_changed("/", cursor_index=1)
     suggestions, _ = view.suggestion_events[-1]
-    assert [s.alias for s in suggestions] == ["/review", "/deploy"]
+    assert [s.label for s in suggestions] == ["/review", "/deploy"]

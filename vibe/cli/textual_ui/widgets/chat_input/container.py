@@ -9,6 +9,7 @@ from textual.containers import Vertical
 from textual.message import Message
 
 from vibe.app_server.models import AgentSafety
+from vibe.cli.autocompletion.base import CompletionEntry
 from vibe.cli.autocompletion.completers import CommandCompleter, PathCompleter
 from vibe.cli.autocompletion.inline_skill_completion import (
     InlineSkillCompletionController,
@@ -78,14 +79,17 @@ class ChatInputContainer(Vertical):
         ])
         self._body: ChatInputBody | None = None
 
-    def _get_slash_entries(self) -> list[tuple[str, str]]:
+    def _get_slash_entries(self) -> list[CompletionEntry]:
         entries = [
-            (alias, command.description)
+            CompletionEntry(alias, command.description)
             for command in self._command_registry.commands.values()
             for alias in sorted(command.aliases)
         ]
         if self._skill_entries_getter:
-            entries.extend(self._skill_entries_getter())
+            entries.extend(
+                CompletionEntry(alias, desc)
+                for alias, desc in self._skill_entries_getter()
+            )
         return sorted(entries)
 
     def compose(self) -> ComposeResult:
@@ -149,7 +153,7 @@ class ChatInputContainer(Vertical):
             self._body.focus_input()
 
     def render_completion_suggestions(
-        self, suggestions: list[tuple[str, str]], selected_index: int
+        self, suggestions: list[CompletionEntry], selected_index: int
     ) -> None:
         try:
             popup = self.query_one(CompletionPopup)

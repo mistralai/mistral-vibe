@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.24.3] - 2026-08-20
+
+### Added
+
+- Slash commands and setting pickers can be used while the agent or a command is running
+- The process is named "Vibe CLI" and the bottom bar shows its PID
+
+### Changed
+
+- Models are shown by display name instead of the raw config alias
+- Python dependencies updated to clear known security advisories
+
+### Fixed
+
+- Connector bootstrap failures are surfaced instead of reporting no connectors
+
+
 ## [2.24.2] - 2026-08-18
 
 ### Added

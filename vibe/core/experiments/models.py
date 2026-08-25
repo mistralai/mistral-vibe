@@ -30,6 +30,8 @@ class ExperimentAttributes(BaseModel):
     organizationKind: str | None = None
     workspaceId: str | None = None
     customerId: str | None = None
+    planType: str | None = None
+    planName: str | None = None
 
 
 class TrackedExperiment(BaseModel):

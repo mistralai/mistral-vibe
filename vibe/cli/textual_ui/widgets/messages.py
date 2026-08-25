@@ -233,8 +233,13 @@ class SlashCommandMessage(UserMessage):
     PROMPT_CHAR = "/"
     SHOW_SEPARATOR = False
 
-    def __init__(self, content: str) -> None:
-        super().__init__(content)
+    def __init__(self, content: str, pending: bool = False) -> None:
+        # content is the raw user input (e.g. "/clear"); the widget already
+        # renders PROMPT_CHAR, so drop a leading slash to avoid "//clear".
+        # Payload-path callers pass content without a slash (e.g. "model x").
+        super().__init__(
+            content[1:] if content.startswith("/") else content, pending=pending
+        )
         self.add_class("slash-command-message")
 
 

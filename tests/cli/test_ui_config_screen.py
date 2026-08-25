@@ -11,8 +11,9 @@ from tests.conftest import (
     build_test_vibe_app,
     build_test_vibe_config,
 )
+from vibe.app_server.protocol import ConfigWriteOpWire
 from vibe.cli.textual_ui.app import VibeApp
-from vibe.cli.textual_ui.screens.config import ConfigScreen
+from vibe.cli.textual_ui.screens.config import ConfigScreen, ConfigWriteResult
 from vibe.cli.textual_ui.screens.config._common import ConfigOptionList
 from vibe.cli.textual_ui.screens.config.edit import _TargetedEditScreen
 from vibe.cli.textual_ui.widgets.theme_picker import sorted_theme_names
@@ -550,3 +551,61 @@ async def test_config_screen_reset_clears_persisted_edit(config_dir: Path) -> No
         await pilot.pause(0.3)
 
     assert orchestrator.config.theme == original
+
+
+@pytest.mark.asyncio
+async def test_config_screen_deferred_write_informs_user() -> None:
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_config()
+        await pilot.pause(0.2)
+        screen = app.screen
+        assert isinstance(screen, ConfigScreen)
+        view = screen._view_by_name("autocopy_to_clipboard")
+        assert view is not None
+
+        async def deferred(
+            _ops: list[ConfigWriteOpWire], _reason: str
+        ) -> ConfigWriteResult:
+            return ConfigWriteResult.DEFERRED
+
+        screen._write_callback = deferred
+        await screen._write(
+            view,
+            [
+                ConfigWriteOpWire(
+                    op="set",
+                    path=view.path,
+                    value=not view.value,
+                    target_layer="user-toml",
+                )
+            ],
+            reason="test deferred edit",
+        )
+        await pilot.pause(0.1)
+
+        assert screen._dirty is False
+        assert any(
+            "will apply when the session is idle" in n.message
+            for n in app._notifications
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_config_patch_reloads_ui_after_write() -> None:
+    from unittest.mock import AsyncMock, patch
+
+    app, _ = _app(build_test_vibe_config(autocopy_to_clipboard=False))
+    async with app.run_test():
+        with patch.object(app, "_reload_config", new=AsyncMock()) as reload_config:
+            await app._run_config_patch(
+                [
+                    ConfigWriteOpWire(
+                        op="set", path="/autocopy_to_clipboard", value=True
+                    )
+                ],
+                "test deferred write",
+            )
+            reload_config.assert_awaited_once()
+        assert app.app_server.resources.config.current.autocopy_to_clipboard is True

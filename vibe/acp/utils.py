@@ -108,7 +108,7 @@ def build_model_config(config: ConfigView) -> SessionConfigOptionSelect:
         type="select",
         options=[
             SessionConfigSelectOption(
-                value=model.alias, name=model.alias, description=model.name
+                value=model.alias, name=model.display_name, description=model.name
             )
             for model in config.models
         ],

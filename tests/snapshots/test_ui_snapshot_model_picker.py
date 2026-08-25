@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from typing import cast
+
 from textual.pilot import Pilot
 
 from tests.conftest import build_test_vibe_config
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp
 from tests.snapshots.snap_compare import SnapCompare
+from vibe.cli.textual_ui.app import VibeApp
 from vibe.core.config import ModelConfig
 
 
@@ -70,6 +73,14 @@ def test_snapshot_model_picker_select_different_model(
         await pilot.pause(0.2)
         await pilot.press("down")
         await pilot.press("enter")
+        # The selection persists via the main queue (two-phase execution), so
+        # wait for the drain to finish before capturing — otherwise the banner
+        # still shows the previous model.
+        app = cast(VibeApp, pilot.app)
+        for _ in range(100):
+            if not app._queue.draining:
+                break
+            await pilot.pause(0.01)
         await pilot.pause(0.2)
 
     assert snap_compare(

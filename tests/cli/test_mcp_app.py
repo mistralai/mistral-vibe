@@ -29,6 +29,7 @@ def _source(
     kind: MCPSourceKind = MCPSourceKind.SERVER,
     status: MCPSourceStatus = MCPSourceStatus.CONNECTED,
     tools: list[MCPToolSummary] | None = None,
+    error: str | None = None,
 ) -> MCPSourceSummary:
     return MCPSourceSummary(
         name=name,
@@ -36,6 +37,7 @@ def _source(
         transport="connector" if kind is MCPSourceKind.CONNECTOR else "stdio",
         status=status,
         tools=tools or [],
+        error=error,
     )
 
 
@@ -184,6 +186,73 @@ def test_connector_detail_requests_connector_auth() -> None:
     message = app.post_message.call_args.args[0]
     assert isinstance(message, MCPApp.ConnectorAuthRequested)
     assert message.connector_name == "gmail"
+
+
+def test_connector_detail_shows_bootstrap_error() -> None:
+    source = _source(
+        "slack",
+        kind=MCPSourceKind.CONNECTOR,
+        status=MCPSourceStatus.UNAVAILABLE,
+        error="Slack OAuth token expired",
+    )
+    app = MCPApp(_state(source))
+    app.query_one = MagicMock()
+    app._set_help_text = MagicMock()
+    app.post_message = MagicMock()
+    option_list = MagicMock()
+
+    app._show_detail_view(option_list, source)
+
+    labels = " ".join(
+        str(call.args[0].prompt) for call in option_list.add_option.call_args_list
+    )
+    assert "Failed to bootstrap" in labels
+    assert "Slack OAuth token expired" in labels
+
+
+def test_connector_detail_shows_error_over_needs_auth() -> None:
+    source = _source(
+        "slack",
+        kind=MCPSourceKind.CONNECTOR,
+        status=MCPSourceStatus.NEEDS_AUTH,
+        error="bootstrap failed: upstream 500",
+    )
+    app = MCPApp(_state(source))
+    app.query_one = MagicMock()
+    app._set_help_text = MagicMock()
+    app.post_message = MagicMock()
+    option_list = MagicMock()
+
+    app._show_detail_view(option_list, source)
+
+    labels = " ".join(
+        str(call.args[0].prompt) for call in option_list.add_option.call_args_list
+    )
+    assert "Failed to bootstrap" in labels
+    assert "upstream 500" in labels
+    app.post_message.assert_not_called()
+
+
+def test_connector_detail_shows_error_over_needs_setup() -> None:
+    source = _source(
+        "slack",
+        kind=MCPSourceKind.CONNECTOR,
+        status=MCPSourceStatus.NEEDS_SETUP,
+        error="bootstrap failed: missing credentials",
+    )
+    app = MCPApp(_state(source))
+    app.query_one = MagicMock()
+    app._set_help_text = MagicMock()
+    app.post_message = MagicMock()
+    option_list = MagicMock()
+
+    app._show_detail_view(option_list, source)
+
+    labels = " ".join(
+        str(call.args[0].prompt) for call in option_list.add_option.call_args_list
+    )
+    assert "Failed to bootstrap" in labels
+    assert "missing credentials" in labels
 
 
 def test_toggling_source_posts_public_identity() -> None:

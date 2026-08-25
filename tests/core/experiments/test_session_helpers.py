@@ -351,6 +351,76 @@ async def test_initialize_includes_organization_kind_from_whoami(
 
 
 @pytest.mark.asyncio
+async def test_initialize_includes_plan_from_whoami(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.fetch_whoami",
+        AsyncMock(
+            return_value=WhoAmIResult(
+                plan_type=AccountPlanKind.MISTRAL_CODE,
+                plan_name="E",
+                organization_kind="S",
+                prompt_switching_to_pro_plan=False,
+            )
+        ),
+    )
+    session_logger = MagicMock()
+    session_logger.persist_experiments = AsyncMock()
+    response = EvalResponse.model_validate({
+        "features": {"vibe_cli_system_prompt": {"defaultValue": "cli"}}
+    })
+    client = _StubClient(response)
+    manager = ExperimentManager(client=client)
+
+    result = await initialize_experiments(
+        config=_make_config(),
+        manager=manager,
+        session_logger=session_logger,
+        launch_context=None,
+    )
+
+    assert result is True
+    assert client.attributes is not None
+    assert client.attributes.planType == "mistral_code"
+    assert client.attributes.planName == "E"
+
+
+@pytest.mark.asyncio
+async def test_initialize_omits_plan_when_whoami_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    # _stub_fetch_whoami autouse fixture already returns None — no override needed.
+    session_logger = MagicMock()
+    session_logger.persist_experiments = AsyncMock()
+    response = EvalResponse.model_validate({
+        "features": {"vibe_cli_system_prompt": {"defaultValue": "cli"}}
+    })
+    client = _StubClient(response)
+    manager = ExperimentManager(client=client)
+
+    result = await initialize_experiments(
+        config=_make_config(),
+        manager=manager,
+        session_logger=session_logger,
+        launch_context=None,
+    )
+
+    assert result is True
+    assert client.attributes is not None
+    assert client.attributes.planType is None
+    assert client.attributes.planName is None
+
+
+@pytest.mark.asyncio
 async def test_initialize_omits_organization_kind_when_whoami_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -19,7 +19,11 @@ def build_test_app_config(
 ) -> ConfigView:
     return ConfigView(
         active_model=ModelConfigView(
-            name="test-model", alias="test-model", thinking="off", supports_images=False
+            name="test-model",
+            alias="test-model",
+            thinking="off",
+            supports_images=False,
+            display_name="test-model",
         ),
         active_model_pinned=True,
         default_model_alias="test-model",
@@ -42,6 +46,7 @@ def build_test_app_config(
                 alias="test-model",
                 thinking="off",
                 supports_images=False,
+                display_name="test-model",
             )
         ],
         transcribe_models=["test-transcribe"],
