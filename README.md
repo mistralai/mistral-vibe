@@ -21,6 +21,27 @@
 
 Mistral Vibe is a command-line coding assistant powered by Mistral's models. It provides a conversational interface to your codebase, allowing you to use natural language to explore, modify, and interact with your projects through a powerful set of tools.
 
+
+## TokenPulse — Live Usage Monitor & Telemetry Observatory
+
+TokenPulse is a real-time observability engine and live telemetry dashboard built for Mistral Vibe. It gives developers complete transparency into context window occupancy, API token consumption, execution throughput, and financial spending during autonomous AI coding sessions.
+
+![TokenPulse Live Usage Monitor](assets/dashboard.png)
+
+### Key Capabilities
+
+- **Interactive Observatory (`Ctrl+U`)**: Real-time modal overlay with animated PetitChat braille mascot.
+- **Context Token Composition**: Stacked bar breakdown across System Prompts, Tool Definitions, `AGENTS.md` Rules, Active Skills, and Conversation Turns.
+- **Session Runway & Budget Tracking**: Dual progress indicators tracking live spending against `--max-price` caps and model window occupancy.
+- **Throughput & Speed Metrics**: Real-time token burn rates (`tokens/min`) and financial burn rates (`$/min`).
+- **Turn-Level Efficiency Accounting**: Last turn metrics (cached token discounts, duration) and average cost/tokens per turn.
+- **Predictive Session Analytics**: Real-time forecasts for when context limits will be reached and rate limits reset.
+- **CLI Status Bar Integration**: Embedded live token counter, cost usage, speed indicator, and session timer in the primary CLI status bar.
+- **Structured Telemetry Export (`Ctrl+E`)**: One-key export of full telemetry audit reports to `~/.vibe/reports/agent_observatory_report_*.json`.
+
+![CLI Status Bar Integration](assets/cli_status.png)
+
+
 > [!WARNING]
 > Mistral Vibe works on Windows, but we officially support and target UNIX environments.
 

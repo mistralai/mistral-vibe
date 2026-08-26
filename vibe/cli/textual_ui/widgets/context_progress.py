@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
 from textual.reactive import reactive
@@ -15,6 +16,10 @@ _MILLION = 1_000_000
 class TokenState:
     max_tokens: int = 0
     current_tokens: int = 0
+    session_cost: float = 0.0
+    burn_rate_tokens_per_min: float = 0.0
+    max_price: float = 0.0
+    session_start_time: float = 0.0
 
 
 def _format_token_count(tokens: int) -> str:
@@ -42,3 +47,10 @@ class ContextProgress(NoMarkupStatic):
             f"{_format_token_count(new_state.max_tokens)} tokens ({ratio:.0%})"
         )
         self.update(text)
+
+    async def _on_click(self, event: Any) -> None:
+        handler = getattr(self.app, "_show_usage_monitor", None)
+        if callable(handler):
+            res = handler()
+            if inspect.isawaitable(res):
+                await res

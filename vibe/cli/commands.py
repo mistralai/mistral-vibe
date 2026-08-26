@@ -134,6 +134,12 @@ class CommandRegistry:
                 handler="_show_status",
                 side_channel=True,
             ),
+            "usage": Command(
+                aliases=frozenset(["/usage", "/monitor"]),
+                description="Display live token, cost, and context usage monitor",
+                handler="_show_usage_monitor",
+                side_channel=True,
+            ),
             "whoami": Command(
                 aliases=frozenset(["/whoami"]),
                 description="Display the Mistral signed-in user, workspace, and plan",
