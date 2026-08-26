@@ -3,14 +3,28 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 import contextlib
+import json
 
 import httpx
 import pytest
 import respx
 
-from tests.app_server.backend_contract.conftest import BackendContractConnection
-from vibe.app_server.events import HistoryEntryAdded, SessionSnapshot, StatsUpdated
+from tests.app_server.backend_contract.conftest import (
+    BackendContractConnection,
+    connect_backend_contract_host,
+)
+from vibe.app_server.events import (
+    CallbackRequested,
+    HistoryEntryAdded,
+    SessionSnapshot,
+    StatsUpdated,
+)
 from vibe.app_server.models import (
+    ApprovalCallbackOutput,
+    ApprovalDecision,
+    ApprovalDecisionType,
+    CompletedEffectState,
+    PublicEffectEntry,
     PublicMessageEntry,
     ResourceContentBlock,
     TextContentBlock,
@@ -18,8 +32,10 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import (
     AppServerResponseError,
+    ClientCapabilities,
     PageRequest,
     ProtocolErrorCode,
+    SessionOptions,
     SessionTurnsListParams,
     SessionTurnsListResponse,
     TurnSteerParams,
@@ -37,6 +53,7 @@ async def test_turn_streams_public_events_over_json_rpc(
     backend_contract_mistral_api.mock(
         return_value=backend_contract_mistral_response("hello")
     )
+    context_window = backend_contract_session.resources.runtime.context_window
 
     events = [
         event
@@ -44,7 +61,8 @@ async def test_turn_streams_public_events_over_json_rpc(
     ]
 
     assert backend_contract_mistral_api.called
-    assert any(isinstance(event, StatsUpdated) for event in events)
+    stats_updated = next(event for event in events if isinstance(event, StatsUpdated))
+    assert stats_updated.params.context_window == context_window
     user = next(
         event.entry
         for event in events
@@ -64,6 +82,233 @@ async def test_turn_streams_public_events_over_json_rpc(
         entry.generation_status == "completed"
         for entry in backend_contract_session.history
     )
+
+
+@pytest.mark.asyncio
+async def test_read_file_tool_call_runs_through_the_backend(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    experimental_harness: bool,
+    tmp_path,
+) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("from file\n", encoding="utf-8")
+    tool_arguments = (
+        {"path": str(target)} if experimental_harness else {"file_path": str(target)}
+    )
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "read-1",
+                        "index": 0,
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps(tool_arguments),
+                        },
+                    }
+                ],
+            ),
+            backend_contract_mistral_response("read done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(
+            cwd=str(tmp_path), enabled_tools=["read_file"], auto_approve=True
+        ),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        session = await connection.host.open_session()
+
+        _ = [event async for event in session.act("read notes")]
+
+        assistant = next(
+            entry
+            for entry in session.history
+            if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
+        )
+        effect = next(
+            entry for entry in session.history if isinstance(entry, PublicEffectEntry)
+        )
+        assert assistant.text == "read done"
+        assert isinstance(effect.state, CompletedEffectState)
+        assert backend_contract_mistral_api.call_count == 2
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_call_runs_through_the_backend(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    experimental_harness: bool,
+    tmp_path,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "bash-1",
+                        "index": 0,
+                        "function": {
+                            "name": "bash",
+                            "arguments": json.dumps({
+                                "command": "printf shell-ok",
+                                "timeout_seconds": 5,
+                            }),
+                        },
+                    }
+                ],
+            ),
+            backend_contract_mistral_response("shell done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(
+            cwd=str(tmp_path), enabled_tools=["bash"], auto_approve=True
+        ),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        session = await connection.host.open_session()
+
+        _ = [event async for event in session.act("run shell")]
+
+        assistant = next(
+            entry
+            for entry in session.history
+            if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
+        )
+        effect = next(
+            entry for entry in session.history if isinstance(entry, PublicEffectEntry)
+        )
+        assert assistant.text == "shell done"
+        assert isinstance(effect.state, CompletedEffectState)
+        assert backend_contract_mistral_api.call_count == 2
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_call_waits_for_approval(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    experimental_harness: bool,
+    tmp_path,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "bash-1",
+                        "index": 0,
+                        "function": {
+                            "name": "bash",
+                            "arguments": json.dumps({
+                                "command": "printf approved",
+                                "timeout_seconds": 5,
+                            }),
+                        },
+                    }
+                ],
+            ),
+            backend_contract_mistral_response("approved done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(cwd=str(tmp_path), enabled_tools=["bash"]),
+        capabilities=ClientCapabilities(callback_kinds=["approval"]),
+    )
+    try:
+        session = await connection.host.open_session()
+
+        callbacks = []
+        async for event in session.act("run shell with approval"):
+            if isinstance(event, CallbackRequested):
+                callbacks.append(event.callback)
+                await session.respond_to_callback(
+                    event.callback.callback_id,
+                    ApprovalCallbackOutput(
+                        decision=ApprovalDecision(type=ApprovalDecisionType.APPROVE)
+                    ),
+                )
+
+        assistant = next(
+            entry
+            for entry in session.history
+            if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
+        )
+        effect = next(
+            entry for entry in session.history if isinstance(entry, PublicEffectEntry)
+        )
+        assert [callback.detail.kind for callback in callbacks] == ["approval"]
+        assert assistant.text == "approved done"
+        assert isinstance(effect.state, CompletedEffectState)
+        assert backend_contract_mistral_api.call_count == 2
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupt_closes_shell_approval_callback(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    experimental_harness: bool,
+    tmp_path,
+) -> None:
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "bash-1",
+                    "index": 0,
+                    "function": {
+                        "name": "bash",
+                        "arguments": json.dumps({
+                            "command": "printf late",
+                            "timeout_seconds": 5,
+                        }),
+                    },
+                }
+            ],
+        )
+    )
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(cwd=str(tmp_path), enabled_tools=["bash"]),
+        capabilities=ClientCapabilities(callback_kinds=["approval"]),
+    )
+    callback_id: str | None = None
+    try:
+        session = await connection.host.open_session()
+
+        async for event in session.act("run shell with approval"):
+            if isinstance(event, CallbackRequested):
+                callback_id = event.callback.callback_id
+                await session.interrupt()
+
+        assert callback_id is not None
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await session.respond_to_callback(
+                callback_id,
+                ApprovalCallbackOutput(
+                    decision=ApprovalDecision(type=ApprovalDecisionType.APPROVE)
+                ),
+            )
+        assert exc_info.value.error.code is ProtocolErrorCode.CALLBACK_CLOSED
+    finally:
+        await connection.host.close()
 
 
 @pytest.mark.asyncio

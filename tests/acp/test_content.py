@@ -6,14 +6,12 @@ from acp import PromptRequest
 from acp.schema import (
     EmbeddedResourceContentBlock,
     ResourceContentBlock,
-    SessionInfoUpdate,
     TextContentBlock,
     TextResourceContents,
 )
 import pytest
 
 from tests.stubs.fake_backend import FakeBackend
-from tests.stubs.fake_client import FakeClient
 from vibe.acp.agent import VibeAcpAgent as VibeAcpAgentLoop
 from vibe.app_server.models import (
     PublicMessageEntry,
@@ -165,36 +163,3 @@ class TestACPContent:
         assert user_message is not None, "User message not found in backend requests"
         expected_content = "uri: file:///home/minimal.txt\nname: minimal.txt"
         assert user_message.content == expected_content
-
-    @pytest.mark.asyncio
-    async def test_resource_blocks_preserve_auto_title_order(
-        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
-    ) -> None:
-        agent, client = acp_agent_with_session_config
-        session = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
-
-        await agent.prompt(
-            session_id=session.session_id,
-            prompt=[
-                TextContentBlock(type="text", text="Refactor "),
-                ResourceContentBlock(
-                    type="resource_link",
-                    uri="file:///workspace/auth.py#L2-L4",
-                    name="auth.py",
-                ),
-                TextContentBlock(type="text", text=" please"),
-                ResourceContentBlock(
-                    type="resource_link",
-                    uri="file:///workspace/automatic.py",
-                    name="automatic.py",
-                    field_meta={"automatic": True},
-                ),
-            ],
-        )
-
-        updates = [
-            notification.update
-            for notification in client._session_updates
-            if isinstance(notification.update, SessionInfoUpdate)
-        ]
-        assert updates[-1].title == "Refactor @auth.py:2-4 please"

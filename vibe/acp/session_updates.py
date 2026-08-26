@@ -63,6 +63,7 @@ from vibe.app_server.models import (
     PublicMessageEntry,
     PublicNoticeEntry,
     PublicReasoningEntry,
+    PublicSession,
     PublicSessionState,
     ResourceContentBlock,
     RunningEffectState,
@@ -113,10 +114,8 @@ _TOOL_KINDS: dict[ToolEffectKind, ToolKind] = {
 
 def replay_session_updates(state: PublicSessionState) -> list[SessionUpdate]:
     updates: list[SessionUpdate] = []
-    if state.session.title is not None:
-        updates.append(
-            _session_info_update(state.session.title, state.session.updated_at)
-        )
+    if display_title := _display_title(state.session):
+        updates.append(_session_info_update(display_title, state.session.updated_at))
     for entry in state.history or []:
         if isinstance(entry, PublicNoticeEntry) and isinstance(
             entry.detail, SessionTitleUpdatedNoticeDetail
@@ -149,9 +148,13 @@ def session_updates_for_event(event: AppServerEvent) -> list[SessionUpdate]:
         case HistoryEntryUpdated(previous=previous, entry=entry):
             return _updated_entry_updates(previous, entry)
         case SessionUpdated(previous=previous, session=session):
-            if previous.title == session.title:
+            # The client renders the title verbatim, so fold the first-message
+            # preview into the effective title: an untitled session still gets a
+            # readable label, and the update fires when the preview first lands.
+            display_title = _display_title(session)
+            if _display_title(previous) == display_title:
                 return []
-            return [_session_info_update(session.title, session.updated_at)]
+            return [_session_info_update(display_title, session.updated_at)]
         case _:
             return []
 
@@ -749,6 +752,12 @@ def _text_delta(previous: str, current: str) -> str:
     if current.startswith(previous):
         return current[len(previous) :]
     return current
+
+
+def _display_title(session: PublicSession) -> str | None:
+    # The client renders the title verbatim with no preview fallback, so an
+    # untitled session should still show its first-message preview.
+    return session.title or session.preview or None
 
 
 def _session_info_update(title: str | None, updated_at: int) -> SessionInfoUpdate:

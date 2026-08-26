@@ -39,6 +39,7 @@ from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 from mistralai.extra.observability.telemetry import configure_telemetry
 
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
+from vibe.core.llm.backend.base import MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.types import (
     AvailableTool,
@@ -360,6 +361,7 @@ class MistralBackend:
             verify=build_ssl_context(),
             follow_redirects=True,
             event_hooks={"response": [self._on_response]},
+            limits=httpx.Limits(keepalive_expiry=MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS),
         )
         client = Mistral(
             api_key=self._api_key,
@@ -502,41 +504,46 @@ class MistralBackend:
                 reasoning_effort=reasoning_effort,
             )
             correlation_id = stream.response.headers.get("mistral-correlation-id")
-            async for chunk in stream:
-                # Some models terminate the stream with a usage-only chunk that
-                # carries no choices.
-                choice = chunk.data.choices[0] if chunk.data.choices else None
-                delta = choice.delta if choice else None
-                parsed = (
-                    self._mapper.parse_content(delta.content)
-                    if delta and delta.content
-                    else ParsedContent(content="", reasoning_content=None)
-                )
-                yield LLMChunk(
-                    message=LLMMessage(
-                        role=Role.assistant,
-                        content=parsed.content,
-                        reasoning_content=parsed.reasoning_content,
-                        tool_calls=self._mapper.parse_tool_calls(delta.tool_calls)
-                        if delta and delta.tool_calls
-                        else None,
-                    ),
-                    usage=LLMUsage(
-                        prompt_tokens=chunk.data.usage.prompt_tokens or 0
-                        if chunk.data.usage
-                        else 0,
-                        completion_tokens=chunk.data.usage.completion_tokens or 0
-                        if chunk.data.usage
-                        else 0,
-                        cached_tokens=_cached_tokens(chunk.data.usage),
-                    ),
-                    correlation_id=correlation_id,
-                    stop=(
-                        StopInfo(reason=str(choice.finish_reason))
-                        if choice and choice.finish_reason is not None
-                        else None
-                    ),
-                )
+            # Close the underlying httpx response on every exit path (normal
+            # completion, early termination of the outer generator, or an error
+            # mid-stream). Without this the connection stays checked out of the
+            # pool and a long-lived session eventually hits PoolTimeout.
+            async with stream:
+                async for chunk in stream:
+                    # Some models terminate the stream with a usage-only chunk that
+                    # carries no choices.
+                    choice = chunk.data.choices[0] if chunk.data.choices else None
+                    delta = choice.delta if choice else None
+                    parsed = (
+                        self._mapper.parse_content(delta.content)
+                        if delta and delta.content
+                        else ParsedContent(content="", reasoning_content=None)
+                    )
+                    yield LLMChunk(
+                        message=LLMMessage(
+                            role=Role.assistant,
+                            content=parsed.content,
+                            reasoning_content=parsed.reasoning_content,
+                            tool_calls=self._mapper.parse_tool_calls(delta.tool_calls)
+                            if delta and delta.tool_calls
+                            else None,
+                        ),
+                        usage=LLMUsage(
+                            prompt_tokens=chunk.data.usage.prompt_tokens or 0
+                            if chunk.data.usage
+                            else 0,
+                            completion_tokens=chunk.data.usage.completion_tokens or 0
+                            if chunk.data.usage
+                            else 0,
+                            cached_tokens=_cached_tokens(chunk.data.usage),
+                        ),
+                        correlation_id=correlation_id,
+                        stop=(
+                            StopInfo(reason=str(choice.finish_reason))
+                            if choice and choice.finish_reason is not None
+                            else None
+                        ),
+                    )
 
         except SDKError as e:
             raise BackendErrorBuilder.build_http_error(

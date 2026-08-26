@@ -31,15 +31,50 @@ class ExperimentManager:
     def __init__(self, client: RemoteEvalClient | None = None) -> None:
         self._client = client if client is not None else RemoteEvalClient()
         self._response: EvalResponse | None = None
+        self._attributes: ExperimentAttributes | None = None
 
     async def initialize(self, attributes: ExperimentAttributes) -> None:
+        # Retain the exact attribute snapshot sent to GrowthBook for bucketing so
+        # telemetry can emit it on the exposure event. Keeping the two in sync is
+        # what lets the datalake exposures be segmented by the same dimensions
+        # GrowthBook assigns on (see ``attributes``).
+        self._attributes = attributes
         response = await self._client.evaluate(attributes)
         if response is None:
             return
         self._response = self._filter_to_known_experiments(response)
         self._log_resolved_variants("resolved")
 
-    def hydrate(self, response: EvalResponse, *, source: str = "session") -> None:
+    def attributes(self) -> ExperimentAttributes | None:
+        """Return the attribute snapshot used for the last GrowthBook eval.
+
+        This is the exact payload sent to the proxy for variant bucketing. It is
+        emitted on the exposure telemetry event so warehouse-side analysis can
+        dimension on the same attributes GrowthBook assigned on. ``None`` until
+        :meth:`initialize` has run (e.g. resumed sessions hydrated from state).
+        """
+        return self._attributes
+
+    def set_attributes(self, attributes: ExperimentAttributes) -> None:
+        """Set the attribute snapshot without a remote eval.
+
+        Used when there is nothing to evaluate (no Mistral provider, so no
+        A/B bucketing) but telemetry still needs ``experiment_attributes`` to
+        carry the sentinel plan fields (planType/planName = NO_PLAN_DATA).
+        """
+        self._attributes = attributes
+
+    def hydrate(
+        self,
+        response: EvalResponse,
+        *,
+        attributes: ExperimentAttributes | None = None,
+        source: str = "session",
+    ) -> None:
+        # Restore the bucketing snapshot too, not just the eval response. The
+        # snapshot is what telemetry emits as ``experiment_attributes``; without
+        # it every event on a resumed session would miss planName/planType.
+        self._attributes = attributes
         self._response = self._filter_to_known_experiments(response)
         self._log_resolved_variants(f"restored from {source}")
 
@@ -126,6 +161,10 @@ class ExperimentManager:
                         experiment_name=track.experiment.key,
                         variation_name=variation_name,
                         variation_id=track.result.variationId,
+                        in_experiment=track.result.inExperiment,
+                        hash_attribute=track.result.hashAttribute,
+                        hash_value=track.result.hashValue,
+                        feature_id=track.result.featureId,
                     )
         return list(by_experiment.values())
 

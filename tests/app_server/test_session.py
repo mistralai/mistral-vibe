@@ -22,6 +22,8 @@ from tests.stubs.app_server import (
     start_test_app_server,
 )
 from tests.stubs.fake_backend import FakeBackend, FakeInterruptedStreamingBackend
+from tests.stubs.fake_connector_catalog import FakeConnectorCatalogService
+from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from vibe.app_server._legacy_composition import create_legacy_app_server
 from vibe.app_server._legacy_session_backend import LegacySessionBackend
 from vibe.app_server._model import validate_wire
@@ -34,14 +36,17 @@ from vibe.app_server._runtime import (
     _apply_stored_stats,
 )
 from vibe.app_server.client import AppServerClient, AppServerConnectionClosed
+from vibe.app_server.connector_catalog import ConnectorRuntimeAuthorization
 from vibe.app_server.events import (
     CallbackRequested,
+    ConnectorAuthorizationRequiredEvent,
     HistoryEntryAdded,
     HistoryEntryUpdated,
     SessionContextCleared,
     SessionSnapshot,
     StatsUpdated,
     TurnCompleted,
+    TurnRetrying,
     TurnStarted,
 )
 from vibe.app_server.models import (
@@ -56,6 +61,7 @@ from vibe.app_server.models import (
     PublicHistoryEntry,
     PublicMessageEntry,
     PublicNoticeEntry,
+    PublicRetryCategory,
     ResourceContentBlock,
     ScheduledLoopFiredNoticeDetail,
     TurnErrorCode,
@@ -71,6 +77,7 @@ from vibe.app_server.protocol import (
     ClientInfo,
     ConfigWriteOpWire,
     ConfigWriteParams,
+    ConnectorAuthRequiredParams,
     Notification,
     PageRequest,
     ProtocolError,
@@ -99,6 +106,7 @@ from vibe.core.config import ModelConfig, SessionLoggingConfig
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.session.session_lease import SessionBusyError, SessionLease
 from vibe.core.session.session_loader import SessionLoader
+from vibe.core.tools.connectors.connector_registry import ConnectorRegistry, RemoteTool
 from vibe.core.tools.models import ToolPermission
 from vibe.core.types import (
     AgentStats,
@@ -113,6 +121,7 @@ from vibe.core.types import (
     ToolCall,
     UserMessageEvent,
 )
+from vibe.core.utils import RetryReason
 from vibe.user_content import UserResourceLink
 
 
@@ -126,6 +135,68 @@ def _wire_read_request(session_id: str) -> dict:
     return SessionReadParams(session_id=session_id).model_dump(
         mode="json", by_alias=True
     )
+
+
+@pytest.mark.asyncio
+async def test_legacy_session_start_applies_host_connector_catalog() -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    registry = ConnectorRegistry(api_key="fake-key")
+    agent_loop = build_test_agent_loop(config=config, connector_registry=registry)
+    catalog = FakeConnectorCatalogService(
+        FakeConnectorRegistry(
+            connectors={
+                "github": [RemoteTool(name="search", description="Search GitHub")]
+            }
+        )
+    )
+
+    session = await create_test_app_server_session(
+        agent_loop, connector_catalog_service=catalog
+    )
+    try:
+        assert registry._host_managed
+        assert registry._host_catalog_entries is not None
+        assert [entry.alias for entry in registry._host_catalog_entries] == ["github"]
+        assert any("search" in name for name in registry.get_tools())
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_connector_auth_notification_failure_releases_reservation() -> None:
+    release_reservation = Mock()
+    start_broker = Mock()
+    service = SimpleNamespace(
+        accept_auth_required=AsyncMock(
+            return_value=ConnectorRuntimeAuthorization(
+                runtime_updated=cast(RuntimeUpdatedParams, object()),
+                start_broker=start_broker,
+                release_reservation=release_reservation,
+            )
+        )
+    )
+    server = SimpleNamespace(
+        _connector_catalog_service=service,
+        _root=None,
+        _notify=AsyncMock(),
+        _route_notification=AsyncMock(side_effect=RuntimeError("disconnected")),
+    )
+    event = ConnectorAuthorizationRequiredEvent(
+        params=ConnectorAuthRequiredParams(
+            session_id="session-1",
+            alias="github",
+            accepted_catalog_revision="catalog-1",
+            reason="gateway_rejected",
+        ),
+        raw_connector_id="github/raw",
+        action="oauth",
+    )
+
+    with pytest.raises(RuntimeError, match="disconnected"):
+        await AppServer._forward_connector_authorization(cast(AppServer, server), event)
+
+    release_reservation.assert_called_once_with()
+    start_broker.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1163,9 +1234,8 @@ async def test_due_loop_runs_as_an_unsolicited_server_turn(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_session_history_get_is_reachable_while_root_active() -> None:
-    # `session/history/get` loads from disk via the host handler, so with a
-    # root attached a missing session must surface NOT_FOUND, not
-    # METHOD_NOT_FOUND.
+    # The history resource reads through the selected backend Host, so a
+    # missing session must surface NOT_FOUND while another root is attached.
     session = await create_test_app_server_session(build_test_agent_loop())
     try:
         with pytest.raises(AppServerResponseError) as excinfo:
@@ -1180,9 +1250,8 @@ async def test_session_history_get_is_reachable_while_root_active() -> None:
 async def test_session_history_get_returns_projected_entries_and_respects_limit() -> (
     None
 ):
-    # No custom save_dir: session/history/get loads config from cwd via the
-    # host handler, so the stored session must live in the default
-    # (test-isolated) dir.
+    # No custom save_dir: the backend Host reads from the default
+    # test-isolated session directory.
     config = build_test_vibe_config(session_logging=SessionLoggingConfig(enabled=True))
     saved = build_test_agent_loop(config=config)
     saved.messages.reset([
@@ -1753,6 +1822,58 @@ async def test_reconnect_resumes_live_turn_and_redelivers_open_callback() -> Non
         isinstance(entry, PublicCheckpointEntry) and entry.kind == "resume"
         for entry in session.history
     )
+
+
+@pytest.mark.asyncio
+async def test_live_retry_is_in_session_read_and_reconnect_snapshot() -> None:
+    retry_started = asyncio.Event()
+    agent_loop = build_test_agent_loop()
+
+    async def retrying_act(*_args, turn_options, **_kwargs):
+        assert turn_options.retry_sink is not None
+        await turn_options.retry_sink(RetryReason.from_http_status(429))
+        retry_started.set()
+        await asyncio.Event().wait()
+        yield AssistantEvent(content="unreachable", message_id="assistant-1")
+
+    agent_loop.act = retrying_act
+    session = await _create_reconnectable_session(agent_loop)
+    stream = session.act("wait for provider")
+    retry_snapshot_task = asyncio.create_task(_next_event(stream, SessionSnapshot))
+
+    try:
+        await asyncio.wait_for(retry_started.wait(), timeout=1)
+        retry_snapshot = await asyncio.wait_for(retry_snapshot_task, timeout=1)
+        await _next_event(stream, TurnRetrying)
+        client = session._connection.current
+        assert client is not None
+        response = validate_wire(
+            SessionReadResponse,
+            await client.request(
+                "session/read", SessionReadParams(session_id=session.session_id)
+            ),
+        )
+        retrying = response.state.retrying
+        assert retrying is not None
+        assert retrying.category is PublicRetryCategory.RATE_LIMITED
+        assert retrying.detail == "HTTP 429"
+        assert response.state.latest_turn is not None
+        assert retrying.turn_id == response.state.latest_turn.id
+        assert retry_snapshot.state.retrying == retrying
+
+        await client.close()
+        snapshot = await _next_event(stream, SessionSnapshot)
+        assert snapshot.state.retrying == retrying
+
+        await session.interrupt()
+        await _consume(stream)
+    finally:
+        if not retry_snapshot_task.done():
+            retry_snapshot_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await retry_snapshot_task
+        await stream.aclose()
+        await session.close()
 
 
 @pytest.mark.asyncio
@@ -2675,35 +2796,36 @@ async def _create_reconnectable_session(
 
 
 @pytest.mark.asyncio
-async def test_install_root_keeps_replacement_serving_when_previous_shutdown_fails(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("failure_call", [1, 2], ids=["legacy-runtime", "app-server"])
+async def test_root_replacement_keeps_serving_when_previous_shutdown_fails(
+    monkeypatch: pytest.MonkeyPatch, failure_call: int
 ) -> None:
+    """*Prepare*: Previous-backend shutdown fails in either replacement cleanup layer.
+    *Do*: Attach a fork that replaces the active root.
+    *Assert*: The replacement remains active and continues serving requests.
+    """
+    # Prepare
     agent_loop = build_test_agent_loop()
     session = await create_test_app_server_session(agent_loop)
-
-    # Monkeypatch shutdown to fail on the *first* call (the previous root being
-    # retired by _install_root) but succeed on subsequent calls (server close).
     original_shutdown = LegacySessionBackend.shutdown
     call_count = 0
 
-    async def failing_first_shutdown(self: LegacySessionBackend) -> None:
+    async def failing_shutdown(self: LegacySessionBackend) -> None:
         nonlocal call_count
         call_count += 1
-        if call_count == 1:
+        if call_count == failure_call:
             raise RuntimeError("disk full — shutdown failed")
         await original_shutdown(self)
 
-    monkeypatch.setattr(LegacySessionBackend, "shutdown", failing_first_shutdown)
+    monkeypatch.setattr(LegacySessionBackend, "shutdown", failing_shutdown)
 
     try:
-        # session/fork with attach=True drives _adopt_root → _install_root, which
-        # calls previous.shutdown() and must swallow the failure to never go rootless.
+        # Do
         await session.resources.sessions.fork(attach=True)
         await session.resources.refresh()
 
-        # The replacement is now the active root and keeps serving requests.
+        # Assert
         assert session.session_id != agent_loop.session_id
-        # A history/clear proves the session is still functional after the failed shutdown.
         await session.clear_history()
     finally:
         await session.close()

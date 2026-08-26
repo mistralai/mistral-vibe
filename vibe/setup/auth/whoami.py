@@ -9,7 +9,10 @@ lookups.
 from __future__ import annotations
 
 import asyncio
-from typing import Protocol
+import json
+import os
+import time
+from typing import Any, Final, Protocol
 from urllib.parse import urlparse
 
 import httpx
@@ -17,10 +20,26 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from vibe.app_server.models import AccountPlanKind
 from vibe.core.config import ProviderConfig
+from vibe.core.paths import WHOAMI_CACHE_FILE
 from vibe.observability.logging import logger
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 _WHOAMI_PATH = "/api/vibe/whoami"
+
+# Sentinel for plan fields (user_plan, planName, planType) when there is no
+# Mistral provider configured at all — the user is not one of ours, so there
+# is nothing to look up. This is an *expected* absence.
+#
+# It is deliberately distinct from ``None``: ``None`` is reserved for the case
+# where a Mistral credential exists and we tried to populate the fields but the
+# lookup failed (missing key / whoami timeout / network / unmapped plan). In
+# other words ``None`` signals a problem in *our* system worth alerting on,
+# whereas ``NO_PLAN_DATA`` is the benign "not our user" state.
+#
+# Note: whether the active model is Mistral is NOT what gates this — a user on
+# a third-party model who still has a Mistral provider configured gets their
+# real plan. Only the render layer gates on the active backend.
+NO_PLAN_DATA = "NO_PLAN_DATA"
 
 
 class WhoAmIResult(BaseModel):
@@ -105,12 +124,98 @@ async def fetch_whoami(
         return None
 
 
+_WHOAMI_CACHE_TTL_SECONDS: Final = 6 * 60 * 60
+
+
+def load_cached_whoami(api_key: str) -> WhoAmIResult | None:
+    """Return the cached /whoami result for ``api_key`` if still fresh, else None.
+
+    The cache is user-scoped (keyed by the hashed Mistral key) and shared across
+    sessions/processes, so plan/org/customer data is neither re-fetched on every
+    launch nor duplicated into each session's ``meta.json``. Fails open: any
+    read/parse error, missing entry, or stale entry yields None so the caller
+    refetches.
+    """
+    entry = _read_whoami_entries().get(_whoami_cache_key(api_key))
+    if not isinstance(entry, dict):
+        return None
+    stored_at = entry.get("stored_at_timestamp")
+    payload = entry.get("payload")
+    if not isinstance(stored_at, int) or not isinstance(payload, dict):
+        return None
+    if stored_at <= int(time.time()) - _WHOAMI_CACHE_TTL_SECONDS:
+        return None
+    try:
+        return WhoAmIResult.model_validate(payload)
+    except (ValueError, ValidationError):
+        return None
+
+
+def store_cached_whoami(api_key: str, result: WhoAmIResult) -> None:
+    """Persist a /whoami result under the hashed ``api_key``. Best-effort."""
+    entries = _read_whoami_entries()
+    entries[_whoami_cache_key(api_key)] = {
+        "stored_at_timestamp": int(time.time()),
+        "payload": result.model_dump(mode="json"),
+    }
+    _write_whoami_entries(entries)
+
+
+def clear_cached_whoami(api_key: str) -> None:
+    """Drop the cached /whoami entry for ``api_key`` (e.g. after a 401/403).
+
+    A rejected credential means any cached plan is untrustworthy, so it must not
+    keep being served for the TTL. Best-effort; no-op when nothing is cached.
+    """
+    entries = _read_whoami_entries()
+    if entries.pop(_whoami_cache_key(api_key), None) is not None:
+        _write_whoami_entries(entries)
+
+
+def _whoami_cache_key(api_key: str) -> str:
+    # Reuse the experiment cache's hashing so the on-disk key is anonymous and
+    # consistent with the rest of the telemetry stack. Imported lazily to keep
+    # this setup-layer module decoupled from the experiments engine at import
+    # time.
+    from vibe.core.experiments.manager import hash_api_key
+
+    return hash_api_key(api_key)
+
+
+def _read_whoami_entries() -> dict[str, Any]:
+    try:
+        with WHOAMI_CACHE_FILE.path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_whoami_entries(entries: dict[str, Any]) -> None:
+    cache_path = WHOAMI_CACHE_FILE.path
+    tmp_path = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.tmp")
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(entries, f, separators=(",", ":"))
+        os.replace(tmp_path, cache_path)
+    except (OSError, TypeError):
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.debug("Failed to write whoami cache file %s", cache_path, exc_info=True)
+
+
 class WhoAmICache:
-    """Session-scoped cache for /whoami results.
+    """In-memory /whoami cache backed by a cross-session on-disk cache.
 
     Fetches once per ``(base_url, api_key)`` pair and caches successes so
-    experiment init and ``AccountController`` share a single round-trip.
-    Failures are not cached so a later caller can retry.
+    experiment init and ``AccountController`` share a single round-trip. On an
+    in-memory miss it consults the user-scoped on-disk cache
+    (:func:`load_cached_whoami`) before hitting the network, and persists every
+    network success back to disk. Failures are not cached so a later caller can
+    retry.
 
     Use :meth:`resolve` to fetch-or-return-cached.
     """
@@ -127,6 +232,16 @@ class WhoAmICache:
         """Store a known result without fetching, for callers that already have one."""
         self._cache[(base_url, api_key)] = result
 
+    def invalidate(self, api_key: str) -> None:
+        """Evict every in-memory entry for ``api_key`` and drop its disk entry.
+
+        Called after a rejected credential (401/403) so neither this process nor
+        a later session serves a stale plan for the key.
+        """
+        for key in [k for k in self._cache if k[1] == api_key]:
+            del self._cache[key]
+        clear_cached_whoami(api_key)
+
     async def resolve(
         self,
         *,
@@ -137,14 +252,21 @@ class WhoAmICache:
     ) -> WhoAmIResult | None:
         """Fetch /whoami once per ``(base_url, api_key)`` and cache successes.
 
-        Single-flight so concurrent callers coalesce onto one request; failures
-        are not cached so a later caller can retry.
+        Read-through: an in-memory hit is returned first, then the cross-session
+        on-disk cache (:func:`load_cached_whoami`); only on a miss do we hit the
+        network, persisting a success to both caches. Single-flight so
+        concurrent callers coalesce onto one request; failures are not cached so
+        a later caller can retry.
         """
         key = (base_url, api_key)
         async with self._lock:
             cached = self._cache.get(key)
             if cached is not None:
                 return cached
+            disk_cached = load_cached_whoami(api_key)
+            if disk_cached is not None:
+                self._cache[key] = disk_cached
+                return disk_cached
             gw = gateway or HttpAccountGateway()
             try:
                 result = await gw.read(
@@ -157,7 +279,39 @@ class WhoAmICache:
                 )
                 return None
             self._cache[key] = result
+            store_cached_whoami(api_key, result)
             return result
+
+
+def derive_user_plan(result: WhoAmIResult | None) -> str | None:
+    """Map a /whoami result to the legacy ``user_plan`` display label.
+
+    Pure function shared by the account controller and the experiments init
+    path so telemetry's ``user_plan`` is populated before the early
+    ``vibe.new_session`` / ``vibe.ready`` events and on surfaces that never
+    call ``account/read`` (ACP, programmatic). Returns ``None`` when whoami
+    is unavailable or the plan is not in the known mapping.
+    """
+    if result is None:
+        return None
+    kind = result.plan_type
+    name = result.plan_name.strip().upper()
+    match kind:
+        case AccountPlanKind.CHAT:
+            return {
+                "FREE": "Free",
+                "INDIVIDUAL": "Pro",
+                "EDU": "Student",
+                "TEAM": "Team",
+            }.get(name)
+        case AccountPlanKind.API:
+            if not name:
+                return None
+            return "Free API" if "FREE" in name else "PAYG API"
+        case AccountPlanKind.MISTRAL_CODE:
+            return {"F": "Free Codestral", "E": "Code Enterprise"}.get(name)
+        case _:
+            return None
 
 
 def _sanitize_tenant_url(candidate: str, *, field: str) -> str | None:

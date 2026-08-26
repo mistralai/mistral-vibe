@@ -203,6 +203,8 @@ result-*
 !.vibe/skills/instrument-feature-analytics/**
 !.vibe/skills/write-vibe-adr/
 !.vibe/skills/write-vibe-adr/**
+!.vibe/skills/write-vibe-design-doc/
+!.vibe/skills/write-vibe-design-doc/**
 !.vibe/skills/write-vibe-tests/
 !.vibe/skills/write-vibe-tests/**
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass
 from http import HTTPStatus
 import json
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, cast
 from pydantic import TypeAdapter
 
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
-from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
+from vibe.core.llm.backend.base import APIAdapter, ParsedStreamChunk, PreparedRequest
 from vibe.core.types import (
     AvailableTool,
     FunctionCall,
@@ -22,6 +23,7 @@ from vibe.core.types import (
     StrToolChoice,
     ToolCall,
 )
+from vibe.core.utils import StreamHTTPError
 
 if TYPE_CHECKING:
     from vibe.core.config import ProviderConfig
@@ -30,24 +32,25 @@ logger = logging.getLogger(__name__)
 
 _EMPTY_USAGE = LLMUsage(prompt_tokens=0, completion_tokens=0)
 
+_ERROR_HTTP_STATUS = {
+    "authentication_error": HTTPStatus.UNAUTHORIZED,
+    "invalid_api_key": HTTPStatus.UNAUTHORIZED,
+    "too_many_requests": HTTPStatus.TOO_MANY_REQUESTS,
+    "rate_limit": HTTPStatus.TOO_MANY_REQUESTS,
+    "rate_limit_error": HTTPStatus.TOO_MANY_REQUESTS,
+    "rate_limit_exceeded": HTTPStatus.TOO_MANY_REQUESTS,
+    "server_error": HTTPStatus.INTERNAL_SERVER_ERROR,
+}
 
-class OpenAIResponsesStreamError(RuntimeError):
+
+class OpenAIResponsesStreamError(StreamHTTPError):
     def __init__(self, error_type: str, message: str) -> None:
         self.error_type = error_type
         self.message = message
-        super().__init__(f"OpenAI Responses stream error ({error_type}): {message}")
-
-    @property
-    def status(self) -> HTTPStatus | None:
-        match self.error_type:
-            case "authentication_error" | "invalid_api_key":
-                return HTTPStatus.UNAUTHORIZED
-            case "too_many_requests" | "rate_limit_error" | "rate_limit_exceeded":
-                return HTTPStatus.TOO_MANY_REQUESTS
-            case "server_error":
-                return HTTPStatus.INTERNAL_SERVER_ERROR
-            case _:
-                return None
+        super().__init__(
+            f"OpenAI Responses stream error ({error_type}): {message}",
+            _ERROR_HTTP_STATUS.get(error_type),
+        )
 
 
 class _ResponsesInputTokensDetails(TypedDict, total=False):
@@ -95,18 +98,22 @@ class _ResponsesReasoningItem(TypedDict, total=False):
     status: str
 
 
+class _ResponsesErrorData(TypedDict, total=False):
+    type: str
+    code: str
+    message: str
+
+
 class _ResponsesObject(TypedDict, total=False):
     usage: _ResponsesUsageData | None
     output: list[dict[str, Any]]
-
-
-class _ResponsesErrorData(TypedDict, total=False):
-    type: str
-    message: str
+    error: _ResponsesErrorData | None
 
 
 class _ResponsesStreamEvent(TypedDict, total=False):
     type: str
+    code: str
+    message: str
     output_index: int
     delta: str
     call_id: str
@@ -404,8 +411,11 @@ class _OpenAIResponsesStreamParser:
 
     def _on_error(self, data: _ResponsesStreamEvent) -> LLMChunk:
         self.reset()
-        error = _RESPONSES_ERROR_DATA_ADAPTER.validate_python(data.get("error") or {})
-        error_type = error.get("type", "unknown_error")
+        response = data.get("response") or {}
+        error = _RESPONSES_ERROR_DATA_ADAPTER.validate_python(
+            response.get("error") or data.get("error") or data
+        )
+        error_type = error.get("code") or error.get("type") or "unknown_error"
         error_message = error.get("message", "Unknown streaming error")
         raise OpenAIResponsesStreamError(error_type, error_message)
 
@@ -434,6 +444,7 @@ class _OpenAIResponsesStreamParser:
         "response.output_item.done": _on_output_item_done,
         "response.completed": _on_response_terminal,
         "response.incomplete": _on_response_terminal,
+        "response.failed": _on_error,
         "error": _on_error,
     }
 
@@ -687,4 +698,42 @@ class OpenAIResponsesAdapter(APIAdapter):
 
         return self._stream_parser.parse(
             _RESPONSES_STREAM_EVENT_ADAPTER.validate_python(data)
+        )
+
+    async def parse_stream(
+        self, responses: AsyncGenerator[dict[str, Any]], provider: ProviderConfig
+    ) -> AsyncGenerator[ParsedStreamChunk]:
+        self._stream_parser.reset()
+        pending: list[ParsedStreamChunk] = []
+        has_output = False
+
+        async with aclosing(responses):
+            async for data in responses:
+                parsed = ParsedStreamChunk(data, self.parse_response(data, provider))
+                if has_output:
+                    yield parsed
+                    continue
+                if not self._has_stream_output(parsed.chunk):
+                    pending.append(parsed)
+                    continue
+
+                has_output = True
+                for pending_chunk in pending:
+                    yield pending_chunk
+                pending.clear()
+                yield parsed
+
+            for pending_chunk in pending:
+                yield pending_chunk
+
+    @staticmethod
+    def _has_stream_output(chunk: LLMChunk) -> bool:
+        message = chunk.message
+        return bool(
+            message.content
+            or message.reasoning_content
+            or message.reasoning_payloads
+            or message.tool_calls
+            or message.images
+            or chunk.stop
         )

@@ -22,6 +22,7 @@ from uuid import uuid4
 from pydantic import BaseModel, JsonValue, ValidationError
 
 from vibe.core.agent_loop._request_broker import InteractionRequestBroker
+from vibe.core.agent_loop._title_cadence import TitleCadence, TitleGenTicket
 from vibe.core.agent_loop_hooks import AgentLoopHooksMixin, PostToolFinalization
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
@@ -42,6 +43,7 @@ from vibe.core.config.harness_files import (
     get_harness_files_manager,
 )
 from vibe.core.config.layers.growthbook import GrowthbookLayer
+from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.experiments import ExperimentManager
 from vibe.core.experiments.client import RemoteEvalClient
@@ -49,7 +51,10 @@ from vibe.core.experiments.models import EvalResponse
 from vibe.core.experiments.session import (
     hydrate_experiments_from_session as session_hydrate_experiments_from_session,
     initialize_experiments as session_initialize_experiments,
+    resolve_plan_attributes as session_resolve_plan_attributes,
 )
+from vibe.core.git.errors import GitError
+from vibe.core.git.worktree.repository import WorktreeRepository
 from vibe.core.hooks.config import load_hooks_from_fs
 from vibe.core.hooks.manager import HooksManager
 from vibe.core.hooks.models import HookConfigResult, HookEvent
@@ -63,6 +68,7 @@ from vibe.core.llm.format import (
     ResolvedToolCall,
 )
 from vibe.core.llm.types import BackendLike
+from vibe.core.llm.utility_completion import is_fast_utility_model
 from vibe.core.middleware import (
     PLAN_AGENT_EXIT,
     AutoCompactMiddleware,
@@ -86,6 +92,7 @@ from vibe.core.session.session_id import extract_suffix, generate_session_id
 from vibe.core.session.session_lease import SessionLease
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.session.session_migration import migrate_sessions_entrypoint
+from vibe.core.session.title_policy import DEFAULT_TITLE_POLICY
 from vibe.core.skills.manager import SkillManager
 from vibe.core.subagents import SubagentRunnerPort
 from vibe.core.system_prompt import get_universal_system_prompt
@@ -121,7 +128,7 @@ from vibe.core.tools.builtins.read_file import ReadFileArgs
 from vibe.core.tools.builtins.skill import (
     Skill as SkillTool,
     SkillArgs,
-    select_skill_result,
+    build_skill_result,
     skill_content_marker,
 )
 from vibe.core.tools.io_port import ToolIOPort
@@ -186,7 +193,7 @@ from vibe.core.utils import (
     is_user_cancellation_event,
 )
 from vibe.observability.logging import log_model_call_success, logger
-from vibe.setup.auth.whoami import WhoAmICache
+from vibe.setup.auth.whoami import WhoAmICache, WhoAmIResult, derive_user_plan
 from vibe.user_content import UserDisplayContent, UserResource
 from vibe.utils import VIBE_WARNING_TAG
 from vibe.utils.api_keys import resolve_api_key
@@ -254,6 +261,9 @@ class AgentRuntimePolicy:
     cache_store: CacheStore
     force_bypass_tool_permissions: bool
     local_managed_shell_runtime_enabled: bool
+    # Whether this surface wants background LLM session titles. Core owns the
+    # capability; the delivery layer (app server) owns this policy decision.
+    auto_title_enabled: bool = False
 
 
 class _SwappableConfigSource:
@@ -285,6 +295,36 @@ class _PreparedReload:
     hook_config_result: HookConfigResult | None
 
 
+# Hold strong references to background backend-close tasks so CPython doesn't
+# GC them mid-execution (the loop keeps only weak refs to tasks). Discarded on
+# completion. Matches the retention pattern used elsewhere in the codebase.
+_pending_close_tasks: set[asyncio.Task[None]] = set()
+
+
+def _close_backend_in_background(backend: BackendLike) -> None:
+    """Close a replaced backend's HTTP pool without blocking the loop.
+
+    Called from the synchronous reload commit, so it can't await. The old and
+    new backends own separate httpx pools, so closing the old one concurrently
+    with the new one is safe. Leaking the pool here is what eventually surfaces
+    as ``httpx.PoolTimeout`` in a long-lived session that swaps models/agents.
+    """
+
+    async def _close() -> None:
+        with contextlib.suppress(Exception):
+            await backend.__aexit__(None, None, None)
+
+    task = asyncio.create_task(_close())
+    _pending_close_tasks.add(task)
+
+    def _on_done(done: asyncio.Task[None]) -> None:
+        _pending_close_tasks.discard(done)
+        if not done.cancelled():
+            done.exception()  # mark retrieved, suppress "never retrieved" warning
+
+    task.add_done_callback(_on_done)
+
+
 @dataclass(frozen=True, slots=True)
 class AgentTurnOptions:
     retry_sink: RetryObserver | None = None
@@ -301,6 +341,9 @@ class _ActiveTurn:
 
 
 _NO_TURN = _ActiveTurn()
+
+# Test-only kill switch for harnesses that run the real CLI against a mock model.
+_DISABLE_AUTO_TITLE_ENV_VAR = "VIBE_TEST_DISABLE_AUTO_TITLE"
 
 
 class AgentLoopError(Exception):
@@ -448,9 +491,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         hook_config_result: HookConfigResult | None = None,
         permission_store: PermissionStore | None = None,
         mcp_registry: MCPRegistry | None = None,
+        connector_registry: ConnectorRegistry | None = None,
         cache_store: CacheStore | None = None,
         force_bypass_tool_permissions: bool = False,
         local_managed_shell_runtime_enabled: bool = True,
+        auto_title_enabled: bool = False,
         experiment_state: EvalResponse | None = None,
         await_experiment_model: bool = False,
         parent_session_id: str | None = None,
@@ -467,6 +512,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._config_orchestrator = config_orchestrator
         self._force_bypass_tool_permissions = force_bypass_tool_permissions
         self._local_managed_shell_runtime_enabled = local_managed_shell_runtime_enabled
+        self._auto_title_enabled = auto_title_enabled
         self._headless = headless
         self._is_subagent = is_subagent
         self.cache_store = cache_store or InMemoryCacheStore()
@@ -477,11 +523,25 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._init_error: Exception | None = None
         self._init_start_time = time.monotonic()
         self._experiments_task: asyncio.Task[None] | None = None
+        # Resume-time plan/org rebuild runs in its own task, NOT _experiments_task:
+        # reusing the latter would make start_initialize_experiments a no-op (its
+        # guard) and skip the GrowthBook eval on resume-then-continue paths.
+        self._plan_attrs_task: asyncio.Task[None] | None = None
         self._reload_generation: int = 0
         self._pending_new_session_telemetry: bool = False
         self._deferred_new_session_telemetry: bool = False
         self._ready_telemetry_pending: bool = defer_heavy_init
         self._last_init_duration_ms: int | None = None
+        self._auto_title_task: asyncio.Task[None] | None = None
+        # Background title results land here. An app-server drain surfaces them
+        # immediately (between turns); otherwise the next turn drains them.
+        self._out_of_band_events: asyncio.Queue[BaseEvent] = asyncio.Queue()
+        self._title_policy = DEFAULT_TITLE_POLICY
+        self._title_cadence = TitleCadence(
+            refresh_every=self._title_policy.refresh_every_steps,
+            capped_max_generations=self._title_policy.capped_max_generations,
+            initial_max_steps=self._title_policy.initial_max_steps,
+        )
 
         self._permission_store = permission_store or PermissionStore()
         self.session_id = session_id or generate_session_id()
@@ -500,7 +560,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             None if defer_heavy_init else self._create_mcp_pool()
         )
         self.connector_registry: ConnectorRegistry | None = (
-            None if defer_heavy_init else self._create_connector_registry()
+            connector_registry
+            if defer_heavy_init
+            else connector_registry or self._create_connector_registry()
         )
         self.agent_manager = AgentManager(
             self._config_orchestrator,
@@ -565,6 +627,20 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._tool_event_queue: asyncio.Queue[BaseEvent | None] | None = None
         self._request_broker = InteractionRequestBroker()
         self._active_turn: _ActiveTurn | None = None
+        # Operations that are not turns but still hold the session: anything
+        # reading the working directory or acting on its repository for longer
+        # than an instant. They exclude each other through _take_session, so an
+        # operation announces itself rather than every other one having to know
+        # it exists. A turn will not start while one is held either, which is
+        # what makes it safe for a holder to await.
+        self._holders: list[str] = []
+        # The directory a move granted session trust to, so a later move
+        # releases that and not a grant somebody else made.
+        self._trust_taken_by_move: Path | None = None
+        # Backends swapped out by an in-session reload while a turn was active.
+        # An in-flight stream may still hold one, so its close is deferred until
+        # the turn ends (drained at the start of the next turn and in aclose()).
+        self._backends_to_close: list[BackendLike] = []
         self.launch_context = launch_context
         config = self.config
         try:
@@ -588,6 +664,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             launch_context=self.launch_context,
             experiments_getter=lambda: self.experiment_manager.assignments(),
             user_plan_getter=lambda: self.user_plan,
+            experiment_attributes_getter=lambda: self.experiment_manager.attributes(),
         )
         self.session_logger = SessionLogger(
             config.session_logging,
@@ -705,9 +782,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             await asyncio.to_thread(thread.join)
             if err := self._init_error:
                 raise copy.copy(err).with_traceback(err.__traceback__)
-        if (task := self._experiments_task) is not None:
-            if task is asyncio.current_task():
-                return
+        for task in (self._experiments_task, self._plan_attrs_task):
+            if task is None or task is asyncio.current_task():
+                continue
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
@@ -767,6 +844,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             cache_store=self.cache_store,
             force_bypass_tool_permissions=self.bypass_tool_permissions,
             local_managed_shell_runtime_enabled=self._local_managed_shell_runtime_enabled,
+            auto_title_enabled=self._auto_title_enabled,
         )
 
     async def record_child_session(
@@ -959,7 +1037,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._experiments_task = asyncio.create_task(self.initialize_experiments())
 
     async def initialize_experiments(self) -> None:
-        updated = await session_initialize_experiments(
+        updated, user_plan = await session_initialize_experiments(
             config=self.config,
             manager=self.experiment_manager,
             session_logger=self.session_logger,
@@ -967,6 +1045,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             resolve_identity=self.identity_cache.resolve,
             resolve_whoami=self.whoami_cache.resolve,
         )
+        # Populate the legacy user_plan display label from the whoami the
+        # experiments path already fetched, so early telemetry events
+        # (vibe.new_session / vibe.ready) and non-CLI surfaces carry it even
+        # when AccountController.read never runs.
+        self.set_user_plan(user_plan)
         if updated and self._await_experiment_model:
             with contextlib.suppress(Exception):
                 self._sync_growthbook_layer_variants()
@@ -976,6 +1059,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     async def hydrate_experiments_from_session(
         self, *, refresh_prompt: bool = True
     ) -> None:
+        # Restore only the sticky variant assignment from meta.json (frozen so
+        # variants do not re-bucket on resume).
         hydrated = await session_hydrate_experiments_from_session(
             config=self.config,
             manager=self.experiment_manager,
@@ -987,6 +1072,95 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 await self.refresh_config()
                 if refresh_prompt:
                     await self.refresh_system_prompt()
+        # Plan/org attributes and user_plan are user-scoped, not session-scoped:
+        # rebuild them from the identity + /whoami path (through their caches) so
+        # a resumed session reports the user's CURRENT plan and resuming never
+        # restores a stale value from meta.json. Run in the BACKGROUND (it does
+        # network I/O) so resume is not blocked — tracked as its OWN task so
+        # wait_until_ready joins it and aclose cancels it, while leaving
+        # _experiments_task free for start_initialize_experiments (GrowthBook).
+        if self._plan_attrs_task is None:
+            self._plan_attrs_task = asyncio.create_task(self._resolve_plan_attributes())
+
+    async def _resolve_plan_attributes(self) -> None:
+        try:
+            user_plan = await session_resolve_plan_attributes(
+                config=self.config,
+                manager=self.experiment_manager,
+                launch_context=self.launch_context,
+                resolve_identity=self.identity_cache.resolve,
+                resolve_whoami=self.whoami_cache.resolve,
+            )
+            self.set_user_plan(user_plan)
+        except Exception:
+            logger.exception("Failed to resolve plan attributes on resume")
+
+    async def apply_account_whoami(
+        self, *, console_base_url: str, api_key: str, whoami: WhoAmIResult
+    ) -> None:
+        """Reconcile telemetry's plan fields with the account controller's live
+        /whoami so ``user_plan`` and ``experiment_attributes`` never diverge.
+
+        The experiments path may have populated the manager snapshot from a
+        stale disk-cache hit; the account controller fetches live, so feed that
+        fresh result back into (a) the in-memory whoami cache and (b) the
+        manager's attribute snapshot — updating only the whoami-derived fields
+        so identity-derived ones (org/workspace/user) are preserved — then set
+        ``user_plan`` from the same result.
+
+        First await any in-flight experiments/plan resolution so this live
+        result is the LAST writer: otherwise a background resolve that started
+        with a stale disk hit could finish afterwards and clobber the reconcile.
+        """
+        for task in (self._experiments_task, self._plan_attrs_task):
+            if task is not None and task is not asyncio.current_task():
+                with contextlib.suppress(BaseException):
+                    await task
+        self.whoami_cache.populate(
+            base_url=console_base_url, api_key=api_key, result=whoami
+        )
+        current = self.experiment_manager.attributes()
+        if current is not None:
+            self.experiment_manager.set_attributes(
+                current.model_copy(
+                    update={
+                        "planType": whoami.plan_type.value,
+                        "planName": whoami.plan_name,
+                        "customerId": whoami.customer_id,
+                        "organizationKind": whoami.organization_kind,
+                    }
+                )
+            )
+        self.set_user_plan(derive_user_plan(whoami))
+
+    async def clear_account_whoami(self, *, api_key: str) -> None:
+        """After a rejected credential (401/403), drop any cached plan so
+        telemetry reports ``null`` ("lookup failed") rather than a stale cached
+        plan: invalidate the whoami cache (in-memory + disk) for the key and null
+        the plan fields on ``user_plan`` and the manager snapshot.
+
+        Awaits any in-flight experiments/plan resolution first so this clear is
+        the LAST writer and cannot be undone by a background resolve that started
+        with a now-invalid cache hit.
+        """
+        for task in (self._experiments_task, self._plan_attrs_task):
+            if task is not None and task is not asyncio.current_task():
+                with contextlib.suppress(BaseException):
+                    await task
+        self.whoami_cache.invalidate(api_key)
+        current = self.experiment_manager.attributes()
+        if current is not None:
+            self.experiment_manager.set_attributes(
+                current.model_copy(
+                    update={
+                        "planType": None,
+                        "planName": None,
+                        "customerId": None,
+                        "organizationKind": None,
+                    }
+                )
+            )
+        self.set_user_plan(None)
 
     def emit_new_session_telemetry(self) -> None:
         # Any direct emit (e.g. /new, /clear via _reset_session) consumes a pending
@@ -1015,15 +1189,22 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.telemetry_client.send_session_closed()
 
     async def aclose(self) -> None:
-        if (task := self._experiments_task) is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(BaseException):
-                await task
+        self._cancel_auto_title_task()
+        for task in (self._experiments_task, self._plan_attrs_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
         if self._mcp_pool is not None:
             with contextlib.suppress(Exception):
                 await self._mcp_pool.aclose()
         with contextlib.suppress(Exception):
             await self.backend.__aexit__(None, None, None)
+        # Close any backends deferred during an in-flight turn at session end.
+        for backend in self._backends_to_close:
+            with contextlib.suppress(Exception):
+                await backend.__aexit__(None, None, None)
+        self._backends_to_close.clear()
         with contextlib.suppress(Exception):
             await self.experiment_manager.aclose()
         with contextlib.suppress(Exception):
@@ -1134,12 +1315,55 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def _turn(self) -> _ActiveTurn:
         return self._active_turn or _NO_TURN
 
+    def _take_session(self, operation: str) -> None:
+        """Claim the session for *operation*, refusing if something else holds it.
+
+        Both the claim and the refusal, because mutual exclusion needs each side
+        to do both. An operation that only announced itself could still start
+        inside another one's awaits.
+        """
+        if self._holders:
+            raise AgentLoopStateError(
+                f"Cannot start {operation} while {self._holders[0]} is running"
+            )
+        self._holders.append(operation)
+
+    def _release_session(self, operation: str) -> None:
+        self._holders.remove(operation)
+
     async def notice_retry(self, reason: RetryReason) -> None:
         if (sink := self._turn.retry_sink) is not None:
             await sink(reason)
 
     def backend_factory(self, config: VibeConfigSchema | None = None) -> BackendLike:
         return self._injected_backend or self._select_backend(config)
+
+    def _schedule_backend_close(self, backend: BackendLike) -> None:
+        """Close a replaced backend's pool, now if idle or deferred to next turn.
+
+        A side-channel reload (e.g. ``session/agent/update``) can run while a turn
+        streams through the old backend; closing it then would abort the stream.
+        Defer until the turn ends -- drained at the start of the next ``act()`` and
+        in :meth:`aclose`.
+
+        The deferral keys on ``_active_turn`` because a subagent's MCP sampling
+        streams through the *parent's* backend (via the ``sampling_callback`` lent
+        to the ``task`` tool), and the subagent runs as a task inside the parent's
+        turn -- so the parent's turn stays active for the subagent's whole lifetime.
+        If a subagent is ever detached to outlive the parent's turn, this deferral
+        no longer protects its sampling stream and the close would tear it down.
+        """
+        if self._active_turn is None:
+            _close_backend_in_background(backend)
+        else:
+            self._backends_to_close.append(backend)
+
+    def _drain_pending_backend_closes(self) -> None:
+        """Close backends deferred during an in-flight turn. Call when idle."""
+        pending = self._backends_to_close
+        self._backends_to_close = []
+        for backend in pending:
+            _close_backend_in_background(backend)
 
     def _select_backend(self, config: VibeConfigSchema | None = None) -> BackendLike:
         config = config or self.config
@@ -1252,6 +1476,17 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             )
         if self._active_turn is not None:
             raise AgentLoopStateError("A turn is already active")
+        # A holder is not a turn, so the check above cannot see one. A move
+        # refuses while a turn is active and then awaits twice; without this a
+        # turn could begin in that window and bind its tools to the directory
+        # being moved out from under them.
+        if self._holders:
+            raise AgentLoopStateError(
+                f"Cannot start a turn while {self._holders[0]} is running"
+            )
+        # The previous turn (if any) is done, so backends deferred during it are
+        # safe to close now -- no in-flight stream holds them anymore.
+        self._drain_pending_backend_closes()
         options = turn_options or AgentTurnOptions()
         self._active_turn = _ActiveTurn(
             subagent_runner=subagent_runner,
@@ -1313,6 +1548,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             stage="no_history" if not resolved_prompt else "git_check",
             project_picker=project_picker,
         )
+        # This reads the repository at the session's directory and pushes its
+        # branch, so a move landing mid-run would ship the checkout the session
+        # had already left.
+        self._take_session("teleport")
         try:
             teleport_message_context: TeleportMessageContext | None = None
             if resolved_prompt and self._should_summarize_teleport_context(prompt):
@@ -1365,6 +1604,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         finally:
             telemetry_tracker.send_failure_if_needed()
             self._teleport_service = None
+            self._release_session("teleport")
 
     def _resolve_teleport_prompt(self, prompt: str | None) -> str:
         if prompt:
@@ -1683,7 +1923,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if auto_title is not None and self.session_logger.set_initial_auto_title(
             auto_title
         ):
-            yield SessionTitleUpdatedEvent(title=auto_title)
+            yield SessionTitleUpdatedEvent(title=auto_title, session_id=self.session_id)
 
         if self._hooks_manager:
             self._hooks_manager.reset_retry_count()
@@ -1751,6 +1991,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 await self._save_messages()
                 self._is_user_prompt_call = False
 
+                # Schedule after each model step, not only at turn end: a single
+                # tool-heavy turn can run for minutes, and the first title should
+                # land as soon as there is usable context. The step ending with
+                # an assistant answer (not a tool result) means the turn is
+                # completing, which the cadence uses to time the initial title.
+                self._maybe_schedule_title_generation(
+                    turn_completing=self.messages[-1].role != Role.tool
+                )
+
                 if self._pending_clear_context:
                     async for event in self._clear_context_after_plan_accept():
                         yield event
@@ -1769,7 +2018,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     for hook_event in hook_events:
                         yield hook_event
                     should_break_loop = self._queue_post_turn_retry(retry_msg)
-
         finally:
             await self._save_messages()
 
@@ -1779,6 +2027,92 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             return True
         self.messages.append(retry_msg)
         return False
+
+    def _maybe_schedule_title_generation(self, *, turn_completing: bool) -> None:
+        # Schedule a background title refresh when due; never blocks the turn.
+        if os.environ.get(_DISABLE_AUTO_TITLE_ENV_VAR) == "1":
+            return
+        # Core owns the capability; the delivery layer decides whether this
+        # surface drives it. Other clients keep title=None and fall back to the
+        # message preview at the ACP boundary until the harness owns titles.
+        if not self._auto_title_enabled:
+            return
+        if not self.session_logger.enabled:
+            return
+        if self.session_logger.title_source == "manual":
+            return
+        if self._auto_title_task is not None and not self._auto_title_task.done():
+            return
+
+        # Only refresh periodically when the title runs on the cheap fast model;
+        # otherwise it falls back to the active model and must stay bounded.
+        periodic = is_fast_utility_model(self.config)
+        ticket = self._title_cadence.begin_if_due(
+            periodic=periodic, turn_completing=turn_completing
+        )
+        if ticket is None:
+            return
+
+        snapshot = list(self.messages)
+        self._auto_title_task = asyncio.create_task(
+            self._generate_title_task(
+                snapshot, ticket=ticket, session_id=self.session_id
+            )
+        )
+
+    async def _generate_title_task(
+        self, messages: list[LLMMessage], *, ticket: TitleGenTicket, session_id: str
+    ) -> None:
+        # session_id pins the conversation this title was generated for: a /new or
+        # /clear reset swaps the loop (and its in-place logger) to a new id mid
+        # flight, and this title must not land on it.
+        from vibe.core.session.title_model import generate_session_title
+
+        try:
+            title = await generate_session_title(
+                messages,
+                config=self.config,
+                previous_title=self.session_logger.title,
+                policy=self._title_policy,
+            )
+            if title is None:
+                self._title_cadence.restore(ticket)
+                return
+            changed = await self.session_logger.refresh_auto_title(
+                title, expected_session_id=session_id
+            )
+            if not changed:
+                return
+            self._out_of_band_events.put_nowait(
+                SessionTitleUpdatedEvent(title=title, session_id=session_id)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._title_cadence.restore(ticket)
+            logger.warning("Background session title update failed", exc_info=True)
+
+    async def out_of_band_events(self) -> AsyncGenerator[BaseEvent, None]:
+        """Stream events produced outside a turn (e.g. background title updates).
+
+        The delivery layer drains this as the single consumer, so a result
+        surfaces once and cannot race the turn projector for the same event.
+        Only surfaces that opt into background titles run a drain.
+        """
+        while True:
+            yield await self._out_of_band_events.get()
+
+    def _cancel_auto_title_task(self) -> None:
+        task = self._auto_title_task
+        self._auto_title_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _reset_title_state(self) -> None:
+        self._cancel_auto_title_task()
+        while not self._out_of_band_events.empty():
+            self._out_of_band_events.get_nowait()
+        self._title_cadence.reset()
 
     def _skill_already_loaded(self, name: str) -> bool:
         marker = skill_content_marker(name)
@@ -1797,7 +2131,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if skill_info is None:
             return
 
-        result = select_skill_result(
+        result = await build_skill_result(
             skill_info, already_loaded=self._skill_already_loaded(parsed.name)
         )
         call_id = str(uuid4())
@@ -2886,6 +3220,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.session_id = session_id
         self.parent_session_id = parent_session_id
         self.replace_session_lease(lease)
+        self._reset_title_state()
         await self.initialize_experiments()
         self.emit_new_session_telemetry()
 
@@ -2955,10 +3290,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         # Clear _await_experiment_model so awaiting_experiment_model returns False
         # immediately — the rebind discards this init lifecycle entirely.
         self._await_experiment_model = False
-        task = self._experiments_task
-        self._experiments_task = None
-        if task is not None and not task.done():
-            task.cancel()
+        for attr in ("_experiments_task", "_plan_attrs_task"):
+            task = getattr(self, attr)
+            setattr(self, attr, None)
+            if task is not None and not task.done():
+                task.cancel()
 
     def _apply_active_model_pricing(self) -> None:
         try:
@@ -3000,6 +3336,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._current_user_message_id = None
         self._is_user_prompt_call = False
         self._reactive_recovery_used = False
+        self._reset_title_state()
 
     @requires_init
     async def clear_history(self) -> None:
@@ -3029,6 +3366,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             await self._save_messages()
             summary = await self.compaction_manager.compact(extra_instructions)
             self.middleware_pipeline.reset(reset_reason=ResetReason.COMPACT)
+            # A compacted conversation reads very differently from its first
+            # turn; force a title refresh at the next scheduling point.
+            self._title_cadence.mark_compaction()
             return summary
         except Exception:
             await self._save_messages()
@@ -3079,6 +3419,167 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await self.reload_with_initial_messages(
             reset_middleware=False, switch_to_agent=agent_name
         )
+
+    @requires_init
+    async def relocate(self, cwd: Path) -> None:
+        """Move the session to *cwd*, or leave it exactly where it was.
+
+        Refused while a turn is active. Tool calls in a batch run as concurrent
+        tasks, so a move alongside a file or shell call would leave that call
+        writing to the old directory, and swapping the objects it holds cannot
+        stop one already running. A subagent runs inside its parent's turn, so
+        this covers those too.
+
+        Refused as well while an operation holds the session. A turn is not
+        the only thing that reads the working directory or acts on its
+        repository, and the rest are invisible to the turn check.
+
+        Raises:
+            AgentLoopStateError: Something is in flight, or *cwd* is not a
+                directory.
+        """
+        if self._active_turn is not None:
+            raise AgentLoopStateError("Cannot relocate while a turn is active")
+        target = cwd.expanduser().resolve()
+        if target == self.cwd:
+            return
+        if not target.is_dir():
+            raise AgentLoopStateError(f"Not a directory: {target}")
+
+        # Taken before the first await, and held across both. Checking once and
+        # then awaiting would leave a window for an operation to start against a
+        # directory that is moving under it.
+        self._take_session("relocation")
+        try:
+            checkout = await asyncio.to_thread(self._destination_checkout, target)
+            if checkout is None:
+                raise AgentLoopStateError(
+                    f"Not a worktree of this session's repository: {target}"
+                )
+
+            previous_files = self.harness_files
+            previous_cwd = self.cwd
+            moved = self.harness_files.moved_to(target)
+            # The checkout rather than the position inside it. The project layer
+            # finds `.vibe` by walking up from the working directory and asks
+            # whether the directory holding it is trusted, and trust resolves
+            # upward too - so a grant on a subdirectory never reaches the root
+            # the file sits at, and a subdirectory move would read no project
+            # config at all. That is the case re-rooting exists for.
+            #
+            # Safe only because of the check above. Session trust outranks an
+            # explicit untrust at the same path and reaches every descendant,
+            # so granting it for an arbitrary directory would hand the session
+            # a tree the user never opened. Restricted to a checkout of the
+            # repository it is already working in, it inherits authority rather
+            # than creating it.
+            moved.trust_store.trust_for_session(checkout)
+            try:
+                await self._bind_workspace(target, moved)
+            except BaseException:
+                moved.trust_store.revoke_session_trust(checkout)
+                await self._restore_workspace(previous_cwd, previous_files)
+                raise
+            # Release the grant a move took, and only that one. The trust store
+            # is process-wide and counts grants, so releasing the departure
+            # outright would take back one the session never made: at session
+            # start for this session, or for another session sitting there.
+            if self._trust_taken_by_move is not None:
+                moved.trust_store.revoke_session_trust(self._trust_taken_by_move)
+            self._trust_taken_by_move = checkout
+        finally:
+            self._release_session("relocation")
+
+    def _destination_checkout(self, target: Path) -> Path | None:
+        """The checkout *target* sits in, or None when it is not one to move to.
+
+        The precondition the rest of the move rests on, and it has to be exactly
+        this narrow. Anything wider grants trust over a tree the session never
+        occupied; anything narrower strands a session opened in a subdirectory,
+        since it moves into the matching subdirectory of the worktree and could
+        not name its way back.
+
+        So the destinations are the counterparts of the current position: the
+        same relative path in the main checkout, and in each linked worktree.
+        Not the parent checkout, which would widen a subdirectory session to the
+        whole repository, and not a sibling directory, which the session has no
+        claim on either.
+
+        The checkout comes back with the answer because trust is granted on it
+        rather than on the position: a `.vibe` at the root is out of reach of a
+        grant made on a subdirectory below it.
+        """
+        try:
+            with WorktreeRepository.open(self.cwd) as repository:
+                for worktree in repository.linked():
+                    if worktree.path.resolve() == target:
+                        return worktree.root.resolve()
+                if repository.repository_counterpart == target:
+                    return repository.root
+        except GitError:
+            return None
+        return None
+
+    def _project_config_layer(self) -> ProjectConfigLayer | None:
+        """The live project config layer, or None when there is none to re-root.
+
+        Absent when the project source is disabled, and when the orchestrator
+        carries no layer stack at all, which is how the test doubles are built.
+        """
+        with contextlib.suppress(AttributeError, KeyError):
+            layer = self.config_orchestrator.get_layer(ProjectConfigLayer.NAME)
+            if isinstance(layer, ProjectConfigLayer):
+                return layer
+        return None
+
+    async def _bind_workspace(
+        self, cwd: Path, harness_files: HarnessFilesManager
+    ) -> None:
+        """Point everything rooted in the working directory at *cwd*."""
+        self.cwd = cwd
+        self.harness_files = harness_files
+        # The logger holds its own copy and is what writes the directory into
+        # session metadata, so a move that skipped it would be recorded as
+        # never having happened.
+        self.session_logger.relocated_to(cwd)
+        if (layer := self._project_config_layer()) is not None:
+            await layer.reroot(cwd)
+            await self.config_orchestrator.reload()
+        self.agent_manager.rebind(harness_files)
+        # Rebuilds the tools, skills, prompt and hooks bound to the old
+        # directory. Preparing happens off-thread and the commit is synchronous,
+        # so that half is not observable partly applied. It runs last so those
+        # objects are built from the config the destination resolves to.
+        #
+        # It returns without committing, and without raising, when a newer
+        # reload supersedes it. The destination still wins: that newer reload
+        # prepares from the live self.cwd, which is already the new one. What is
+        # not guaranteed is that the rebuild has finished by the time relocate
+        # returns. Treating supersession as failure would be worse, since the
+        # rollback would then fight a reload that is legitimately in flight.
+        await self.reload_with_initial_messages(reload_hooks=True)
+
+    async def _restore_workspace(
+        self, cwd: Path, harness_files: HarnessFilesManager
+    ) -> None:
+        """Undo a partly applied move.
+
+        Failures are logged rather than raised. The caller is already unwinding
+        the exception that says why the move did not happen, and replacing it
+        with a second one would hide that.
+        """
+        self.cwd = cwd
+        self.harness_files = harness_files
+        self.session_logger.relocated_to(cwd)
+        try:
+            if (layer := self._project_config_layer()) is not None:
+                await layer.reroot(cwd)
+                await self.config_orchestrator.reload()
+            self.agent_manager.rebind(harness_files)
+        except Exception:
+            logger.exception(
+                "Failed to restore the workspace after a rejected move cwd=%s", cwd
+            )
 
     @requires_init
     async def reload_with_initial_messages(
@@ -3181,6 +3682,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         # Now that the profile is live, the prepared managers should track the live
         # config so later refreshes (refresh_config) propagate to them.
         prepared.config_source.point_to(lambda: self.config)
+        # Close the previous backend's HTTP pool so its connections don't leak
+        # on every reload (model/agent/config switch) within a long-lived session.
+        # If a turn is in flight (e.g. a side-channel session/agent/update RPC),
+        # its stream may still hold this backend, so defer the close to the next
+        # turn rather than tearing its connections down underneath it.
+        if self.backend is not prepared.backend:
+            self._schedule_backend_close(self.backend)
         self.backend = prepared.backend
         self.tool_manager = prepared.tool_manager
         self.skill_manager = prepared.skill_manager

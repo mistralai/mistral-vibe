@@ -65,6 +65,8 @@ from vibe.app_server.protocol import (
     SessionStartParams,
     SessionTitleUpdateParams,
     SessionTitleUpdateResponse,
+    WorkspaceGitCheckoutsParams,
+    WorkspaceGitCheckoutsResponse,
     WorkspaceTrustStatusParams,
     WorkspaceWorktreeListParams,
     WorkspaceWorktreeListResponse,
@@ -1120,7 +1122,7 @@ async def _remove_worktree_over_rpc(
         )
 
     try:
-        raw = await client.request("workspace/worktrees/remove", {"cwd": str(cwd)})
+        raw = await client.request("workspace/git/worktrees/remove", {"cwd": str(cwd)})
     finally:
         if session is not None:
             await session.close()
@@ -1361,7 +1363,7 @@ async def test_passive_host_lists_linked_worktrees(tmp_path: Path) -> None:
     handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
 
     result = await handler.dispatch(
-        "workspace/worktrees/list",
+        "workspace/git/worktrees/list",
         WorkspaceWorktreeListParams(cwd=str(tmp_path)).model_dump(
             mode="json", by_alias=True
         ),
@@ -1375,7 +1377,60 @@ async def test_passive_host_lists_linked_worktrees(tmp_path: Path) -> None:
             "cwd": str(worktree.path),
             "root": str(worktree.root),
             "repoRoot": str(worktree.repo_root),
+            # Absent unless the caller asked for details, which this did not.
+            "branchChanges": None,
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_passive_host_reports_the_repository_counterpart(tmp_path: Path) -> None:
+    """Where a session listing from a subdirectory would stand in the main checkout."""
+    _init_repo(tmp_path)
+    worktree = _prepare("counterpart", tmp_path, branch="feat/counterpart")
+    (tmp_path / "packages" / "api").mkdir(parents=True)
+    (worktree.root / "packages" / "api").mkdir(parents=True)
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/git/worktrees/list",
+        WorkspaceWorktreeListParams(
+            cwd=str(worktree.root / "packages" / "api")
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    response = cast(WorkspaceWorktreeListResponse, result.response)
+    assert response.repository_cwd == str(
+        (tmp_path / "packages" / "api").resolve(strict=True)
+    )
+
+
+@pytest.mark.asyncio
+async def test_passive_host_reports_no_counterpart_outside_the_main_checkout(
+    tmp_path: Path,
+) -> None:
+    """A directory that exists only on a feature branch is not a destination.
+
+    The worktree holding it is still listed; it is the main checkout that has
+    nowhere for the session to stand, and saying so is what keeps a caller from
+    offering a move the relocation would refuse.
+    """
+    _init_repo(tmp_path)
+    worktree = _prepare("only-here", tmp_path, branch="feat/only-here")
+    (worktree.root / "packages" / "api").mkdir(parents=True)
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/git/worktrees/list",
+        WorkspaceWorktreeListParams(
+            cwd=str(worktree.root / "packages" / "api")
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    response = cast(WorkspaceWorktreeListResponse, result.response)
+    assert response.repository_cwd is None
+    assert [entry.cwd for entry in response.worktrees] == [
+        str(worktree.root / "packages" / "api")
     ]
 
 
@@ -1393,14 +1448,166 @@ async def test_passive_host_lists_no_worktrees_without_git(
     handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
 
     result = await handler.dispatch(
-        "workspace/worktrees/list",
+        "workspace/git/worktrees/list",
         WorkspaceWorktreeListParams(cwd=str(tmp_path)).model_dump(
             mode="json", by_alias=True
         ),
     )
 
     response = cast(WorkspaceWorktreeListResponse, result.response)
-    assert response.model_dump(mode="json", by_alias=True) == {"worktrees": []}
+    assert response.model_dump(mode="json", by_alias=True) == {
+        "worktrees": [],
+        "repositoryBranch": None,
+        "repositoryCwd": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_passive_host_reads_the_main_checkout(tmp_path: Path) -> None:
+    """The main checkout is absent from the worktree listing by design."""
+    _init_repo(tmp_path)
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/git/checkouts",
+        WorkspaceGitCheckoutsParams(
+            repo_local_paths=[str(tmp_path)], session_cwd=str(tmp_path)
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    response = cast(WorkspaceGitCheckoutsResponse, result.response)
+    assert response.model_dump(mode="json", by_alias=True) == {
+        "checkouts": [
+            {
+                "repoLocalPath": str(tmp_path),
+                "ok": True,
+                "isPrimary": True,
+                # No worktree: the session sits in the repository's own
+                # checkout, which the listing does not report.
+                "worktree": None,
+                "root": str(tmp_path.resolve()),
+                "branch": "main",
+                "baseBranch": "main",
+                # The fixture repository has no remote, which is what a checkout
+                # made locally and never pushed looks like.
+                "repoUrl": None,
+                "message": None,
+            }
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_passive_host_reads_the_worktree_holding_the_session(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+    worktree = _prepare("status-listed", tmp_path, branch="feat/status-listed")
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/git/checkouts",
+        WorkspaceGitCheckoutsParams(
+            repo_local_paths=[str(tmp_path)], session_cwd=str(worktree.path)
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    response = cast(WorkspaceGitCheckoutsResponse, result.response)
+    [checkout] = response.checkouts
+    # A managed worktree lives outside the repository, so the repository is
+    # still the one holding the session.
+    assert checkout.is_primary is True
+    assert checkout.worktree == "status-listed"
+    assert checkout.branch == "feat/status-listed"
+    assert checkout.base_branch == "main"
+    assert checkout.root == str(worktree.root)
+
+
+@pytest.mark.asyncio
+async def test_passive_host_keeps_an_unreadable_repository_as_the_holder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Containment is a question about paths, so a repository git could not be
+    # read from still takes the session from its ancestor. Handing it to the
+    # ancestor instead would report that ancestor's branch for a session that
+    # is not in it.
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    _init_repo(outer)
+    inner = outer / "nested"
+    inner.mkdir()
+    _init_repo(inner)
+
+    listed = WorktreeRepository.linked
+
+    def unreadable_inner(repository: WorktreeRepository) -> tuple[object, ...]:
+        if repository.root == inner.resolve():
+            raise GitUnavailableError("Git worktree operations require git.")
+        return listed(repository)
+
+    monkeypatch.setattr(WorktreeRepository, "linked", unreadable_inner)
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/git/checkouts",
+        WorkspaceGitCheckoutsParams(
+            repo_local_paths=[str(outer), str(inner)], session_cwd=str(inner)
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    response = cast(WorkspaceGitCheckoutsResponse, result.response)
+    primary = [
+        checkout.repo_local_path
+        for checkout in response.checkouts
+        if checkout.is_primary
+    ]
+    assert primary == [str(inner)]
+
+
+@pytest.mark.asyncio
+async def test_passive_host_reads_the_branch_of_a_worktree_the_listing_skips(
+    tmp_path: Path,
+) -> None:
+    # A detached worktree is absent from the listing, but the session can still
+    # be standing in one. Falling back to the repository would report the main
+    # checkout's branch for a session that is not on it.
+    _init_repo(tmp_path)
+    worktree = _prepare("detached-listed", tmp_path, branch="feat/detached-listed")
+    Repo(worktree.root).git.checkout("--detach")
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/git/checkouts",
+        WorkspaceGitCheckoutsParams(
+            repo_local_paths=[str(tmp_path)], session_cwd=str(worktree.path)
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    response = cast(WorkspaceGitCheckoutsResponse, result.response)
+    [checkout] = response.checkouts
+    assert checkout.root == str(worktree.root)
+    # Detached: on no branch at all, which is not the repository's branch.
+    assert checkout.branch is None
+
+
+@pytest.mark.asyncio
+async def test_passive_host_leaves_out_a_path_git_knows_nothing_about(
+    tmp_path: Path,
+) -> None:
+    # Not a checkout is not a failure to report. A project may link a directory
+    # git knows nothing about, and an entry for it would put a permanent error
+    # in the header rather than simply nothing.
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/git/checkouts",
+        WorkspaceGitCheckoutsParams(
+            repo_local_paths=[str(tmp_path)], session_cwd=None
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    response = cast(WorkspaceGitCheckoutsResponse, result.response)
+    assert response.checkouts == []
 
 
 @pytest.mark.asyncio
@@ -1408,14 +1615,18 @@ async def test_passive_host_lists_no_worktrees_for_non_git_root(tmp_path: Path) 
     handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
 
     result = await handler.dispatch(
-        "workspace/worktrees/list",
+        "workspace/git/worktrees/list",
         WorkspaceWorktreeListParams(cwd=str(tmp_path)).model_dump(
             mode="json", by_alias=True
         ),
     )
 
     response = cast(WorkspaceWorktreeListResponse, result.response)
-    assert response.model_dump(mode="json", by_alias=True) == {"worktrees": []}
+    assert response.model_dump(mode="json", by_alias=True) == {
+        "worktrees": [],
+        "repositoryBranch": None,
+        "repositoryCwd": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -1449,6 +1660,48 @@ async def test_passive_host_renames_saved_session(
     _, metadata = SessionLoader.load_session(session_path)
     assert result.response.title == "Reviewed session"
     assert metadata["title"] == "Reviewed session"
+
+
+@pytest.mark.asyncio
+async def test_rename_on_corrupt_metadata_reports_internal_error(
+    tmp_path: Path,
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    root = build_test_agent_loop(config=config)
+    await root.persist_empty_session()
+
+    async def open_root(_request: runtime.RootOpenRequest) -> AgentLoop:
+        return root
+
+    client_transport, server_transport = memory_transport_pair()
+    server = create_legacy_app_server(server_transport, open_root=open_root)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(ClientInfo(name="test", version="1"))
+    await client.notify("initialized")
+    try:
+        await client.request("session/start", SessionStartParams())
+        session_path = SessionLoader.find_session_by_id(
+            root.session_id, config.session_logging
+        )
+        assert session_path is not None
+        # Corrupt the metadata after the session is attached, so the rename hits
+        # apply_manual_title's read rather than failing session discovery first.
+        (session_path / "meta.json").write_text("{not json", encoding="utf-8")
+
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await client.request(
+                "session/rename",
+                SessionTitleUpdateParams(
+                    session_id=root.session_id, title="New title"
+                ).model_dump(mode="json", by_alias=True),
+            )
+    finally:
+        await client.close()
+
+    assert exc_info.value.error.code is ProtocolErrorCode.INTERNAL_ERROR
+    assert "Failed to read session metadata" in exc_info.value.error.message
 
 
 @pytest.mark.asyncio
@@ -1518,6 +1771,13 @@ async def test_root_config_discovery_uses_session_cwd(
 
     assert blueprint.cwd == session_cwd
     assert blueprint.config.default_agent == "plan"
+    assert blueprint.mcp_registry is not None
+    assert blueprint.mcp_registry._authorization_provider is not None
+    assert blueprint.mcp_registry._descriptor_cache_root == (
+        Path(blueprint.config.session_logging.save_dir).expanduser().resolve().parent
+        / "mcp-descriptors"
+        / "legacy"
+    )
 
 
 def test_experimental_harness_process_selects_the_unified_harness_host(

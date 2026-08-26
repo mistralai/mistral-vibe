@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 import json
-from typing import Any
 
 from mistralai.client import Mistral
 from mistralai.client.models import (
@@ -15,6 +14,7 @@ from mistralai.client.models import (
 from mistralai.extra.realtime import UnknownRealtimeEvent
 
 from vibe.app_server.config import AudioProviderView, TranscribeModelConfigView
+from vibe.cli.audio_request_metadata import RequestMetadataGetter
 from vibe.cli.transcribe.transcribe_client_port import (
     TranscribeDone,
     TranscribeError,
@@ -35,7 +35,7 @@ class MistralTranscribeClient:
         self,
         provider: AudioProviderView,
         model: TranscribeModelConfigView,
-        metadata_getter: Callable[[], dict[str, Any]] | None = None,
+        metadata_getter: RequestMetadataGetter | None = None,
     ) -> None:
         self._api_key = resolve_api_key(provider.api_key_env_var) or ""
         self._server_url = provider.api_base

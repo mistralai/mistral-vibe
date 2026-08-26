@@ -15,6 +15,7 @@ from vibe.app_server.models import (
     PublicCheckpointEntry,
     PublicEntryGenerationStatus,
     PublicHistoryEntry,
+    PublicRetryState,
     PublicSessionState,
     PublicTurn,
     SessionLogSummary,
@@ -127,8 +128,8 @@ class RootSessionCoordinator:
         *,
         current_history: list[PublicHistoryEntry],
         callbacks: list[PublicCallbackEntry],
-        active_turn: PublicTurn | None,
-        completed_turns: list[PublicTurn],
+        turns: list[PublicTurn],
+        retrying: PublicRetryState | None,
         history_limit: int,
         turns_limit: int | None = None,
         include_history: bool = True,
@@ -139,8 +140,8 @@ class RootSessionCoordinator:
             history=self._history.base,
             current_history=current_history,
             callbacks=callbacks,
-            active_turn=active_turn,
-            completed_turns=completed_turns,
+            turns=turns,
+            retrying=retrying,
             history_limit=history_limit,
             turns_limit=turns_limit,
             include_history=include_history,
@@ -165,8 +166,8 @@ class RootSessionCoordinator:
         state = self.public_state(
             current_history=current_history,
             callbacks=callbacks,
-            active_turn=active_turn,
-            completed_turns=completed_turns,
+            turns=[*completed_turns, active_turn],
+            retrying=None,
             history_limit=history_limit,
         )
         return SessionHandoff(
@@ -291,8 +292,8 @@ class RootSessionCoordinator:
         return self.public_state(
             current_history=[],
             callbacks=[],
-            active_turn=None,
-            completed_turns=[],
+            turns=[],
+            retrying=None,
             history_limit=history_limit,
         )
 

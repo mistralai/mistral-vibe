@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 import re
 
-MAX_TITLE_LENGTH = 50
+MAX_TITLE_LENGTH = 72
 ELLIPSIS = "…"
 
 _WHITESPACE_RE = re.compile(r"\s+")

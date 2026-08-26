@@ -6,6 +6,9 @@ iterm = "iterm"
 ITERM = "ITERM"
 asend = "asend"
 certifi = "certifi"
+# Additive Increase / Multiplicative Decrease — congestion-control acronym,
+# not the word "aimed".
+AIMD = "AIMD"
 
 [default.extend-identifiers]
 # macOS pasteboard four-char-code for the PNG flavor — required verbatim

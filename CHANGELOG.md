@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.24.4] - 2026-08-26
+
+### Added
+
+- LLM-generated session titles and terminal title
+- Queue selection and edit mode for queued messages
+- Git info is shown in the session header
+
+### Changed
+
+- Model connections are reused across tool turns for faster responses
+
+### Fixed
+
+- `/mcp login <connector>` routes to the connector auth flow
+- Rate-limited calls retry with adaptive backoff and pacing
+- Model retry state stays authoritative across clients
+- Loading nix-managed skills through a symlinked `SKILL.md` no longer freezes
+- Chat-completion connections are closed to avoid pool timeouts
+
+
 ## [2.24.3] - 2026-08-20
 
 ### Added

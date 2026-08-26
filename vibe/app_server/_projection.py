@@ -389,16 +389,26 @@ def _project_mcp_connectors(
             if connector_registry is not None
             else None
         )
+        source_tools = {
+            tool.name: tool for tool in tools.get((MCPSourceKind.CONNECTOR, name), [])
+        }
+        if connector_registry is not None:
+            for descriptor in connector_registry.get_catalog_tools(name):
+                source_tools.setdefault(
+                    descriptor.name,
+                    MCPToolSummary(
+                        name=descriptor.name,
+                        description=descriptor.description or "",
+                        enabled=False,
+                    ),
+                )
         sources.append(
             MCPSourceSummary(
                 name=name,
                 kind=MCPSourceKind.CONNECTOR,
                 transport="connector",
                 status=status,
-                tools=sorted(
-                    tools.get((MCPSourceKind.CONNECTOR, name), []),
-                    key=lambda tool: tool.name,
-                ),
+                tools=sorted(source_tools.values(), key=lambda tool: tool.name),
                 error=error,
             )
         )

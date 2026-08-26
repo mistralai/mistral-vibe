@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, cast
 
 from vibe.app_server._dispatch import DispatchResult, RequestFailure
@@ -13,20 +14,40 @@ from vibe.app_server._model import ProtocolModel
 from vibe.app_server._resources import ResourceRequestHandler
 from vibe.app_server._root_session import RootSessionCoordinator
 from vibe.app_server._session_backend_port import (
+    ConnectorAuthRequest,
+    MCPAuthorizationProvider,
+    MCPAuthorizationRef,
+    MCPAuthorizationRequired,
+    MCPAuthorizationSnapshot,
+    ResolvedConnector,
+    ResolvedConnectorCatalog,
+    ResolvedConnectorSelection,
+    ResolvedMCPCatalog,
     SessionBackendError,
     SessionBackendEvent,
     SessionBackendKind,
     SessionBackendResult,
+    SessionConnectorSourceState,
+    SessionConnectorState,
+    SessionConnectorToolDescriptor,
     SessionEventSubscription,
     SessionForkResult,
     SessionLifecycleResult,
+    SessionMCPSourceState,
+    SessionMCPState,
+    SessionMCPToolDescriptor,
 )
 from vibe.app_server._sessions import SessionRuntime, SessionRuntimeRegistry
 from vibe.app_server._streaming import finish_event_queue
+from vibe.app_server.connector_catalog import (
+    connector_source_enabled,
+    connector_tool_enabled,
+)
 from vibe.app_server.events import (
     CallbackRequested,
     ClientProjection,
     EventSequenceError,
+    MCPAuthorizationRequiredEvent,
     UnknownNotificationError,
     parse_server_event,
 )
@@ -44,6 +65,7 @@ from vibe.app_server.protocol import (
     ContextInjectResponse,
     EmptyResponse,
     EventNotificationParams,
+    MCPAuthRequiredParams,
     Notification,
     ProtocolErrorCode,
     RuntimeMutationResponse,
@@ -58,6 +80,7 @@ from vibe.app_server.protocol import (
     SessionListResponse,
     SessionReadParams,
     SessionReadResponse,
+    SessionRelocateResponse,
     SessionResumeParams,
     SessionRewindResponse,
     SessionSettingsUpdateParams,
@@ -69,8 +92,22 @@ from vibe.app_server.protocol import (
     TurnSteerParams,
     TurnSteerResponse,
 )
+from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.git.worktree import ManagedWorktree, PreparedWorktree
 from vibe.core.session.session_lease import SessionBusyError
+from vibe.core.tools.connectors.connector_registry import (
+    ConnectorAuthAction,
+    ConnectorCatalogEntry,
+    ConnectorToolDefinition,
+)
+from vibe.core.tools.mcp.authorization import (
+    MCPAuthorizationProvider as LegacyMCPAuthorizationProvider,
+    MCPAuthorizationRef as LegacyMCPAuthorizationRef,
+    MCPAuthorizationRequired as LegacyMCPAuthorizationRequired,
+    MCPAuthorizationSnapshot as LegacyMCPAuthorizationSnapshot,
+)
+from vibe.core.tools.mcp.registry import MCPRegistry
 from vibe.observability.logging import logger
 
 
@@ -93,7 +130,175 @@ type _StopBackgroundTasks = Callable[[Any], Awaitable[list[BaseException]]]
 type _AfterLifecycleResponse = Callable[[], None]
 
 
-@dataclass(slots=True)
+class _LegacyMCPAuthorizationProviderAdapter(LegacyMCPAuthorizationProvider):
+    def __init__(self, provider: MCPAuthorizationProvider) -> None:
+        self._provider = provider
+
+    async def resolve(
+        self, reference: LegacyMCPAuthorizationRef
+    ) -> LegacyMCPAuthorizationSnapshot | LegacyMCPAuthorizationRequired:
+        result = await self._provider.resolve(_app_authorization_ref(reference))
+        return _legacy_authorization_result(result)
+
+    async def reject(
+        self,
+        reference: LegacyMCPAuthorizationRef,
+        *,
+        observed_connection_revision: str,
+        reason: str,
+    ) -> LegacyMCPAuthorizationSnapshot | LegacyMCPAuthorizationRequired:
+        if reason not in {"http_unauthorized", "mcp_unauthorized"}:
+            raise ValueError("Unsupported MCP authorization rejection reason")
+        result = await self._provider.reject(
+            _app_authorization_ref(reference),
+            observed_connection_revision=observed_connection_revision,
+            reason=cast(Any, reason),
+        )
+        return _legacy_authorization_result(result)
+
+
+def _app_authorization_ref(reference: LegacyMCPAuthorizationRef) -> MCPAuthorizationRef:
+    return MCPAuthorizationRef(
+        server_name=reference.server_name,
+        server_fingerprint=reference.server_fingerprint,
+        kind=reference.kind,
+        descriptor_revision=reference.descriptor_revision,
+    )
+
+
+def _legacy_authorization_result(
+    result: MCPAuthorizationSnapshot | MCPAuthorizationRequired,
+) -> LegacyMCPAuthorizationSnapshot | LegacyMCPAuthorizationRequired:
+    if isinstance(result, MCPAuthorizationRequired):
+        return LegacyMCPAuthorizationRequired(
+            reason=result.reason,
+            descriptor_revision=result.descriptor_revision,
+            observed_connection_revision=result.observed_connection_revision,
+        )
+    return LegacyMCPAuthorizationSnapshot(
+        headers=result.headers,
+        connection_revision=result.connection_revision,
+        descriptor_revision=result.descriptor_revision,
+        expires_at=result.expires_at,
+    )
+
+
+def configure_legacy_mcp_registry(
+    registry: MCPRegistry,
+    configuration: ResolvedMCPCatalog,
+    provider: MCPAuthorizationProvider,
+    *,
+    required_sink: Callable[
+        [str, LegacyMCPAuthorizationRequired], Awaitable[None] | None
+    ]
+    | None = None,
+    descriptor_cache_root: Path | None = None,
+) -> None:
+    registry.configure_authorization(
+        _LegacyMCPAuthorizationProviderAdapter(provider),
+        {
+            server.name: LegacyMCPAuthorizationRef(
+                server_name=server.authorization.server_name,
+                server_fingerprint=server.authorization.server_fingerprint,
+                kind=server.authorization.kind,
+                descriptor_revision=server.authorization.descriptor_revision,
+            )
+            for server in configuration.servers
+        },
+        required_sink=required_sink,
+        descriptor_cache_root=descriptor_cache_root,
+    )
+
+
+def create_legacy_mcp_registry(
+    configuration: ResolvedMCPCatalog,
+    provider: MCPAuthorizationProvider,
+    *,
+    descriptor_cache_root: Path | None = None,
+) -> MCPRegistry:
+    registry = MCPRegistry()
+    configure_legacy_mcp_registry(
+        registry, configuration, provider, descriptor_cache_root=descriptor_cache_root
+    )
+    return registry
+
+
+def _legacy_connector_entries(
+    catalog: ResolvedConnectorCatalog,
+) -> tuple[ConnectorCatalogEntry, ...]:
+    return tuple(
+        ConnectorCatalogEntry(
+            connector_id=connector.raw_id,
+            alias=connector.alias,
+            display_name=connector.display_name,
+            ready=connector.ready,
+            auth_action=(
+                ConnectorAuthAction(connector.auth_action)
+                if connector.auth_action != "unknown"
+                else ConnectorAuthAction.NONE
+            ),
+            tools=tuple(
+                ConnectorToolDefinition(
+                    name=tool.raw_name,
+                    description=tool.description,
+                    input_schema=dict(tool.input_schema),
+                )
+                for tool in connector.tools
+            ),
+            diagnostic="; ".join(connector.diagnostics) or None,
+        )
+        for connector in catalog.connectors
+    )
+
+
+def _legacy_connector_source(
+    connector: ResolvedConnector,
+    selection: ResolvedConnectorSelection,
+    *,
+    connected: bool,
+    suspended: set[tuple[str, str | None]],
+) -> SessionConnectorSourceState:
+    source_enabled = (
+        connector_source_enabled(selection, connector.alias)
+        and (connector.alias, None) not in suspended
+    )
+    if not source_enabled:
+        status = "disabled"
+    elif not connector.ready and connector.auth_action == "oauth":
+        status = "needs_auth"
+    elif not connector.ready and connector.auth_action == "credentials_setup":
+        status = "needs_setup"
+    elif not connector.ready or connector.auth_action == "unknown":
+        status = "unavailable"
+    elif connected:
+        status = "connected"
+    else:
+        status = "unavailable"
+    return SessionConnectorSourceState(
+        raw_id=connector.raw_id,
+        alias=connector.alias,
+        display_name=connector.display_name,
+        status=cast(Any, status),
+        tools=tuple(
+            SessionConnectorToolDescriptor(
+                raw_name=tool.raw_name,
+                description=tool.description,
+                enabled=(
+                    connector_tool_enabled(
+                        selection, alias=connector.alias, raw_tool_name=tool.raw_name
+                    )
+                    and (connector.alias, None) not in suspended
+                    and (connector.alias, tool.raw_name) not in suspended
+                ),
+                display_name=f"connector_{connector.alias}_{tool.raw_name}",
+            )
+            for tool in connector.tools
+        ),
+        error="; ".join(connector.diagnostics) or None,
+    )
+
+
+@dataclass(slots=True)  # noqa: PLR0904 - implements narrow app-server ports
 class LegacySessionBackend:
     session: SessionRuntime
     resources: ResourceRequestHandler
@@ -101,6 +306,11 @@ class LegacySessionBackend:
     handler: CoreRequestHandler
     children: SessionRuntimeRegistry
     record_last_session: Callable[..., None]
+    mcp_catalog: ResolvedMCPCatalog | None = None
+    mcp_authorization_provider: MCPAuthorizationProvider | None = None
+    mcp_descriptor_cache_root: Path | None = None
+    connector_catalog: ResolvedConnectorCatalog | None = None
+    connector_selection: ResolvedConnectorSelection | None = None
     created_worktree: PreparedWorktree | None = field(default=None, init=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _projection: ClientProjection | None = field(default=None, init=False, repr=False)
@@ -110,13 +320,320 @@ class LegacySessionBackend:
     _events_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _events_idle: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _events_subscribed: bool = field(default=False, init=False, repr=False)
+    _mcp_catalog_revision: str = field(default="", init=False, repr=False)
+    _mcp_route_revision: int = field(default=0, init=False, repr=False)
+    _connector_route_revision: int = field(default=0, init=False, repr=False)
+    _suspended_connectors: set[tuple[str, str | None]] = field(
+        default_factory=set, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self._events_idle.set()
+        self._configure_mcp_registry()
+
+    @property
+    def connector_config_orchestrator(self) -> ConfigOrchestrator[VibeConfigSchema]:
+        return self.session.agent_loop.config_orchestrator
+
+    async def read_connectors(self) -> SessionConnectorState:
+        return self._session_connector_state()
+
+    async def reconfigure_connectors(
+        self,
+        catalog: ResolvedConnectorCatalog,
+        selection: ResolvedConnectorSelection,
+        *,
+        force: bool,
+    ) -> SessionConnectorState:
+        del force
+        self._require_mcp_idle()
+        registry = self.session.agent_loop.connector_registry
+        if registry is None:
+            raise SessionBackendError(
+                ProtocolErrorCode.NOT_IMPLEMENTED,
+                "The legacy Runtime has no host-managed connector executor",
+            )
+        registry.reconfigure(_legacy_connector_entries(catalog))
+        self.connector_catalog = catalog
+        self.connector_selection = selection
+        self._suspended_connectors.clear()
+        manager = self.session.agent_loop.tool_manager
+        manager.set_connector_registry(registry)
+        await manager.integrate_connectors_async()
+        await self.session.agent_loop.refresh_system_prompt()
+        self._connector_route_revision += 1
+        return self._session_connector_state()
+
+    async def suspend_connectors(
+        self, *, name: str, tool_name: str | None, reason: str
+    ) -> SessionConnectorState:
+        if reason not in {"disable", "replace", "gateway_rejected"}:
+            raise SessionBackendError(
+                ProtocolErrorCode.INVALID_PARAMS, "Invalid connector suspension reason"
+            )
+        self._require_mcp_idle()
+        self.session.agent_loop.tool_manager.suspend_connector(name, tool_name)
+        self._suspended_connectors.add((name, tool_name))
+        await self.session.agent_loop.refresh_system_prompt()
+        self._connector_route_revision += 1
+        return self._session_connector_state()
+
+    async def request_connector_auth(self, *, alias: str) -> ConnectorAuthRequest:
+        state = self._session_connector_state()
+        source = next((item for item in state.sources if item.alias == alias), None)
+        if source is None:
+            raise SessionBackendError(
+                ProtocolErrorCode.NOT_FOUND, f"Connector not found: {alias}"
+            )
+        if source.status not in {"needs_auth", "needs_setup"}:
+            raise SessionBackendError(
+                ProtocolErrorCode.CONFLICT,
+                f"Connector authorization is not actionable: {alias}",
+            )
+        catalog = self.connector_catalog
+        if catalog is None:
+            raise SessionBackendError(
+                ProtocolErrorCode.CONFLICT, "The connector catalog is not accepted"
+            )
+        connector = next(item for item in catalog.connectors if item.alias == alias)
+        return ConnectorAuthRequest(
+            session_id=self.session_id,
+            raw_connector_id=connector.raw_id,
+            alias=alias,
+            accepted_catalog_revision=catalog.revision,
+            action=connector.auth_action,
+            reason="needs_auth" if source.status == "needs_auth" else "needs_setup",
+        )
+
+    def _session_connector_state(self) -> SessionConnectorState:
+        catalog = self.connector_catalog
+        selection = self.connector_selection
+        if catalog is None or selection is None:
+            return SessionConnectorState(
+                accepted_catalog_revision="",
+                accepted_selection_revision="",
+                route_revision=f"legacy-connector-routes:{self._connector_route_revision}",
+                sources=(),
+                discovery_errors={},
+            )
+        registry = self.session.agent_loop.connector_registry
+        sources = tuple(
+            _legacy_connector_source(
+                connector,
+                selection,
+                connected=(
+                    registry.is_connected(connector.alias)
+                    if registry is not None
+                    else False
+                ),
+                suspended=self._suspended_connectors,
+            )
+            for connector in catalog.connectors
+        )
+        return SessionConnectorState(
+            accepted_catalog_revision=catalog.revision,
+            accepted_selection_revision=selection.selection_revision,
+            route_revision=f"legacy-connector-routes:{self._connector_route_revision}",
+            sources=sources,
+            discovery_errors={
+                source.alias: source.error
+                for source in sources
+                if source.error is not None
+            },
+        )
+
+    def _configure_mcp_registry(self) -> None:
+        catalog = self.mcp_catalog
+        provider = self.mcp_authorization_provider
+        if catalog is None or provider is None:
+            return
+        registry = self.session.agent_loop.mcp_registry
+        if registry is None and self.session.agent_loop.config.mcp_servers:
+            registry = MCPRegistry()
+            self.session.agent_loop.mcp_registry = registry
+            self.session.agent_loop.tool_manager.set_mcp_registry(registry)
+        if registry is None:
+            return
+        configure_legacy_mcp_registry(
+            registry,
+            catalog,
+            provider,
+            required_sink=self._publish_mcp_authorization_required,
+            descriptor_cache_root=self.mcp_descriptor_cache_root,
+        )
+
+    async def _publish_mcp_authorization_required(
+        self,
+        name: str,
+        required: MCPAuthorizationRequired | LegacyMCPAuthorizationRequired,
+    ) -> None:
+        params = MCPAuthRequiredParams(
+            session_id=self.session_id,
+            name=name,
+            descriptor_revision=required.descriptor_revision,
+            observed_connection_revision=required.observed_connection_revision,
+        )
+        self._events_idle.clear()
+        await self._events.put(
+            SessionBackendEvent(
+                event=MCPAuthorizationRequiredEvent(params),
+                method="mcp_catalog/authRequired",
+                params=params,
+                session_id=self.session_id,
+            )
+        )
 
     @property
     def session_id(self) -> str:
         return self.session.agent_loop.session_id
+
+    @property
+    def mcp_config_orchestrator(self) -> ConfigOrchestrator[VibeConfigSchema]:
+        return self.session.agent_loop.config_orchestrator
+
+    async def read_mcp(self) -> SessionMCPState:
+        return self._session_mcp_state()
+
+    async def reconfigure_mcp(
+        self, configuration: ResolvedMCPCatalog, *, force_remote_discovery: bool
+    ) -> SessionMCPState:
+        self._require_mcp_idle()
+        current_names = tuple(
+            server.name for server in self.session.agent_loop.config.mcp_servers
+        )
+        if current_names != tuple(server.name for server in configuration.servers):
+            raise SessionBackendError(
+                ProtocolErrorCode.CONFLICT,
+                "The resolved MCP catalog does not match the session configuration",
+            )
+        self.mcp_catalog = configuration
+        self._configure_mcp_registry()
+        self._mcp_catalog_revision = configuration.revision
+        manager = self.session.agent_loop.tool_manager
+        if force_remote_discovery:
+            await manager.refresh_remote_tools_async()
+        else:
+            await manager.reconfigure_mcp_async()
+        await self.session.agent_loop.refresh_system_prompt()
+        self._mcp_route_revision += 1
+        return self._session_mcp_state()
+
+    async def authorization_changed(
+        self, *, name: str, descriptor_revision: str
+    ) -> SessionMCPState:
+        self._require_mcp_idle()
+        registry = self.session.agent_loop.mcp_registry
+        if registry is None:
+            raise SessionBackendError(
+                ProtocolErrorCode.NOT_FOUND, "No MCP servers are configured"
+            )
+        catalog = self.mcp_catalog
+        provider = self.mcp_authorization_provider
+        resolved = (
+            next((server for server in catalog.servers if server.name == name), None)
+            if catalog is not None
+            else None
+        )
+        if catalog is None or resolved is None or provider is None:
+            raise SessionBackendError(
+                ProtocolErrorCode.NOT_FOUND, f"MCP server not found: {name}"
+            )
+        resolved = replace(
+            resolved,
+            authorization=replace(
+                resolved.authorization, descriptor_revision=descriptor_revision
+            ),
+        )
+        self.mcp_catalog = replace(
+            catalog,
+            servers=tuple(
+                resolved if server.name == name else server
+                for server in catalog.servers
+            ),
+        )
+        self._configure_mcp_registry()
+        manager = self.session.agent_loop.tool_manager
+        if resolved.disabled:
+            registry.record_disabled_authorization(name, descriptor_revision)
+            manager.suspend_mcp(name)
+            await self.session.agent_loop.refresh_system_prompt()
+            self._mcp_route_revision += 1
+            return self._session_mcp_state()
+        authorization = await provider.resolve(resolved.authorization)
+        if authorization.descriptor_revision != descriptor_revision:
+            raise SessionBackendError(
+                ProtocolErrorCode.CONFLICT,
+                "The MCP authorization descriptor revision is stale",
+            )
+        if isinstance(authorization, MCPAuthorizationRequired):
+            registry.mark_needs_auth(name, descriptor_revision)
+            manager.suspend_mcp(name)
+            await self._publish_mcp_authorization_required(name, authorization)
+            await self.session.agent_loop.refresh_system_prompt()
+            self._mcp_route_revision += 1
+            return self._session_mcp_state()
+        registry.invalidate(name)
+        await manager.reconfigure_mcp_async()
+        await self.session.agent_loop.refresh_system_prompt()
+        self._mcp_route_revision += 1
+        return self._session_mcp_state()
+
+    async def suspend_mcp(
+        self, *, name: str, tool_name: str | None, reason: str
+    ) -> SessionMCPState:
+        if reason not in {"logout", "remove", "disable", "replace"}:
+            raise SessionBackendError(
+                ProtocolErrorCode.INVALID_PARAMS, "Invalid MCP suspension reason"
+            )
+        self._require_mcp_idle()
+        self.session.agent_loop.tool_manager.suspend_mcp(name, tool_name)
+        await self.session.agent_loop.refresh_system_prompt()
+        self._mcp_route_revision += 1
+        return self._session_mcp_state()
+
+    def _require_mcp_idle(self) -> None:
+        try:
+            self.session.execution.require_idle()
+        except SessionExecutionConflict as exc:
+            raise SessionBackendError(ProtocolErrorCode.CONFLICT, str(exc)) from exc
+
+    def _session_mcp_state(self) -> SessionMCPState:
+        public = self.resources.runtime_snapshot().mcp
+        registry = self.session.agent_loop.mcp_registry
+        transports = {
+            server.name: server.transport
+            for server in self.session.agent_loop.config.mcp_servers
+        }
+        sources = tuple(
+            SessionMCPSourceState(
+                name=source.name,
+                transport=cast(Any, transports[source.name]),
+                status=cast(Any, source.status.value),
+                tools=tuple(
+                    SessionMCPToolDescriptor(
+                        remote_name=tool.name,
+                        description=tool.description,
+                        enabled=tool.enabled,
+                        display_name=f"{source.name}_{tool.name}",
+                    )
+                    for tool in source.tools
+                ),
+                descriptor_revision=(
+                    registry.descriptor_revision(source.name)
+                    if registry is not None
+                    else ""
+                ),
+                error=public.discovery_errors.get(source.name),
+            )
+            for source in public.sources
+            if source.name in transports
+        )
+        return SessionMCPState(
+            catalog_revision=self._mcp_catalog_revision,
+            route_revision=f"legacy-mcp-routes:{self._mcp_route_revision}",
+            sources=sources,
+            discovery_errors=public.discovery_errors,
+        )
 
     def adopt_state(self, state: PublicSessionState) -> None:
         self._projection = ClientProjection(state)
@@ -338,7 +855,10 @@ class LegacySessionBackend:
         except RequestFailure as exc:
             raise SessionBackendError(exc.code, str(exc), exc.data) from exc
         if isinstance(
-            dispatched.response, SessionHistoryClearResponse | SessionRewindResponse
+            dispatched.response,
+            SessionHistoryClearResponse
+            | SessionRelocateResponse
+            | SessionRewindResponse,
         ):
             self.adopt_state(dispatched.response.state)
         return dispatched

@@ -150,6 +150,12 @@ class LoadingWidget(SpinnerMixin, Static):
         if self._status_widget:
             self._status_widget.update(self._build_status_text())
 
+    def set_retrying(self, retrying: bool) -> None:
+        if retrying:
+            self.set_status(RETRYING_LOADING_STATUS)
+        elif self._base_status == RETRYING_LOADING_STATUS:
+            self.set_status(DEFAULT_LOADING_STATUS)
+
     def set_queue_count(self, count: int) -> None:
         if count == self._queued_count:
             return

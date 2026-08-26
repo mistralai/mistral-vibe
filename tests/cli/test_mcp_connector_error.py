@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from unittest.mock import AsyncMock
 
 import pytest
@@ -107,3 +108,41 @@ async def test_show_mcp_no_error_when_healthy_and_empty(
         and "No MCP servers or connectors configured" in w._content
         for w in mounted
     )
+
+
+@pytest.mark.asyncio
+async def test_refresh_mcp_browser_refreshes_both_owned_catalogs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = build_test_vibe_app(config=build_test_vibe_config())
+    await app.prepare()
+    calls: list[str] = []
+
+    def recorder(name: str) -> Callable[[], Awaitable[None]]:
+        async def record() -> None:
+            calls.append(name)
+
+        return record
+
+    monkeypatch.setattr(
+        app.app_server.resources.runtime,
+        "wait_until_ready",
+        AsyncMock(side_effect=recorder("ready")),
+    )
+    monkeypatch.setattr(
+        app.app_server.resources.mcp,
+        "refresh_connectors",
+        AsyncMock(side_effect=recorder("connectors")),
+    )
+    monkeypatch.setattr(
+        app.app_server.resources.mcp, "refresh", AsyncMock(side_effect=recorder("mcp"))
+    )
+    monkeypatch.setattr(
+        app.app_server.resources.mcp, "read", AsyncMock(side_effect=recorder("read"))
+    )
+    monkeypatch.setattr(app, "_refresh_banner", lambda: calls.append("banner"))
+
+    result = await app._refresh_mcp_browser()
+
+    assert result == "Refreshed."
+    assert calls == ["ready", "connectors", "mcp", "read", "banner"]

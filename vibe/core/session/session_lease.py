@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 import json
 import os
@@ -34,29 +36,33 @@ class SessionLease:
         if self._path.parents[1].is_symlink() or self._path.parent.is_symlink():
             raise ValueError("session lease path cannot contain a symbolic link")
         self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        file = self._path.open("a+b")
-        try:
-            _acquire_file_lock(file)
-        except BlockingIOError as exc:
-            file.close()
-            raise SessionBusyError(self._session_id) from exc
-        diagnostic = {
-            "lease_version": 1,
-            "session_id": self._session_id,
-            "process_id": os.getpid(),
-            "acquired_at": _timestamp(),
-        }
-        file.seek(0)
-        file.truncate()
-        file.write(
-            json.dumps(
-                diagnostic, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-            ).encode()
-            + b"\n"
-        )
-        file.flush()
-        os.fsync(file.fileno())
-        self._file = file
+        with _lease_directory_lock(self._path.parent):
+            file = self._path.open("a+b")
+            try:
+                _acquire_file_lock(file)
+            except BlockingIOError as exc:
+                file.close()
+                raise SessionBusyError(self._session_id) from exc
+            diagnostic = {
+                "lease_version": 1,
+                "session_id": self._session_id,
+                "process_id": os.getpid(),
+                "acquired_at": _timestamp(),
+            }
+            file.seek(0)
+            file.truncate()
+            file.write(
+                json.dumps(
+                    diagnostic,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode()
+                + b"\n"
+            )
+            file.flush()
+            os.fsync(file.fileno())
+            self._file = file
         return self
 
     def release(self) -> None:
@@ -64,10 +70,12 @@ class SessionLease:
             return
         file = self._file
         self._file = None
-        try:
-            _release_file_lock(file)
-        finally:
-            file.close()
+        with _lease_directory_lock(self._path.parent):
+            try:
+                _release_file_lock(file)
+            finally:
+                file.close()
+            self._path.unlink(missing_ok=True)
 
     def __enter__(self) -> Self:
         return self.acquire()
@@ -76,7 +84,22 @@ class SessionLease:
         self.release()
 
 
-def _acquire_file_lock(file: Any) -> None:
+@contextmanager
+def _lease_directory_lock(directory: Path) -> Iterator[None]:
+    file = (directory / ".registry").open("a+b")
+    try:
+        _acquire_file_lock(file, blocking=True)
+    except BaseException:
+        file.close()
+        raise
+    try:
+        yield
+    finally:
+        _release_file_lock(file)
+        file.close()
+
+
+def _acquire_file_lock(file: Any, *, blocking: bool = False) -> None:
     if _is_windows():
         msvcrt = cast(Any, __import__("msvcrt"))
 
@@ -86,14 +109,16 @@ def _acquire_file_lock(file: Any) -> None:
             file.flush()
         file.seek(0)
         try:
-            msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+            mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+            msvcrt.locking(file.fileno(), mode, 1)
         except OSError as exc:
             raise BlockingIOError from exc
         return
     import fcntl
 
     try:
-        fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        operation = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+        fcntl.flock(file.fileno(), operation)
     except OSError as exc:
         raise BlockingIOError from exc
 

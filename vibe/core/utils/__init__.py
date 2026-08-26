@@ -14,10 +14,12 @@ from vibe.core.utils.concurrency import (
 )
 from vibe.core.utils.matching import name_matches
 from vibe.core.utils.merge import MergeConflictError, MergeStrategy
+from vibe.core.utils.pacing import AdaptivePacer
 from vibe.core.utils.retry import (
     RetryCategory,
     RetryObserver,
     RetryReason,
+    StreamHTTPError,
     async_generator_retry,
     async_retry,
 )
@@ -50,6 +52,7 @@ __all__ = [
     "KNOWN_TAGS",
     "TOOL_ERROR_TAG",
     "VIBE_STOP_EVENT_TAG",
+    "AdaptivePacer",
     "AsyncExecutor",
     "CancellationReason",
     "ConversationLimitException",
@@ -58,6 +61,7 @@ __all__ = [
     "RetryCategory",
     "RetryObserver",
     "RetryReason",
+    "StreamHTTPError",
     "TaggedText",
     "WindowsShell",
     "WindowsShellKind",

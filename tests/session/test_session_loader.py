@@ -1086,6 +1086,20 @@ class TestSessionLoaderGetFirstUserMessage:
 
         assert result == "block one block two"
 
+    def test_caps_a_long_first_message(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        # An untitled session falls back to this preview in the resume picker and
+        # ACP session list; a long paste must not blow up those labels.
+        session_dir = Path(session_config.save_dir)
+        messages = [LLMMessage(role=Role.user, content="x" * 5000)]
+        create_test_session(session_dir, "longmsg0", messages=messages)
+
+        result = SessionLoader.get_first_user_message("longmsg0", session_config)
+
+        assert len(result) <= 201
+        assert result.endswith("…")
+
     def test_returns_fallback_for_missing_session(
         self, session_config: SessionLoggingConfig
     ) -> None:

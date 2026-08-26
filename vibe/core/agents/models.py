@@ -32,6 +32,7 @@ class AgentProfile:
     agent_type: AgentType = AgentType.AGENT
     overrides: dict[str, Any] = field(default_factory=dict)
     install_required: bool = False
+    instructions: str | None = None
 
     @classmethod
     def from_toml(cls, path: Path) -> AgentProfile:
@@ -45,6 +46,7 @@ class AgentProfile:
             description=data.pop("description", ""),
             safety=AgentSafety(data.pop("safety", AgentSafety.NEUTRAL)),
             agent_type=AgentType(data.pop("agent_type", AgentType.AGENT)),
+            instructions=data.pop("instructions", None),
             overrides=data,
         )
 

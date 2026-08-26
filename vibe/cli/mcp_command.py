@@ -8,6 +8,10 @@ import webbrowser
 
 from pydantic import ValidationError
 
+from vibe.app_server.mcp_catalog import (
+    SessionlessMCPCatalog,
+    create_sessionless_mcp_catalog,
+)
 from vibe.core.auth import MCPOAuthError
 from vibe.core.config import (
     MCPHttp,
@@ -25,13 +29,8 @@ from vibe.core.config.mcp_servers import (
     MCPServerAddError,
     MCPServerRemoveError,
     PersistedMCPServerResult,
-    persist_stdio_mcp_server,
 )
 from vibe.core.config.types import ConcurrencyConflictError
-from vibe.core.tools.mcp.management import (
-    add_mcp_server,
-    remove_mcp_server_and_credentials,
-)
 
 
 class MCPCommandError(ValueError):
@@ -209,10 +208,8 @@ def _build_remote_add_command(args: argparse.Namespace) -> _MCPAddCommand:
 
 
 async def _add_mcp_server(command: _MCPAddCommand) -> str:
-    orchestrator = await build_user_config_orchestrator()
+    catalog = _sessionless_catalog()
     server = command.server
-    if isinstance(server, MCPStdio):
-        return _add_result_message(await persist_stdio_mcp_server(orchestrator, server))
 
     async def show_oauth_url(url: str) -> None:
         print(f"Open this URL in your browser:\n\n  {url}")
@@ -222,8 +219,7 @@ async def _add_mcp_server(command: _MCPAddCommand) -> str:
             print(f"Could not open the browser: {exc}", file=sys.stderr)
 
     try:
-        result = await add_mcp_server(
-            orchestrator,
+        result = await catalog.add_server(
             server,
             login=command.login,
             on_oauth_url=show_oauth_url,
@@ -242,7 +238,9 @@ async def _add_mcp_server(command: _MCPAddCommand) -> str:
 
     message = _add_result_message(result)
     persisted = result.server
-    if not isinstance(persisted.auth, MCPOAuth):
+    if not isinstance(persisted, MCPHttp | MCPStreamableHttp) or not isinstance(
+        persisted.auth, MCPOAuth
+    ):
         return message
     if not command.login:
         return f"{message}\nRun `/mcp login {persisted.name}` to authenticate."
@@ -250,12 +248,15 @@ async def _add_mcp_server(command: _MCPAddCommand) -> str:
 
 
 async def _remove_mcp_server(name: str) -> str:
-    orchestrator = await build_user_config_orchestrator()
-    result = await remove_mcp_server_and_credentials(orchestrator, name)
+    result = await _sessionless_catalog().remove_server(name)
     if not result.removed:
         return f"MCP server `{result.name}` is not configured in the user config."
 
     return f"Removed MCP server `{result.name}`."
+
+
+def _sessionless_catalog() -> SessionlessMCPCatalog:
+    return create_sessionless_mcp_catalog(build_user_config_orchestrator)
 
 
 def _add_result_message(result: PersistedMCPServerResult) -> str:

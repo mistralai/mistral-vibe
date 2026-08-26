@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from vibe.app_server._account import AccountGateway
 from vibe.app_server._dispatch import RequestFailure
@@ -38,6 +39,11 @@ from vibe.app_server._runtime import (
     RuntimeUnfinishedMigrationError,
     close_agent_loop,
 )
+from vibe.app_server._session_backend_port import (
+    ResolvedConnectorCatalog,
+    ResolvedConnectorSelection,
+    ResolvedMCPCatalog,
+)
 from vibe.app_server._session_backend_services import SessionBackendServices
 from vibe.app_server._session_history import SessionHistory
 from vibe.app_server._sessions import SessionRuntime, SessionRuntimeRegistry
@@ -45,9 +51,23 @@ from vibe.app_server._tool_io import ClientToolIO
 from vibe.app_server._turns import TurnConflictError, TurnController
 from vibe.app_server._utils import now_ms, public_error
 from vibe.app_server._worktree_effects import WorktreeEffect
-from vibe.app_server.models import PublicSessionState, TextContentBlock
+from vibe.app_server.connector_catalog import (
+    ConnectorCatalogError,
+    ConnectorCatalogService,
+)
+from vibe.app_server.mcp_catalog import MCPCatalogService
+from vibe.app_server.models import (
+    JsonPatchOperation,
+    PublicCallbackEntry,
+    PublicEntryGenerationStatus,
+    PublicNoticeEntry,
+    PublicSessionState,
+    SessionTitleUpdatedNoticeDetail,
+    TextContentBlock,
+)
 from vibe.app_server.protocol import (
     AgentConfig,
+    HistoryEntryAddedParams,
     ProtocolErrorCode,
     RuntimeUpdatedParams,
     ServerErrorParams,
@@ -57,6 +77,7 @@ from vibe.app_server.protocol import (
     SessionResumeParams,
     SessionStartParams,
     SessionStartResponse,
+    SessionUpdatedParams,
     TurnStartParams,
 )
 from vibe.core.agent_loop import AgentLoop
@@ -70,7 +91,7 @@ from vibe.core.git.worktree import (
 from vibe.core.git.worktree.naming_model import suggest_worktree_name
 from vibe.core.session import last_session_pointer
 from vibe.core.session.session_lease import SessionBusyError
-from vibe.core.types import WorktreeContext
+from vibe.core.types import SessionTitleUpdatedEvent, WorktreeContext
 from vibe.observability.logging import logger
 
 type OpenRoot = Callable[[RootOpenRequest], Awaitable[AgentLoop]]
@@ -98,6 +119,8 @@ class LegacySessionRuntimeController:
         host_handler: HostRequestHandler,
         stage_root: StageRoot | None,
         services: SessionBackendServices,
+        mcp_catalog_service: MCPCatalogService | None = None,
+        connector_catalog_service: ConnectorCatalogService | None = None,
         account_gateway: AccountGateway | None = None,
         identity_gateway: IdentityGateway | None = None,
     ) -> None:
@@ -106,10 +129,16 @@ class LegacySessionRuntimeController:
         self._host_handler = host_handler
         self._stage_root = stage_root
         self._services = services
+        self._mcp_catalog_service = mcp_catalog_service
+        self._connector_catalog_service = connector_catalog_service
         self._account_gateway = account_gateway
         self._identity_gateway = identity_gateway
         self._scheduler_enabled = False
         self._scheduler_task: asyncio.Task[None] | None = None
+        self._title_drain_task: asyncio.Task[None] | None = None
+        # The agent loop whose out-of-band queue the drain is bound to, so a
+        # restart on the same loop doesn't add a second consumer to one queue.
+        self._title_drain_loop: AgentLoop | None = None
         self._resume_tasks: set[asyncio.Task[None]] = set()
         self._tasks: set[asyncio.Task[None]] = set()
         self._swept_worktree_buckets: set[str] = set()
@@ -203,12 +232,18 @@ class LegacySessionRuntimeController:
         self._scheduler_task = None
         if scheduler is not None and scheduler is not current:
             tasks.append(scheduler)
+        drain = self._title_drain_task
+        self._title_drain_task = None
+        self._title_drain_loop = None
+        if drain is not None and drain is not current:
+            tasks.append(drain)
         self._resume_tasks.clear()
         return await cancel_tasks(tasks, label="legacy session runtime")
 
     def _after_lifecycle_response(self) -> None:
         if self._scheduler_enabled:
             self._ensure_scheduler()
+        self._restart_title_drain()
 
     def _require_root(self) -> LegacySessionBackend:
         if self._root is None:
@@ -245,7 +280,13 @@ class LegacySessionRuntimeController:
         task.add_done_callback(self._resume_tasks.discard)
         self._track_task(task)
 
-    def _bind_root(self, agent_loop: AgentLoop) -> None:
+    def _bind_root(
+        self,
+        agent_loop: AgentLoop,
+        mcp_catalog: ResolvedMCPCatalog | None,
+        connector_catalog: ResolvedConnectorCatalog | None,
+        connector_selection: ResolvedConnectorSelection | None,
+    ) -> None:
         execution = SessionExecution()
         history = SessionHistory(project_history(agent_loop))
         resources = ResourceRequestHandler(
@@ -263,12 +304,31 @@ class LegacySessionRuntimeController:
             self._services.event_watermark,
             history,
         )
+        turns: TurnController | None = None
+
+        def snapshot_state() -> PublicSessionState:
+            if turns is None:
+                raise RuntimeError("Turn controller is not bound")
+            callbacks = [
+                entry
+                for entry in coordinator.all_history(turns.history)
+                if isinstance(entry, PublicCallbackEntry)
+            ]
+            return coordinator.public_state(
+                current_history=turns.history,
+                callbacks=callbacks,
+                turns=turns.turns,
+                retrying=turns.retrying,
+                history_limit=200,
+            )
+
         turns = TurnController(
             agent_loop,
             self._services.notify,
             self._services.publish_callback,
             execution,
             self._sessions,
+            snapshot_state=snapshot_state,
             tool_io=self._tool_io,
             session_coordinator=coordinator,
         )
@@ -300,6 +360,22 @@ class LegacySessionRuntimeController:
             handler,
             self._sessions,
             last_session_pointer.record,
+            mcp_catalog=mcp_catalog,
+            mcp_authorization_provider=(
+                self._mcp_catalog_service.authentication
+                if self._mcp_catalog_service is not None
+                else None
+            ),
+            mcp_descriptor_cache_root=(
+                Path(agent_loop.config.session_logging.save_dir)
+                .expanduser()
+                .resolve()
+                .parent
+                / "mcp-descriptors"
+                / "legacy"
+            ),
+            connector_catalog=connector_catalog,
+            connector_selection=connector_selection,
         )
 
     async def _replace_root(
@@ -384,7 +460,19 @@ class LegacySessionRuntimeController:
     ) -> PublicSessionState:
         self._sessions.release_root(previous.session)
         try:
-            self._bind_root(replacement)
+            (
+                connector_catalog,
+                connector_selection,
+            ) = await self._resolve_connector_configuration(replacement)
+            self._bind_root(
+                replacement,
+                await self._resolve_mcp_catalog(replacement),
+                connector_catalog,
+                connector_selection,
+            )
+            await self._apply_connector_configuration(
+                connector_catalog, connector_selection
+            )
         except BaseException:
             self._sessions.bind_root(previous.session)
             self._root = previous
@@ -421,8 +509,8 @@ class LegacySessionRuntimeController:
             state = self._root_session.public_state(
                 current_history=[],
                 callbacks=[],
-                active_turn=None,
-                completed_turns=[],
+                turns=[],
+                retrying=None,
                 history_limit=history_limit,
             )
         replacement_backend.adopt_state(state)
@@ -437,7 +525,19 @@ class LegacySessionRuntimeController:
         created_worktree: PreparedWorktree | None = None,
     ) -> PublicSessionState:
         try:
-            self._bind_root(agent_loop)
+            (
+                connector_catalog,
+                connector_selection,
+            ) = await self._resolve_connector_configuration(agent_loop)
+            self._bind_root(
+                agent_loop,
+                await self._resolve_mcp_catalog(agent_loop),
+                connector_catalog,
+                connector_selection,
+            )
+            await self._apply_connector_configuration(
+                connector_catalog, connector_selection
+            )
             if created_worktree is not None:
                 await self._report_created_worktree(agent_loop, created_worktree)
             started = await self._handler.dispatch(
@@ -470,6 +570,41 @@ class LegacySessionRuntimeController:
             else:
                 await close_agent_loop(agent_loop)
             raise
+
+    async def _apply_connector_configuration(
+        self,
+        catalog: ResolvedConnectorCatalog | None,
+        selection: ResolvedConnectorSelection | None,
+    ) -> None:
+        if catalog is None or selection is None:
+            return
+        backend = self._require_root()
+        if backend.session.agent_loop.connector_registry is None:
+            return
+        await backend.reconfigure_connectors(catalog, selection, force=False)
+
+    async def _resolve_mcp_catalog(
+        self, agent_loop: AgentLoop
+    ) -> ResolvedMCPCatalog | None:
+        if self._mcp_catalog_service is None:
+            return None
+        return await self._mcp_catalog_service.resolve_catalog(
+            agent_loop.config_orchestrator
+        )
+
+    async def _resolve_connector_configuration(
+        self, agent_loop: AgentLoop
+    ) -> tuple[ResolvedConnectorCatalog | None, ResolvedConnectorSelection | None]:
+        service = self._connector_catalog_service
+        if service is None:
+            return None, None
+        try:
+            catalog = await service.resolve_catalog(agent_loop.config_orchestrator)
+        except ConnectorCatalogError:
+            logger.warning("Connector catalog is unavailable while binding the session")
+            catalog = None
+        selection = service.resolve_selection(agent_loop.config_orchestrator, catalog)
+        return catalog, selection
 
     def _schedule_admin_config_fetch(self) -> None:
         task = asyncio.create_task(
@@ -659,6 +794,91 @@ class LegacySessionRuntimeController:
                 exc_info=(type(error), error, error.__traceback__),
             )
 
+    def _restart_title_drain(self) -> None:
+        # Rebind to the current agent loop; resume/continue swaps it in place.
+        # If we're already draining this loop's queue, do nothing: cancelling and
+        # immediately recreating would briefly leave two consumers on the one
+        # queue, and a title event could be delivered to the dying task and lost.
+        loop = self._agent_loop
+        task = self._title_drain_task
+        if task is not None and not task.done() and self._title_drain_loop is loop:
+            return
+        if task is not None and not task.done():
+            task.cancel()
+        self._title_drain_loop = loop
+        self._title_drain_task = asyncio.create_task(
+            self._run_title_drain(), name="vibe-title-drain"
+        )
+        self._title_drain_task.add_done_callback(self._title_drain_finished)
+
+    @staticmethod
+    def _title_drain_finished(task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Session title drain task failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    async def _run_title_drain(self) -> None:
+        async for event in self._agent_loop.out_of_band_events():
+            try:
+                if isinstance(event, SessionTitleUpdatedEvent):
+                    await self._notify_title(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._services.notify(
+                    "error", ServerErrorParams(error=public_error(exc))
+                )
+
+    async def _notify_title(self, event: SessionTitleUpdatedEvent) -> None:
+        # The background title is session metadata: reflect it in the public
+        # projection (a single /title patch) so every projection consumer, e.g.
+        # the ACP session state, sees it live. The terminal notice is the
+        # separate, CLI-owned concern for the tab title. Both are emitted by this
+        # single drain owner, so nothing competes with the turn projector.
+        session_id = event.session_id
+        # A reset (/new, /clear) can swap in a new session while a title for the
+        # old one is still queued. Dropping the stale event keeps its title from
+        # reviving on the fresh session's tab.
+        if session_id != self._agent_loop.session_id:
+            return
+        title = event.title
+        now = now_ms()
+        await self._services.notify(
+            "session/updated",
+            SessionUpdatedParams(
+                event_id=0,
+                session_id=session_id,
+                patch=[JsonPatchOperation(op="replace", path="/title", value=title)],
+                emitted_at=now,
+            ),
+        )
+        entry = PublicNoticeEntry(
+            id=str(uuid4()),
+            session_id=session_id,
+            turn_id=None,
+            created_at=now,
+            updated_at=now,
+            generation_status=PublicEntryGenerationStatus.COMPLETED,
+            level="info",
+            message="Session title updated",
+            detail=SessionTitleUpdatedNoticeDetail(title=title),
+        )
+        await self._services.notify(
+            "history/entryAdded",
+            HistoryEntryAddedParams(
+                event_id=0,
+                session_id=session_id,
+                turn_id=None,
+                entry=entry,
+                emitted_at=now,
+            ),
+        )
+
     async def _run_scheduler(self) -> None:
         while True:
             try:
@@ -705,6 +925,8 @@ def create_legacy_session_backend_host(
     host_handler: HostRequestHandler,
     stage_root: StageRoot | None,
     services: SessionBackendServices,
+    mcp_catalog_service: MCPCatalogService | None = None,
+    connector_catalog_service: ConnectorCatalogService | None = None,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
 ) -> LegacySessionBackendHost:
@@ -714,6 +936,8 @@ def create_legacy_session_backend_host(
         host_handler=host_handler,
         stage_root=stage_root,
         services=services,
+        mcp_catalog_service=mcp_catalog_service,
+        connector_catalog_service=connector_catalog_service,
         account_gateway=account_gateway,
         identity_gateway=identity_gateway,
     ).create_host()

@@ -6,7 +6,7 @@ import pytest
 
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
-from vibe.app_server import _resources
+from vibe.app_server import _admin_config
 from vibe.app_server._execution import SessionExecution
 from vibe.app_server._resources import ResourceRequestHandler
 from vibe.app_server.protocol import ConfigReloadParams
@@ -16,7 +16,7 @@ from vibe.core.config.default_orchestrator import build_default_orchestrator
 
 
 async def _build_handler(monkeypatch) -> ResourceRequestHandler:
-    monkeypatch.setattr(_resources, "resolve_api_key", lambda _env: "api-key")
+    monkeypatch.setattr(_admin_config, "resolve_api_key", lambda _env: "api-key")
     orchestrator = await build_default_orchestrator(require_api_key=False)
     loop = AgentLoop(
         config_orchestrator=orchestrator,
@@ -44,7 +44,7 @@ async def test_apply_admin_config_updates_effective_config(
             config=ManagedConfig(state="enabled", toml='theme = "nord"\n')
         )
 
-    monkeypatch.setattr(_resources, "fetch_managed_config", fake_fetch)
+    monkeypatch.setattr(_admin_config, "fetch_managed_config", fake_fetch)
     handler = await _build_handler(monkeypatch)
 
     assert handler._agent_loop.config.theme != "nord"
@@ -65,7 +65,7 @@ async def test_apply_admin_config_updates_effective_config(
 async def test_apply_admin_config_no_api_key_emits_no_telemetry(
     monkeypatch, telemetry_events: list[dict[str, Any]]
 ) -> None:
-    monkeypatch.setattr(_resources, "resolve_api_key", lambda _env: None)
+    monkeypatch.setattr(_admin_config, "resolve_api_key", lambda _env: None)
     orchestrator = await build_default_orchestrator(require_api_key=False)
     loop = AgentLoop(
         config_orchestrator=orchestrator,
@@ -93,7 +93,7 @@ async def test_apply_admin_config_reports_fetch_failure(
     async def fake_fetch(base_url, api_key):
         return ManagedConfigResult(error="HTTP 503")
 
-    monkeypatch.setattr(_resources, "fetch_managed_config", fake_fetch)
+    monkeypatch.setattr(_admin_config, "fetch_managed_config", fake_fetch)
     handler = await _build_handler(monkeypatch)
 
     with caplog.at_level("WARNING"):
@@ -120,7 +120,7 @@ async def test_config_reload_reports_admin_fetch_failure(
     async def fake_fetch(base_url, api_key):
         return ManagedConfigResult(error="HTTP 503")
 
-    monkeypatch.setattr(_resources, "fetch_managed_config", fake_fetch)
+    monkeypatch.setattr(_admin_config, "fetch_managed_config", fake_fetch)
     handler = await _build_handler(monkeypatch)
 
     with caplog.at_level("WARNING"):
@@ -152,7 +152,7 @@ async def test_apply_admin_config_invalid_toml_rolls_back(
             config=ManagedConfig(state="enabled", toml="active_model = 123\n")
         )
 
-    monkeypatch.setattr(_resources, "fetch_managed_config", fake_fetch)
+    monkeypatch.setattr(_admin_config, "fetch_managed_config", fake_fetch)
     handler = await _build_handler(monkeypatch)
     baseline = handler._agent_loop.config.active_model
 
@@ -181,7 +181,7 @@ async def test_apply_admin_config_disabled_emits_no_telemetry(
     async def fake_fetch(base_url, api_key):
         return ManagedConfigResult(config=ManagedConfig(state="disabled", toml=None))
 
-    monkeypatch.setattr(_resources, "fetch_managed_config", fake_fetch)
+    monkeypatch.setattr(_admin_config, "fetch_managed_config", fake_fetch)
     handler = await _build_handler(monkeypatch)
 
     with caplog.at_level("WARNING"):

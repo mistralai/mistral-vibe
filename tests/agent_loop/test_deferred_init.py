@@ -391,7 +391,7 @@ class TestStartInitializeExperiments:
         )
         refresh_mock = AsyncMock()
         refresh_config_mock = AsyncMock()
-        init_mock = AsyncMock(return_value=True)
+        init_mock = AsyncMock(return_value=(True, None))
 
         with (
             patch.object(
@@ -417,7 +417,7 @@ class TestStartInitializeExperiments:
         loop = build_test_agent_loop(await_experiment_model=True)
         refresh_mock = AsyncMock()
         refresh_config_mock = AsyncMock()
-        init_mock = AsyncMock(return_value=True)
+        init_mock = AsyncMock(return_value=(True, None))
 
         with (
             patch.object(
@@ -442,7 +442,7 @@ class TestStartInitializeExperiments:
             patch.object(
                 agent_loop_module,
                 "session_initialize_experiments",
-                new=AsyncMock(return_value=False),
+                new=AsyncMock(return_value=(False, None)),
             ),
             patch.object(loop, "refresh_config", new=refresh_config_mock),
             patch.object(loop, "refresh_system_prompt", new=refresh_mock),
@@ -484,7 +484,7 @@ class TestStartInitializeExperiments:
             patch.object(
                 agent_loop_module,
                 "session_initialize_experiments",
-                new=AsyncMock(return_value=False),
+                new=AsyncMock(return_value=(False, None)),
             ),
             patch.object(loop, "refresh_system_prompt", new=refresh_mock),
         ):
@@ -593,6 +593,7 @@ class TestHydrateExperimentsOnResume:
         refresh_prompt = AsyncMock()
         refresh_config = AsyncMock()
         sync_variants = MagicMock()
+        resolve_mock = AsyncMock(return_value="Pro")
 
         with (
             patch.object(
@@ -600,15 +601,22 @@ class TestHydrateExperimentsOnResume:
                 "session_hydrate_experiments_from_session",
                 new=AsyncMock(return_value=True),
             ),
+            patch.object(
+                agent_loop_module, "session_resolve_plan_attributes", new=resolve_mock
+            ),
             patch.object(loop, "refresh_system_prompt", new=refresh_prompt),
             patch.object(loop, "refresh_config", new=refresh_config),
             patch.object(loop, "_sync_growthbook_layer_variants", new=sync_variants),
         ):
             await loop.hydrate_experiments_from_session(refresh_prompt=False)
+            # Plan resolution is backgrounded so resume is not blocked — join it.
+            assert loop._plan_attrs_task is not None
+            await loop._plan_attrs_task
 
         refresh_prompt.assert_not_called()
         refresh_config.assert_awaited_once()
         sync_variants.assert_called_once()
+        resolve_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_default_refreshes_prompt(self) -> None:
@@ -616,6 +624,7 @@ class TestHydrateExperimentsOnResume:
         refresh_prompt = AsyncMock()
         refresh_config = AsyncMock()
         sync_variants = MagicMock()
+        resolve_mock = AsyncMock(return_value="Pro")
 
         with (
             patch.object(
@@ -623,15 +632,93 @@ class TestHydrateExperimentsOnResume:
                 "session_hydrate_experiments_from_session",
                 new=AsyncMock(return_value=True),
             ),
+            patch.object(
+                agent_loop_module, "session_resolve_plan_attributes", new=resolve_mock
+            ),
             patch.object(loop, "refresh_system_prompt", new=refresh_prompt),
             patch.object(loop, "refresh_config", new=refresh_config),
             patch.object(loop, "_sync_growthbook_layer_variants", new=sync_variants),
         ):
             await loop.hydrate_experiments_from_session()
+            assert loop._plan_attrs_task is not None
+            await loop._plan_attrs_task
 
         refresh_prompt.assert_awaited_once()
         refresh_config.assert_awaited_once()
         sync_variants.assert_called_once()
+        resolve_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_always_resolves_plan_attributes_without_rebucketing(self) -> None:
+        # On resume the loop restores only the frozen variant assignment, then
+        # ALWAYS rebuilds plan/org attributes from the user-scoped path — never
+        # by calling initialize_experiments (which would re-bucket) and never
+        # from meta.json. So user_plan reflects the current user.
+        loop = build_test_agent_loop()
+        refresh_prompt = AsyncMock()
+        refresh_config = AsyncMock()
+        sync_variants = MagicMock()
+        init_mock = AsyncMock()
+        resolve_mock = AsyncMock(return_value="Pro")
+
+        with (
+            patch.object(
+                agent_loop_module,
+                "session_hydrate_experiments_from_session",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(loop, "initialize_experiments", new=init_mock),
+            patch.object(
+                agent_loop_module, "session_resolve_plan_attributes", new=resolve_mock
+            ),
+            patch.object(loop, "refresh_system_prompt", new=refresh_prompt),
+            patch.object(loop, "refresh_config", new=refresh_config),
+            patch.object(loop, "_sync_growthbook_layer_variants", new=sync_variants),
+        ):
+            await loop.hydrate_experiments_from_session()
+            assert loop._plan_attrs_task is not None
+            await loop._plan_attrs_task
+
+        sync_variants.assert_called_once()
+        refresh_config.assert_awaited_once()
+        init_mock.assert_not_called()
+        resolve_mock.assert_awaited_once()
+        assert loop.user_plan == "Pro"
+
+    @pytest.mark.asyncio
+    async def test_hydrate_leaves_experiments_task_free_for_growthbook(self) -> None:
+        # Regression (Bugbot): the resume plan-resolution uses its OWN task, not
+        # _experiments_task — otherwise start_initialize_experiments (guarded on
+        # _experiments_task) would no-op after hydrate and the session would skip
+        # the GrowthBook eval entirely.
+        loop = build_test_agent_loop()
+        resolve_mock = AsyncMock(return_value="Pro")
+        with (
+            patch.object(
+                agent_loop_module,
+                "session_hydrate_experiments_from_session",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(
+                agent_loop_module, "session_resolve_plan_attributes", new=resolve_mock
+            ),
+            patch.object(loop, "refresh_system_prompt", new=AsyncMock()),
+            patch.object(loop, "refresh_config", new=AsyncMock()),
+            patch.object(loop, "_sync_growthbook_layer_variants", new=MagicMock()),
+        ):
+            await loop.hydrate_experiments_from_session()
+            assert loop._plan_attrs_task is not None
+            await loop._plan_attrs_task
+
+            # hydrate used the dedicated plan task, leaving _experiments_task free.
+            pre_experiments_task = loop._experiments_task
+            assert pre_experiments_task is None
+
+            # so start_initialize_experiments is NOT a no-op.
+            loop.start_initialize_experiments()
+            experiments_task = loop._experiments_task
+            assert experiments_task is not None
+            await experiments_task
 
 
 class TestInitDurationMsProperty:

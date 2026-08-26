@@ -18,7 +18,6 @@ from vibe.core.session.session_loader import (
     METADATA_FILENAME,
     SessionLoader,
 )
-from vibe.core.session.title_format import MAX_TITLE_LENGTH
 from vibe.core.types import (
     AgentStats,
     LLMMessage,
@@ -40,7 +39,11 @@ if TYPE_CHECKING:
 TMP_CLEANUP_INTERVAL = timedelta(seconds=5)
 
 
-class SessionLogger:
+# Over the method limit, as AgentLoop and VibeApp already are: most of these
+# are one-line accessors onto the metadata record this owns, and hiding them
+# behind a second object would put a hop between the log and everything that
+# reads it.
+class SessionLogger:  # noqa: PLR0904
     def __init__(
         self,
         session_config: SessionLoggingConfig,
@@ -172,25 +175,10 @@ class SessionLogger:
             git_branch=git_branch,
             username=user_name,
             environment={"working_directory": str(self.cwd)},
+            origin_directory=str(self.cwd),
             title=None,
             title_source="auto",
         )
-
-    def _fallback_title_from_messages(self, messages: Sequence[LLMMessage]) -> str:
-        first_user_message = None
-        for message in messages:
-            if message.role == Role.user:
-                first_user_message = message
-                break
-
-        if first_user_message is None:
-            return "Untitled session"
-
-        text = str(first_user_message.content)
-        title = text[:MAX_TITLE_LENGTH]
-        if len(text) > MAX_TITLE_LENGTH:
-            title += "…"
-        return title
 
     def _set_title_state(
         self, title: str | None, *, source: Literal["auto", "manual"]
@@ -202,7 +190,32 @@ class SessionLogger:
         self.session_metadata.title = title
         self.session_metadata.title_source = source
 
-    def set_title(self, title: str | None) -> None:
+    def relocated_to(self, cwd: Path) -> None:
+        """Record that the session now sits at *cwd*.
+
+        ``environment.working_directory`` is what the interface shows as the
+        session's directory, so it names where the agent is working rather than
+        where it started. ``origin_directory`` is left where it was: it is what
+        keeps the session findable from the place the user began it.
+
+        A session that predates ``origin_directory``, or that was imported, has
+        only the environment entry, and that entry is where it started. The
+        first move has to promote it, or overwriting the entry would leave the
+        session with no record of its origin at all, which is exactly the
+        disappearance this pair of fields exists to prevent.
+        """
+        self.cwd = cwd.resolve()
+        if self.session_metadata is None:
+            return
+
+        environment = self.session_metadata.environment
+        if self.session_metadata.origin_directory is None:
+            self.session_metadata.origin_directory = environment.get(
+                "working_directory"
+            )
+        environment["working_directory"] = str(self.cwd)
+
+    def _set_title(self, title: str | None) -> None:
         if title is None:
             self._set_title_state(None, source="auto")
             return
@@ -219,6 +232,12 @@ class SessionLogger:
             return self.session_metadata.title
         return self._title
 
+    @property
+    def title_source(self) -> Literal["auto", "manual"]:
+        if self.session_metadata is not None:
+            return self.session_metadata.title_source
+        return "auto"
+
     def needs_initial_auto_title(self) -> bool:
         return self.title is None
 
@@ -233,13 +252,87 @@ class SessionLogger:
         self._set_title_state(normalized_title, source="auto")
         return True
 
-    def _resolve_title(self, messages: Sequence[LLMMessage]) -> str | None:
-        if self.title is not None:
-            return self.title
+    # Two writers touch the title: the background auto-refresh
+    # (``refresh_auto_title``) and a manual ``/rename`` (``apply_manual_title``),
+    # possibly concurrently. The invariant that keeps them correct:
+    #   1. Both mutate title state and persist only while holding ``_save_lock``.
+    #   2. ``refresh_auto_title`` re-checks ``title_source`` under the lock and
+    #      bails if a manual rename already won, so a manual title is never
+    #      clobbered by an auto one.
+    #   3. Both persist first and flip memory only after the write succeeds, so a
+    #      failed read or write leaves memory and disk consistent (old value).
+    # A manual title is therefore always the winner of any race.
+    async def refresh_auto_title(
+        self, title: str, *, expected_session_id: str | None = None
+    ) -> bool:
+        """Replace an auto-generated title and persist it to disk.
 
-        title = self._fallback_title_from_messages(messages)
-        self._set_title_state(title, source="auto")
-        return title
+        Never overrides a manual rename. ``expected_session_id`` guards against a
+        background generation that outlived a ``/new`` or ``/clear`` reset: the
+        logger is reset in place, so a title generated for the old conversation
+        must not land on the new one. Returns whether the title changed.
+        """
+        if self.session_metadata is None or self.title_source == "manual":
+            return False
+
+        normalized_title = title.strip()
+        if not normalized_title or normalized_title == self.title:
+            return False
+
+        async with self._save_lock:
+            # Re-check under the lock: a /rename may have landed and must win.
+            if self.title_source == "manual":
+                return False
+            # A reset swaps this logger to a new session id; bail so the old
+            # title isn't persisted onto it. The check is immediately before the
+            # persist (which captures the session dir synchronously), so no reset
+            # can slip between the guard and the write.
+            if (
+                expected_session_id is not None
+                and self.session_id != expected_session_id
+            ):
+                return False
+            # Persist first, flip memory after: a failed persist then leaves
+            # memory and disk consistent (both still the old auto title).
+            await self._persist_title_fields_locked(normalized_title, "auto")
+            self._set_title_state(normalized_title, source="auto")
+        return True
+
+    async def apply_manual_title(self, title: str) -> str | None:
+        """Flip the title to a manual rename and persist under the save lock.
+
+        Persists first and flips memory only after the write succeeds, so a
+        failed read or write never leaves memory manual while disk stays auto. A
+        concurrent auto-refresh rechecks title_source under the same lock and
+        bails. Returns the persisted end_time, or None when there is no on-disk
+        metadata yet.
+        """
+        async with self._save_lock:
+            session_info = self._get_session_info()
+            if session_info is None:
+                self._set_title(title)
+                return None
+            session_dir, _ = session_info
+            metadata_path = session_dir / METADATA_FILENAME
+            if not metadata_path.exists():
+                self._set_title(title)
+                return None
+            normalized_title = title.strip()
+            if not normalized_title:
+                raise ValueError("Session title cannot be empty.")
+            try:
+                raw = (await read_safe_async(metadata_path)).text
+                metadata = json.loads(raw)
+            except (OSError, json.JSONDecodeError) as e:
+                raise RuntimeError(
+                    f"Failed to read session metadata at {metadata_path}: {e}"
+                ) from e
+            metadata["title"] = normalized_title
+            metadata["title_source"] = "manual"
+            await SessionLogger.persist_metadata(metadata, session_dir)
+            self._set_title_state(normalized_title, source="manual")
+        end_time = metadata.get("end_time")
+        return end_time if isinstance(end_time, str) else None
 
     @staticmethod
     def _persist_metadata_sync(metadata: Any, session_dir: Path) -> None:
@@ -353,11 +446,9 @@ class SessionLogger:
         if not non_system_messages and not allow_empty:
             return
 
-        # Snapshot the message list and resolve the title on the event loop,
-        # then hand everything to a worker thread: serialization and fsync are
-        # too slow to run on the UI thread after every agent turn.
+        # Serialization and fsync are too slow for the UI thread, so snapshot
+        # here and hand off to a worker thread.
         messages_snapshot = list(messages)
-        title = self._resolve_title(messages_snapshot)
         async with self._save_lock:
             await asyncio.to_thread(
                 self._save_interaction_sync,
@@ -366,7 +457,6 @@ class SessionLogger:
                 config,
                 tool_manager,
                 agent_profile,
-                title,
                 session_dir,
                 session_metadata,
                 allow_empty,
@@ -380,7 +470,6 @@ class SessionLogger:
         config: VibeConfigSchema,
         tool_manager: ToolManager,
         agent_profile: AgentProfile,
-        title: str | None,
         session_dir: Path,
         session_metadata: SessionMetadata,
         allow_empty: bool,
@@ -464,7 +553,6 @@ class SessionLogger:
                 **session_metadata.model_dump(),
                 "end_time": utc_now().isoformat(),
                 "stats": stats.model_dump(),
-                "title": title,
                 "total_messages": len(non_system_messages),
                 "last_message_fingerprint": last_message_fingerprint,
                 "tools_available": tools_available,
@@ -492,6 +580,10 @@ class SessionLogger:
         )
 
     async def persist_experiments(self, response: EvalResponse | None) -> None:
+        # Persist ONLY the sticky GrowthBook variant assignment. Plan/org
+        # attributes and user_plan are user-scoped, not session-scoped, so they
+        # are never written to meta.json — they are re-resolved from the user
+        # cache on every session (fresh and resume alike).
         session_info = self._get_session_info()
         if session_info is None:
             return
@@ -527,7 +619,9 @@ class SessionLogger:
             [link.model_dump(mode="json") for link in session_metadata.child_sessions],
         )
 
-    async def _persist_metadata_field(self, field: str, value: Any) -> None:
+    async def _persist_title_fields_locked(
+        self, title: str, source: Literal["auto", "manual"]
+    ) -> None:
         session_info = self._get_session_info()
         if session_info is None:
             return
@@ -535,16 +629,38 @@ class SessionLogger:
         metadata_path = session_dir / METADATA_FILENAME
         if not metadata_path.exists():
             return
+        try:
+            raw = (await read_safe_async(metadata_path)).text
+            metadata = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as e:
+            raise RuntimeError(
+                f"Failed to read session metadata at {metadata_path}: {e}"
+            ) from e
+        metadata["title"] = title
+        metadata["title_source"] = source
+        await SessionLogger.persist_metadata(metadata, session_dir)
+
+    async def _persist_metadata_field(self, field: str, value: Any) -> None:
         async with self._save_lock:
-            try:
-                raw = (await read_safe_async(metadata_path)).text
-                metadata = json.loads(raw)
-            except (OSError, json.JSONDecodeError) as e:
-                raise RuntimeError(
-                    f"Failed to read session metadata at {metadata_path}: {e}"
-                ) from e
-            metadata[field] = value
-            await SessionLogger.persist_metadata(metadata, session_dir)
+            await self._persist_metadata_field_locked(field, value)
+
+    async def _persist_metadata_field_locked(self, field: str, value: Any) -> None:
+        session_info = self._get_session_info()
+        if session_info is None:
+            return
+        session_dir, _ = session_info
+        metadata_path = session_dir / METADATA_FILENAME
+        if not metadata_path.exists():
+            return
+        try:
+            raw = (await read_safe_async(metadata_path)).text
+            metadata = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as e:
+            raise RuntimeError(
+                f"Failed to read session metadata at {metadata_path}: {e}"
+            ) from e
+        metadata[field] = value
+        await SessionLogger.persist_metadata(metadata, session_dir)
 
     def reset_session(
         self, session_id: str, *, parent_session_id: str | None = None

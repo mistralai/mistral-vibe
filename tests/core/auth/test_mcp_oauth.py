@@ -36,6 +36,8 @@ from vibe.core.auth.mcp_oauth import (
     build_oauth_provider,
     delete_oauth_credentials,
     perform_oauth_login,
+    restore_oauth_credentials,
+    snapshot_oauth_credentials,
     unwrap_oauth_refresh_error,
 )
 from vibe.core.config import MCPOAuth, MCPStreamableHttp
@@ -261,6 +263,42 @@ class TestKeyringTokenStorage:
         # No keyring backend means nothing was ever stored, so removing an OAuth
         # server (e.g. added with `--no-login` on CI) must not fail.
         await delete_oauth_credentials("linear")
+
+    @pytest.mark.asyncio
+    async def test_oauth_credential_snapshot_restores_exact_keyring_state(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        """*Prepare*: One OAuth source has tokens, client registration, and fingerprint.
+        *Do*: Snapshot its keyring entries, delete them, and restore the snapshot.
+        *Assert*: Every opaque credential entry returns byte-for-byte unchanged.
+        """
+        # Prepare
+        storage = KeyringTokenStorage(alias="linear")
+        await storage.set_tokens(
+            OAuthToken(
+                access_token="access",
+                token_type="Bearer",
+                expires_in=3600,
+                refresh_token="refresh",
+            )
+        )
+        await storage.set_client_info(
+            OAuthClientInformationFull(
+                client_id="client",
+                redirect_uris=["http://127.0.0.1:47823/callback"],  # type: ignore[list-item]
+                token_endpoint_auth_method="none",
+            )
+        )
+        await Fingerprint.compute(_oauth_server(name="linear")).save("linear")
+        expected = dict(memory_keyring.store)
+
+        # Do
+        backup = await snapshot_oauth_credentials("linear")
+        await delete_oauth_credentials("linear")
+        await restore_oauth_credentials("linear", backup)
+
+        # Assert
+        assert memory_keyring.store == expected
 
 
 class TestFingerprint:

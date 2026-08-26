@@ -36,6 +36,40 @@ async def test_completed_turn_is_visible_in_the_persisted_session_log(
 
 
 @pytest.mark.asyncio
+async def test_completed_turn_survives_a_new_host(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_connection: BackendContractConnection,
+    experimental_harness: bool,
+) -> None:
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("stored")
+    )
+    session = await backend_contract_persistent_connection.host.open_session()
+    try:
+        _ = [event async for event in session.act("save this")]
+        session_id = session.session_id
+    finally:
+        await session.close()
+
+    resumed_connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+    )
+    resumed = await resumed_connection.host.resume_session(session_id)
+    try:
+        assert resumed.session_id == session_id
+        assert [
+            entry.text
+            for entry in resumed.history
+            if isinstance(entry, PublicMessageEntry)
+        ] == ["save this", "stored"]
+    finally:
+        await resumed.close()
+
+
+@pytest.mark.asyncio
 async def test_cleared_replacement_becomes_resumable_after_its_first_turn(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],

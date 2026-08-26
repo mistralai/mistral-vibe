@@ -235,6 +235,9 @@ async def test_assignments_returns_confirmed_assignment() -> None:
                                 "key": "1",
                                 "variationId": 1,
                                 "inExperiment": True,
+                                "hashAttribute": "userId",
+                                "hashValue": "user-abc",
+                                "featureId": ExperimentName.SYSTEM_PROMPT.value,
                             },
                         }
                     ],
@@ -250,6 +253,11 @@ async def test_assignments_returns_confirmed_assignment() -> None:
     assert assignments[0].experiment_name == ExperimentName.SYSTEM_PROMPT.value
     assert assignments[0].variation_name == "explore"
     assert assignments[0].variation_id == 1
+    # GrowthBook result payload is captured for exposure analysis.
+    assert assignments[0].in_experiment is True
+    assert assignments[0].hash_attribute == "userId"
+    assert assignments[0].hash_value == "user-abc"
+    assert assignments[0].feature_id == ExperimentName.SYSTEM_PROMPT.value
 
 
 @pytest.mark.asyncio
@@ -381,6 +389,21 @@ async def test_initialize_does_nothing_on_failed_eval() -> None:
     assert manager.assignments() == []
     for name in ExperimentName:
         assert manager.get_variant(name) == DEFAULT_VARIANTS[name]
+
+
+def test_attributes_none_before_initialize() -> None:
+    manager = ExperimentManager(client=_StubClient(None))
+    assert manager.attributes() is None
+
+
+@pytest.mark.asyncio
+async def test_attributes_retains_snapshot_even_on_failed_eval() -> None:
+    # The snapshot is retained regardless of eval outcome so telemetry can emit
+    # the same plan attributes GrowthBook buckets on.
+    manager = ExperimentManager(client=_StubClient(None))
+    attrs = _attrs()
+    await manager.initialize(attrs)
+    assert manager.attributes() is attrs
 
 
 def test_experiment_attributes_default_custom_system_prompt_to_false() -> None:

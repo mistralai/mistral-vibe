@@ -228,6 +228,17 @@ class TrustedFoldersManager:
     def trust_for_session(self, path: Path) -> None:
         self._session_trusted.append(self._normalize_path(path))
 
+    def revoke_session_trust(self, path: Path) -> None:
+        """Undo one ``trust_for_session`` grant.
+
+        Grants are counted rather than deduplicated, so revoking removes the
+        one the caller made and leaves any other in place. Trust that came from
+        the stored lists is untouched.
+        """
+        normalized = self._normalize_path(path)
+        if normalized in self._session_trusted:
+            self._session_trusted.remove(normalized)
+
     def _normalize_path(self, path: Path) -> str:
         return str(path.expanduser().resolve())
 

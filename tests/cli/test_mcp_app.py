@@ -307,7 +307,11 @@ def test_refresh_index_replaces_state_from_resource() -> None:
 
 def test_start_refresh_dispatches_one_worker() -> None:
     app = MCPApp(_state(), refresh_callback=AsyncMock(return_value="Refreshed"))
-    app.run_worker = MagicMock()
+
+    def close_worker(coroutine, **_kwargs: object) -> None:
+        coroutine.close()
+
+    app.run_worker = MagicMock(side_effect=close_worker)
 
     app._start_refresh()
     app._start_refresh()

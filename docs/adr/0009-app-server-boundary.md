@@ -236,10 +236,19 @@ assignment from the first rendered prompt.
 - public session metadata;
 - a page of public history;
 - currently open callback entries; and
-- the active or most recently terminal turn.
+- the active or most recently terminal turn; and
+- the current model-provider retry, including its turn, category, and technical
+  detail.
 
 It is not the private persistence format and is not sufficient to reconstruct
 the engine. Only the server reads session files.
+
+The optional `retrying` value is present only while the current live turn is
+waiting to retry a model request. The server sets it before announcing the
+retry and clears it before resumed model output, terminal turn state,
+interruption, shutdown, or session replacement. Other projection changes,
+including session metadata and statistics updates, preserve it. The public retry
+state currently includes only the turn ID, retry category, and technical detail.
 
 Within a session, public history is an append-only timeline of these closed
 variants:
@@ -282,6 +291,16 @@ The core notification families are `session/snapshot`, session handoffs,
 `session/updated`, `history/entryAdded`, `history/entryUpdated`,
 `turn/started`, `turn/completed`, and `session/statsUpdated`. Warnings, errors,
 and resource notifications remain typed rather than using a generic envelope.
+
+Retry-state changes use numbered `session/snapshot` notifications and therefore
+share the session event watermark. A live same-session snapshot contains a
+bounded latest history and turn page. Reducers retain an already-loaded
+contiguous prefix when that page overlaps it, while explicit resyncs and session
+handoffs still replace state. The unnumbered `turn/retrying` notification remains
+temporarily because the ACP/VS Code path and previously released clients may
+still depend on it. New reducers derive retry presentation from
+`PublicSessionState.retrying` and do not keep a second local retry value from that
+compatibility notification.
 
 ## Callbacks and client participation
 
@@ -363,9 +382,10 @@ session loader, tool execution path, or extension lifecycle.
 
 The in-process harness can replace a failed memory connection. The client
 initializes the new connection, resumes the attached session, replaces its
-projection from the returned snapshot, and receives still-open callbacks. Stdio
-EOF closes its server process; process restart uses normal persisted-session
-resume semantics and does not imply restoration of in-flight execution.
+projection from the returned snapshot, receives still-open callbacks, and sees
+the current retry state when the live turn is waiting to retry. Stdio EOF closes
+its server process; process restart uses normal persisted-session resume
+semantics and does not restore an in-flight turn or its retry state.
 
 Transport detachment only removes that connection's subscriptions and callback
 claims. A successful `session/stop` is the delivery surface's durability and
@@ -420,6 +440,8 @@ Security rules:
   validated response lifecycles.
 - Return or notify canonical resource state after mutations rather than
   maintaining client/server shadow state.
+- Derive retry presentation from `PublicSessionState.retrying`; do not maintain
+  a client-local retry lifecycle.
 - Keep blocking serialization, file I/O, subprocess work, and discovery off the
   shared UI event loop.
 

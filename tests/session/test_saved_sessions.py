@@ -9,6 +9,7 @@ from vibe.core.config import SessionLoggingConfig
 from vibe.core.session import last_session_pointer
 from vibe.core.session.saved_sessions import (
     delete_saved_session,
+    relocate_saved_session,
     update_saved_session_title,
 )
 
@@ -40,6 +41,91 @@ def write_saved_session(
     )
     (saved_session_dir / "meta.json").write_text(json.dumps(metadata), encoding="utf-8")
     return saved_session_dir
+
+
+class TestRelocateSavedSession:
+    @pytest.mark.asyncio
+    async def test_names_the_new_directory_and_remembers_the_old_one(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        # The two fields answer different questions. `working_directory` is
+        # where the session is working, which is what the interface shows;
+        # `origin_directory` is where it began, which is what keeps it findable
+        # from there. A move that overwrote one without promoting the other
+        # would drop the session out of the listing it was started from.
+        write_saved_session(
+            session_config,
+            "20240101_120000",
+            "aaaaaaaa",
+            {
+                "session_id": "aaaaaaaa-1111",
+                "environment": {"working_directory": "/repo", "shell": "zsh"},
+                "title": "Moving session",
+            },
+        )
+
+        updated = await relocate_saved_session(
+            "aaaaaaaa-1111", Path("/repo/worktrees/feature"), session_config
+        )
+
+        assert updated["environment"]["working_directory"] == "/repo/worktrees/feature"
+        assert updated["origin_directory"] == "/repo"
+        # Untouched neighbours in the same block, and the rest of the record.
+        assert updated["environment"]["shell"] == "zsh"
+        assert updated["title"] == "Moving session"
+
+    @pytest.mark.asyncio
+    async def test_a_second_move_keeps_the_first_origin(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        # Promotion happens once. Re-promoting on every move would walk the
+        # origin forward until it named the previous directory rather than the
+        # first, which is the one the listing matches on.
+        write_saved_session(
+            session_config,
+            "20240101_120000",
+            "bbbbbbbb",
+            {
+                "session_id": "bbbbbbbb-2222",
+                "environment": {"working_directory": "/repo"},
+            },
+        )
+
+        await relocate_saved_session(
+            "bbbbbbbb-2222", Path("/repo/worktrees/one"), session_config
+        )
+        updated = await relocate_saved_session(
+            "bbbbbbbb-2222", Path("/repo/worktrees/two"), session_config
+        )
+
+        assert updated["environment"]["working_directory"] == "/repo/worktrees/two"
+        assert updated["origin_directory"] == "/repo"
+
+    @pytest.mark.asyncio
+    async def test_the_move_reaches_disk(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        saved_session_dir = write_saved_session(
+            session_config,
+            "20240101_120000",
+            "cccccccc",
+            {
+                "session_id": "cccccccc-3333",
+                "environment": {"working_directory": "/repo"},
+            },
+        )
+
+        await relocate_saved_session(
+            "cccccccc-3333", Path("/repo/worktrees/feature"), session_config
+        )
+
+        persisted = json.loads(
+            (saved_session_dir / "meta.json").read_text(encoding="utf-8")
+        )
+        assert (
+            persisted["environment"]["working_directory"] == "/repo/worktrees/feature"
+        )
+        assert persisted["origin_directory"] == "/repo"
 
 
 class TestUpdateSavedSessionTitle:

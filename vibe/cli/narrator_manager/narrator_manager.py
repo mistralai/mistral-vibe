@@ -4,6 +4,7 @@ import asyncio
 from typing import TYPE_CHECKING
 
 from vibe.app_server.config import ConfigView
+from vibe.app_server.telemetry_port import ClientTelemetryEvent
 from vibe.cli.audio_player.audio_player_port import AudioFormat, AudioPlayerPort
 from vibe.cli.narrator_manager.narrator_manager_port import (
     NarratorManagerListener,
@@ -24,7 +25,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
 
-    from vibe.cli.telemetry import ClientTelemetry
+    from vibe.app_server.telemetry_port import ClientTelemetry
+    from vibe.cli.audio_request_metadata import RequestMetadataGetter
     from vibe.cli.turn_summary import TurnSummaryPort
 
 
@@ -35,18 +37,20 @@ class NarratorManager:
         audio_player: AudioPlayerPort,
         summary_generator: TurnSummaryGenerator,
         telemetry_client: ClientTelemetry | None = None,
+        request_metadata_getter: RequestMetadataGetter | None = None,
     ) -> None:
         self._config_getter = config_getter
         self._audio_player = audio_player
         self._summary_generator = summary_generator
         self._telemetry_client = telemetry_client
+        self._request_metadata_getter = request_metadata_getter
         config = config_getter()
         self._turn_summary: TurnSummaryPort = self._make_turn_summary(
             config, summary_generator
         )
         self._turn_summary.on_summary = self._on_turn_summary
         self._tts_client: TTSClientPort | None = self._make_tts_client(
-            config, telemetry_client
+            config, request_metadata_getter
         )
         self._state = NarratorState.IDLE
         self._speak_task: asyncio.Task[None] | None = None
@@ -132,7 +136,7 @@ class NarratorManager:
         self.cancel()
         config = self._config_getter()
         self.turn_summary = self._make_turn_summary(config, self._summary_generator)
-        self.tts_client = self._make_tts_client(config, self._telemetry_client)
+        self.tts_client = self._make_tts_client(config, self._request_metadata_getter)
 
     @staticmethod
     def _make_turn_summary(
@@ -144,7 +148,7 @@ class NarratorManager:
 
     @staticmethod
     def _make_tts_client(
-        config: ConfigView, telemetry_client: ClientTelemetry | None
+        config: ConfigView, request_metadata_getter: RequestMetadataGetter | None
     ) -> TTSClientPort | None:
         if not config.narrator_enabled:
             return None
@@ -152,13 +156,7 @@ class NarratorManager:
             model = config.speech.model
             provider = config.speech.provider
             return make_tts_client(
-                provider,
-                model,
-                metadata_getter=(
-                    None
-                    if telemetry_client is None
-                    else telemetry_client.build_request_metadata
-                ),
+                provider, model, metadata_getter=request_metadata_getter
             )
         except KeyError as exc:
             logger.error("Failed to initialize TTS client", exc_info=exc)
@@ -227,24 +225,28 @@ class NarratorManager:
     def _on_read_aloud_requested(self) -> None:
         if not self._telemetry_client:
             return
-        self._telemetry_client.send_telemetry_event(
-            "vibe.read_aloud.requested",
-            {
-                "read_aloud_session_id": self._tracking.session_id,
-                "trigger": "autoplay_next_message",
-            },
+        self._telemetry_client.log(
+            ClientTelemetryEvent(
+                name="vibe.read_aloud.requested",
+                properties={
+                    "read_aloud_session_id": self._tracking.session_id,
+                    "trigger": "autoplay_next_message",
+                },
+            )
         )
 
     def _on_read_aloud_play_started(self) -> None:
         if not self._telemetry_client:
             return
-        self._telemetry_client.send_telemetry_event(
-            "vibe.read_aloud.play_started",
-            {
-                "read_aloud_session_id": self._tracking.session_id,
-                "time_to_first_read_s": self._tracking.time_to_first_read_s(),
-                "speed_selection": None,
-            },
+        self._telemetry_client.log(
+            ClientTelemetryEvent(
+                name="vibe.read_aloud.play_started",
+                properties={
+                    "read_aloud_session_id": self._tracking.session_id,
+                    "time_to_first_read_s": self._tracking.time_to_first_read_s(),
+                    "speed_selection": None,
+                },
+            )
         )
 
     def _on_read_aloud_ended(
@@ -252,15 +254,17 @@ class NarratorManager:
     ) -> None:
         if not self._telemetry_client:
             return
-        self._telemetry_client.send_telemetry_event(
-            "vibe.read_aloud.ended",
-            {
-                "read_aloud_session_id": self._tracking.session_id,
-                "status": status,
-                "error_type": error_type,
-                "speed_selection": None,
-                "elapsed_seconds": self._tracking.elapsed_since_play_s(),
-            },
+        self._telemetry_client.log(
+            ClientTelemetryEvent(
+                name="vibe.read_aloud.ended",
+                properties={
+                    "read_aloud_session_id": self._tracking.session_id,
+                    "status": status,
+                    "error_type": error_type,
+                    "speed_selection": None,
+                    "elapsed_seconds": self._tracking.elapsed_since_play_s(),
+                },
+            )
         )
 
     def _set_state(self, state: NarratorState) -> None:

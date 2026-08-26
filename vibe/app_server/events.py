@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from vibe.app_server._model import validate_wire
@@ -16,8 +17,10 @@ from vibe.app_server.models import (
     validate_history_entry,
 )
 from vibe.app_server.protocol import (
+    ConnectorAuthRequiredParams,
     HistoryEntryAddedParams,
     HistoryEntryUpdatedParams,
+    MCPAuthRequiredParams,
     Notification,
     ServerErrorParams,
     ServerWarningParams,
@@ -101,6 +104,18 @@ class ServerError:
     params: ServerErrorParams
 
 
+@dataclass(frozen=True, slots=True)
+class MCPAuthorizationRequiredEvent:
+    params: MCPAuthRequiredParams
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectorAuthorizationRequiredEvent:
+    params: ConnectorAuthRequiredParams
+    raw_connector_id: str | None = None
+    action: str | None = None
+
+
 type AppServerEvent = (
     HistoryEntryAdded
     | HistoryEntryUpdated
@@ -115,9 +130,44 @@ type AppServerEvent = (
     | TurnRetrying
     | ServerWarning
     | ServerError
+    | MCPAuthorizationRequiredEvent
+    | ConnectorAuthorizationRequiredEvent
 )
 
 _STREAMING_TEXT_PATHS = {"/content/0/text", "/text", "/state/outputText"}
+
+
+def _merge_snapshot_suffix[ItemT](
+    previous: list[ItemT] | None,
+    current: list[ItemT] | None,
+    *,
+    item_id: Callable[[ItemT], str],
+) -> tuple[list[ItemT] | None, bool]:
+    if current is None:
+        return previous, previous is not None
+    if not previous or not current:
+        return current, False
+
+    first_current_id = item_id(current[0])
+    overlap_start = next(
+        (
+            index
+            for index, item in enumerate(previous)
+            if item_id(item) == first_current_id
+        ),
+        None,
+    )
+    if overlap_start is None:
+        return current, False
+
+    overlap = previous[overlap_start:]
+    if len(overlap) > len(current):
+        return current, False
+    if [item_id(item) for item in overlap] != [
+        item_id(item) for item in current[: len(overlap)]
+    ]:
+        return current, False
+    return [*previous[:overlap_start], *current], overlap_start > 0
 
 
 def reconcile_snapshot(
@@ -191,7 +241,14 @@ class UnknownNotificationError(RuntimeError):
 
 def parse_server_event(
     notification: Notification,
-) -> ServerWarning | ServerError | TurnRetrying | None:
+) -> (
+    ServerWarning
+    | ServerError
+    | TurnRetrying
+    | MCPAuthorizationRequiredEvent
+    | ConnectorAuthorizationRequiredEvent
+    | None
+):
     match notification.method:
         case "warning":
             return ServerWarning(
@@ -201,6 +258,14 @@ def parse_server_event(
             return ServerError(validate_wire(ServerErrorParams, notification.params))
         case "turn/retrying":
             return TurnRetrying(validate_wire(TurnRetryingParams, notification.params))
+        case "mcp_catalog/authRequired":
+            return MCPAuthorizationRequiredEvent(
+                validate_wire(MCPAuthRequiredParams, notification.params)
+            )
+        case "connector_catalog/authRequired":
+            return ConnectorAuthorizationRequiredEvent(
+                validate_wire(ConnectorAuthRequiredParams, notification.params)
+            )
         case _:
             return None
 
@@ -274,8 +339,8 @@ class ClientProjection:
         event: AppServerEvent | None
         match params:
             case SessionSnapshotParams():
-                self._replace_state(params.state)
-                event = SessionSnapshot(params.state)
+                self._apply_snapshot(params.state)
+                event = SessionSnapshot(self.state)
             case SessionUpdatedParams():
                 event = self._update_session(params)
             case HistoryEntryAddedParams():
@@ -347,6 +412,35 @@ class ClientProjection:
         self.state = state
         self._entries = {entry.id: entry for entry in state.history or []}
         self._last_event_id = state.event_id
+
+    def _apply_snapshot(self, state: PublicSessionState) -> None:
+        previous = self.state
+        if state.session.id != previous.session.id:
+            self._replace_state(state)
+            return
+
+        # History and turns are append-only within one session. Live snapshots
+        # carry only their latest page, so retain a contiguous page already loaded
+        # before that suffix while taking updated entries from the snapshot.
+        history, preserved_history_prefix = _merge_snapshot_suffix(
+            previous.history, state.history, item_id=lambda entry: entry.id
+        )
+        turns, _ = _merge_snapshot_suffix(
+            previous.turns, state.turns, item_id=lambda turn: turn.id
+        )
+        self._replace_state(
+            state.model_copy(
+                update={
+                    "history": history,
+                    "history_before_cursor": (
+                        previous.history_before_cursor
+                        if preserved_history_prefix
+                        else state.history_before_cursor
+                    ),
+                    "turns": turns,
+                }
+            )
+        )
 
     def _add_entry(self, entry: PublicHistoryEntry) -> None:
         if entry.id in self._entries:

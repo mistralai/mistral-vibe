@@ -196,14 +196,17 @@ async def test_in_place_resume_replaces_the_public_snapshot_and_keeps_the_sessio
 
 
 @pytest.mark.asyncio
-async def test_continue_attaches_the_latest_persisted_public_session(
+async def test_continue_attaches_the_latest_persisted_session_and_keeps_it_usable(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
     experimental_harness: bool,
 ) -> None:
     backend_contract_mistral_api.mock(
-        return_value=backend_contract_mistral_response("saved")
+        side_effect=[
+            backend_contract_mistral_response("saved"),
+            backend_contract_mistral_response("continued"),
+        ]
     )
     session = await backend_contract_persistent_connection.host.open_session()
     try:
@@ -219,21 +222,30 @@ async def test_continue_attaches_the_latest_persisted_public_session(
     )
     continued = await continued_connection.host.continue_session()
     try:
+        _ = [event async for event in continued.act("continue this")]
         assert continued.session_id == session_id
         assert continued.state.session.id == session_id
+        assert [
+            entry.text
+            for entry in continued.history
+            if isinstance(entry, PublicMessageEntry)
+        ] == ["save this", "saved", "continue this", "continued"]
     finally:
         await continued.close()
 
 
 @pytest.mark.asyncio
-async def test_resume_attaches_the_requested_persisted_public_session(
+async def test_resume_attaches_the_requested_persisted_session_and_keeps_it_usable(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
     experimental_harness: bool,
 ) -> None:
     backend_contract_mistral_api.mock(
-        return_value=backend_contract_mistral_response("saved")
+        side_effect=[
+            backend_contract_mistral_response("saved"),
+            backend_contract_mistral_response("resumed"),
+        ]
     )
     session = await backend_contract_persistent_connection.host.open_session()
     try:
@@ -249,11 +261,12 @@ async def test_resume_attaches_the_requested_persisted_public_session(
     )
     resumed = await resumed_connection.host.resume_session(session_id)
     try:
+        _ = [event async for event in resumed.act("resume this")]
         assert resumed.session_id == session_id
         assert [
             entry.text
             for entry in resumed.history
             if isinstance(entry, PublicMessageEntry)
-        ] == ["save this", "saved"]
+        ] == ["save this", "saved", "resume this", "resumed"]
     finally:
         await resumed.close()

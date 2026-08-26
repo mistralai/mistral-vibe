@@ -44,6 +44,17 @@ class AgentRegistry:
         self._migrate()
         self.discovered = self._discover()
 
+    def rediscover(self, harness_files: HarnessFilesManager) -> None:
+        """Point discovery at a different set of project directories.
+
+        Search paths are resolved once at construction, so a session that has
+        moved keeps offering the agents of the directory it left until this runs.
+        """
+        self._harness_files = harness_files
+        self.search_paths = self._compute_search_paths()
+        self._migrate()
+        self.discovered = self._discover()
+
     def _compute_search_paths(self) -> list[Path]:
         mgr = self._harness_files
         return dedup_paths([

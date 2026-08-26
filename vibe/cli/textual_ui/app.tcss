@@ -2010,6 +2010,18 @@ FeedbackBar {
     }
 }
 
+.user-message.queue-selected {
+    .user-message-content {
+        text-style: bold reverse;
+    }
+}
+
+.bash-output-message.queue-selected {
+    .bash-command {
+        text-style: bold reverse;
+    }
+}
+
 #rewind-app {
     width: 100%;
     height: auto;

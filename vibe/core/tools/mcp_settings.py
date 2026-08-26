@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from vibe.core.config import VibeConfigSchema
@@ -22,10 +23,15 @@ async def persist_mcp_toggle(
     is_connector: bool,
     disabled: bool,
     tool_name: str | None = None,
+    preflight: Callable[[VibeConfigSchema], Awaitable[None]] | None = None,
 ) -> None:
     if is_connector:
         await _persist_connector_toggle(
-            orchestrator, name=name, disabled=disabled, tool_name=tool_name
+            orchestrator,
+            name=name,
+            disabled=disabled,
+            tool_name=tool_name,
+            preflight=preflight,
         )
         return
     await _persist_server_toggle(
@@ -60,26 +66,35 @@ async def _persist_connector_toggle(
     name: str,
     disabled: bool,
     tool_name: str | None,
+    preflight: Callable[[VibeConfigSchema], Awaitable[None]] | None,
 ) -> None:
-    connectors = await _load_persisted_list(orchestrator, "connectors")
-    for connector in connectors:
-        if connector.get("name") != name:
-            continue
-        if tool_name is not None:
-            connector["disabled_tools"] = updated_tool_list(
-                connector.get("disabled_tools", []), tool_name, disabled
-            )
+    def mutate(raw_connectors: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_connectors, list):
+            raise ValueError("Cannot update connectors: expected a list.")
+        connectors = [item.copy() for item in raw_connectors if isinstance(item, dict)]
+        for connector in connectors:
+            if connector.get("name") != name:
+                continue
+            if tool_name is not None:
+                connector["disabled_tools"] = updated_tool_list(
+                    connector.get("disabled_tools", []), tool_name, disabled
+                )
+            else:
+                connector["disabled"] = disabled
+            break
         else:
-            connector["disabled"] = disabled
-        break
-    else:
-        connector: dict[str, Any] = {"name": name}
-        if tool_name is not None:
-            connector["disabled_tools"] = [tool_name] if disabled else []
-        else:
-            connector["disabled"] = disabled
-        connectors.append(connector)
-    await _persist_field(orchestrator, "/connectors", connectors)
+            connector: dict[str, Any] = {"name": name}
+            if tool_name is not None:
+                connector["disabled_tools"] = [tool_name] if disabled else []
+            else:
+                connector["disabled"] = disabled
+            connectors.append(connector)
+        return connectors
+
+    failures = await orchestrator.mutate_field(
+        "/connectors", mutate, default=[], preflight=preflight
+    )
+    _raise_persistence_failure("/connectors", failures)
 
 
 async def _load_persisted_list(
@@ -95,8 +110,14 @@ async def _persist_field(
     orchestrator: ConfigOrchestrator[VibeConfigSchema],
     path: str,
     value: list[dict[str, Any]],
+    *,
+    preflight: Callable[[VibeConfigSchema], Awaitable[None]] | None = None,
 ) -> None:
-    failures = await orchestrator.set_field(path, value)
+    failures = await orchestrator.set_field(path, value, preflight=preflight)
+    _raise_persistence_failure(path, failures)
+
+
+def _raise_persistence_failure(path: str, failures: list[BaseException]) -> None:
     if not failures:
         return
     failure = failures[0]

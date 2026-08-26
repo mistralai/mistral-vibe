@@ -316,3 +316,22 @@ def test_current_date_placeholder_substituted_in_prompt(
     expected = f"Today's date is {today.isoformat()} ({today.strftime('%A')})."
     assert expected in prompt
     assert "$current_date" not in prompt
+
+
+def test_v3_system_prompt_variant_is_available_to_legacy_harness(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
+    config = build_config(
+        system_prompt_id="cli_2026-08_v3",
+        include_model_info=False,
+        include_commit_signature=False,
+    )
+    skill_manager = SkillManager(lambda: config)
+    agent_manager = AgentManager(load_orchestrator(config))
+
+    prompt = get_universal_system_prompt(config, skill_manager, agent_manager)
+
+    assert prompt.startswith("You are Mistral Vibe, an interactive coding agent.")
+    assert "# Harness" in prompt
+    assert "invoke it via the `skill` tool" in prompt
+    assert "## Instruction hierarchy" not in prompt

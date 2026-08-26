@@ -21,6 +21,7 @@ from acp.schema import (
 from vibe.acp.session_updates import (
     _TOOL_KINDS,
     replay_history_entry,
+    replay_session_updates,
     session_updates_for_event,
 )
 from vibe.acp.user_display_content import USER_DISPLAY_CONTENT_META_KEY
@@ -53,6 +54,7 @@ from vibe.app_server.models import (
     PublicNoticeEntry,
     PublicReasoningEntry,
     PublicSession,
+    PublicSessionState,
     RunningEffectState,
     SessionTitleUpdatedNoticeDetail,
     ShellEffectDetail,
@@ -105,10 +107,11 @@ def _display(summary: str = "Running tool") -> EffectCallDisplay:
     )
 
 
-def _session(title: str | None, updated_at: int) -> PublicSession:
+def _session(title: str | None, updated_at: int, preview: str = "") -> PublicSession:
     return PublicSession(
         id="session-1",
         title=title,
+        preview=preview,
         status=IdleSessionStatus(),
         created_at=1_000,
         updated_at=updated_at,
@@ -1009,6 +1012,54 @@ def test_checkpoints_and_session_titles_use_public_identity_and_metadata() -> No
     assert live_notice_updates == []
     assert isinstance(live_title, SessionInfoUpdate)
     assert live_title.title == "New title"
+
+
+def test_live_session_update_falls_back_to_preview_when_untitled() -> None:
+    # The first user message sets the preview on a still-untitled session; the
+    # client renders the title verbatim, so the update must carry the preview.
+    updates = session_updates_for_event(
+        SessionUpdated(
+            previous=_session(None, 1_000, preview=""),
+            session=_session(None, 2_000, preview="MARKER-ONE: first turn"),
+            patch=[
+                JsonPatchOperation(
+                    op="replace", path="/preview", value="MARKER-ONE: first turn"
+                )
+            ],
+        )
+    )
+
+    assert len(updates) == 1
+    assert isinstance(updates[0], SessionInfoUpdate)
+    assert updates[0].title == "MARKER-ONE: first turn"
+
+
+def test_live_session_update_prefers_generated_title_over_preview() -> None:
+    updates = session_updates_for_event(
+        SessionUpdated(
+            previous=_session(None, 1_000, preview="MARKER-ONE"),
+            session=_session("Generated title", 2_000, preview="MARKER-ONE"),
+            patch=[
+                JsonPatchOperation(op="replace", path="/title", value="Generated title")
+            ],
+        )
+    )
+
+    assert len(updates) == 1
+    assert isinstance(updates[0], SessionInfoUpdate)
+    assert updates[0].title == "Generated title"
+
+
+def test_replay_falls_back_to_preview_when_untitled() -> None:
+    state = PublicSessionState(
+        event_id=0, session=_session(None, 2_000, preview="MARKER-PREV"), history=[]
+    )
+
+    updates = replay_session_updates(state)
+
+    assert len(updates) == 1
+    assert isinstance(updates[0], SessionInfoUpdate)
+    assert updates[0].title == "MARKER-PREV"
 
 
 def test_every_effect_kind_maps_to_an_acp_tool_kind() -> None:

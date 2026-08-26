@@ -271,6 +271,12 @@ class PublicRetryCategory(StrEnum):
     UNKNOWN = auto()
 
 
+class PublicRetryState(ProtocolModel):
+    turn_id: str
+    category: PublicRetryCategory
+    detail: str
+
+
 class TurnErrorCode(StrEnum):
     RATE_LIMIT = auto()
     CONTEXT_TOO_LONG = auto()
@@ -490,6 +496,38 @@ class SkillSummary(ProtocolModel):
 class ToolSummary(ProtocolModel):
     name: str
     is_custom: bool = False
+
+
+# The closed set the App Server contract declares. Vibe never emits "unknown";
+# it is here so a component kind Vibe does not model still round-trips.
+type PluginComponentKind = Literal[
+    "skill",
+    "knowledge",
+    "library",
+    "mcp_server",
+    "connector",
+    "hook",
+    "agent",
+    "subagent",
+    "tool",
+    "unknown",
+]
+
+
+class PluginComponent(ProtocolModel):
+    kind: PluginComponentKind
+    name: str
+    # Absolute, and joined against the plugin root at read time. The snapshot
+    # stores a portable reference; absolute paths never enter a digested
+    # artifact. A component with no file on disk has no source path.
+    source_path: str | None = None
+    config: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class PluginInfo(ProtocolModel):
+    workdir: str | None = None
+    components: list[PluginComponent] = Field(default_factory=list)
+    raw: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class ConnectorCounts(ProtocolModel):
@@ -897,6 +935,7 @@ class PublicSessionState(ProtocolModel):
     history_before_cursor: str | None = None
     turns: list[PublicTurn] | None = None
     active_callbacks: list[PublicCallbackEntry] = Field(default_factory=list)
+    retrying: PublicRetryState | None = None
 
     @property
     def latest_turn(self) -> PublicTurn | None:

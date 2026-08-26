@@ -103,6 +103,24 @@ class ChatTextArea(TextArea):
     class HistoryReset(Message):
         """Message sent when history navigation should be reset."""
 
+    class QueueSelectionPrevious(Message):
+        """Move selection to the previous (older) queued item."""
+
+    class QueueSelectionNext(Message):
+        """Move selection to the next (newer) queued item."""
+
+    class QueueSelectionEnter(Message):
+        """Enter edit mode for the selected queued item."""
+
+    class QueueSelectionRemove(Message):
+        """Delete the selected queued item."""
+
+    class QueueSelectionExit(Message):
+        """Exit queue selection mode."""
+
+    class QueueEditCancelled(Message):
+        """Message sent when the user cancels queue-edit mode (Escape)."""
+
     class ModeChanged(Message):
         """Message sent when the input mode changes (>, !, /, &)."""
 
@@ -138,6 +156,8 @@ class ChatTextArea(TextArea):
         self._input_mode: InputMode = self.DEFAULT_MODE
         self._last_text = ""
         self._navigating_history = False
+        self._queue_edit_active = False
+        self._queue_selection_active = False
         self._applying_completion = False
         self._original_text: str = ""
         self._cursor_pos_after_load: tuple[int, int] | None = None
@@ -387,7 +407,12 @@ class ChatTextArea(TextArea):
             self.move_cursor((rewritten.count("\n"), len(last_line)))
             return
 
-        if not self._navigating_history and self.text != self._last_text:
+        if (
+            not self._navigating_history
+            and not self._queue_edit_active
+            and not self._queue_selection_active
+            and self.text != self._last_text
+        ):
             self._original_text = ""
             self._cursor_pos_after_load = None
             self._cursor_moved_since_load = False
@@ -519,7 +544,7 @@ class ChatTextArea(TextArea):
     def time_since_last_keystroke(self) -> float:
         return time.monotonic() - self._last_keystroke_time
 
-    async def _on_key(self, event: events.Key) -> None:  # noqa: PLR0911
+    async def _on_key(self, event: events.Key) -> None:  # noqa: PLR0911, PLR0912, PLR0915
         self._last_keystroke_time = time.monotonic()
 
         if await self._handle_voice_key(event):
@@ -540,6 +565,34 @@ class ChatTextArea(TextArea):
                 return
             if event.character is not None:
                 self.post_message(self.NonFeedbackKeyPressed())
+
+        if self._queue_selection_active:
+            match event.key:
+                case "up":
+                    event.prevent_default()
+                    event.stop()
+                    self.post_message(self.QueueSelectionPrevious())
+                    return
+                case "down":
+                    event.prevent_default()
+                    event.stop()
+                    self.post_message(self.QueueSelectionNext())
+                    return
+                case "enter":
+                    event.prevent_default()
+                    event.stop()
+                    self.post_message(self.QueueSelectionEnter())
+                    return
+                case "backspace" | "delete":
+                    event.prevent_default()
+                    event.stop()
+                    self.post_message(self.QueueSelectionRemove())
+                    return
+                case "escape":
+                    event.prevent_default()
+                    event.stop()
+                    self.post_message(self.QueueSelectionExit())
+                    return
 
         manager = self._completion_manager
         if manager:
@@ -585,6 +638,12 @@ class ChatTextArea(TextArea):
             self._set_mode(self.DEFAULT_MODE)
             event.prevent_default()
             event.stop()
+            return
+
+        if event.key == "escape" and self._queue_edit_active:
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.QueueEditCancelled())
             return
 
         if event.key == "up" and self._handle_history_up():

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator, Sequence
+from contextlib import aclosing
 import json
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 from vibe.core.types import AvailableTool, LLMChunk, LLMMessage, StrToolChoice
 
 if TYPE_CHECKING:
     from vibe.core.config import ProviderConfig
+
+
+MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS = 60.0
 
 
 def apply_reasoning_effort(payload: dict[str, Any], thinking: str) -> None:
@@ -72,9 +77,15 @@ class PreparedRequest(NamedTuple):
     base_url: str = ""
 
 
-class APIAdapter(Protocol):
+class ParsedStreamChunk(NamedTuple):
+    data: dict[str, Any]
+    chunk: LLMChunk
+
+
+class APIAdapter(ABC):
     endpoint: ClassVar[str]
 
+    @abstractmethod
     def prepare_request(
         self,
         *,
@@ -90,6 +101,14 @@ class APIAdapter(Protocol):
         thinking: str = "off",
     ) -> PreparedRequest: ...
 
+    @abstractmethod
     def parse_response(
         self, data: dict[str, Any], provider: ProviderConfig
     ) -> LLMChunk: ...
+
+    async def parse_stream(
+        self, responses: AsyncGenerator[dict[str, Any]], provider: ProviderConfig
+    ) -> AsyncGenerator[ParsedStreamChunk]:
+        async with aclosing(responses):
+            async for data in responses:
+                yield ParsedStreamChunk(data, self.parse_response(data, provider))

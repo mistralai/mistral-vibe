@@ -11,12 +11,16 @@ from vibe.cli.textual_ui.message_queue import (
     MessageQueue,
     QueueController,
     QueuedItem,
-    QueuedItemKind,
     QueuePorts,
     SideChannelController,
     SideChannelPorts,
 )
-from vibe.cli.textual_ui.widgets.messages import SlashCommandMessage, UserMessage
+from vibe.cli.textual_ui.queue_kinds import QueuedItemKind
+from vibe.cli.textual_ui.widgets.messages import (
+    BashOutputMessage,
+    SlashCommandMessage,
+    UserMessage,
+)
 
 
 def test_empty_queue_is_falsy() -> None:
@@ -347,6 +351,7 @@ def unmounted_widget_remove(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(UserMessage, "remove", noop_remove)
+    monkeypatch.setattr(BashOutputMessage, "remove", noop_remove)
 
 
 @pytest.mark.asyncio
@@ -390,11 +395,18 @@ async def test_command_does_not_orphan_preceding_prompt(
 
 
 @pytest.mark.asyncio
-async def test_command_between_prompts_keeps_single_llm_turn(
+async def test_command_between_prompts_runs_each_as_own_turn(
     unmounted_widget_remove: None,
 ) -> None:
+    # A queued command is a FIFO turn boundary, not transparent to prompt
+    # grouping: the prompt queued before it runs as its own LLM turn before the
+    # command's side effect, and the prompt queued after it runs as a separate
+    # turn afterwards. The old behaviour kept both prompts as a single turn and
+    # let the command jump ahead of the preceding prompt — a FIFO violation for
+    # any command that blocks (e.g. /mcp, /compact) or mutates the conversation.
     injected: list[str] = []
     turns: list[str] = []
+    commands: list[str] = []
 
     async def inject_queued_prompt(content: str, **kwargs) -> None:
         injected.append(content)
@@ -403,22 +415,61 @@ async def test_command_between_prompts_keeps_single_llm_turn(
         turns.append(content)
         return _noop_task()
 
+    async def run_command(content: str, payload) -> None:
+        commands.append(content)
+
     controller = _queue_controller(
-        inject_queued_prompt=inject_queued_prompt, start_agent_turn=start_agent_turn
+        inject_queued_prompt=inject_queued_prompt,
+        start_agent_turn=start_agent_turn,
+        run_command=run_command,
     )
     controller.queue.append_prompt("first")
-    controller.queue.append_command("model sonnet")
+    controller.queue.append_command("mcp")
     controller.queue.append_prompt("second")
     controller._widgets = [
         UserMessage("first", pending=True),
-        SlashCommandMessage("model sonnet", pending=True),
+        SlashCommandMessage("mcp", pending=True),
         UserMessage("second", pending=True),
     ]
 
     await controller._drain()
 
-    assert injected == ["first"]
-    assert turns == ["second"]
+    assert commands == ["mcp"]
+    assert turns == ["first", "second"]
+    assert injected == []
+    assert not controller.queue
+
+
+@pytest.mark.asyncio
+async def test_command_runs_preceding_prompt_turn_before_side_effect(
+    unmounted_widget_remove: None,
+) -> None:
+    # Regresses a FIFO ordering bug: a prompt queued before a blocking command
+    # (e.g. /mcp, which opens a picker the drain blocks on) must run as an LLM
+    # turn BEFORE the command's side effect. Otherwise the picker opens first
+    # and the prompt only runs after the user dismisses it — out of order.
+    order: list[str] = []
+
+    def start_agent_turn(content: str, **kwargs) -> asyncio.Task[None]:
+        order.append(f"prompt:{content}")
+        return _noop_task()
+
+    async def run_command(content: str, payload) -> None:
+        order.append(f"command:{content}")
+
+    controller = _queue_controller(
+        start_agent_turn=start_agent_turn, run_command=run_command
+    )
+    controller.queue.append_prompt("queued prompt")
+    controller.queue.append_command("mcp")
+    controller._widgets = [
+        UserMessage("queued prompt", pending=True),
+        SlashCommandMessage("mcp", pending=True),
+    ]
+
+    await controller._drain()
+
+    assert order == ["prompt:queued prompt", "command:mcp"]
     assert not controller.queue
 
 
@@ -509,6 +560,91 @@ async def test_flushes_pending_command_drops_preceding_prompt(
 
 
 @pytest.mark.asyncio
+async def test_prompt_before_bash_runs_prompt_turn(
+    unmounted_widget_remove: None,
+) -> None:
+    # A prompt immediately followed by a bash item must still get an LLM turn;
+    # the bash runs after the model answers. Regresses a bug where the prompts
+    # were injected without a turn and silently dropped ("pwd executes but the
+    # model never answers the prompt").
+    injected: list[str] = []
+    turns: list[str] = []
+    bashes: list[str] = []
+
+    async def inject_queued_prompt(content: str, **kwargs) -> None:
+        injected.append(content)
+
+    def start_agent_turn(content: str, **kwargs) -> asyncio.Task[None]:
+        turns.append(content)
+        return _noop_task()
+
+    def run_bash(content: str, **kwargs) -> asyncio.Task[None]:
+        bashes.append(content)
+        return _noop_task()
+
+    controller = _queue_controller(
+        inject_queued_prompt=inject_queued_prompt,
+        start_agent_turn=start_agent_turn,
+        run_bash=run_bash,
+    )
+    controller.queue.append_prompt("say I love code")
+    controller.queue.append_bash("pwd")
+    controller._widgets = [
+        UserMessage("say I love code", pending=True),
+        BashOutputMessage("pwd", "/tmp", pending=True),
+    ]
+
+    await controller._drain()
+
+    assert turns == ["say I love code"]
+    assert bashes == ["pwd"]
+    assert not controller.queue
+
+
+@pytest.mark.asyncio
+async def test_prompts_before_bash_run_as_single_turn(
+    unmounted_widget_remove: None,
+) -> None:
+    # Multiple prompts before a bash combine into one turn (head injected, tail
+    # starts the turn), then the bash runs.
+    injected: list[str] = []
+    turns: list[str] = []
+    bashes: list[str] = []
+
+    async def inject_queued_prompt(content: str, **kwargs) -> None:
+        injected.append(content)
+
+    def start_agent_turn(content: str, **kwargs) -> asyncio.Task[None]:
+        turns.append(content)
+        return _noop_task()
+
+    def run_bash(content: str, **kwargs) -> asyncio.Task[None]:
+        bashes.append(content)
+        return _noop_task()
+
+    controller = _queue_controller(
+        inject_queued_prompt=inject_queued_prompt,
+        start_agent_turn=start_agent_turn,
+        run_bash=run_bash,
+    )
+    controller.queue.append_prompt("first")
+    controller.queue.append_prompt("second")
+    controller.queue.append_bash("pwd")
+    controller._widgets = [
+        UserMessage("first", pending=True),
+        UserMessage("second", pending=True),
+        BashOutputMessage("pwd", "/tmp", pending=True),
+    ]
+
+    await controller._drain()
+
+    assert injected == ["first"]
+    assert turns == ["second"]
+    assert bashes == ["pwd"]
+    assert not controller.queue
+
+
+@pytest.mark.asyncio
 async def test_drain_blocks_on_open_picker_before_running_turn(
     unmounted_widget_remove: None,
 ) -> None:
@@ -559,3 +695,39 @@ async def test_run_queued_command_text_only_failure_does_not_raise(
             # A failing text-only command (payload is None) must be caught
             # rather than propagating into _drain and aborting the queue.
             await app._run_queued_command("/clear", None)
+
+
+@pytest.mark.asyncio
+async def test_pop_at_fires_on_discard(unmounted_widget_remove: None) -> None:
+    # Deleting a queued item via the selection UI (pop_at) must fire its
+    # on_discard, the same way pop_last does for Ctrl+C — otherwise a queued
+    # theme change deleted from the queue stays visually applied but never
+    # reverts.
+    discarded: list[str] = []
+
+    async def on_discard() -> None:
+        discarded.append("called")
+
+    controller = _queue_controller()
+    controller.queue.append_command("theme nord", on_discard=on_discard)
+    controller._widgets = [SlashCommandMessage("theme nord", pending=True)]
+
+    assert await controller.pop_at(0)
+    assert not controller
+    assert discarded == ["called"]
+
+
+@pytest.mark.asyncio
+async def test_pop_at_no_item_does_not_fire_on_discard(
+    unmounted_widget_remove: None,
+) -> None:
+    async def on_discard() -> None:
+        raise AssertionError("on_discard must not run for a missing item")
+
+    controller = _queue_controller()
+    controller.queue.append_command("theme nord", on_discard=on_discard)
+    controller._widgets = [SlashCommandMessage("theme nord", pending=True)]
+
+    # Out-of-range index: nothing removed, callback never runs.
+    assert not await controller.pop_at(5)
+    assert len(controller) == 1

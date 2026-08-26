@@ -54,6 +54,38 @@ from vibe.utils.tool_presentation import (
 )
 
 
+def test_generic_backend_keeps_idle_connections_for_tool_turns() -> None:
+    provider = ProviderConfig(
+        name="generic", api_base="https://example.com/v1", api_key_env_var="API_KEY"
+    )
+    with patch(
+        "vibe.core.llm.backend.generic.VibeAsyncHTTPClient"
+    ) as create_http_client:
+        GenericBackend(provider=provider)._get_client()
+
+    limits = create_http_client.call_args.kwargs["limits"]
+    assert limits.keepalive_expiry == 60.0
+
+
+@pytest.mark.asyncio
+async def test_mistral_backend_keeps_idle_connections_for_tool_turns() -> None:
+    provider = ProviderConfig(
+        name="mistral", api_base="https://api.mistral.ai/v1", api_key_env_var="API_KEY"
+    )
+    backend = MistralBackend(provider=provider)
+    with (
+        patch(
+            "vibe.core.llm.backend.mistral.VibeAsyncHTTPClient"
+        ) as create_http_client,
+        patch("vibe.core.llm.backend.mistral.Mistral"),
+        patch("vibe.core.llm.backend.mistral._register_retry_hook"),
+    ):
+        backend._create_mistral_client()
+
+    limits = create_http_client.call_args.kwargs["limits"]
+    assert limits.keepalive_expiry == 60.0
+
+
 def test_internal_tool_presentation_is_not_sent_to_provider() -> None:
     message = LLMMessage(
         role=Role.assistant,
@@ -252,6 +284,64 @@ class TestBackend:
                         )
 
     @pytest.mark.asyncio
+    async def test_mistral_backend_streaming_closes_response_on_early_exit(self):
+        # Regression: terminating the streaming generator early (user interrupt,
+        # max-tokens truncation) used to leave the SDK stream -- and the httpx
+        # connection it holds -- open until async-gen finalization, exhausting
+        # the pool over a long session. The fix closes the SDK stream via its
+        # async context manager, so ``EventStreamAsync.__aexit__`` (which calls
+        # ``response.aclose()``) runs synchronously on every exit path.
+        from mistralai.client.utils.eventstreaming import EventStreamAsync
+
+        base_url, chunks, _ = MISTRAL_STREAMED_SIMPLE_CONVERSATION_PARAMS[0]
+        aexit_called = False
+        original_aexit = EventStreamAsync.__aexit__
+
+        async def spy_aexit(self, exc_type, exc_val, exc_tb):
+            nonlocal aexit_called
+            aexit_called = True
+            return await original_aexit(self, exc_type, exc_val, exc_tb)
+
+        with (
+            respx.mock(base_url=base_url) as mock_api,
+            patch.object(EventStreamAsync, "__aexit__", spy_aexit),
+        ):
+            route = mock_api.post(CHAT_COMPLETIONS_PATH).mock(
+                return_value=httpx.Response(
+                    status_code=200,
+                    stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            )
+            provider = ProviderConfig(
+                name="provider_name",
+                api_base=f"{base_url}/v1",
+                api_key_env_var="API_KEY",
+            )
+            backend = MistralBackend(provider=provider)
+            model = ModelConfig(
+                name="model_name", provider="provider_name", alias="model_alias"
+            )
+            messages = [LLMMessage(role=Role.user, content="List files")]
+
+            generator = backend.complete_streaming(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+            first = await generator.__anext__()
+            assert first is not None
+            # Simulate the consumer dropping the stream mid-flight.
+            await generator.aclose()
+
+            assert aexit_called, "SDK stream was not closed on early exit"
+            assert route.calls.last.response.is_closed
+
+    @pytest.mark.asyncio
     async def test_backend_complete_streaming_keeps_unicode_line_breaks(self):
         content = "first\u2028second\u0085third"
         chunk = json.dumps(
@@ -343,9 +433,11 @@ class TestBackend:
                 api_base=f"{base_url}/v1",
                 api_key_env_var="API_KEY",
             )
-            backend = backend_class(provider=provider)
-            if isinstance(backend, MistralBackend):
+            if issubclass(backend_class, MistralBackend):
+                backend = backend_class(provider=provider)
                 backend._retry_config = self._build_fast_retry_config()
+            else:
+                backend = backend_class(provider=provider, retry_max_elapsed_time=0.0)
             model = ModelConfig(
                 name="model_name", provider="provider_name", alias="model_alias"
             )
@@ -551,6 +643,22 @@ class TestBackendFactory:
 
         assert isinstance(backend, GenericBackend)
         assert backend._enable_otel is True
+
+    def test_create_backend_passes_retry_budget_to_generic_backend(self):
+        provider = ProviderConfig(
+            name="test_provider",
+            api_base="https://api.example.com/v1",
+            api_key_env_var="API_KEY",
+            backend=Backend.GENERIC,
+        )
+
+        backend = create_backend(
+            provider=provider, timeout=7200.0, retry_max_elapsed_time=1234.0
+        )
+
+        assert isinstance(backend, GenericBackend)
+        assert backend._timeout == 7200.0
+        assert backend._retry_max_elapsed_time == 1234.0
 
 
 class TestMistralRetry:

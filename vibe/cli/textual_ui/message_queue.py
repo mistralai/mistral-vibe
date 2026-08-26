@@ -3,14 +3,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass, field
-from enum import StrEnum, auto
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from textual.widget import Widget
 
 from vibe.app_server.models import PreparedPrompt
+from vibe.cli.textual_ui.queue_kinds import QueuedItemKind
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.messages import (
     BashOutputMessage,
@@ -24,12 +24,6 @@ from vibe.observability.logging import logger
 if TYPE_CHECKING:
     from vibe.app_server.config import ModelConfigView
     from vibe.cli.commands import Command
-
-
-class QueuedItemKind(StrEnum):
-    PROMPT = auto()
-    BASH = auto()
-    COMMAND = auto()
 
 
 async def _noop_async() -> None:
@@ -132,6 +126,22 @@ class MessageQueue:
         if not self._items:
             return None
         return self._items.pop(0)
+
+    def pop_at(self, index: int) -> QueuedItem | None:
+        if index < 0 or index >= len(self._items):
+            return None
+        item = self._items.pop(index)
+        if not self._items:
+            self._paused = False
+        return item
+
+    def update_prompt_item(
+        self, index: int, content: str, *, prepared_prompt: PreparedPrompt | None = None
+    ) -> None:
+        old = self._items[index]
+        self._items[index] = replace(
+            old, content=content, prepared_prompt=prepared_prompt
+        )
 
     def pause(self) -> None:
         self._paused = True
@@ -259,6 +269,7 @@ class QueueController:
         self._widgets.append(widget)
         await self._ports.mount_and_scroll(widget, after=anchor)
         self._push_loading_queue_count()
+        self.start_drain_if_needed()
 
     async def enqueue_bash(self, content: str, workdir: str) -> None:
         self._queue.append_bash(content)
@@ -269,6 +280,7 @@ class QueueController:
         self._widgets.append(widget)
         await self._ports.mount_and_scroll(widget, after=anchor)
         self._push_loading_queue_count()
+        self.start_drain_if_needed()
 
     async def enqueue_command(
         self,
@@ -303,6 +315,80 @@ class QueueController:
         await self._remove_header_if_empty()
         self._push_loading_queue_count()
         return True
+
+    def prompt_item_texts(self) -> list[tuple[int, str]]:
+        """Return (queue_index, content) for PROMPT items, in queue order."""
+        return [
+            (i, item.content)
+            for i, item in enumerate(self._queue._items)
+            if item.kind == QueuedItemKind.PROMPT
+        ]
+
+    def queue_item_texts(self) -> list[tuple[int, str]]:
+        """Return (queue_index, content) for all items, in queue order."""
+        return [(i, item.content) for i, item in enumerate(self._queue._items)]
+
+    def queue_items(self) -> list[tuple[int, QueuedItemKind, str]]:
+        """Return (queue_index, kind, content) for all items, in queue order."""
+        return [
+            (i, item.kind, item.content) for i, item in enumerate(self._queue._items)
+        ]
+
+    @property
+    def widgets(self) -> list[Widget]:
+        return list(self._widgets)
+
+    async def pop_at(self, index: int) -> bool:
+        item = self._queue.pop_at(index)
+        if item is None:
+            return False
+        await item.on_discard()
+        if index < len(self._widgets):
+            widget = self._widgets.pop(index)
+            await widget.remove()
+        await self._remove_header_if_empty()
+        self._push_loading_queue_count()
+        return True
+
+    async def update_prompt_item(
+        self,
+        queue_index: int,
+        content: str,
+        *,
+        prepared_prompt: PreparedPrompt | None = None,
+    ) -> None:
+        self._queue.update_prompt_item(
+            queue_index, content, prepared_prompt=prepared_prompt
+        )
+        widget = self._widgets[queue_index]
+        if isinstance(widget, UserMessage):
+            widget.update_content(content)
+
+    async def update_item(
+        self,
+        queue_index: int,
+        content: str,
+        *,
+        prepared_prompt: PreparedPrompt | None = None,
+    ) -> None:
+        """In-place edit of a queued item, refreshing its on-screen widget.
+
+        Prompts re-prepare mentions/images; bash commands refresh the rendered
+        command line. The widget list and queue positions are unchanged.
+        """
+        item = self._queue._items[queue_index]
+        if item.kind == QueuedItemKind.BASH:
+            self._queue.update_prompt_item(queue_index, content)
+            widget = self._widgets[queue_index]
+            if isinstance(widget, BashOutputMessage):
+                widget.update_command(content)
+            return
+        self._queue.update_prompt_item(
+            queue_index, content, prepared_prompt=prepared_prompt
+        )
+        widget = self._widgets[queue_index]
+        if isinstance(widget, UserMessage):
+            widget.update_content(content)
 
     # -- header lifecycle -------------------------------------------------
 
@@ -392,8 +478,13 @@ class QueueController:
                 break
             widget = self._widgets.pop(0) if self._widgets else None
             if item.kind == QueuedItemKind.BASH:
-                await self._flush_pending_prompts(pending)
-                pending = []
+                # A bash item is a turn boundary: run any preceding prompts as
+                # a real LLM turn before executing the command. Injecting them
+                # without a turn (the old flush) silently dropped prompts that
+                # immediately preceded a bash item — the model never answered.
+                if pending:
+                    await self._run_pending_as_llm_turn(pending)
+                    pending = []
                 if widget is not None:
                     await widget.remove()
                 if not await self._run_bash(item.content):
@@ -407,7 +498,14 @@ class QueueController:
                 # (e.g. /clear) resets the conversation, so drop any prompts
                 # queued before it instead of running a turn on the widgets it
                 # is about to tear down.
-                if item.flushes_pending and pending:
+                if item.flushes_pending:
+                    pending = []
+                elif pending:
+                    # Run preceding prompts as a real LLM turn before the
+                    # command's side effect. Without this, a queued [/mcp]
+                    # following a prompt opens its picker first and the prompt
+                    # only runs after the user dismisses it — out of FIFO order.
+                    await self._run_pending_as_llm_turn(pending)
                     pending = []
                 if widget is not None:
                     await widget.remove()
@@ -441,14 +539,6 @@ class QueueController:
             if current is not None and current.cancelling():
                 raise
             self._push_loading_queue_count()
-
-    async def _flush_pending_prompts(self, pending: list[_Pending]) -> None:
-        if not await self._gate_queued_images_for_vision(pending):
-            return
-        for p in pending:
-            await self._inject_head_item(p.item, p.widget)
-            await p.widget.set_pending(False)
-        self._link_consecutive_user_messages([p.widget for p in pending])
 
     async def _gate_queued_images_for_vision(self, pending: list[_Pending]) -> bool:
         if not any(

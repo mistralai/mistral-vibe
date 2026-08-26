@@ -28,6 +28,7 @@ def dedup_paths(paths: Iterable[Path]) -> list[Path]:
 _VIBE_DIR = Path(".vibe")
 _TOOLS_SUBDIR = _VIBE_DIR / "tools"
 _VIBE_SKILLS_SUBDIR = _VIBE_DIR / "skills"
+_PLUGINS_SUBDIR = _VIBE_DIR / "plugins"
 _AGENTS_SUBDIR = _VIBE_DIR / "agents"
 _AGENTS_DIR = Path(".agents")
 _AGENTS_SKILLS_SUBDIR = _AGENTS_DIR / "skills"
@@ -40,6 +41,7 @@ class LocalConfigDirs:
     config_dirs: tuple[Path, ...] = ()
     tools: tuple[Path, ...] = ()
     skills: tuple[Path, ...] = ()
+    plugins: tuple[Path, ...] = ()
     agents: tuple[Path, ...] = ()
 
     def __or__(self, other: LocalConfigDirs) -> LocalConfigDirs:
@@ -47,6 +49,7 @@ class LocalConfigDirs:
             config_dirs=tuple(dedup_paths([*self.config_dirs, *other.config_dirs])),
             tools=tuple(dedup_paths([*self.tools, *other.tools])),
             skills=tuple(dedup_paths([*self.skills, *other.skills])),
+            plugins=tuple(dedup_paths([*self.plugins, *other.plugins])),
             agents=tuple(dedup_paths([*self.agents, *other.agents])),
         )
 
@@ -60,6 +63,7 @@ def find_local_config_dirs(root: Path) -> LocalConfigDirs:
     config_dirs: list[Path] = []
     tools: list[Path] = []
     skills: list[Path] = []
+    plugins: list[Path] = []
     agents: list[Path] = []
 
     vibe_dir = resolved / _VIBE_DIR
@@ -70,6 +74,9 @@ def find_local_config_dirs(root: Path) -> LocalConfigDirs:
             has_content = True
         if _safe_is_dir(candidate := resolved / _VIBE_SKILLS_SUBDIR):
             skills.append(candidate)
+            has_content = True
+        if _safe_is_dir(candidate := resolved / _PLUGINS_SUBDIR):
+            plugins.append(candidate)
             has_content = True
         if _safe_is_dir(candidate := resolved / _AGENTS_SUBDIR):
             agents.append(candidate)
@@ -92,5 +99,6 @@ def find_local_config_dirs(root: Path) -> LocalConfigDirs:
         config_dirs=tuple(config_dirs),
         tools=tuple(tools),
         skills=tuple(skills),
+        plugins=tuple(plugins),
         agents=tuple(agents),
     )

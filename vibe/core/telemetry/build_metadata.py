@@ -24,6 +24,7 @@ def build_base_metadata(
     parent_session_id: str | None = None,
     experiment_assignments: list[ExperimentAssignment] | None = None,
     user_plan: str | None = None,
+    experiment_attributes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     launch_payload = (
         launch_context.telemetry_fields() if launch_context is not None else {}
@@ -41,6 +42,7 @@ def build_base_metadata(
             experiments=experiments or None,
             experiment_assignments=experiment_assignments or None,
             user_plan=user_plan,
+            experiment_attributes=experiment_attributes or None,
             **launch_payload,
         ).model_dump(exclude_none=True),
     )

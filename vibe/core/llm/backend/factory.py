@@ -43,14 +43,10 @@ def create_backend(
 ) -> BackendLike:
     backend = Backend(provider.backend)
     factory = BACKEND_FACTORY[backend]
-    if backend == Backend.MISTRAL:
-        return factory(
-            provider=provider,
-            timeout=timeout,
-            retry_max_elapsed_time=retry_max_elapsed_time,
-            enable_otel=enable_otel,
-            on_retry=on_retry,
-        )
     return factory(
-        provider=provider, timeout=timeout, enable_otel=enable_otel, on_retry=on_retry
+        provider=provider,
+        timeout=timeout,
+        retry_max_elapsed_time=retry_max_elapsed_time,
+        enable_otel=enable_otel,
+        on_retry=on_retry,
     )

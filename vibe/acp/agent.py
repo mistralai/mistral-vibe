@@ -755,7 +755,9 @@ class VibeAcpAgent(AcpAgent):
                 SessionInfo(
                     session_id=item.id,
                     cwd=item.cwd or "",
-                    title=item.title,
+                    # No LLM title yet: fall back to the first-message preview so
+                    # the list stays readable instead of showing "untitled".
+                    title=item.title or item.preview,
                     updated_at=datetime.fromtimestamp(
                         item.updated_at / 1000, UTC
                     ).isoformat(),

@@ -20,6 +20,7 @@ from vibe.core.paths._vibe_home import (
     SESSION_LOG_DIR,
     TRUSTED_FOLDERS_FILE,
     VIBE_HOME,
+    WHOAMI_CACHE_FILE,
     WORKTREES_DIR,
     GlobalPath,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "SESSION_LOG_DIR",
     "TRUSTED_FOLDERS_FILE",
     "VIBE_HOME",
+    "WHOAMI_CACHE_FILE",
     "WORKTREES_DIR",
     "GlobalPath",
     "LocalConfigDirs",

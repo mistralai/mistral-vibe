@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Literal
 
-from vibe import __version__
 from vibe.app_server._model import validate_wire
 from vibe.app_server.client_state import ClientSessionState
 from vibe.app_server.connection import AppServerResourceConnection
@@ -17,6 +16,7 @@ from vibe.app_server.protocol import (
     NarrationSummarizeResponse,
     TelemetryRecordParams,
 )
+from vibe.app_server.telemetry_port import ClientTelemetryEvent
 
 
 class NarrationResource:
@@ -51,9 +51,6 @@ class NarrationResource:
         return response.summary
 
 
-from vibe.utils.platform import get_platform_id, get_platform_version
-
-
 class TelemetryResource:
     def __init__(
         self, connection: AppServerResourceConnection, state: ClientSessionState
@@ -79,29 +76,12 @@ class TelemetryResource:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
-    def send_telemetry_event(
-        self,
-        event_name: str,
-        properties: dict[str, Any],
-        *,
-        correlation_id: str | None = None,
-    ) -> None:
+    def log(self, event: ClientTelemetryEvent) -> None:
         self.record(
-            event_name, properties, correlate_last_request=correlation_id is not None
+            event.name,
+            event.properties,
+            correlate_last_request=event.correlation_id is not None,
         )
-
-    def build_request_metadata(self, message_id: str | None = None) -> dict[str, Any]:
-        session = self._state.state.session
-        return {
-            "os": get_platform_id(),
-            "os_version": get_platform_version(),
-            "version": __version__,
-            "session_id": session.id,
-            "parent_session_id": session.parent_session_id,
-            "call_type": "secondary_call",
-            "call_source": "vibe_code",
-            "message_id": message_id,
-        }
 
     async def _record(
         self,

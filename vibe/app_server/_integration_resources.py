@@ -15,7 +15,11 @@ from vibe.app_server._streaming import (
 from vibe.app_server.client_state import ClientSessionState
 from vibe.app_server.connection import AppServerResourceConnection
 from vibe.app_server.models import (
+    MCPSourceKind,
+    MCPSourceStatus,
+    MCPSourceSummary,
     MCPState,
+    MCPToolSummary,
     PublicError,
     TeleportComplete,
     TeleportEvent,
@@ -24,14 +28,21 @@ from vibe.app_server.models import (
     VibeCodeProject,
 )
 from vibe.app_server.protocol import (
+    AppServerResponseError,
     ConnectorAuthReadParams,
     ConnectorAuthReadResponse,
+    ConnectorCatalogMutationResponse,
+    ConnectorCatalogReadParams,
+    ConnectorCatalogReadResponse,
+    ConnectorCatalogRefreshParams,
+    ConnectorCatalogToggleParams,
     ConnectorRefreshParams,
     ConnectorRefreshResponse,
     EmptyResponse,
     MCPAddParams,
     MCPAddResponse,
     MCPAuthUrlParams,
+    MCPCatalogMutationResponse,
     MCPLoginParams,
     MCPLogoutParams,
     MCPReadParams,
@@ -39,7 +50,7 @@ from vibe.app_server.protocol import (
     MCPRefreshParams,
     MCPToggleParams,
     Notification,
-    RuntimeMutationResponse,
+    RuntimeSnapshot,
     TeleportCancelParams,
     TeleportCancelResponse,
     TeleportEventParams,
@@ -63,6 +74,37 @@ from vibe.app_server.protocol import (
 from vibe.utils.mcp import MCPAddTransport
 
 
+def _required_mcp_runtime(runtime: RuntimeSnapshot | None) -> RuntimeSnapshot:
+    if runtime is None:
+        raise RuntimeError("A session-targeted MCP mutation returned no runtime")
+    return runtime
+
+
+def _connector_sources(
+    response: ConnectorCatalogReadResponse,
+) -> list[MCPSourceSummary]:
+    if response.session is None:
+        return []
+    return [
+        MCPSourceSummary(
+            name=source.alias,
+            kind=MCPSourceKind.CONNECTOR,
+            transport="connector",
+            status=MCPSourceStatus(source.status),
+            tools=[
+                MCPToolSummary(
+                    name=tool.name,
+                    description=tool.description or "",
+                    enabled=tool.enabled,
+                )
+                for tool in source.tools
+            ],
+            error=source.error,
+        )
+        for source in response.session.sources
+    ]
+
+
 class MCPResource:
     def __init__(
         self, connection: AppServerResourceConnection, state: ClientSessionState
@@ -77,25 +119,84 @@ class MCPResource:
 
     async def read(self) -> MCPState:
         client = await self._connection.connect()
-        response = validate_wire(
+        mcp_response = validate_wire(
             MCPReadResponse,
             await client.request(
-                "mcp/read", MCPReadParams(session_id=self._state.session_id)
+                "mcp_catalog/read", MCPReadParams(session_id=self._state.session_id)
             ),
         )
-        self._state.mcp = response.mcp
-        return response.mcp
+        try:
+            connector_response = validate_wire(
+                ConnectorCatalogReadResponse,
+                await client.request(
+                    "connector_catalog/read",
+                    ConnectorCatalogReadParams(session_id=self._state.session_id),
+                ),
+            )
+        except AppServerResponseError as exc:
+            connectors = [
+                source
+                for source in self._state.mcp.sources
+                if source.kind is MCPSourceKind.CONNECTOR
+            ]
+            connector_error = exc.error.message
+        else:
+            connectors = _connector_sources(connector_response)
+            connector_error = (
+                None
+                if connector_response.catalog.disposition in {"memory", "fresh_cache"}
+                else self._state.mcp.connector_error
+            )
+
+        connector_names = {source.name for source in connectors}
+        connector_discovery_errors = {
+            name: error
+            for name, error in self._state.mcp.discovery_errors.items()
+            if name in connector_names
+        }
+        state = MCPState(
+            sources=[
+                *(
+                    source
+                    for source in mcp_response.mcp.sources
+                    if source.kind is MCPSourceKind.SERVER
+                ),
+                *connectors,
+            ],
+            discovery_errors={
+                **mcp_response.mcp.discovery_errors,
+                **connector_discovery_errors,
+            },
+            connector_error=connector_error,
+        )
+        self._state.mcp = state
+        return state
 
     async def refresh(self) -> MCPState:
         client = await self._connection.connect()
         response = validate_wire(
-            RuntimeMutationResponse,
+            MCPCatalogMutationResponse,
             await client.request(
-                "mcp/refresh", MCPRefreshParams(session_id=self._state.session_id)
+                "mcp_catalog/refresh",
+                MCPRefreshParams(session_id=self._state.session_id),
             ),
         )
-        self._state.apply_runtime(response.runtime)
-        return response.runtime.mcp
+        runtime = _required_mcp_runtime(response.runtime)
+        self._state.apply_runtime(runtime)
+        return runtime.mcp
+
+    async def refresh_connectors(self) -> MCPState:
+        client = await self._connection.connect()
+        response = validate_wire(
+            ConnectorCatalogMutationResponse,
+            await client.request(
+                "connector_catalog/refresh",
+                ConnectorCatalogRefreshParams(session_id=self._state.session_id),
+            ),
+        )
+        if response.runtime is not None:
+            self._state.apply_runtime(response.runtime)
+        return self._state.mcp
 
     async def toggle(
         self,
@@ -106,10 +207,26 @@ class MCPResource:
         tool_name: str | None = None,
     ) -> MCPState:
         client = await self._connection.connect()
+        if source == "connector":
+            connector_response = validate_wire(
+                ConnectorCatalogMutationResponse,
+                await client.request(
+                    "connector_catalog/toggle",
+                    ConnectorCatalogToggleParams(
+                        session_id=self._state.session_id,
+                        alias=name,
+                        disabled=disabled,
+                        tool_name=tool_name,
+                    ),
+                ),
+            )
+            runtime = _required_mcp_runtime(connector_response.runtime)
+            self._state.apply_runtime(runtime)
+            return runtime.mcp
         response = validate_wire(
-            RuntimeMutationResponse,
+            MCPCatalogMutationResponse,
             await client.request(
-                "mcp/toggle",
+                "mcp_catalog/toggle",
                 MCPToggleParams(
                     session_id=self._state.session_id,
                     name=name,
@@ -119,8 +236,9 @@ class MCPResource:
                 ),
             ),
         )
-        self._state.apply_runtime(response.runtime)
-        return response.runtime.mcp
+        runtime = _required_mcp_runtime(response.runtime)
+        self._state.apply_runtime(runtime)
+        return runtime.mcp
 
     async def add(
         self,
@@ -134,7 +252,7 @@ class MCPResource:
         response = validate_wire(
             MCPAddResponse,
             await client.request(
-                "mcp/add",
+                "mcp_catalog/add",
                 MCPAddParams(
                     session_id=self._state.session_id,
                     url=url,
@@ -144,20 +262,21 @@ class MCPResource:
                 ),
             ),
         )
-        self._state.apply_runtime(response.runtime)
+        self._state.apply_runtime(_required_mcp_runtime(response.runtime))
         return response
 
     async def logout(self, name: str) -> MCPState:
         client = await self._connection.connect()
         response = validate_wire(
-            RuntimeMutationResponse,
+            MCPCatalogMutationResponse,
             await client.request(
-                "mcp/logout",
+                "mcp_catalog/logout",
                 MCPLogoutParams(session_id=self._state.session_id, name=name),
             ),
         )
-        self._state.apply_runtime(response.runtime)
-        return response.runtime.mcp
+        runtime = _required_mcp_runtime(response.runtime)
+        self._state.apply_runtime(runtime)
+        return runtime.mcp
 
     async def login(self, name: str) -> AsyncGenerator[MCPAuthUrlParams, None]:
         if name in self._login_events:
@@ -168,20 +287,24 @@ class MCPResource:
         try:
             async for event in stream_request(
                 client,
-                "mcp/login",
+                "mcp_catalog/login",
                 MCPLoginParams(session_id=self._state.session_id, name=name),
                 events,
-                RuntimeMutationResponse,
+                MCPCatalogMutationResponse,
             ):
-                if isinstance(event, RuntimeMutationResponse):
-                    self._state.apply_runtime(event.runtime)
+                if isinstance(event, MCPCatalogMutationResponse):
+                    self._state.apply_runtime(_required_mcp_runtime(event.runtime))
                 else:
                     yield event
         finally:
             self._login_events.pop(name, None)
 
     async def consume_notification(self, notification: Notification) -> bool:
-        if notification.method != "mcp/authUrl":
+        if notification.method == "mcp/authUrl":
+            # The catalog publishes the compatibility notification alongside the
+            # canonical one. Current clients consume it without duplicating the URL.
+            return True
+        if notification.method != "mcp_catalog/authUrl":
             return False
         params = validate_wire(MCPAuthUrlParams, notification.params)
         if events := self._login_events.get(params.name):

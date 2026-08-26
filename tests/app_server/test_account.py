@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 from pydantic import ValidationError
 import pytest
@@ -23,7 +25,9 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import AccountReadParams
 from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.experiments.models import ExperimentAttributes
 from vibe.core.types import Backend
+from vibe.setup.auth.whoami import load_cached_whoami, store_cached_whoami
 
 
 @pytest.mark.asyncio
@@ -174,9 +178,13 @@ async def test_account_controller_does_not_call_gateway_without_key(
 
 
 @pytest.mark.asyncio
-async def test_account_controller_skips_non_mistral_active_model(
+async def test_account_controller_no_plan_data_when_no_mistral_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Non-Mistral active model AND no Mistral provider configured at all — not
+    # our user. No whoami call, no account UI, and the NO_PLAN_DATA sentinel
+    # (not the stale value, not null) so telemetry tells this apart from a
+    # failed fetch.
     monkeypatch.setenv("MISTRAL_API_KEY", "server-secret")
     base_config = build_test_vibe_config()
     provider = base_config.get_active_provider().model_copy(
@@ -195,8 +203,201 @@ async def test_account_controller_skips_non_mistral_active_model(
         await agent_loop.aclose()
 
     assert account.status is AccountStatus.UNAVAILABLE
+    assert account.plan is None
     assert gateway.calls == []
+    assert agent_loop.user_plan == "NO_PLAN_DATA"
+
+
+@pytest.mark.asyncio
+async def test_account_controller_fetches_plan_for_non_mistral_active_with_mistral_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Core of the change: the active model is a third-party backend, but a
+    # Mistral provider with a key is still configured. We MUST call whoami and
+    # capture the real plan for telemetry / GrowthBook — while suppressing the
+    # account UI (no plan shown) because the active model is not Mistral.
+    monkeypatch.setenv("MISTRAL_API_KEY", "server-secret")
+    base_config = build_test_vibe_config()
+    active = base_config.get_active_provider()
+    generic = active.model_copy(update={"backend": Backend.GENERIC})
+    mistral = active.model_copy(
+        update={"name": "mistral-extra", "backend": Backend.MISTRAL}
+    )
+    config = base_config.model_copy(update={"providers": [generic, mistral]})
+    agent_loop = build_test_agent_loop(config=config)
+    gateway = FakeAccountGateway(
+        WhoAmIResult(plan_type=AccountPlanKind.CHAT, plan_name="INDIVIDUAL")
+    )
+
+    try:
+        account = await AccountController(agent_loop, gateway).read()
+    finally:
+        await agent_loop.aclose()
+
+    # UI suppressed for the non-Mistral active model ...
+    assert account.status is AccountStatus.UNAVAILABLE
+    assert account.plan is None
+    # ... but whoami WAS called and telemetry captured the real plan.
+    assert len(gateway.calls) == 1
+    assert agent_loop.user_plan == "Pro"
+
+
+@pytest.mark.asyncio
+async def test_account_read_warms_cross_session_whoami_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A successful live account fetch writes through to the user-scoped on-disk
+    # cache so the next session's experiments path can read it without another
+    # round-trip.
+    monkeypatch.setenv("MISTRAL_API_KEY", "server-secret")
+    agent_loop = build_test_agent_loop()
+    result = WhoAmIResult(plan_type=AccountPlanKind.CHAT, plan_name="INDIVIDUAL")
+    gateway = FakeAccountGateway(result)
+
+    try:
+        await AccountController(agent_loop, gateway).read()
+    finally:
+        await agent_loop.aclose()
+
+    assert load_cached_whoami("server-secret") == result
+
+
+@pytest.mark.asyncio
+async def test_account_read_reconciles_manager_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The experiments path may have stamped the manager snapshot from a stale
+    # disk-cache hit (plan=FREE). The account controller's live fetch must
+    # reconcile the whoami-derived fields (plan/customer/org-kind) AND user_plan
+    # so they never diverge — while preserving identity-derived fields.
+    monkeypatch.setenv("MISTRAL_API_KEY", "server-secret")
+    agent_loop = build_test_agent_loop()
+    agent_loop.experiment_manager.set_attributes(
+        ExperimentAttributes(
+            userId="u1",
+            organizationId="org-1",
+            entrypoint="cli",
+            agent_version="0",
+            os="darwin",
+            planType="chat",
+            planName="FREE",
+        )
+    )
+    gateway = FakeAccountGateway(
+        WhoAmIResult(
+            plan_type=AccountPlanKind.API,
+            plan_name="PAY_AS_YOU_GO",
+            customer_id="cust-1",
+            organization_kind="C",
+        )
+    )
+
+    try:
+        await AccountController(agent_loop, gateway).read()
+    finally:
+        await agent_loop.aclose()
+
+    attrs = agent_loop.experiment_manager.attributes()
+    assert attrs is not None
+    # whoami-derived fields updated to the live result ...
+    assert attrs.planType == "api"
+    assert attrs.planName == "PAY_AS_YOU_GO"
+    assert attrs.customerId == "cust-1"
+    assert attrs.organizationKind == "C"
+    # ... identity-derived fields preserved.
+    assert attrs.organizationId == "org-1"
+    assert attrs.userId == "u1"
+    assert agent_loop.user_plan == "PAYG API"
+
+
+@pytest.mark.asyncio
+async def test_apply_account_whoami_wins_over_in_flight_experiments() -> None:
+    # Race guard (Bugbot): a background experiments/plan resolve that finishes
+    # with a stale value must not clobber the account's live reconcile.
+    # apply_account_whoami awaits the in-flight task first, then writes last.
+    agent_loop = build_test_agent_loop()
+
+    async def stale_experiments() -> None:
+        # Simulates the experiments path committing a snapshot from a stale hit.
+        agent_loop.experiment_manager.set_attributes(
+            ExperimentAttributes(
+                userId="u1",
+                organizationId="org-1",
+                entrypoint="cli",
+                agent_version="0",
+                os="darwin",
+                planType="chat",
+                planName="FREE",
+            )
+        )
+        agent_loop.set_user_plan("Free")
+
+    agent_loop._experiments_task = asyncio.create_task(stale_experiments())
+    try:
+        await agent_loop.apply_account_whoami(
+            console_base_url="https://console.test",
+            api_key="server-secret",
+            whoami=WhoAmIResult(
+                plan_type=AccountPlanKind.API,
+                plan_name="PAY_AS_YOU_GO",
+                customer_id="cust-1",
+                organization_kind="C",
+            ),
+        )
+    finally:
+        await agent_loop.aclose()
+
+    attrs = agent_loop.experiment_manager.attributes()
+    assert attrs is not None
+    # The account's live values won, despite the stale task finishing first.
+    assert attrs.planType == "api"
+    assert attrs.planName == "PAY_AS_YOU_GO"
+    assert attrs.organizationId == "org-1"  # identity preserved from the snapshot
+    assert agent_loop.user_plan == "PAYG API"
+
+
+@pytest.mark.asyncio
+async def test_account_read_unauthorized_clears_stale_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A rejected credential (401/403) must drop any cached plan: user_plan -> None,
+    # manager plan fields -> None, and the disk cache entry removed — otherwise a
+    # stale plan keeps flowing for the TTL, contradicting null=lookup-failed.
+    monkeypatch.setenv("MISTRAL_API_KEY", "server-secret")
+    agent_loop = build_test_agent_loop()
+    agent_loop.experiment_manager.set_attributes(
+        ExperimentAttributes(
+            userId="u1",
+            organizationId="org-1",
+            entrypoint="cli",
+            agent_version="0",
+            os="darwin",
+            planType="chat",
+            planName="INDIVIDUAL",
+        )
+    )
+    agent_loop.set_user_plan("Pro")
+    store_cached_whoami(
+        "server-secret",
+        WhoAmIResult(plan_type=AccountPlanKind.CHAT, plan_name="INDIVIDUAL"),
+    )
+    gateway = FakeAccountGateway(unauthorized=True)
+
+    try:
+        account = await AccountController(agent_loop, gateway).read()
+    finally:
+        await agent_loop.aclose()
+
+    assert account.status is AccountStatus.UNAUTHORIZED
+    # Plan telemetry cleared to the failure signal ...
     assert agent_loop.user_plan is None
+    attrs = agent_loop.experiment_manager.attributes()
+    assert attrs is not None
+    assert attrs.planName is None
+    assert attrs.planType is None
+    assert attrs.organizationId == "org-1"  # identity-derived fields preserved
+    # ... and the stale disk cache entry is gone.
+    assert load_cached_whoami("server-secret") is None
 
 
 @pytest.mark.asyncio

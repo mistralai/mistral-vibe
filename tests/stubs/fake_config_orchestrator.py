@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 import copy
 from typing import Any
 
@@ -118,17 +119,43 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         reason: str = "No reason",
         *,
         target_layer: str | None = None,
+        preflight: Callable[[C], Awaitable[None]] | None = None,
     ) -> list[BaseException]:
+        data = self._base_config.model_dump()
+        _set_pointer_in_place(data, path, value)
+        candidate = self.copy()
+        candidate._base_config = type(self._base_config).model_validate(data)
+        candidate.rebuild()
+        if preflight is not None:
+            await preflight(candidate.config)
         if target_layer != OverridesLayer.NAME:
             orchestrator = await self._persistence_orchestrator()
             await orchestrator.set_field(path, value, reason)
         before = self._config.model_dump(mode="json")
-        data = self._base_config.model_dump()
-        _set_pointer_in_place(data, path, value)
         self._base_config = type(self._base_config).model_validate(data)
         self.rebuild()
         self._publish(before, reason)
         return []
+
+    async def mutate_field(
+        self,
+        path: str,
+        mutate: Callable[[Any], Any],
+        reason: str = "No reason",
+        *,
+        default: Any = None,
+        target_layer: str | None = None,
+        preflight: Callable[[C], Awaitable[None]] | None = None,
+    ) -> list[BaseException]:
+        raw = (await self.load_persistence_layer()).model_dump()
+        current = JsonPointer(path).resolve(raw, default=copy.deepcopy(default))
+        return await self.set_field(
+            path,
+            mutate(copy.deepcopy(current)),
+            reason,
+            target_layer=target_layer,
+            preflight=preflight,
+        )
 
     async def apply_patch(
         self,
@@ -136,7 +163,17 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         reason: str = "No reason",
         *,
         on_conflict: ConflictStrategy = ConflictStrategy.CANCEL,
+        preflight: Callable[[C], Awaitable[None]] | None = None,
     ) -> list[BaseException]:
+        data = ensure_parent_paths(self._base_config.model_dump(), operations)
+        data = json_apply_patch(
+            data, [op.to_json_patch() for op in operations], in_place=False
+        )
+        candidate = self.copy()
+        candidate._base_config = type(self._base_config).model_validate(data)
+        candidate.rebuild()
+        if preflight is not None:
+            await preflight(candidate.config)
         before = self._config.model_dump(mode="json")
         persistent_operations = [
             operation
@@ -150,10 +187,6 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
             )
             if failures:
                 return failures
-        data = ensure_parent_paths(self._base_config.model_dump(), operations)
-        data = json_apply_patch(
-            data, [op.to_json_patch() for op in operations], in_place=False
-        )
         self._base_config = type(self._base_config).model_validate(data)
         self.rebuild()
         self._publish(before, reason)

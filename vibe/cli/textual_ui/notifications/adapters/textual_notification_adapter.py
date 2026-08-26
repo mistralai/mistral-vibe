@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
 import time
 
 from textual.app import App
@@ -15,6 +16,9 @@ NOTIFICATION_TITLE_SUFFIXES: dict[NotificationContext, str] = {
 }
 
 NOTIFICATION_THROTTLE_SECONDS: float = 1.0
+
+# Strip control chars: titles reach the terminal raw inside an OSC sequence.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 class TextualNotificationAdapter:
@@ -49,6 +53,16 @@ class TextualNotificationAdapter:
     def restore(self) -> None:
         self._set_title(self._default_title)
 
+    def set_default_title(self, title: str) -> None:
+        # While blurred a notification title is showing, so defer the new base
+        # to the next restore instead of clobbering it.
+        normalized = title.strip() or "Vibe"
+        if normalized == self._default_title:
+            return
+        self._default_title = normalized
+        if self._has_focus:
+            self._set_title(normalized)
+
     def _get_notification_title(self, context: NotificationContext) -> str:
         suffix = NOTIFICATION_TITLE_SUFFIXES.get(context)
         if suffix is None:
@@ -57,4 +71,5 @@ class TextualNotificationAdapter:
 
     def _set_title(self, title: str) -> None:
         if not self._app.is_headless and self._app._driver is not None:
-            self._app._driver.write(f"\x1b]0;{title}\x07")
+            safe_title = _CONTROL_CHARS_RE.sub("", title)
+            self._app._driver.write(f"\x1b]0;{safe_title}\x07")
