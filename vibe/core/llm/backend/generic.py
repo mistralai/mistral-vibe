@@ -662,7 +662,7 @@ class GenericBackend:
             if on_response_status is not None:
                 on_response_status(response.status_code)
             async for line in iter_sse_lines(response):
-                if line.strip() == "":
+                if line.strip() == "" or line.strip().startswith(":")::
                     continue
 
                 if line.startswith(":"):
