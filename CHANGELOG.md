@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.24.5] - 2026-08-27
+
+### Added
+
+- Fuzzy search in the MCP servers and connectors browser
+
+### Changed
+
+- Faster startup through additional lazy imports and deferred schema builds
+
+### Fixed
+
+- Trust prompt is skipped when `--worktree` or `--trust` already grants access
+- Links are normalized before opening to prevent broken clicks
+- Themes apply correctly at startup
+- Retried Mistral responses are released back into the connection pool
+
+
 ## [2.24.4] - 2026-08-26
 
 ### Added

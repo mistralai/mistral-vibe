@@ -65,6 +65,8 @@ CLI / Textual / ACP / client -> app server -> owning port -> runtime/backend
 - Link to precise repository files or authoritative external specifications.
 - Label conclusions as source-confirmed, test-confirmed, or runtime-verified.
   Do not present a source-only protocol concern as a reproduced runtime bug.
+- For each material observation, state the constraint or design decision it
+  causes. Do not collect evidence that has no effect on the proposal.
 - Resolve related repositories only through locations documented in
   `AGENTS.md`; ask for the path when a documented sibling is absent.
 
@@ -83,9 +85,17 @@ Separate current limitations from intentional target behavior.
   layer only with a bounded migration need, named owner, and removal condition.
 - Carry every accepted decision through component boundaries, APIs and routes,
   data models, state machines, persistence/recovery, concurrency, failure
-  semantics, compatibility, rollout, observability, security, and tests.
+  semantics, compatibility, rollout, and tests.
 - Specify what happens before and after partial failure. Include idempotency,
   retry, cancellation, cleanup, and restart behavior where applicable.
+- Include an edge case when it changes the design, requires separate behavior,
+  or prevents serious security, authorization, data-loss, or repeated-effect
+  risk. Group cases when one rule determines the same safe response. Omit
+  speculative, unlikely, low-consequence cases already covered by that rule.
+- Include security, privacy, or observability only when the feature introduces
+  a relevant behavior, risk, or operational need. Name the feature-specific
+  concern and response; do not add generic logging, metrics, or inherited
+  controls.
 - Use a Mermaid diagram only when it makes ownership, sequence, state, or
   migration materially clearer than prose or a small table.
 
@@ -141,20 +151,47 @@ implementation plan or draft the design until this gate is complete.
   checks in proportion to the risk.
 - Test the production composition and selection path, not only a directly
   constructed implementation.
-- Define completion from the agreed requirements. Focused passing tests and
-  soft-failing CI do not satisfy a broader acceptance checklist.
+- Start the Validation Plan with a short, visible completion checklist covering
+  implementation slice exit criteria, required validation, and rollout or
+  documentation work. Refer to earlier sections instead of repeating details.
+- Put the detailed validation matrix, commands, and expected results in a
+  `<details>` block below that checklist. Focused passing tests and soft-failing
+  CI do not satisfy the complete acceptance boundary.
+- Keep reviewer decisions in the main design. Put exact types, schemas, method
+  signatures, protocol mappings, file maps, and algorithms in collapsible
+  sections or the appendix when they do not need independent approval.
 
 ### 7. Draft from the template
 
 Read `DESIGN-DOC-TEMPLATE.md` from this skill directory before drafting. Adapt
 the template to the proposal, but preserve its decision, failure, rollout, and
-validation coverage. Remove a section only when it is genuinely irrelevant;
-do not leave placeholders in the finished document.
+validation coverage. Remove optional or irrelevant sections rather than adding
+generic content. Do not leave placeholders in the finished document.
+
+Use Sections 1 through 7, Alternatives, and Rollout as the reviewer path. Keep
+implementation-only material in the Implementation Plan, Validation Plan, or
+Appendix without hiding decisions that require reviewer approval. For documents
+around 500 lines, add a table of contents unless navigation is already clear.
+
+Keep the document easy to scan:
+
+- Use short, title-case headings in a sequential hierarchy, with a maximum
+  depth of four by default. A heading labels a topic; the body makes the
+  argument.
+- Use bold sparingly. Do not decorate headings or bullets with emoji or Unicode
+  styling.
+- Use a table for mappings and comparisons, a diagram for relationships or
+  sequences, a list for discrete items, and code for exact contracts. Use one
+  only when it communicates more clearly than prose.
+- State each rule once. Refer back to it instead of repeating it in the
+  design, checklist, and validation plan.
 
 Keep claims auditable:
 
 - Link requirements to their source.
 - Link current behavior to source files and tests.
+- Prefer one authoritative source and relevant first-party evidence over a
+  stack of secondary links. Use working links without tracking parameters.
 - Mark proposed names and wire shapes as proposals rather than existing APIs.
 - Use normative language for requirements and plain present tense for current
   behavior.
@@ -188,3 +225,5 @@ Before handing off:
    Skip file-only checks for a response-only draft.
 7. Report separately what was source-confirmed, test-confirmed, and not
    runtime-verified.
+8. Check that low-probability cases are present only when their consequence or
+   distinct implementation behavior justifies reviewer attention.

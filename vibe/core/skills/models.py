@@ -11,6 +11,7 @@ class SkillSource(StrEnum):
     BUILTIN = auto()
     LOCAL = auto()
     REGISTRY = auto()
+    PLUGIN = auto()
 
 
 class SkillScope(StrEnum):

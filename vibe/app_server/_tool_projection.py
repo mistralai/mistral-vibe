@@ -186,7 +186,10 @@ def project_effect_output_value(
     try:
         projected = _project_model(projection.output_model, value)
     except ValidationError:
-        return _dump_value(value)
+        # A post_tool hook can replace a result with content that does not fit this effect's
+        # output model. Degrade to None ("no structured output") rather than leak the raw
+        # wire shape; the human-readable text is carried separately in output_text.
+        return None
     return _dump_value(projected)
 
 
@@ -203,6 +206,12 @@ def _project_model[ModelT: BaseModel](
                 continue
             if isinstance(field.alias, str) and field.alias in value:
                 projected[field.alias] = value[field.alias]
+        # A non-empty dict that shares no field with this model is foreign data -- e.g. a
+        # post_tool hook's raw tool-result wire shape. Degrade to None so it is not mistaken
+        # for an empty structured output (which would validate for all-defaulted models like
+        # TodoEffectOutput and hide the replacement reason).
+        if value and not projected:
+            return None
         value = projected
     return model_type.model_validate(value, from_attributes=True)
 

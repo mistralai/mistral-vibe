@@ -315,6 +315,58 @@ def test_legacy_persisted_shell_payloads_still_project_on_resume() -> None:
     }
 
 
+def test_hook_replaced_result_projects_to_none_not_a_raw_dump() -> None:
+    # A post_tool hook can replace a tool's native output with arbitrary text content
+    # that does not fit the tool's output model (here bash's ShellEffectOutput has no
+    # stdout/stderr). The projection must degrade to None -- a shape every typed client
+    # (TUI, Le Chat, ACP) handles as "no structured output" -- rather than leak the raw
+    # RustToolResult wire shape (`{"type": "success", "content": [...]}`), which no
+    # client's output model can parse. The replacement text is carried in output_text.
+    replaced = {
+        "type": "success",
+        "content": [{"type": "text", "text": "Output blocked by deny-plop."}],
+    }
+
+    assert project_effect_output_value(ToolEffectKind.SHELL, replaced) is None
+
+
+def test_hook_replaced_result_degrades_to_none_for_every_kind() -> None:
+    # For every kind, a post_tool deny (a raw RustToolResult wire shape) degrades to None
+    # -- never the raw shape, and never a bogus empty model (e.g. todo -> {"todos": []}),
+    # which would hide the replacement reason the TUI surfaces from output_text.
+    replaced = {
+        "type": "success",
+        "content": [{"type": "text", "text": "Output blocked by a post_tool hook."}],
+    }
+    typed_kinds = [
+        ToolEffectKind.SHELL,
+        ToolEffectKind.FILE_READ,
+        ToolEffectKind.FILE_WRITE,
+        ToolEffectKind.FILE_EDIT,
+        ToolEffectKind.FILE_SEARCH,
+        ToolEffectKind.TODO,
+        ToolEffectKind.WEB_SEARCH,
+        ToolEffectKind.WEB_FETCH,
+        ToolEffectKind.SKILL,
+        ToolEffectKind.SUBAGENT,
+    ]
+    for kind in typed_kinds:
+        assert project_effect_output_value(kind, replaced) is None, kind
+
+
+def test_hook_replaced_result_passes_through_for_a_generic_tool() -> None:
+    # A generic/MCP tool (ToolEffectKind.TOOL) has no typed output model, so a client
+    # renders its output as opaque JSON. The projection leaves the replacement intact
+    # (rather than degrading to None) -- the generic renderer accepts any JSON, so there
+    # is nothing to crash and no reason to drop the payload.
+    replaced = {
+        "type": "success",
+        "content": [{"type": "text", "text": "Blocked by a post_tool hook."}],
+    }
+
+    assert project_effect_output_value(ToolEffectKind.TOOL, replaced) == replaced
+
+
 def test_file_edit_projection_preserves_all_rendering_occurrences() -> None:
     result = EditResult(
         file="example.py", message="updated", old_string="bar", new_string="qux"

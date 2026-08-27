@@ -1,21 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
+import hashlib
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from vibe.core.plugins._canonical import (
-    NormalizedJson,
-    NormalizedStr,
-    canonical_json_digest,
-)
+from vibe.core.plugins._canonical import NormalizedJson, NormalizedStr, canonical_json
 from vibe.core.plugins._paths import PluginPathRef
 
 PluginSourceFormat = Literal[
     "agent_plugins_1_0", "claude_code", "codex", "kimi_code", "opencode"
 ]
 PluginToolExposure = Literal["programmatic", "direct", "direct_and_programmatic"]
+PluginSourceKind = Literal["mcp", "connector"]
 
 HOST_HOOK_ENVIRONMENT = frozenset({"PLUGIN_ROOT", "PLUGIN_DATA"})
 
@@ -106,6 +104,7 @@ class PluginToolGroupSnapshot(_OwnedModel):
 class PluginToolRouteSnapshot(_OwnedModel):
     group_name: NormalizedStr
     function_name: NormalizedStr
+    source_kind: PluginSourceKind
     source_id: NormalizedStr
     source_tool_name: NormalizedStr
     execution_name: NormalizedStr
@@ -181,8 +180,13 @@ def build_plugin_snapshot(
     )
 
 
+def snapshot_bytes(snapshot: ResolvedPluginSnapshot) -> bytes:
+    """The bytes a pinned session stores, and the exact input to its digest."""
+    return canonical_json(snapshot.model_dump(mode="json"))
+
+
 def snapshot_digest(snapshot: ResolvedPluginSnapshot) -> str:
-    return canonical_json_digest(snapshot)
+    return hashlib.sha256(snapshot_bytes(snapshot)).hexdigest()
 
 
 def validate_resolved_plugin_snapshot(snapshot: ResolvedPluginSnapshot) -> None:

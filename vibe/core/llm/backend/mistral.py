@@ -68,6 +68,7 @@ logger = logging.getLogger("vibe")
 
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 _RETRYABLE_ERRORS = (httpx.NetworkError, httpx.TimeoutException)
+_MAX_CONNECTIONS = 20
 
 
 def _log_delivery_failure(future: Future[None]) -> None:
@@ -305,8 +306,28 @@ class MistralBackend:
         )
 
     async def _on_response(self, response: httpx.Response) -> None:
-        if response.status_code in _RETRYABLE_STATUS_CODES:
-            await self._notice_retry(RetryReason.from_http_status(response.status_code))
+        """Release the connection behind a retryable response, then report it.
+
+        Streaming requests are issued with the body unread, and the SDK holds a
+        failed response alive across the retry backoff without closing it, so its
+        pooled connection stays checked out for the lifetime of the client.
+        Reading the body here returns the connection to the pool and keeps the
+        error payload available to the terminal error path.
+
+        A truncated or badly encoded body is not retryable to the SDK, so letting
+        that surface would turn a rate limit into a dead turn. Close the response
+        instead and let the retry proceed on the status code alone.
+        """
+        if response.status_code not in _RETRYABLE_STATUS_CODES:
+            return
+        try:
+            await response.aread()
+        except Exception:
+            logger.debug(
+                "Could not read the body of a %s response", response.status_code
+            )
+            await response.aclose()
+        await self._notice_retry(RetryReason.from_http_status(response.status_code))
 
     def _report_error(self, error: Exception) -> None:
         # On a worker thread inside basesdk's except block: raising would
@@ -361,7 +382,10 @@ class MistralBackend:
             verify=build_ssl_context(),
             follow_redirects=True,
             event_hooks={"response": [self._on_response]},
-            limits=httpx.Limits(keepalive_expiry=MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS),
+            limits=httpx.Limits(
+                max_connections=_MAX_CONNECTIONS,
+                keepalive_expiry=MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS,
+            ),
         )
         client = Mistral(
             api_key=self._api_key,
@@ -456,7 +480,7 @@ class MistralBackend:
                 has_tools=bool(tools),
                 tool_choice=tool_choice,
             ) from e
-        except httpx.RequestError as e:
+        except (httpx.RequestError, httpx.StreamError) as e:
             raise BackendErrorBuilder.build_request_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,
@@ -557,7 +581,7 @@ class MistralBackend:
                 has_tools=bool(tools),
                 tool_choice=tool_choice,
             ) from e
-        except httpx.RequestError as e:
+        except (httpx.RequestError, httpx.StreamError) as e:
             raise BackendErrorBuilder.build_request_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,

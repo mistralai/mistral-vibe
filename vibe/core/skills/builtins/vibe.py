@@ -702,7 +702,7 @@ vibe --workdir DIR                  # Change working directory
 vibe --worktree NAME                # Create/reuse a git worktree under $VIBE_HOME/worktrees on branch NAME and run inside it. Auto-cleanup only for worktrees Vibe created this run and only after a session started; reused worktrees and attached (pre-existing) branches are kept unless confirmed. -p sessions keep worktrees. Ignored with --setup/--check-upgrade.
 vibe --worktree                     # Same, but Vibe picks an unused name from the prompt (a random slug when there is no prompt) on a vibe/<name> branch, and never reuses an existing worktree. The prompt must precede the flag or follow a `--`, since --worktree otherwise reads it as NAME.
 vibe --add-dir DIR                  # Extra working dir loaded for context (repeatable). Implicitly trusted.
-vibe --trust                        # Trust cwd for this invocation only (not persisted)
+vibe --trust                        # Trust cwd for this invocation only (not persisted). Skips the trust prompt.
 vibe -c / --continue                # Continue most recent session in this terminal (TTY-scoped, falls back to latest in cwd)
 vibe --resume [SESSION_ID]          # Resume a specific session
 vibe -v / --version                 # Show version
@@ -770,8 +770,10 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/status` - Display agent statistics
 - `/whoami` - Display the Mistral signed-in user, workspace, and plan
 - `/voice` - Configure voice settings
-- `/mcp` - Display MCP servers and connector status; pass a server or connector
-  name to list its tools or open its auth panel when authentication is required
+- `/mcp` (or `/connectors`) - Display MCP servers and connector status. The
+  browser opens on the first item; press Up or Left to move into the fuzzy-search
+  bar, and Up again to wrap to the last item. Pass a server or connector name to
+  list its tools or open its auth panel when authentication is required
 - `/mcp add <url>` - Add a hosted OAuth MCP server. Supports `--name <alias>`,
   repeatable `--scope <scope>`, `--transport <http|streamable-http>`, and
   `--no-login`. Starts OAuth login by default. OAuth-only; use
@@ -976,6 +978,10 @@ entry; the search excludes the user's home directory and the filesystem
 root, and falls back to the cwd if no qualifying ancestor is found.
 Programmatic mode (`-p`/`--prompt`) never prompts: the folder is untrusted.
 Use `--trust` to trust cwd for the current invocation only (not persisted).
+`--trust` and `--worktree` both skip the prompt: they grant the workspace trust
+for the session, so there is no decision left to ask about. Without this a
+`--worktree` run would prompt on every launch, since each worktree is a
+directory the trust database has never seen.
 
 ## Sensitive Files — DO NOT READ OR EDIT
 

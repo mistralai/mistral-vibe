@@ -42,6 +42,7 @@ class _Descriptor(_StrictModel):
     name: str = Field(min_length=1)
     description: str | None = None
     input_schema: dict[str, object] = Field(alias="inputSchema")
+    output_schema: dict[str, object] | None = Field(default=None, alias="outputSchema")
 
 
 class _Record(_StrictModel):
@@ -65,6 +66,7 @@ class _Record(_StrictModel):
                     "name": descriptor.name,
                     "description": descriptor.description,
                     "inputSchema": descriptor.input_schema,
+                    "outputSchema": descriptor.output_schema,
                 }
                 for descriptor in record.descriptors
             ],
@@ -77,11 +79,15 @@ class _Record(_StrictModel):
             discovered_at=self.discovered_at,
             last_used_at=self.last_used_at,
             descriptors=tuple(
-                RemoteTool(
-                    name=descriptor.name,
-                    description=descriptor.description,
-                    input_schema=descriptor.input_schema,
-                )
+                # By alias: ``RemoteTool`` takes its schemas under the wire
+                # names only, and a read that dropped them would be written
+                # back over the entry it just read.
+                RemoteTool.model_validate({
+                    "name": descriptor.name,
+                    "description": descriptor.description,
+                    "inputSchema": descriptor.input_schema,
+                    "outputSchema": descriptor.output_schema,
+                })
                 for descriptor in self.descriptors
             ),
         )

@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.24.4"
+version = "2.24.5"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 import time
 from typing import Any, Never, cast
 
+from mistralai.vibe.harness.app_server.session.models import (  # pyright: ignore[reportMissingImports]
+    ResolvedPluginDefinition,
+)
 from mistralai_rust_harness.protocol import (  # pyright: ignore[reportMissingImports]
     RustHarnessConfig,
 )
@@ -23,6 +26,7 @@ from mistralai_rust_harness.session_protocol import (  # pyright: ignore[reportM
     SessionStartParams as HarnessSessionStartParams,
 )
 from mistralai_rust_harness.vibe import (  # pyright: ignore[reportMissingImports]
+    CompiledHooks,
     ConnectorGatewayClient as HarnessConnectorGatewayClient,
     ConnectorRouteSnapshot as HarnessConnectorRouteSnapshot,
     HarnessNotImplementedError,
@@ -48,8 +52,8 @@ from mistralai_rust_harness.vibe import (  # pyright: ignore[reportMissingImport
     UnifiedHarnessSessionBackend,
     UnifiedHarnessSessionBackendHost,
 )
-from mistralai_rust_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-    PluginLockV1,
+from mistralai_rust_harness.vibe.plugins import (  # pyright: ignore[reportMissingImports]
+    SessionPluginBinding,
 )
 
 from vibe.app_server._admin_config import (
@@ -66,7 +70,12 @@ from vibe.app_server._config_write import config_write_ops_to_patches
 from vibe.app_server._dispatch import DispatchResult, method_not_found
 from vibe.app_server._host import config_schema_response
 from vibe.app_server._model import ProtocolModel, validate_wire
-from vibe.app_server._plugins import SessionPlugins, plugin_info
+from vibe.app_server._plugins import (
+    PluginReloadUnavailableError,
+    SessionPlugins,
+    UnifiedPluginProvider,
+    plugin_reload_notices,
+)
 from vibe.app_server._projection import project_config_view
 from vibe.app_server._session_backend_port import (
     ConnectorAuthRequest,
@@ -92,6 +101,7 @@ from vibe.app_server._session_backend_port import (
     SessionMCPToolDescriptor,
 )
 from vibe.app_server._state import history_page
+from vibe.app_server._tool_projection import project_effect_output_value
 from vibe.app_server._workspace import (
     PromptPreparationError,
     mentioned_file_content_blocks_async,
@@ -104,6 +114,7 @@ from vibe.app_server.events import (
     HistoryEntryAdded,
     HistoryEntryUpdated,
     MCPAuthorizationRequiredEvent,
+    ServerWarning,
     SessionSnapshot,
     SessionUpdated,
     StatsUpdated,
@@ -116,6 +127,7 @@ from vibe.app_server.models import (
     AccountView,
     AgentStatsSnapshot,
     BlockedSessionStatus as VibeBlockedSessionStatus,
+    CompletedEffectState,
     ConnectorCounts,
     ContentBlock,
     FailedSessionStatus as VibeFailedSessionStatus,
@@ -126,16 +138,20 @@ from vibe.app_server.models import (
     MCPSourceSummary,
     MCPState,
     MCPToolSummary,
+    PluginInfo,
     PreparedPrompt,
     PublicCallbackEntry,
+    PublicEffectEntry,
     PublicError,
     PublicHistoryEntry,
+    PublicMessageEntry,
     PublicSession,
     PublicSessionState,
     PublicTurn,
     PublicTurnStatus,
     RunningSessionStatus as VibeRunningSessionStatus,
     SessionLogSummary,
+    SkillEffectDetail,
     TextContentBlock,
     TokenUsage as VibeTokenUsage,
     TurnErrorCode,
@@ -143,6 +159,7 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import (
     AccountReadResponse,
+    AgentSwitchParams,
     CallbackResult,
     CallbackResultError,
     CallbackResultParams,
@@ -172,11 +189,15 @@ from vibe.app_server.protocol import (
     PageRequest,
     PluginInfoParams,
     PluginInfoResponse,
+    PluginReloadParams,
+    PluginReloadResponse,
     ProtocolErrorCode,
+    RuntimeMutationResponse,
     RuntimeReadParams,
     RuntimeReadResponse,
     RuntimeSnapshot,
     RuntimeUpdatedParams,
+    ServerWarningParams,
     SessionContinueParams,
     SessionForkParams,
     SessionForkResponse,
@@ -185,6 +206,8 @@ from vibe.app_server.protocol import (
     SessionKind,
     SessionListParams,
     SessionListResponse,
+    SessionLogReadParams,
+    SessionLogReadResponse,
     SessionOptions,
     SessionReadParams,
     SessionReadResponse,
@@ -198,6 +221,8 @@ from vibe.app_server.protocol import (
     SessionTurnsListParams,
     SessionTurnsListResponse,
     SessionUpdatedParams,
+    SkillsListParams,
+    SkillsListResponse,
     StatsUpdatedParams,
     TurnCompletedParams,
     TurnInterruptParams,
@@ -210,6 +235,7 @@ from vibe.app_server.protocol import (
     WorkspacePromptPrepareParams,
     WorkspacePromptPrepareResponse,
 )
+from vibe.core.agents.manager import AgentManager
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.admin_config import MANAGED_CONFIG_TIMEOUT
 from vibe.core.config.harness_files import HarnessFilesManager
@@ -225,6 +251,7 @@ from vibe.core.proxy_setup import (
 )
 from vibe.core.skills.manager import SkillManager
 from vibe.core.skills.models import SkillSource
+from vibe.core.tools.builtins.skill import already_loaded_message, skill_content_marker
 from vibe.observability.logging import logger
 
 
@@ -246,7 +273,6 @@ class UnifiedRuntimeDerivation:
 
     runtime: RuntimeSnapshot
     core_config: RustHarnessConfig
-    plugin_lock: PluginLockV1
     adapter_config: LocalRuntimeAdapterConfig
 
 
@@ -267,11 +293,18 @@ class UnifiedSessionContext:
     storage_root: str
     legacy_source_loader: LegacySourceLoader
     legacy_source_resolver: LegacySourceResolver
-    # Resolved once by an async call at session open, so it is pinned for the
-    # session and cannot be recomputed by the synchronous ``derive``.
+    # Resolved once by an async call at session open, so they are pinned for
+    # the session and cannot be recomputed by the synchronous ``derive``.
     plugins: SessionPlugins
+    """The Host's own resolve: it reports issues and supplies the environment."""
+
+    plugin_provider: UnifiedPluginProvider
+    """The seam. Only its ``bind`` reaches the Core."""
+
+    requested_plugins: tuple[ResolvedPluginDefinition, ...]
     config_orchestrator: ConfigOrchestrator[VibeConfigSchema]
     harness_files: HarnessFilesManager
+    agents: AgentManager
     derive: UnifiedRuntimeDeriver
     mcp_catalog: ResolvedMCPCatalog
     mcp_authorization_provider: MCPAuthorizationProvider
@@ -281,10 +314,22 @@ class UnifiedSessionContext:
     connector_selection: ResolvedConnectorSelection | None = None
     connector_base_url: str = "https://api.mistral.ai"
     connector_api_key: str = ""
+    # Compiled user hooks for this session: Core bindings + Runtime handlers. The
+    # Host registers the handlers on every lifecycle op (so a hook's command is
+    # re-read live) and the bindings are supplied on start (then persisted, so the
+    # set that fires stays frozen for the session's life).
+    hooks: CompiledHooks = field(default_factory=CompiledHooks)
 
 
 type SessionContextBuilder = Callable[
     [SessionOptions], Awaitable[UnifiedSessionContext]
+]
+
+# The one write path pinning has: reload rescans and hands the result to the
+# same `config/write` the Host uses at `session/start`. Unbound, so nothing has
+# to close over a session id that does not exist until the adapter is built.
+type PluginRewrite = Callable[
+    [str, Sequence[ResolvedPluginDefinition]], Awaitable[SessionPluginBinding]
 ]
 
 
@@ -319,21 +364,39 @@ class UnifiedHarnessBackendHostAdapter:
                 HarnessSessionStartParams(history_limit=params.history_limit),
                 cwd=_session_cwd(options),
                 ephemeral=params.kind is SessionKind.EPHEMERAL,
+                hook_bindings=context.hooks.bindings,
+                hook_handlers=context.hooks.handlers,
             )
         )
         backend = UnifiedHarnessBackendAdapter(
-            session, _session_cwd(options), context, derivation
+            session,
+            _session_cwd(options),
+            context,
+            derivation,
+            rewrite_plugins=self._host.rewrite_session_plugins,
         )
         backend._update_connector_projection(await backend.read_connectors())
         return SessionLifecycleResult(backend=backend)
 
     async def resume(self, params: SessionResumeParams) -> SessionLifecycleResult:
         context, derivation = await self._context(params.agent_config)
+        context, derivation = await self._pin_to_session_cwd(
+            params.agent_config, params.session_id, context, derivation
+        )
         session = await _harness_call(
-            self._host.resume(params.session_id, history_limit=params.history_limit)
+            self._host.resume(
+                params.session_id,
+                history_limit=params.history_limit,
+                hook_bindings=context.hooks.bindings,
+                hook_handlers=context.hooks.handlers,
+            )
         )
         backend = UnifiedHarnessBackendAdapter(
-            session, session.cwd, context, derivation
+            session,
+            session.cwd,
+            context,
+            derivation,
+            rewrite_plugins=self._host.rewrite_session_plugins,
         )
         backend._update_connector_projection(await backend.read_connectors())
         return SessionLifecycleResult(backend=backend)
@@ -341,12 +404,36 @@ class UnifiedHarnessBackendHostAdapter:
     async def continue_latest(
         self, params: SessionContinueParams
     ) -> SessionLifecycleResult:
+        # Resolve the latest session once and resume it by id, rather than pinning
+        # cwd/hooks off one listing and letting Host.continue_latest list again: a
+        # session created between the two lists would otherwise be resumed with hooks
+        # compiled for a different project's cwd (and a clean rebind would persist them
+        # on the wrong session). The first _context configures the Host (storage/legacy),
+        # which list and session_cwd need.
         context, derivation = await self._context(params.agent_config)
+        listing = await _harness_call(self._host.list(limit=1))
+        target_id = listing.continue_session_id
+        if target_id is None:
+            raise SessionBackendError(
+                ProtocolErrorCode.NOT_FOUND, "No session to continue"
+            )
+        context, derivation = await self._pin_to_session_cwd(
+            params.agent_config, target_id, context, derivation
+        )
         session = await _harness_call(
-            self._host.continue_latest(history_limit=params.history_limit)
+            self._host.resume(
+                target_id,
+                history_limit=params.history_limit,
+                hook_bindings=context.hooks.bindings,
+                hook_handlers=context.hooks.handlers,
+            )
         )
         backend = UnifiedHarnessBackendAdapter(
-            session, session.cwd, context, derivation
+            session,
+            session.cwd,
+            context,
+            derivation,
+            rewrite_plugins=self._host.rewrite_session_plugins,
         )
         backend._update_connector_projection(await backend.read_connectors())
         return SessionLifecycleResult(backend=backend)
@@ -354,13 +441,22 @@ class UnifiedHarnessBackendHostAdapter:
     async def fork(self, params: SessionForkParams) -> SessionForkResult:
         options = params.agent_config or SessionOptions()
         context, derivation = await self._context(options)
+        context, derivation = await self._pin_to_session_cwd(
+            options, params.source_session_id, context, derivation
+        )
         result = await _harness_call(
             self._host.fork(
-                params.source_session_id, history_limit=params.history_limit
+                params.source_session_id,
+                history_limit=params.history_limit,
+                hook_handlers=context.hooks.handlers,
             )
         )
         backend = UnifiedHarnessBackendAdapter(
-            result.session, result.session.cwd, context, derivation
+            result.session,
+            result.session.cwd,
+            context,
+            derivation,
+            rewrite_plugins=self._host.rewrite_session_plugins,
         )
         backend._update_connector_projection(await backend.read_connectors())
         snapshot = await backend.read(
@@ -410,11 +506,38 @@ class UnifiedHarnessBackendHostAdapter:
     async def shutdown(self) -> None:
         await self._host.shutdown()
 
+    async def _pin_to_session_cwd(
+        self,
+        options: SessionOptions,
+        session_id: str,
+        context: UnifiedSessionContext,
+        derivation: UnifiedRuntimeDerivation,
+    ) -> tuple[UnifiedSessionContext, UnifiedRuntimeDerivation]:
+        """Rebuild the context against an existing session's stored cwd, if it differs.
+
+        The caller must have already built ``context`` once (which configures the Host's
+        storage/legacy resolver — what ``session_cwd`` needs). If the session was created
+        in a different cwd than the caller's, rebuild so hooks are discovered and compiled
+        against the session's own cwd; binding ids embed it, so a resume/fork otherwise
+        skips every persisted hook or binds the wrong project's hooks (§7 as-built).
+        """
+        stored_cwd = await _harness_call(self._host.session_cwd(session_id))
+        if stored_cwd is None or stored_cwd == _session_cwd(options):
+            return context, derivation
+        if options.trust_workspace:
+            # The first build recorded an ephemeral --trust grant for the caller cwd on
+            # the process-wide trust store. Its ancestor walk would still trust the pinned
+            # (often descendant) session cwd, so revoke that one grant before rebuilding.
+            context.harness_files.trust_store.revoke_session_trust(
+                Path(_session_cwd(options))
+            )
+        return await self._context(_with_session_cwd(options, stored_cwd))
+
     async def _context(
         self, options: SessionOptions
     ) -> tuple[UnifiedSessionContext, UnifiedRuntimeDerivation]:
         context = await self._build_context(options)
-        derivation = context.derive(UnifiedSessionSettings())
+        derivation = await asyncio.to_thread(context.derive, UnifiedSessionSettings())
         connector_catalog = context.connector_catalog or ResolvedConnectorCatalog(
             provider_fingerprint="", revision="", connectors=()
         )
@@ -430,8 +553,14 @@ class UnifiedHarnessBackendHostAdapter:
         self._host.configure_legacy_source_loader(context.legacy_source_loader)
         self._host.configure_legacy_source_resolver(context.legacy_source_resolver)
         self._host.configure_runtime(
-            derivation.core_config, derivation.plugin_lock, derivation.adapter_config
+            derivation.core_config, adapter_config=derivation.adapter_config
         )
+        self._host.configure_plugins(context.plugin_provider, context.requested_plugins)
+        # The session's compiled foreign handlers are passed per-lifecycle-op
+        # (start/resume/continue/fork take hook_handlers=), so we deliberately do NOT
+        # set them on the Host-global registry here. The Host merges the per-session
+        # foreign handlers with any Host-global builtins at bind time
+        # (merge_hook_handlers), keeping the global registry reserved for builtins.
         self._host.configure_mcp(
             _harness_mcp_catalog(context.mcp_catalog),
             _HarnessMCPAuthorizationProviderAdapter(context.mcp_authorization_provider),
@@ -673,14 +802,18 @@ class UnifiedHarnessBackendAdapter(
         cwd: str | None,
         context: UnifiedSessionContext,
         derivation: UnifiedRuntimeDerivation,
+        rewrite_plugins: PluginRewrite | None = None,
     ) -> None:
         self._session = session
         self._cwd = cwd
         self._context = context
         self._settings = UnifiedSessionSettings()
         self._runtime = derivation.runtime
+        self._skills = derivation.adapter_config.skills
         self._storage_root = context.storage_root
         self._plugins = context.plugins
+        self._plugin_provider = context.plugin_provider
+        self._rewrite_plugins = rewrite_plugins
         self._connector_catalog = context.connector_catalog or ResolvedConnectorCatalog(
             provider_fingerprint="", revision="", connectors=()
         )
@@ -704,6 +837,75 @@ class UnifiedHarnessBackendAdapter(
     def runtime_updated_params(self) -> RuntimeUpdatedParams:
         return RuntimeUpdatedParams(session_id=self.session_id, runtime=self._runtime)
 
+    @property
+    def session_plugins(self) -> SessionPlugins:
+        """What this session runs: the bound set, or the resolve it started from.
+
+        They agree until the Runtime binds. After that the bound set is the
+        only one carrying route drift and the pinned catalogue.
+        """
+        bound = (
+            None
+            if self._plugin_provider is None
+            else self._plugin_provider.bound(self.session_id)
+        )
+        return bound if bound is not None else self._plugins
+
+    @property
+    def installed_plugin_roots(self) -> Mapping[str, Path]:
+        return (
+            {}
+            if self._plugin_provider is None
+            else self._plugin_provider.installed_roots
+        )
+
+    async def _read_plugin_info(self) -> PluginInfo:
+        """Ask the Runtime what this session bound, not the Host what it resolved.
+
+        The two agree at ``session/start`` and diverge the moment anything
+        moves: a restored session runs the catalogue it pinned, a reloaded one
+        whatever the rescan settled on.
+
+        The wire model crosses the seam and is re-read here. Both runtimes
+        share it, so nothing is translated — but the Runtime holds no Vibe
+        types, and this is where it stops holding one.
+        """
+        info = await _harness_call(self._session.read_plugin_info())
+        return PluginInfo.model_validate(info.model_dump(mode="json", by_alias=True))
+
+    async def _reload_plugins(self) -> PluginReloadResponse:
+        """Rescan the installed roots and re-pin whatever moved.
+
+        Rescan here, because the resolver is Host code in this process; re-pin
+        through ``config/write``, because that is the only writer of the lock
+        and it already knows how to fail without breaking a running session;
+        report nothing, because reload allocates no identity.
+
+        The rescan runs even when nothing changed: that is the case which
+        refreshes everything materialization owns and pinning does not — MCP
+        connections, connector availability, staged files, route drift.
+        """
+        if self._rewrite_plugins is None:
+            raise SessionBackendError(
+                ProtocolErrorCode.NOT_IMPLEMENTED,
+                "This session has no plugin writer, so there is nothing to reload.",
+            )
+        try:
+            requested = await self._plugin_provider.rescan()
+        except PluginReloadUnavailableError as error:
+            raise SessionBackendError(
+                ProtocolErrorCode.NOT_IMPLEMENTED, str(error)
+            ) from error
+        await _harness_call(self._rewrite_plugins(self.session_id, requested))
+        # Past the write, so this is the new set. Adopting it keeps the
+        # adapter's own reads off the resolve the session started with.
+        bound = self._plugin_provider.bound(self.session_id)
+        if bound is not None:
+            self._plugins = bound
+            for notice in plugin_reload_notices(bound):
+                self._session.publish_notice(notice)
+        return PluginReloadResponse()
+
     def _require_session(self, session_id: str) -> None:
         """Reject a request addressed to some other session.
 
@@ -726,35 +928,26 @@ class UnifiedHarnessBackendAdapter(
                     session_log=await self._session_log_summary(),
                     ready=True,
                 )
+            case _ if method.startswith("session/"):
+                response = await self._dispatch_session_extension(method, raw_params)
             case "plugin/info":
                 params = validate_wire(PluginInfoParams, raw_params)
                 self._require_session(params.session_id)
-                # The catalogue projected is the one this session was created
-                # against, not a fresh scan of the checkout: a client asking
-                # what the session is running has to be told what it is running.
-                response = PluginInfoResponse(info=plugin_info(self._plugins))
+                response = PluginInfoResponse(info=await self._read_plugin_info())
             case "plugin/reload":
-                # Reload rescans the installed roots and re-pins whatever moved.
-                # Nothing here does that yet, and answering success would tell a
-                # client the catalogue was refreshed when it was not.
-                raise SessionBackendError(
-                    ProtocolErrorCode.NOT_IMPLEMENTED,
-                    f"Plugins cannot be reloaded yet: {method}",
-                )
-            case "session/ready/wait":
-                response = SessionReadyWaitResponse(ready=True, init_duration_ms=0)
-            case "session/ready/read":
-                response = SessionReadyReadResponse(ready=True)
-            case "session/stop":
-                params = validate_wire(SessionStopParams, raw_params)
+                params = validate_wire(PluginReloadParams, raw_params)
                 self._require_session(params.session_id)
-                response = SessionStopResponse()
+                response = await self._reload_plugins()
             case "account/read":
                 response = AccountReadResponse(
                     account=AccountView(status=AccountStatus.READY)
                 )
             case "identity/read":
                 response = IdentityReadResponse(identity=None)
+            case "skills/list":
+                skills_params = validate_wire(SkillsListParams, raw_params)
+                self._require_session(skills_params.session_id)
+                response = SkillsListResponse(skills=self._runtime.skills)
             case _ if method.startswith("config/"):
                 response = await self._dispatch_config_read(method, raw_params)
             case "telemetry/record":
@@ -767,42 +960,55 @@ class UnifiedHarnessBackendAdapter(
                 params = validate_wire(WorkspacePromptPrepareParams, raw_params)
                 self._require_session(params.session_id)
                 response = await self._prepare_prompt_response(params)
-            case "session/history/list":
-                params = validate_wire(SessionHistoryListParams, raw_params)
-                self._require_session(params.session_id)
-                state = await self._read_page_state(params.session_id)
-                page = history_page(
-                    state.history or [],
-                    turn_id=params.turn_id,
-                    before=params.cursor
-                    if params.sort_direction == "backward"
-                    else None,
-                    after=params.cursor if params.sort_direction == "forward" else None,
-                    limit=params.limit,
-                )
-                response = SessionHistoryListResponse(
-                    items=page.entries,
-                    next_cursor=(
-                        page.cursor.before
-                        if params.sort_direction == "backward"
-                        else page.cursor.after
-                    ),
-                    previous_cursor=(
-                        page.cursor.after
-                        if params.sort_direction == "backward"
-                        else page.cursor.before
-                    ),
-                )
-            case "session/turns/list":
-                params = validate_wire(SessionTurnsListParams, raw_params)
-                self._require_session(params.session_id)
-                state = await self._read_page_state(params.session_id)
-                response = _turns_list_response(
-                    _turns_from_history(state.history or [], state.session.id), params
-                )
             case _:
                 raise method_not_found(method)
         return DispatchResult(response)
+
+    async def _dispatch_session_extension(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> ProtocolModel:
+        match method:
+            case "session/log/read":
+                params = validate_wire(SessionLogReadParams, raw_params)
+                self._require_session(params.session_id)
+                return SessionLogReadResponse(log=await self._session_log_summary())
+            case "session/ready/wait":
+                return SessionReadyWaitResponse(ready=True, init_duration_ms=0)
+            case "session/ready/read":
+                return SessionReadyReadResponse(ready=True)
+            case "session/stop":
+                params = validate_wire(SessionStopParams, raw_params)
+                self._require_session(params.session_id)
+                return SessionStopResponse()
+            case "session/history/list":
+                history_params = validate_wire(SessionHistoryListParams, raw_params)
+                self._require_session(history_params.session_id)
+                state = await self._read_page_state(history_params.session_id)
+                backward = history_params.sort_direction == "backward"
+                page = history_page(
+                    state.history or [],
+                    turn_id=history_params.turn_id,
+                    before=history_params.cursor if backward else None,
+                    after=None if backward else history_params.cursor,
+                    limit=history_params.limit,
+                )
+                return SessionHistoryListResponse(
+                    items=page.entries,
+                    next_cursor=page.cursor.before if backward else page.cursor.after,
+                    previous_cursor=(
+                        page.cursor.after if backward else page.cursor.before
+                    ),
+                )
+            case "session/turns/list":
+                turns_params = validate_wire(SessionTurnsListParams, raw_params)
+                self._require_session(turns_params.session_id)
+                state = await self._read_page_state(turns_params.session_id)
+                return _turns_list_response(
+                    _turns_from_history(state.history or [], state.session.id),
+                    turns_params,
+                )
+            case _:
+                raise method_not_found(method)
 
     async def _dispatch_config_read(
         self, method: str, raw_params: dict[str, Any]
@@ -870,8 +1076,20 @@ class UnifiedHarnessBackendAdapter(
     def guard_request(self) -> None:
         self._session.guard_request()
 
-    async def switch_agent(self, params: object) -> Never:
-        _reject("agent/switch")
+    async def switch_agent(
+        self, params: AgentSwitchParams
+    ) -> SessionBackendResult[RuntimeMutationResponse]:
+        self._require_session(params.session_id)
+        try:
+            self._context.agents.switch_profile(params.agent_name)
+        except ValueError as exc:
+            raise SessionBackendError(
+                ProtocolErrorCode.INVALID_PARAMS, str(exc)
+            ) from exc
+        await self._apply_derivation()
+        return SessionBackendResult(
+            response=RuntimeMutationResponse(runtime=self._runtime)
+        )
 
     async def update_settings(
         self, params: SessionSettingsUpdateParams
@@ -890,7 +1108,7 @@ class UnifiedHarnessBackendAdapter(
                 else self._settings.max_tokens
             ),
         )
-        self._apply_derivation()
+        await self._apply_derivation()
         return SessionBackendResult(response=EmptyResponse())
 
     async def write_config(
@@ -910,14 +1128,14 @@ class UnifiedHarnessBackendAdapter(
                 response=ConfigWriteResponse(runtime=self._runtime, rejected=True)
             )
         if failures:
-            self._apply_derivation()
+            await self._apply_derivation()
             return SessionBackendResult(
                 response=ConfigWriteResponse(
                     runtime=self._runtime,
                     failures=[str(failure) for failure in failures],
                 )
             )
-        self._apply_derivation()
+        await self._apply_derivation()
         return SessionBackendResult(response=ConfigWriteResponse(runtime=self._runtime))
 
     async def reload_config(
@@ -935,7 +1153,7 @@ class UnifiedHarnessBackendAdapter(
         except Exception as exc:
             logger.debug("Admin config refresh failed on reload", exc_info=exc)
         await self._context.config_orchestrator.reload()
-        self._apply_derivation()
+        await self._apply_derivation()
         return SessionBackendResult(
             response=ConfigMutationResponse(runtime=self._runtime)
         )
@@ -1017,25 +1235,35 @@ class UnifiedHarnessBackendAdapter(
             {"activeTurnId": active_turn_id},
         )
 
-    def _apply_derivation(self) -> None:
+    async def _apply_derivation(self) -> None:
         """Re-derive from the mutated config and push it into the live session.
 
-        ``core_config`` is deliberately not pushed: the Rust Core is built at
-        bind time, so turn settings only take effect on the next bind.
+        Root capabilities are pushed when the skill tool availability changes.
+        Plugin contexts are not: the provider's ``bind`` is the only source of
+        the bound set, and this derivation carries none, so pushing it would
+        clear what the session is running. The rest of ``core_config`` —
+        provider, settings, system instructions — is read when the Core is
+        built, so it takes effect on the next bind.
+
+        ``mcp`` and ``connectors`` are carried over rather than taken from the
+        derivation. They describe what the session is *connected to*, which
+        comes back from the Harness and is patched in as it changes; a
+        derivation only projects the layered config and leaves both empty. What
+        the config asks for still lands, through ``config``. Converging the two
+        is ``config/reload``'s job, and it brackets this call to do it.
         """
-        derivation = self._context.derive(self._settings)
-        self._runtime = derivation.runtime
+        derivation = await asyncio.to_thread(self._context.derive, self._settings)
+        self._runtime = derivation.runtime.model_copy(
+            update={"mcp": self._runtime.mcp, "connectors": self._runtime.connectors}
+        )
+        self._skills = derivation.adapter_config.skills
         self._session.apply_adapter_config(derivation.adapter_config)
+        await self._session.apply_capabilities(derivation.core_config.capabilities)
 
     async def start_turn(
         self, params: TurnStartParams
     ) -> SessionBackendResult[TurnStartResponse]:
-        try:
-            params = await self._with_mentioned_file_blocks(params)
-        except PromptPreparationError as exc:
-            raise SessionBackendError(
-                ProtocolErrorCode.INVALID_PARAMS, str(exc)
-            ) from exc
+        params = await self._prepared_turn_params(params, inject_skill=True)
         result = cast(Any, await _harness_call(self._session.start_turn(params)))
         response = result.response
         turn = response.turn
@@ -1055,12 +1283,9 @@ class UnifiedHarnessBackendAdapter(
     async def steer_turn(
         self, params: TurnSteerParams
     ) -> SessionBackendResult[TurnSteerResponse]:
-        try:
-            params = await self._with_mentioned_file_blocks(params)
-        except PromptPreparationError as exc:
-            raise SessionBackendError(
-                ProtocolErrorCode.INVALID_PARAMS, str(exc)
-            ) from exc
+        params = await self._prepared_turn_params(
+            params, inject_skill=params.inject_invoked_skill
+        )
         result = cast(Any, await _harness_call(self._session.steer_turn(params)))
         response = result.response
         return SessionBackendResult(
@@ -1085,12 +1310,19 @@ class UnifiedHarnessBackendAdapter(
     async def inject_context(
         self, params: ContextInjectParams
     ) -> SessionBackendResult[ContextInjectResponse]:
+        block = (
+            await self._invoked_skill_block(params.input)
+            if params.inject_invoked_skill
+            else None
+        )
         try:
             params = await self._with_mentioned_file_blocks_for_input(params)
         except PromptPreparationError as exc:
             raise SessionBackendError(
                 ProtocolErrorCode.INVALID_PARAMS, str(exc)
             ) from exc
+        if block is not None:
+            params = params.model_copy(update={"input": [*params.input, block]})
         result = cast(Any, await _harness_call(self._session.inject_context(params)))
         response = result.response
         return SessionBackendResult(
@@ -1188,6 +1420,63 @@ class UnifiedHarnessBackendAdapter(
             ) from exc
         return WorkspacePromptPrepareResponse(prompt=prompt)
 
+    async def _invoked_skill_block(
+        self, blocks: list[ContentBlock]
+    ) -> ContentBlock | None:
+        text = _text_from_blocks(blocks).strip()
+        if not text.startswith("/"):
+            return None
+        parts = text[1:].split(None, 1)
+        if not parts:
+            return None
+        typed = parts[0].casefold()
+        skill = next(
+            (s for s in self._runtime.skills if s.name.casefold() == typed), None
+        )
+        if skill is None or not skill.user_invocable:
+            return None
+        name = skill.name
+        # A skill Core rejected is still in the client-facing list, and it has
+        # no payload. Injecting nothing beats injecting a name with no body.
+        body = self._skills.get(name)
+        if body is None:
+            return None
+        if await self._skill_already_loaded(name):
+            return TextContentBlock(text=already_loaded_message(name))
+        return TextContentBlock(text=body)
+
+    async def _skill_already_loaded(self, name: str) -> bool:
+        """Report whether this conversation already carries the skill's body.
+
+        Core owns the model-visible history, so the check runs over the public
+        projection: a body this adapter injected shows up as the marker its
+        renderer opens with, and one the model loaded itself shows up as a
+        ``skill`` effect. Only a resolved ``/name`` gets this far, so the read
+        costs a page on the turns legacy also scans for.
+        """
+        marker = skill_content_marker(name)
+        state = await self._read_page_state(self.session_id)
+        return any(
+            _entry_loaded_skill(entry, name=name, marker=marker)
+            for entry in state.history or ()
+        )
+
+    async def _prepared_turn_params[ParamsT: TurnStartParams | TurnSteerParams](
+        self, params: ParamsT, *, inject_skill: bool
+    ) -> ParamsT:
+        block = (
+            await self._invoked_skill_block(params.message) if inject_skill else None
+        )
+        try:
+            params = await self._with_mentioned_file_blocks(params)
+        except PromptPreparationError as exc:
+            raise SessionBackendError(
+                ProtocolErrorCode.INVALID_PARAMS, str(exc)
+            ) from exc
+        if block is None:
+            return params
+        return params.model_copy(update={"message": [*params.message, block]})
+
     async def _with_mentioned_file_blocks[ParamsT: TurnStartParams | TurnSteerParams](
         self, params: ParamsT
     ) -> ParamsT:
@@ -1235,16 +1524,19 @@ class UnifiedHarnessBackendAdapter(
             self._events_condition.notify_all()
         try:
             async for event in subscription.events:
-                authorization = await self._authorization_event(event)
-                if authorization is not None:
-                    translated, watermark = authorization
+                signal = await self._signal_event(cast(dict[str, object], event))
+                if signal is not None:
+                    translated, watermark = signal
                     yield translated
                     await self._mark_harness_event_observed(watermark)
                     continue
-                callback_events = self._callback_events(cast(dict[str, object], event))
+                callback_events = self._callback_events(event)
                 if callback_events is not None:
                     for callback_event in callback_events:
                         yield callback_event
+                    await self._mark_harness_event_observed(
+                        _required_event_id(event, "callback")
+                    )
                     continue
                 if event.get("type") != "session_state_updated":
                     _reject(f"the Harness session event {event.get('type', event)!r}")
@@ -1324,8 +1616,48 @@ class UnifiedHarnessBackendAdapter(
                 self._events_subscribed = False
                 self._events_condition.notify_all()
 
-    async def _connector_authorization_event(
+    async def _signal_event(
         self, event: dict[str, object]
+    ) -> tuple[SessionBackendEvent, int] | None:
+        """Translate the events that carry a signal rather than a state change.
+
+        Each maps to a notification of its own and none touch the session
+        snapshot, so none reach the reconciliation below, which has nothing to
+        diff for them. The event id rides back with the translation because a
+        signal still spends one, and ``flush_events`` waits on the id the
+        session reports, so skipping one hangs the request that published it.
+        """
+        match event.get("type"):
+            case "connector_authorization_required":
+                watermark = _required_event_id(event, "connector")
+                return await self._connector_authorization_event(event), watermark
+            case "mcp_authorization_required":
+                watermark = _required_event_id(event, "MCP")
+                return self._mcp_authorization_event(event), watermark
+            case "notice":
+                watermark = _required_event_id(event, "notice")
+                return self._notice_event(event), watermark
+            case _:
+                return None
+
+    def _mcp_authorization_event(self, event: dict[str, object]) -> SessionBackendEvent:
+        params = MCPAuthRequiredParams(
+            session_id=self.session_id,
+            name=_required_event_str(event, "serverName"),
+            descriptor_revision=_required_event_str(event, "descriptorRevision"),
+            observed_connection_revision=_optional_event_str(
+                event, "observedConnectionRevision"
+            ),
+        )
+        return SessionBackendEvent(
+            event=MCPAuthorizationRequiredEvent(params),
+            method="mcp_catalog/authRequired",
+            params=params,
+            session_id=self.session_id,
+        )
+
+    async def _connector_authorization_event(
+        self, event: Mapping[str, object]
     ) -> SessionBackendEvent:
         self._update_connector_projection(await self.read_connectors())
         params = ConnectorAuthRequiredParams(
@@ -1347,30 +1679,23 @@ class UnifiedHarnessBackendAdapter(
             session_id=self.session_id,
         )
 
-    async def _authorization_event(
-        self, event: dict[str, object]
-    ) -> tuple[SessionBackendEvent, int] | None:
-        event_type = event.get("type")
-        if event_type == "connector_authorization_required":
-            watermark = _required_event_id(event, "connector")
-            return await self._connector_authorization_event(event), watermark
-        if event_type == "mcp_authorization_required":
-            watermark = _required_event_id(event, "MCP")
-            return self._mcp_authorization_event(event), watermark
-        return None
+    def _notice_event(self, event: dict[str, object]) -> SessionBackendEvent:
+        """Carry an out-of-band remark out on the notification the Client has.
 
-    def _mcp_authorization_event(self, event: dict[str, object]) -> SessionBackendEvent:
-        params = MCPAuthRequiredParams(
-            session_id=self.session_id,
-            name=_required_event_str(event, "serverName"),
-            descriptor_revision=_required_event_str(event, "descriptorRevision"),
-            observed_connection_revision=_optional_event_str(
-                event, "observedConnectionRevision"
-            ),
+        The closed event union has no plugin event and a reload changes no
+        session state, so the remark rides ``warning`` rather than becoming a
+        history entry: Core owns history in a Unified session, and a Host
+        writing into it would author a turn out of an operational aside.
+        """
+        params = ServerWarningParams(
+            warning=PublicError(
+                code=_optional_event_str(event, "level") or "warning",
+                message=_required_event_str(event, "message"),
+            )
         )
         return SessionBackendEvent(
-            event=MCPAuthorizationRequiredEvent(params),
-            method="mcp_catalog/authRequired",
+            event=ServerWarning(params),
+            method="warning",
             params=params,
             session_id=self.session_id,
         )
@@ -1383,7 +1708,7 @@ class UnifiedHarnessBackendAdapter(
             self._events_condition.notify_all()
 
     def _callback_events(
-        self, event: dict[str, object]
+        self, event: Mapping[str, object]
     ) -> list[SessionBackendEvent] | None:
         event_type = event.get("type")
         if event_type not in {"callback_requested", "callback_resolved"}:
@@ -1422,21 +1747,21 @@ class UnifiedHarnessBackendAdapter(
         ]
 
 
-def _required_event_str(event: dict[str, Any], name: str) -> str:
+def _required_event_str(event: Mapping[str, object], name: str) -> str:
     value = event.get(name)
     if not isinstance(value, str) or not value:
         _reject(f"a Harness MCP event without {name}")
     return value
 
 
-def _required_event_id(event: dict[str, Any], kind: str) -> int:
+def _required_event_id(event: Mapping[str, object], kind: str) -> int:
     value = event.get("eventId")
     if not isinstance(value, int):
         _reject(f"a Harness {kind} event without an event id")
     return value
 
 
-def _optional_event_str(event: dict[str, Any], name: str) -> str | None:
+def _optional_event_str(event: Mapping[str, object], name: str) -> str | None:
     value = event.get(name)
     if value is not None and not isinstance(value, str):
         _reject(f"a Harness MCP event with an invalid {name}")
@@ -1445,6 +1770,25 @@ def _optional_event_str(event: dict[str, Any], name: str) -> str | None:
 
 def _session_cwd(options: SessionOptions) -> str:
     return str(Path(options.cwd or Path.cwd()).expanduser().resolve())
+
+
+def _with_session_cwd(options: SessionOptions, cwd: str | None) -> SessionOptions:
+    """Pin the context build to a session's stored cwd on resume/continue/fork.
+
+    Binding ids embed the source cwd (``f"{cwd}:{name}"``), so hooks must be discovered
+    against the stored cwd, not the caller's invocation cwd, or a resume/fork rebinds to
+    the wrong project. Falls back to the request cwd when the stored cwd is unresolvable.
+
+    ``--trust`` is scoped to the caller's invocation cwd, so it is dropped when the pinned
+    cwd differs -- a cross-directory ``--trust`` resume must not auto-execute another
+    project's ``hooks.toml``.
+    """
+    if cwd is None:
+        return options
+    update: dict[str, object] = {"cwd": cwd}
+    if options.trust_workspace and cwd != _session_cwd(options):
+        update["trust_workspace"] = False
+    return options.model_copy(update=update)
 
 
 def _harness_read_params(params: SessionReadParams) -> HarnessSessionReadParams:
@@ -1459,12 +1803,46 @@ def _text_from_blocks(blocks: list[ContentBlock]) -> str:
     )
 
 
+def _entry_loaded_skill(entry: PublicHistoryEntry, *, name: str, marker: str) -> bool:
+    if isinstance(entry, PublicMessageEntry):
+        return marker in _text_from_blocks(entry.content)
+    return (
+        isinstance(entry, PublicEffectEntry)
+        and isinstance(entry.detail, SkillEffectDetail)
+        and entry.detail.input is not None
+        and entry.detail.input.name == name
+        and entry.state.status == "completed"
+        and marker in entry.state.output_text
+    )
+
+
 def _limit_harness_history(
     state: HarnessPublicSessionState, history_limit: int
 ) -> HarnessPublicSessionState:
     entries = state.history.entries[-history_limit:] if history_limit else []
     return state.model_copy(
         update={"history": state.history.model_copy(update={"entries": entries})}
+    )
+
+
+def _normalize_effect_output(entry: PublicHistoryEntry) -> PublicHistoryEntry:
+    """Re-project a completed effect's output through the shared effect projection.
+
+    A post_tool hook can leave a tool effect's ``output`` as the raw RustToolResult wire
+    shape, which fits no client's output model. Routing it through
+    ``project_effect_output_value`` degrades such a result to None; valid native outputs
+    are unchanged (the projection is idempotent for them).
+    """
+    if not isinstance(entry, PublicEffectEntry):
+        return entry
+    state = entry.state
+    if not isinstance(state, CompletedEffectState) or state.output is None:
+        return entry
+    reprojected = project_effect_output_value(entry.detail.kind, state.output)
+    if reprojected == state.output:
+        return entry
+    return entry.model_copy(
+        update={"state": state.model_copy(update={"output": reprojected})}
     )
 
 
@@ -1475,7 +1853,7 @@ def _read_response(
     for raw_entry in snapshot.state.history.entries:
         normalized = dict(raw_entry)
         normalized.pop("outcome", None)
-        history.append(validate_history_entry(normalized))
+        history.append(_normalize_effect_output(validate_history_entry(normalized)))
     last_event_id = (
         snapshot.watermark if event_id is None else max(event_id, snapshot.watermark)
     )
@@ -1932,20 +2310,6 @@ async def _harness_call[ResultT](operation: Awaitable[ResultT]) -> ResultT:
             ) from exc
         if exc.code == "callback_not_found":
             raise SessionBackendError(ProtocolErrorCode.NOT_FOUND, str(exc)) from exc
-        if exc.code == "resource_lock_mismatch":
-            # The plugin lock detects; it does not restore. Nothing archives a
-            # plugin tree, so the SDK's "does not match the current
-            # environment" is the whole story it can tell — say which resource
-            # moved and what the operator can do, rather than leaving them to
-            # guess at an internal error.
-            resource = (exc.details or {}).get("resource", "plugin")
-            raise SessionBackendError(
-                ProtocolErrorCode.CONFLICT,
-                f"The {resource}s installed now are not the ones this session "
-                "was created against. The session cannot be resumed against a "
-                "different environment: restore them, or start a new session.",
-                {"harnessCode": exc.code, "details": exc.details},
-            ) from exc
         if exc.code == "stale_turn":
             data: dict[str, Any] = {}
             active_turn_id = exc.details.get("active_turn_id") if exc.details else None

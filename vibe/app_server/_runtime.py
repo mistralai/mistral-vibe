@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import os
 from pathlib import Path
 import threading
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import JsonValue, ValidationError
 
@@ -17,12 +17,17 @@ from vibe._experimental_harness import (
     create_experimental_harness_host,
 )
 from vibe.app_server._host import HostRequestHandler
-from vibe.app_server._projection import project_agent_summaries, project_config_view
+from vibe.app_server._projection import (
+    project_agent_summaries,
+    project_config_view,
+    project_skill_summaries,
+)
 from vibe.app_server._session_backend_port import (
     ResolvedConnectorCatalog,
     SessionBackendHost,
 )
 from vibe.app_server._session_backend_services import SessionBackendServices
+from vibe.app_server._skills import discover_session_skills
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.client_tools import ClientToolHandler
 from vibe.app_server.connector_catalog import (
@@ -67,9 +72,9 @@ from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.experiments.cache import load_cached_eval_response
 from vibe.core.experiments.manager import config_variants_from_response
 from vibe.core.experiments.models import EvalResponse
-from vibe.core.hooks.config import load_hooks_from_fs
+from vibe.core.hooks.config import load_hooks_file, load_hooks_from_fs
 from vibe.core.hooks.models import HookConfigResult
-from vibe.core.paths import WORKTREES_DIR
+from vibe.core.paths import VIBE_HOME, WORKTREES_DIR
 from vibe.core.session import last_session_pointer
 from vibe.core.session.session_id import extract_suffix, generate_session_id
 from vibe.core.session.session_index import warm_session_index
@@ -82,6 +87,7 @@ from vibe.core.session.session_interop import (
 from vibe.core.session.session_lease import SessionLease
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.session.session_logger import SessionLogger
+from vibe.core.skills.models import SkillInfo
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.permissions import PermissionStore
@@ -119,6 +125,7 @@ if TYPE_CHECKING:
         RustRuntimeBuiltinToolName,
     )
 
+    from vibe.app_server._plugins import SessionPlugins, UnifiedPluginProvider
     from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionContext
     from vibe.app_server.server import AppServer
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
@@ -711,6 +718,7 @@ class HarnessProcess:
     ) -> None:
         from vibe.app_server._mcp_auth import MCPAuthenticationService
         from vibe.app_server.mcp_catalog import MCPCatalogService
+        from vibe.app_server.plugin_catalog import PluginCatalogService
 
         self.runtime_factory = AgentRuntimeFactory()
         self.cache_store = FileSystemCacheStore()
@@ -733,6 +741,7 @@ class HarnessProcess:
             implicit_source_enabled=experimental_harness,
             sessionless_catalog_factory=self.build_sessionless_mcp_catalog,
         )
+        self.plugin_catalog = PluginCatalogService()
 
     def create_session_backend_host(
         self, services: SessionBackendServices
@@ -808,7 +817,7 @@ class HarnessProcess:
         session_config = await self._build_session_config(SessionOptions())
         return session_config.config_orchestrator
 
-    async def build_unified_session_context(  # noqa: PLR0914 - composition root
+    async def build_unified_session_context(  # noqa: PLR0914, PLR0915 - composition root
         self, options: SessionOptions
     ) -> UnifiedSessionContext:
         from mistralai_rust_harness.protocol import (  # pyright: ignore[reportMissingImports]
@@ -817,6 +826,7 @@ class HarnessProcess:
             RustDisabledLargeOutputPolicy,
             RustDisabledRuntimeToolFeature,
             RustGitBashCommandEnvironment,
+            RustHarnessCapabilitySet,
             RustHarnessConfig,
             RustHarnessSettings,
             RustPowerShellCommandEnvironment,
@@ -829,13 +839,14 @@ class HarnessProcess:
             LegacyImportSource,
             LegacySessionReference as HarnessLegacySessionReference,
             LocalRuntimeAdapterConfig,
+            compile_foreign_hooks,
+            tool_catalog_for_config,
         )
 
         from vibe.app_server._plugins import (
             core_plugins,
             plugin_issues,
-            plugin_lock,
-            resolve_session_plugins,
+            requested_plugin_definitions,
         )
         from vibe.app_server._unified_harness_backend_adapter import (
             UnifiedRuntimeDerivation,
@@ -851,10 +862,7 @@ class HarnessProcess:
         workspace_roots = tuple(
             Path(root).expanduser().resolve() for root in options.workspace_roots
         ) or (cwd,)
-        plugins = await resolve_session_plugins(
-            session_config.harness_files,
-            config_orchestrator=session_config.config_orchestrator,
-        )
+        plugins, plugin_provider = await self._build_plugins(session_config, cwd)
         match _command_environment_mode():
             case "unix":
                 command_environment = RustUnixCommandEnvironment()
@@ -907,6 +915,13 @@ class HarnessProcess:
                 history=export.history,
             )
 
+        # Discover the user's hooks once. The raw parse -- including any parse/duplicate
+        # diagnostics on result.issues -- is settings-independent, so load it before the
+        # derivation closure and surface those diagnostics as session notices, matching
+        # legacy (which projects hook_config_issues) and the design's failure table.
+        hook_result = await asyncio.to_thread(
+            load_hooks_from_fs, harness_files=session_config.harness_files
+        )
         mcp_catalog = await self.mcp_catalog.resolve_catalog(config_orchestrator)
         try:
             connector_catalog = await self.connector_catalog.resolve_catalog(
@@ -938,9 +953,24 @@ class HarnessProcess:
             available_tools = set(tools.available_tools)
             bypass_approval = options.auto_approve or config.bypass_tool_permissions
             max_iterations = settings.max_turns or options.max_turns or 25
+            skill_issues, skills = discover_session_skills(
+                lambda: config_orchestrator.config,
+                harness_files=harness_files,
+                plugin_skills=plugins.materialized.resolution.skills,
+                plugin_contexts=core_plugins(plugins),
+                skill_tool_available="skill" in available_tools,
+            )
             return UnifiedRuntimeDerivation(
                 runtime=build_unified_runtime_snapshot(
-                    config_orchestrator, agents, issues=plugin_issues(plugins)
+                    config_orchestrator,
+                    agents,
+                    issues=[
+                        *plugin_issues(plugins),
+                        *skill_issues,
+                        *_hook_config_issues(hook_result),
+                    ],
+                    skills=skills.catalogue,
+                    hooks_count=len(hook_result.hooks),
                 ),
                 core_config=RustHarnessConfig(
                     task_id="runtime-template",
@@ -962,9 +992,13 @@ class HarnessProcess:
                             large_output=RustDisabledLargeOutputPolicy(),
                         ),
                     ),
-                    plugins=core_plugins(plugins),
+                    capabilities=RustHarnessCapabilitySet(
+                        skills=list(skills.definitions)
+                    ),
+                    # No plugins: once a provider is configured its `bind` is
+                    # the only source, and a template's would silently win over
+                    # none.
                 ),
-                plugin_lock=plugin_lock(plugins),
                 adapter_config=LocalRuntimeAdapterConfig(
                     provider=provider.name,
                     base_url=provider.api_base,
@@ -989,17 +1023,38 @@ class HarnessProcess:
                     tool_modes=_rust_tool_modes(
                         available_tools, bypass_approval=bypass_approval
                     ),
+                    skills=skills.payloads,
                 ),
             )
+
+        # Compile the discovered hooks into Core bindings + Runtime handlers. The
+        # catalogue provider is lazy: it only runs the native call when a hook
+        # actually scopes itself to a tool by name. Deriving from default settings is
+        # safe here: only max_iterations/max_tokens vary by UnifiedSessionSettings, and
+        # neither changes core_config's tool set, so the catalog is settings-invariant.
+        core_config_json = derive(UnifiedSessionSettings()).core_config.model_dump_json(
+            exclude_none=True
+        )
+        hooks = await asyncio.to_thread(
+            compile_foreign_hooks,
+            _foreign_hook_definitions(
+                hook_result, harness_files=harness_files, cwd=cwd
+            ),
+            tool_catalog=lambda: tool_catalog_for_config(core_config_json),
+        )
 
         return UnifiedSessionContext(
             storage_root=config.session_logging.save_dir,
             legacy_source_loader=load_legacy_source,
             legacy_source_resolver=resolve_legacy_source,
             plugins=plugins,
+            plugin_provider=plugin_provider,
+            requested_plugins=tuple(requested_plugin_definitions(plugins)),
             config_orchestrator=config_orchestrator,
             harness_files=harness_files,
+            agents=agents,
             derive=derive,
+            hooks=hooks,
             mcp_catalog=mcp_catalog,
             mcp_authorization_provider=self.mcp_authentication,
             mcp_cache_root=str(
@@ -1065,7 +1120,7 @@ class HarnessProcess:
             connector_registry=(
                 None
                 if self._experimental_harness
-                else await self._build_legacy_connector_registry(config_orchestrator)
+                else await self._build_connector_registry(config_orchestrator)
             ),
         )
 
@@ -1136,7 +1191,57 @@ class HarnessProcess:
             configuration, self.mcp_authentication, descriptor_cache_root=cache_root
         )
 
-    async def _build_legacy_connector_registry(
+    async def _build_plugins(
+        self, session_config: _SessionConfig, cwd: Path
+    ) -> tuple[SessionPlugins, UnifiedPluginProvider]:
+        """The Host's own resolve, and the provider the Runtime binds through.
+
+        One call, because both need the same two registries and building them
+        twice would open two MCP client pools for one session.
+        """
+        from vibe.app_server._plugins import (
+            UnifiedPluginProvider,
+            resolve_session_plugins,
+        )
+
+        config = session_config.config_orchestrator.config
+        mcp_registry = self._build_plugin_mcp_registry(config)
+        connector_registry = await self._build_connector_registry(
+            session_config.config_orchestrator
+        )
+        plugins = await resolve_session_plugins(
+            session_config.harness_files,
+            config_orchestrator=session_config.config_orchestrator,
+            mcp_registry=mcp_registry,
+            connector_registry=connector_registry,
+        )
+        return plugins, UnifiedPluginProvider(
+            storage_root=Path(config.session_logging.save_dir),
+            workdir=session_config.harness_files.cwd or cwd,
+            installed_roots={
+                plugin.name: plugin.root
+                for plugin in plugins.materialized.resolution.plugins
+            },
+            config_orchestrator=session_config.config_orchestrator,
+            mcp_registry=mcp_registry,
+            connector_registry=connector_registry,
+            # Kept so ``plugin/reload`` repeats this resolve. A rescan that
+            # walked elsewhere would report the session's plugins uninstalled.
+            harness_files=session_config.harness_files,
+        )
+
+    def _build_plugin_mcp_registry(self, config: VibeConfigSchema) -> MCPRegistry:
+        from vibe.core.tools.mcp.registry import MCPRegistry
+
+        return MCPRegistry(
+            descriptor_cache_root=(
+                Path(config.session_logging.save_dir).expanduser().resolve().parent
+                / "mcp-descriptors"
+                / "plugins"
+            )
+        )
+
+    async def _build_connector_registry(
         self, orchestrator: ConfigOrchestrator[VibeConfigSchema]
     ) -> ConnectorRegistry | None:
         from vibe.core.tools.connectors.connector_registry import (
@@ -1229,10 +1334,79 @@ async def create_harness_server(
             session_backend_host_factory=process.create_session_backend_host,
             mcp_catalog_service=process.mcp_catalog,
             connector_catalog_service=process.connector_catalog,
+            plugin_catalog_service=process.plugin_catalog,
         ),
         _transport=transport,
         _reconnectable=transport_kind == "in_process",
     )
+
+
+def _hook_config_issues(result: HookConfigResult) -> list[ConfigIssue]:
+    """Project hooks.toml parse/duplicate diagnostics onto the session's issues.
+
+    ``load_hooks_from_fs`` skips an invalid or conflicting file's hooks and records why
+    on ``result.issues``. Surfacing them as session notices (rather than dropping them
+    silently) matches the legacy loop, which projects ``hook_config_issues``, and the
+    design's failure table ("CLI logs a diagnostic; that file's hooks are skipped").
+    """
+    return [
+        ConfigIssue(file=str(issue.file), message=issue.message)
+        for issue in result.issues
+    ]
+
+
+def _user_hook_names(harness_files: HarnessFilesManager) -> set[str]:
+    """Names of hooks that come from ``~/.vibe/hooks.toml``, after project-first dedup.
+
+    ``load_hooks_from_fs`` merges project and user files (project first) and drops the
+    origin, so recover it here: a surviving hook is user-owned only when it is declared in
+    the user file and by no project file.
+    """
+    user_file = (VIBE_HOME.path / "hooks.toml").resolve()
+    project_names: set[str] = set()
+    user_names: set[str] = set()
+    for path in harness_files.hook_files:
+        names = {hook.name for hook in load_hooks_file(path).hooks}
+        if path.resolve() == user_file:
+            user_names |= names
+        else:
+            project_names |= names
+    return user_names - project_names
+
+
+def _foreign_hook_definitions(
+    result: HookConfigResult, *, harness_files: HarnessFilesManager, cwd: Path
+) -> list[Any]:
+    """Map discovered project/user hook declarations to harness hook definitions.
+
+    Consumes ``result.hooks`` (the parsed ``[[hooks]]`` from ``hooks.toml``), the
+    same field the legacy loop uses -- not ``result.runtime_hooks``, which only the
+    plugin loader populates.
+
+    ``source`` scopes the binding id (``f"{source}:{name}"``). A user hook is labelled
+    ``"user"`` and a project hook the session cwd, so a persisted project binding cannot be
+    matched by a same-named user hook on a resume where project trust has since been lost.
+    """
+    from mistralai_rust_harness.vibe import (  # pyright: ignore[reportMissingImports]
+        ForeignHookDefinition,
+    )
+
+    user_names = _user_hook_names(harness_files)
+    cwd_source = str(cwd)
+
+    return [
+        ForeignHookDefinition(
+            name=hook.name,
+            point=hook.type.value,
+            command=hook.command,
+            source="user" if hook.name in user_names else cwd_source,
+            match=hook.match,
+            order=index,
+            timeout_s=hook.timeout if hook.timeout is not None else 60.0,
+            strict=hook.strict,
+        )
+        for index, hook in enumerate(result.hooks)
+    ]
 
 
 def build_runtime_snapshot(
@@ -1256,13 +1430,16 @@ def build_unified_runtime_snapshot(
     agents: AgentManager,
     *,
     issues: Sequence[ConfigIssue] = (),
+    skills: Iterable[SkillInfo] = (),
+    hooks_count: int = 0,
 ) -> RuntimeSnapshot:
     """Project the layered config into the runtime state the client observes.
 
-    ``tools``/``skills``/``hooks_count``/``connectors``/``mcp`` stay empty: the
-    Unified Harness has no catalogue for them yet, and an invented one would
-    report capabilities the Runtime cannot honour. ``issues`` is supplied by the
-    caller because it comes from plugin resolution, not from the layered config.
+    ``tools``/``connectors``/``mcp`` stay empty: the Unified Harness has no
+    catalogue for them yet, and an invented one would report capabilities the
+    Runtime cannot honour. ``skills``, ``issues`` and ``hooks_count`` are
+    supplied by the caller because they come from skill discovery, plugin
+    resolution and the hook files on disk, not from the layered config.
     """
     config = config_orchestrator.config
     active, available = project_agent_summaries(
@@ -1272,12 +1449,12 @@ def build_unified_runtime_snapshot(
         config=project_config_view(config),
         active_agent=active,
         agents=available,
-        skills=[],
+        skills=project_skill_summaries(skills),
         tools=[],
         stats=AgentStatsSnapshot(),
         context_window=config.get_active_model().auto_compact_threshold,
         issues=list(issues),
-        hooks_count=0,
+        hooks_count=hooks_count,
         connectors=ConnectorCounts(),
         mcp=MCPState(),
     )
@@ -1290,9 +1467,13 @@ _RUST_BUILTIN_TOOL_SOURCES: dict[RustRuntimeBuiltinToolName, frozenset[str]] = {
     "file_system.write_file": frozenset({"write_file"}),
     "file_system.search_replace": frozenset({"edit"}),
     "file_system.bash": frozenset({"bash", "powershell", "git_bash"}),
+    "skill.read": frozenset({"skill"}),
 }
+# Loading a skill only reads a file Vibe already resolved and put in the prompt,
+# so it is never worth an approval prompt. Legacy grants it ``ALWAYS`` too.
 _RUST_READ_ONLY_BUILTIN_TOOLS: frozenset[RustRuntimeBuiltinToolName] = frozenset({
-    "file_system.read_file"
+    "file_system.read_file",
+    "skill.read",
 })
 
 

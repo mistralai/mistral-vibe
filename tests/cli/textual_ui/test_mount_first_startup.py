@@ -6,10 +6,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from tests.conftest import build_test_vibe_app
+from tests.stubs.app_config import build_test_app_config
 from vibe.app_server import AppServerSession
 from vibe.app_server.events import StatsUpdated
 from vibe.app_server.models import AgentStatsSnapshot
-from vibe.app_server.protocol import StatsUpdatedParams
+from vibe.app_server.protocol import ConfigReadResponse, StatsUpdatedParams
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputBody, ChatInputContainer
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress
@@ -30,6 +31,24 @@ async def test_compose_yields_main_ui_when_no_session() -> None:
         assert app.query_one(Banner) is not None
         assert app.query_one(ChatInputContainer) is not None
         assert app.query_one(NarratorStatus) is not None
+
+
+@pytest.mark.asyncio
+async def test_cold_mount_applies_configured_theme_not_fallback() -> None:
+    # Cold mount-first path must apply the theme from the pre-read config so the
+    # UI does not flash the fallback theme before the session opens.
+    async def _blocking_starter() -> AppServerSession:
+        await asyncio.Event().wait()
+        raise RuntimeError("unreachable")
+
+    config = build_test_app_config().model_copy(update={"theme": "gruvbox"})
+    app = build_test_vibe_app(app_server=_blocking_starter)
+    app._mount_first = True
+    app._initial_config_response = ConfigReadResponse(config=config)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.1)
+        assert app._app_server is None
+        assert app.theme == "gruvbox"
 
 
 @pytest.mark.asyncio

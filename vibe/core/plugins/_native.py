@@ -49,14 +49,16 @@ from vibe.core.plugins._compatibility import (
     PluginAdapterDiagnostic,
     PluginFormatAdapter,
     PluginToolOverride,
+    author_display_name,
     detect_plugin_source_format,
+    plugin_runtime_state_names,
     relative_plugin_path,
     typescript_identifier,
 )
 from vibe.core.plugins._content import digest_plugin_tree
 from vibe.core.plugins._foreign import OpenCodePluginAdapter
 from vibe.core.plugins._kimi import KimiPluginAdapter
-from vibe.core.skills.models import SkillInfo, SkillMetadata, SkillScope
+from vibe.core.skills.models import SkillInfo, SkillMetadata, SkillScope, SkillSource
 from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
 from vibe.utils.io import read_safe
 from vibe.utils.platform import is_windows
@@ -359,6 +361,7 @@ class PluginDescriptor:
     private_metadata: Mapping[str, object]
     manifest_digest: str
     content_digest: str
+    author: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -468,11 +471,16 @@ class PluginResolver:
         *,
         project_roots: Sequence[Path] = (),
         user_roots: Sequence[Path] = (),
+        plugin_dirs: Sequence[Path] = (),
         data_root_base: Path | None = None,
         config_orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None,
     ) -> None:
         self._project_roots = tuple(project_roots)
         self._user_roots = tuple(user_roots)
+        # Named outright rather than discovered under a root: a pinned session
+        # rebuilding its recorded set has nothing to scan and no scope to
+        # distinguish, so these join the project scope and skip discovery.
+        self._plugin_dirs = tuple(plugin_dirs)
         self._data_root_base = data_root_base
         self._config_orchestrator = config_orchestrator
         self._issues: list[PluginConfigIssue] = []
@@ -494,8 +502,11 @@ class PluginResolver:
     def resolve(self) -> ResolvedPluginSet:
         self._issues = []
         self._unsupported_components = []
-        project = self._discover_scope(self._project_roots, SkillScope.PROJECT)
-        user = self._discover_scope(self._user_roots, SkillScope.GLOBAL)
+        project = self._load_scope(
+            [*self._plugin_dirs, *self._child_dirs(self._project_roots)],
+            SkillScope.PROJECT,
+        )
+        user = self._load_scope(self._child_dirs(self._user_roots), SkillScope.GLOBAL)
         selected = self._select_by_precedence(project, user)
         selected = self._remove_namespace_collisions(selected)
         plugins = tuple(
@@ -574,24 +585,31 @@ class PluginResolver:
             unsupported_components=tuple(self._unsupported_components),
         )
 
-    def _discover_scope(
-        self, roots: Sequence[Path], scope: SkillScope
-    ) -> list[_PluginCandidate]:
-        candidates: list[_PluginCandidate] = []
+    def _child_dirs(self, roots: Sequence[Path]) -> list[Path]:
+        """Every plugin directory sitting under one of these roots."""
+        plugin_dirs: list[Path] = []
         for root in roots:
             try:
-                plugin_dirs = sorted(
-                    (path for path in root.iterdir() if path.is_dir()),
-                    key=lambda path: path.name,
+                plugin_dirs.extend(
+                    sorted(
+                        (path for path in root.iterdir() if path.is_dir()),
+                        key=lambda path: path.name,
+                    )
                 )
             except OSError as error:
                 self._issues.append(
                     PluginConfigIssue(file=root, message=f"Failed to discover: {error}")
                 )
-                continue
-            for plugin_dir in plugin_dirs:
-                if candidate := self._load_plugin(plugin_dir, scope):
-                    candidates.append(candidate)
+        return plugin_dirs
+
+    def _load_scope(
+        self, plugin_dirs: Sequence[Path], scope: SkillScope
+    ) -> list[_PluginCandidate]:
+        candidates = [
+            candidate
+            for plugin_dir in plugin_dirs
+            if (candidate := self._load_plugin(plugin_dir, scope))
+        ]
         return self._remove_same_scope_duplicates(candidates)
 
     def _load_plugin(
@@ -695,7 +713,12 @@ class PluginResolver:
         extension = self._parse_vibe_extension(manifest, resolved_manifest)
         try:
             manifest_digest = canonical_json_digest(manifest)
-            content_digest = digest_plugin_tree(root)
+            content_digest = digest_plugin_tree(
+                root,
+                ignored_names=plugin_runtime_state_names(
+                    DetectedPluginFormat.AGENT_PLUGINS_1_0
+                ),
+            )
         except OSError as error:
             self._issues.append(
                 PluginConfigIssue(
@@ -736,6 +759,9 @@ class PluginResolver:
             private_metadata=MappingProxyType({}),
             manifest_digest=manifest_digest,
             content_digest=content_digest,
+            author=author_display_name(
+                manifest.author.name if manifest.author is not None else None
+            ),
         )
         skills = self._load_skills(descriptor)
         mcp_servers = self._load_mcp_servers(descriptor)
@@ -774,7 +800,9 @@ class PluginResolver:
             return None
         try:
             manifest_text = read_safe(package.manifest_path, raise_on_error=True).text
-            content_digest = digest_plugin_tree(root)
+            content_digest = digest_plugin_tree(
+                root, ignored_names=plugin_runtime_state_names(package.source_format)
+            )
         except OSError as error:
             self._issues.append(
                 PluginConfigIssue(
@@ -806,6 +834,7 @@ class PluginResolver:
             private_metadata=package.private_metadata,
             manifest_digest=manifest_digest,
             content_digest=content_digest,
+            author=package.author,
         )
         self._unsupported_components.extend(
             PluginUnsupportedComponent(
@@ -910,7 +939,9 @@ class PluginResolver:
                 definition.prompt,
                 scope=plugin.scope,
             )
-            skills[alias] = skill.model_copy(update={"name": alias})
+            skills[alias] = skill.model_copy(
+                update={"name": alias, "source": SkillSource.PLUGIN}
+            )
         return skills
 
     @staticmethod
@@ -1654,7 +1685,9 @@ class PluginResolver:
                         )
                     )
                     continue
-                skills[alias] = skill.model_copy(update={"name": alias})
+                skills[alias] = skill.model_copy(
+                    update={"name": alias, "source": SkillSource.PLUGIN}
+                )
         return skills
 
     @staticmethod

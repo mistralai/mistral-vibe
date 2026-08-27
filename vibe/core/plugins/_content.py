@@ -8,7 +8,9 @@ from vibe.core.plugins._canonical import normalize_nfc
 _CHUNK = 1024 * 1024
 
 
-def digest_plugin_tree(root: Path) -> str:
+def digest_plugin_tree(
+    root: Path, *, ignored_names: frozenset[str] = frozenset()
+) -> str:
     """Digest a plugin tree with the framing the package store ingests.
 
     Each entry is ``<tag> NUL <posix relative path> NUL <sha256> NUL``, in
@@ -25,6 +27,8 @@ def digest_plugin_tree(root: Path) -> str:
     """
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*"), key=lambda item: _relative(root, item)):
+        if not ignored_names.isdisjoint(path.relative_to(root).parts):
+            continue
         relative = _relative(root, path)
         if path.is_symlink():
             _entry(digest, b"l", relative, _digest(str(path.readlink()).encode()))

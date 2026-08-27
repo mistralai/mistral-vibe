@@ -10,6 +10,7 @@ class ProtocolModel(BaseModel):
         extra="forbid",
         populate_by_name=True,
         serialize_by_alias=True,
+        defer_build=True,
     )
 
 

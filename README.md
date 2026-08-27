@@ -338,6 +338,10 @@ If a model response is interrupted by a backend error, use `/retry` to continue
 from the partial response. Add optional guidance after the command, for example
 `/retry keep the conclusion concise`.
 
+Use `/mcp` or `/connectors` to browse configured MCP servers and workspace
+connectors. The browser starts on the first item; press Up or Left to focus its
+fuzzy search bar, then Up again to wrap to the last item.
+
 ### Custom Slash Commands via Skills
 
 You can define your own slash commands through the skills system. Skills are reusable components that extend Vibe's functionality.

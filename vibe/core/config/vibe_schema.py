@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
+import json
 import os
 from pathlib import Path
 import tomllib
@@ -237,6 +238,33 @@ def _coerce_routed_model_config(v: str) -> ModelConfig | None:
         return None
 
 
+def _coerce_routed_extra_models(v: Any) -> list[ModelConfig]:
+    """Parse the GrowthBook-supplied extra-models payload, failing open.
+
+    The value arrives as a JSON-array string (like every other GrowthBook-mapped
+    config value). Invalid entries are dropped rather than raising so a malformed
+    A/B payload can never brick config loading.
+    """
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if not isinstance(v, list):
+        return []
+    coerced: list[ModelConfig] = []
+    for item in v:
+        try:
+            coerced.append(
+                item
+                if isinstance(item, ModelConfig)
+                else ModelConfig.model_validate(item)
+            )
+        except ValidationError:
+            continue
+    return coerced
+
+
 _LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 
 
@@ -269,6 +297,14 @@ class VibeConfigSchema(ConfigSchema):
         WithReplaceMerge(),
         BeforeValidator(_coerce_routed_model_config),
     ] = None
+    # Extra models injected into the dropdown at runtime by the GrowthBook layer,
+    # for exposure/rollout without changing the default. Unlike
+    # ``routed_model_config``, these never influence ``resolve_default_model_alias``.
+    routed_extra_models: Annotated[
+        list[ModelConfig],
+        WithReplaceMerge(),
+        BeforeValidator(_coerce_routed_extra_models),
+    ] = Field(default_factory=list)
     providers: Annotated[list[ProviderConfig], WithUnionMerge(merge_key="name")] = (
         Field(default_factory=lambda: list(DEFAULT_PROVIDERS))
     )
@@ -701,6 +737,33 @@ class VibeConfigSchema(ConfigSchema):
                 "models",
                 {**self.models, alias: model.model_copy(update=user_overrides)},
             )
+        return self
+
+    @model_validator(mode="after")
+    def _inject_routed_extra_models(self) -> VibeConfigSchema:
+        # Adds models to the dropdown without touching ``routed_default_model``,
+        # so exposure/rollout never changes the resolved default. Composes with
+        # ``_inject_routed_model``: if ``routed_default_model`` names an alias
+        # added here, ``resolve_default_model_alias`` still promotes it to default.
+        if not self.routed_extra_models:
+            return self
+        models = dict(self.models)
+        for model in self.routed_extra_models:
+            # An empty alias collides with the unpinned ``active_model`` sentinel
+            # (""), so a malformed payload could hijack the resolved default. Skip
+            # it: injection must never touch the default.
+            if not model.alias:
+                continue
+            existing = models.get(model.alias)
+            if existing is None:
+                models[model.alias] = model
+                continue
+            # A user-defined entry for the same alias always wins over injection.
+            user_overrides = {
+                field: getattr(existing, field) for field in existing.model_fields_set
+            }
+            models[model.alias] = model.model_copy(update=user_overrides)
+        object.__setattr__(self, "models", models)
         return self
 
     @model_validator(mode="after")

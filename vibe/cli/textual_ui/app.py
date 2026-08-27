@@ -163,6 +163,7 @@ from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenS
 from vibe.cli.textual_ui.widgets.debug_console import DebugConsole
 from vibe.cli.textual_ui.widgets.feedback_bar import FeedbackBar
 from vibe.cli.textual_ui.widgets.inline_notice import InlineNotice
+from vibe.cli.textual_ui.widgets.links import normalize_url
 from vibe.cli.textual_ui.widgets.load_more import HistoryLoadMoreRequested
 from vibe.cli.textual_ui.widgets.loading import (
     DEFAULT_LOADING_STATUS,
@@ -290,10 +291,12 @@ _MAX_INCOMPLETE_STREAM_RETRIES = 2
 
 
 if TYPE_CHECKING:
+    from vibe.app_server.resources import PluginCatalogDiff
     from vibe.cli.textual_ui.screens.config import ConfigWriteResult
     from vibe.cli.textual_ui.widgets.connector_auth_app import ConnectorAuthApp
     from vibe.cli.textual_ui.widgets.mcp_app import MCPApp
     from vibe.cli.textual_ui.widgets.mcp_oauth_app import MCPOAuthApp
+    from vibe.cli.textual_ui.widgets.plugins_app import PluginsApp
 
 
 def _get_connector_auth_app_class() -> type[ConnectorAuthApp]:
@@ -306,6 +309,12 @@ def _get_mcp_app_class() -> type[MCPApp]:
     from vibe.cli.textual_ui.widgets.mcp_app import MCPApp
 
     return MCPApp
+
+
+def _get_plugins_app_class() -> type[PluginsApp]:
+    from vibe.cli.textual_ui.widgets.plugins_app import PluginsApp
+
+    return PluginsApp
 
 
 def _get_mcp_oauth_app_class() -> type[MCPOAuthApp]:
@@ -348,6 +357,7 @@ class BottomApp(StrEnum):
     MCP = auto()
     MCPOAuth = auto()
     ModelPicker = auto()
+    Plugins = auto()
     ProxySetup = auto()
     Question = auto()
     ThemePicker = auto()
@@ -644,6 +654,13 @@ class VibeApp(App):  # noqa: PLR0904
         driver_class = super().get_driver_class()
         patch_driver_parser()
         return driver_class
+
+    def open_url(self, url: str, *, new_tab: bool = True) -> None:
+        """Normalize URLs before opening so illegal characters (e.g. a literal
+        backslash from model output) can't break the platform opener. Both link
+        paths — tool-output links and clicked markdown links — funnel here.
+        """
+        super().open_url(normalize_url(url), new_tab=new_tab)
 
     def __init__(
         self,
@@ -966,12 +983,12 @@ class VibeApp(App):  # noqa: PLR0904
             )
 
     def _build_command_registry(self) -> CommandRegistry:
-        context = self._command_context()
-        return CommandRegistry(vibe_code_enabled=context.vibe_code_enabled)
+        return CommandRegistry(context=self._command_context())
 
     def _command_context(self) -> CommandContext:
         return CommandContext(
-            vibe_code_enabled=self.app_server.resources.config.current.vibe_code_enabled
+            vibe_code_enabled=self.app_server.resources.config.current.vibe_code_enabled,
+            plugins_enabled=self.app_server.resources.plugins.supported,
         )
 
     def _refresh_command_registry(self) -> None:
@@ -1098,7 +1115,9 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def on_mount(self) -> None:
         if self._app_server is None and self._start_app_server is not None:
-            await self._apply_theme(FALLBACK_THEME)
+            init = self._initial_config_response
+            initial_theme = init.config.theme if init is not None else FALLBACK_THEME
+            await self._apply_theme(initial_theme)
             self.call_after_refresh(self._record_tui_displayed)
             self.run_worker(self._bootstrap_session(), exclusive=False)
             return
@@ -1226,10 +1245,27 @@ class VibeApp(App):  # noqa: PLR0904
         if self._tui_displayed_monotonic is None:
             self._tui_displayed_monotonic = time.monotonic()
 
+    async def _probe_plugin_catalog(self) -> None:
+        """Ask once whether this backend resolves plugins, and gate on the answer.
+
+        There is no flag to read: ``--experimental-harness`` is a CLI argument
+        the app server never sends back, and the same TUI talks to backends
+        that were never given one.
+        """
+        try:
+            await self.app_server.resources.plugins.read()
+        except Exception as exc:
+            logger.debug("Plugin catalogue probe failed: %s", exc)
+
     async def _complete_post_ready_startup(self) -> None:
         try:
-            await asyncio.gather(self._refresh_account(), self._refresh_identity())
+            await asyncio.gather(
+                self._refresh_account(),
+                self._refresh_identity(),
+                self._probe_plugin_catalog(),
+            )
         finally:
+            self._refresh_command_registry()
             self._startup_command_availability_ready.set()
         await self._check_and_show_whats_new()
         if (
@@ -3446,6 +3482,58 @@ class VibeApp(App):  # noqa: PLR0904
             )
         )
 
+    async def _show_plugins(self, **kwargs: Any) -> None:
+        state = await self.app_server.resources.plugins.read()
+        if state is None:
+            await self._mount_and_scroll(
+                UserCommandMessage("This session resolves no plugins.")
+            )
+            return
+        if not state.plugins and not state.dropped:
+            await self._mount_and_scroll(
+                UserCommandMessage("No plugins are installed for this session.")
+            )
+            return
+        if self._current_bottom_app == BottomApp.Plugins:
+            return
+        await self._mount_and_scroll(UserCommandMessage("Plugins opened..."))
+        await self._switch_from_input(_get_plugins_app_class()(state=state))
+
+    async def _reload_plugins(self, **kwargs: Any) -> PluginCatalogDiff | None:
+        from vibe.cli.textual_ui.widgets.plugins_app import plugin_reload_report
+
+        try:
+            diff = await self.app_server.resources.plugins.reload()
+        except Exception as exc:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to reload plugins: {exc}", collapsed=self._tools_collapsed
+                )
+            )
+            return None
+        if diff is None:
+            await self._mount_and_scroll(
+                UserCommandMessage("This session resolves no plugins.")
+            )
+            return None
+        await self._mount_and_scroll(UserCommandMessage(plugin_reload_report(diff)))
+        return diff
+
+    async def on_plugins_app_plugins_closed(
+        self, _message: PluginsApp.PluginsClosed
+    ) -> None:
+        await self._mount_and_scroll(UserCommandMessage("Plugins closed."))
+        await self._switch_to_input_app()
+
+    async def on_plugins_app_plugins_reload_requested(
+        self, _message: PluginsApp.PluginsReloadRequested
+    ) -> None:
+        diff = await self._reload_plugins()
+        if diff is None:
+            return
+        with suppress(Exception):
+            self.query_one(_get_plugins_app_class()).update_state(diff.state)
+
     async def _show_status(self, **kwargs: Any) -> None:
         stats = self.app_server.resources.runtime.stats
         session_cached = (
@@ -4383,6 +4471,7 @@ class VibeApp(App):  # noqa: PLR0904
             BottomApp.VibeCodeProjectPicker: VibeCodeProjectPickerApp,
             BottomApp.SessionPicker: SessionPickerApp,
             BottomApp.MCP: _get_mcp_app_class(),
+            BottomApp.Plugins: _get_plugins_app_class(),
             BottomApp.ConnectorAuth: _get_connector_auth_app_class(),
             BottomApp.MCPOAuth: _get_mcp_oauth_app_class(),
             BottomApp.Rewind: RewindApp,
@@ -4731,6 +4820,9 @@ class VibeApp(App):  # noqa: PLR0904
             BottomApp.Voice: self._handle_voice_app_escape,
             BottomApp.MCP: lambda: self._handle_bottom_app_close_escape(
                 _get_mcp_app_class()
+            ),
+            BottomApp.Plugins: lambda: self._handle_bottom_app_close_escape(
+                _get_plugins_app_class()
             ),
             BottomApp.ConnectorAuth: lambda: self._handle_bottom_app_close_escape(
                 _get_connector_auth_app_class()

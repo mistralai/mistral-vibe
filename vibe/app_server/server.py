@@ -97,6 +97,7 @@ from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from vibe.app_server.mcp_catalog import MCPCatalogService
+    from vibe.app_server.plugin_catalog import PluginCatalogService
 
 
 class InitializationState(StrEnum):
@@ -168,6 +169,7 @@ class AppServer:
         host_handler: HostRequestHandler | None = None,
         mcp_catalog_service: MCPCatalogService | None = None,
         connector_catalog_service: ConnectorCatalogService | None = None,
+        plugin_catalog_service: PluginCatalogService | None = None,
     ) -> None:
         self._root: SessionBackend | None = None
         self._host_handler = host_handler or HostRequestHandler(
@@ -202,6 +204,7 @@ class AppServer:
         self._identity_gateway = identity_gateway
         self._mcp_catalog_service = mcp_catalog_service
         self._connector_catalog_service = connector_catalog_service
+        self._plugin_catalog_service = plugin_catalog_service
         self._session_backend_host = session_backend_host_factory(self)
         if self._session_backend_host is None:
             raise TypeError(
@@ -650,6 +653,13 @@ class AppServer:
         ):
             return await self._connector_catalog_service.dispatch(
                 method, raw_params, root=self._root, notify=self._route_notification
+            )
+        if (
+            self._plugin_catalog_service is not None
+            and self._plugin_catalog_service.handles(method)
+        ):
+            return await self._plugin_catalog_service.dispatch(
+                method, raw_params, root=self._root
             )
         if method in {
             "config/schema",

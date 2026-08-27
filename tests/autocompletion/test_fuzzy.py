@@ -94,3 +94,60 @@ def test_favors_earlier_positions() -> None:
     result = fuzzy_match("a", "banana")
 
     assert result.matched_indices == (1,)
+
+
+def test_dp_finds_optimal_alignment_over_greedy() -> None:
+    """The DP should prefer a boundary-consecutive match over an earlier
+    scattered match that the greedy subsequence matcher would lock onto.
+
+    Pattern "ab" against "xaxb/ab": the greedy subsequence matcher takes the
+    first 'a' at position 1 and first 'b' at 3, but the DP finds the
+    consecutive boundary match at (5, 6) which scores higher.
+    """
+    result = fuzzy_match("ab", "xaxb/ab")
+
+    assert result.matched_indices == (5, 6)
+
+
+def test_dp_prefers_fewer_gaps_when_multiple_alignments_exist() -> None:
+    """When multiple valid alignments exist, the DP should pick the one with
+    the smallest total gap and best boundaries.
+    """
+    # "abc" can match at (0, 1, 2) as prefix or at (6, 7, 8) consecutively
+    # after a boundary.  Prefix wins due to the +50 prefix bonus.
+    result = fuzzy_match("abc", "abc/xxabcyy")
+
+    assert result.matched_indices == (0, 1, 2)
+
+
+def test_dp_matches_single_character_at_best_boundary() -> None:
+    """Single char should prefer the earliest boundary position."""
+    # 'b' appears at position 3 (after 'x', no boundary) and position 5
+    # (after '/', boundary).  The DP should prefer the boundary.
+    result = fuzzy_match("b", "xxb/bx")
+
+    assert result.matched_indices == (4,)
+
+
+def test_empty_text_returns_no_match() -> None:
+    result = fuzzy_match("a", "")
+
+    assert result.matched is False
+    assert result.score == 0.0
+    assert result.matched_indices == ()
+
+
+def test_prefix_match_scores_higher_than_scattered() -> None:
+    prefix = fuzzy_match("abc", "abc/def")
+    scattered = fuzzy_match("abc", "axbxc")
+
+    assert prefix.score > scattered.score
+
+
+def test_text_lower_optimization_is_equivalent() -> None:
+    text = "src/Main.py"
+    text_lower = text.lower()
+    with_opt = fuzzy_match("main", text, text_lower)
+    without_opt = fuzzy_match("main", text)
+
+    assert with_opt == without_opt

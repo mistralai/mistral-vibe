@@ -93,7 +93,7 @@ def build_snapshot(materialized: MaterializedPluginSet) -> ResolvedPluginSnapsho
         hooks=_hooks(resolution.runtime_hooks, plugins),
         libraries=_libraries(resolution.libraries, plugins),
         connectors=_connectors(resolution.connectors),
-        tool_groups=_tool_groups(materialized, by_namespace),
+        tool_groups=_tool_groups(materialized),
         tool_routes=_tool_routes(materialized),
     )
 
@@ -232,17 +232,12 @@ def _connectors(
     ]
 
 
-def _tool_groups(
-    materialized: MaterializedPluginSet, by_namespace: Mapping[str, PluginDescriptor]
-) -> list[PluginToolGroupSnapshot]:
+def _tool_groups(materialized: MaterializedPluginSet) -> list[PluginToolGroupSnapshot]:
     snapshots: list[PluginToolGroupSnapshot] = []
     for group in materialized.tool_groups:
-        plugin = by_namespace.get(group.name)
-        if plugin is None:
-            continue
         snapshots.append(
             PluginToolGroupSnapshot(
-                plugin_name=plugin.name,
+                plugin_name=group.plugin_name,
                 name=group.name,
                 description=group.description,
                 tools=tuple(
@@ -270,6 +265,7 @@ def _tool_routes(materialized: MaterializedPluginSet) -> list[PluginToolRouteSna
             plugin_name=route.plugin_name,
             group_name=route.group_name,
             function_name=route.function_name,
+            source_kind=route.source_kind,
             source_id=route.source_id,
             source_tool_name=route.source_tool_name,
             execution_name=route.execution_name,

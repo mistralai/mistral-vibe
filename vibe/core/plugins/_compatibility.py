@@ -38,6 +38,19 @@ class PluginFormatDetection:
     unsupported_schema: str | None = None
 
 
+_UNIVERSAL_RUNTIME_STATE_NAMES = frozenset({".git"})
+
+_RUNTIME_STATE_NAMES: Mapping[DetectedPluginFormat, frozenset[str]] = MappingProxyType({
+    DetectedPluginFormat.CLAUDE_CODE: frozenset({".in_use"})
+})
+
+
+def plugin_runtime_state_names(source_format: DetectedPluginFormat) -> frozenset[str]:
+    return _UNIVERSAL_RUNTIME_STATE_NAMES | _RUNTIME_STATE_NAMES.get(
+        source_format, frozenset()
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PluginToolOverride:
     name: str | None = None
@@ -103,6 +116,7 @@ class AdaptedPluginPackage:
     mcp_servers: tuple[AdaptedMCPServer, ...]
     tool_overrides: Mapping[str, PluginToolOverride]
     private_metadata: Mapping[str, object]
+    author: str | None = None
     adapted_skills: tuple[AdaptedSkill, ...] = ()
     adapted_hooks: tuple[AdaptedHook, ...] = ()
 
@@ -167,6 +181,14 @@ def detect_plugin_source_format(root: Path) -> PluginFormatDetection:
         source_format=DetectedPluginFormat.UNKNOWN,
         marker_paths=(native_manifest,) if native_manifest.exists() else (),
     )
+
+
+def author_display_name(value: object) -> str | None:
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, Mapping):
+        return author_display_name(value.get("name"))
+    return None
 
 
 def typescript_identifier(value: str) -> str:

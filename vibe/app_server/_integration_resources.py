@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Literal
 from uuid import uuid4
 
@@ -20,6 +21,7 @@ from vibe.app_server.models import (
     MCPSourceSummary,
     MCPState,
     MCPToolSummary,
+    PluginCatalogState,
     PublicError,
     TeleportComplete,
     TeleportEvent,
@@ -50,6 +52,11 @@ from vibe.app_server.protocol import (
     MCPRefreshParams,
     MCPToggleParams,
     Notification,
+    PluginCatalogReadParams,
+    PluginCatalogReadResponse,
+    PluginReloadParams,
+    PluginReloadResponse,
+    ProtocolErrorCode,
     RuntimeSnapshot,
     TeleportCancelParams,
     TeleportCancelResponse,
@@ -72,6 +79,13 @@ from vibe.app_server.protocol import (
     VibeCodeProjectUnlinkResponse,
 )
 from vibe.utils.mcp import MCPAddTransport
+
+# A backend that resolves no plugins declines the read; a build that never
+# registered the service has no such method at all. Both mean "no plugins here".
+_NO_PLUGIN_BACKEND = frozenset({
+    ProtocolErrorCode.NOT_IMPLEMENTED,
+    ProtocolErrorCode.METHOD_NOT_FOUND,
+})
 
 
 def _required_mcp_runtime(runtime: RuntimeSnapshot | None) -> RuntimeSnapshot:
@@ -333,6 +347,98 @@ class MCPResource:
         )
         self._state.apply_runtime(response.runtime)
         return response.tool_count
+
+
+@dataclass(frozen=True, slots=True)
+class PluginCatalogChange:
+    """One plugin whose pinned content moved across a reload."""
+
+    name: str
+    before: str | None
+    after: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PluginCatalogDiff:
+    changes: tuple[PluginCatalogChange, ...]
+    state: PluginCatalogState
+    """The catalogue after the reload, so a re-render costs no third read."""
+
+
+def _plugin_changes(
+    before: PluginCatalogState, after: PluginCatalogState
+) -> tuple[PluginCatalogChange, ...]:
+    """Compare two catalogues on content digest, which is what a re-pin moves."""
+    pinned = {entry.name: entry.content_sha256 for entry in before.plugins}
+    current = {entry.name: entry.content_sha256 for entry in after.plugins}
+    return tuple(
+        PluginCatalogChange(name=name, before=pinned.get(name), after=current.get(name))
+        for name in sorted(pinned.keys() | current.keys())
+        if pinned.get(name) != current.get(name)
+    )
+
+
+class PluginCatalogResource:
+    """The session's plugin catalogue, and the one command that re-pins it.
+
+    Whether a backend resolves plugins at all is discovered rather than
+    configured: ``--experimental-harness`` is a CLI argument that never reaches
+    a client, and a client talking to ``vibe-app-server`` was never given one.
+    So the first read answers the question and ``supported`` remembers it.
+    """
+
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+        self._supported = False
+
+    @property
+    def supported(self) -> bool:
+        """Whether a read has found a backend that resolves plugins."""
+        return self._supported
+
+    async def read(self) -> PluginCatalogState | None:
+        """The catalogue, or ``None`` from a backend that resolves no plugins."""
+        client = await self._connection.connect()
+        try:
+            response = validate_wire(
+                PluginCatalogReadResponse,
+                await client.request(
+                    "plugin_catalog/read",
+                    PluginCatalogReadParams(session_id=self._state.session_id),
+                ),
+            )
+        except AppServerResponseError as exc:
+            if exc.error.code not in _NO_PLUGIN_BACKEND:
+                raise
+            self._supported = False
+            return None
+        self._supported = True
+        return response.plugins
+
+    async def reload(self) -> PluginCatalogDiff | None:
+        """Re-pin the session and report what moved, by digest.
+
+        The diff is two reads either side of ``plugin/reload`` rather than a
+        field on its response: the before-image belongs to whoever is about to
+        render it, not to a Host holding one per session.
+        """
+        before = await self.read()
+        if before is None:
+            return None
+        client = await self._connection.connect()
+        validate_wire(
+            PluginReloadResponse,
+            await client.request(
+                "plugin/reload", PluginReloadParams(session_id=self._state.session_id)
+            ),
+        )
+        after = await self.read()
+        if after is None:
+            return None
+        return PluginCatalogDiff(changes=_plugin_changes(before, after), state=after)
 
 
 class VibeCodeResource:

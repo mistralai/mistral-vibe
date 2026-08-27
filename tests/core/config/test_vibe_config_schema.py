@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import keyring
@@ -303,6 +304,122 @@ def test_sparse_user_entry_merges_routed_model_fields() -> None:
     assert merged.thinking == "medium"
     assert merged.input_price == _ROUTED_TEST_MODEL.input_price
     assert merged.supports_images == _ROUTED_TEST_MODEL.supports_images
+
+
+_EXTRA_MODEL_ALIAS = "extra-dropdown-model"
+_EXTRA_MODEL = ModelConfig(
+    name="extra-dropdown-model-name",
+    provider="mistral",
+    alias=_EXTRA_MODEL_ALIAS,
+    input_price=0.0,
+    output_price=0.0,
+    supports_images=False,
+)
+_EXTRA_MODELS_JSON = f"[{_EXTRA_MODEL.model_dump_json()}]"
+
+
+def test_routed_extra_model_added_to_dropdown_without_becoming_default() -> None:
+    from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
+
+    config = VibeConfigSchema.model_validate({
+        "active_model": "",
+        "routed_extra_models": _EXTRA_MODELS_JSON,
+    })
+
+    # Present in the dropdown ...
+    assert _EXTRA_MODEL_ALIAS in config.models
+    assert _EXTRA_MODEL_ALIAS in config.available_models()
+    # ... but never the default: it does not touch routed_default_model.
+    assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    assert config.get_active_model().alias == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+
+
+def test_routed_extra_models_accepts_multiple_definitions() -> None:
+    second = ModelConfig(name="second-name", provider="mistral", alias="second-extra")
+    payload = f"[{_EXTRA_MODEL.model_dump_json()},{second.model_dump_json()}]"
+
+    config = VibeConfigSchema.model_validate({"routed_extra_models": payload})
+
+    assert _EXTRA_MODEL_ALIAS in config.models
+    assert "second-extra" in config.models
+
+
+def test_routed_extra_model_becomes_default_when_named_by_routed_default() -> None:
+    # New flag adds the model; old flag names it as default. The two compose:
+    # the model is both in the dropdown and promoted to default.
+    config = VibeConfigSchema.model_validate({
+        "active_model": "",
+        "routed_extra_models": _EXTRA_MODELS_JSON,
+        "routed_default_model": _EXTRA_MODEL_ALIAS,
+    })
+
+    assert _EXTRA_MODEL_ALIAS in config.models
+    assert config.resolve_default_model_alias() == _EXTRA_MODEL_ALIAS
+    assert config.get_active_model().alias == _EXTRA_MODEL_ALIAS
+
+
+def test_routed_extra_models_compose_with_routed_model_config() -> None:
+    # Old add-and-default flag and the new add-only flag stay independent: the
+    # routed default model is the default, the extra model is only in the dropdown.
+    config = VibeConfigSchema.model_validate({
+        "active_model": "",
+        "routed_default_model": _ROUTED_TEST_ALIAS,
+        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
+        "routed_extra_models": _EXTRA_MODELS_JSON,
+    })
+
+    assert config.models.get(_ROUTED_TEST_ALIAS) == _ROUTED_TEST_MODEL
+    assert _EXTRA_MODEL_ALIAS in config.models
+    assert config.resolve_default_model_alias() == _ROUTED_TEST_ALIAS
+    assert config.get_active_model().alias == _ROUTED_TEST_ALIAS
+
+
+def test_malformed_routed_extra_models_fails_open() -> None:
+    config = VibeConfigSchema.model_validate({"routed_extra_models": "not-json"})
+
+    assert config.routed_extra_models == []
+    assert _EXTRA_MODEL_ALIAS not in config.models
+
+
+def test_invalid_routed_extra_model_entries_are_dropped() -> None:
+    payload = json.dumps([
+        {"not": "a model"},
+        json.loads(_EXTRA_MODEL.model_dump_json()),
+    ])
+
+    config = VibeConfigSchema.model_validate({"routed_extra_models": payload})
+
+    aliases = {model.alias for model in config.routed_extra_models}
+    assert aliases == {_EXTRA_MODEL_ALIAS}
+    assert _EXTRA_MODEL_ALIAS in config.models
+
+
+def test_empty_alias_extra_model_is_not_injected_and_keeps_default() -> None:
+    from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
+
+    # An empty alias would collide with the unpinned active_model sentinel ("")
+    # and hijack the default. It must be dropped, not injected.
+    empty_alias = ModelConfig(name="", provider="mistral", alias="")
+    config = VibeConfigSchema.model_validate({
+        "active_model": "",
+        "routed_extra_models": f"[{empty_alias.model_dump_json()}]",
+    })
+
+    assert "" not in config.models
+    assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    assert config.get_active_model().alias == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+
+
+def test_user_model_entry_wins_over_routed_extra_injection() -> None:
+    user_model = ModelConfig(
+        name="my-own-model", provider="mistral", alias=_EXTRA_MODEL_ALIAS
+    )
+    config = VibeConfigSchema.model_validate({
+        "routed_extra_models": _EXTRA_MODELS_JSON,
+        "models": [user_model],
+    })
+
+    assert config.models[_EXTRA_MODEL_ALIAS].name == "my-own-model"
 
 
 def test_known_active_model_is_not_overridden(caplog: pytest.LogCaptureFixture) -> None:

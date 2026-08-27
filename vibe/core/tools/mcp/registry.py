@@ -592,6 +592,16 @@ class MCPRegistry:
             bool(self._cache_keys_by_alias.get(server.name)) for server in servers
         )
 
+    def descriptors_for(self, alias: str) -> tuple[RemoteTool, ...]:
+        descriptors: dict[str, RemoteTool] = {}
+        for key in sorted(self._cache_keys_by_alias.get(alias, ())):
+            record = self._memory_records.get(key)
+            if record is None:
+                continue
+            for descriptor in record.descriptors:
+                descriptors.setdefault(descriptor.name, descriptor)
+        return tuple(descriptor for _, descriptor in sorted(descriptors.items()))
+
     def clear(self) -> None:
         self._cache.clear()
         self._memory_records.clear()

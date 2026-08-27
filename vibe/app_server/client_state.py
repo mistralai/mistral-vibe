@@ -44,7 +44,10 @@ class ClientSessionState:
         return sum(skill.source != "builtin" for skill in self.skills)
 
     def get_skill(self, name: str) -> SkillSummary | None:
-        return next((skill for skill in self.skills if skill.name == name), None)
+        folded = name.casefold()
+        return next(
+            (skill for skill in self.skills if skill.name.casefold() == folded), None
+        )
 
     def has_tool(self, name: str) -> bool:
         return any(tool.name == name for tool in self.tools)

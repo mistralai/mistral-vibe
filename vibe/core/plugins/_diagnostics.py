@@ -13,7 +13,16 @@ from vibe.core.plugins._snapshot import PluginSourceFormat
 _ABSOLUTE_PATH = re.compile(r"^(?:[/\\]|[A-Za-z]:[/\\])")
 
 PluginComponent = Literal[
-    "manifest", "skill", "hook", "knowledge", "agent", "library", "connector", "package"
+    "manifest",
+    "skill",
+    "hook",
+    "knowledge",
+    "agent",
+    "library",
+    "connector",
+    "mcp_server",
+    "tool",
+    "package",
 ]
 
 
@@ -35,7 +44,14 @@ class PluginDiagnosticCode(StrEnum):
     AGENT_INVALID = "plugin.agent.invalid"
     LIBRARY_ALIAS_COLLISION = "plugin.library.alias_collision"
     CONNECTOR_RUNTIME_UNAVAILABLE = "plugin.connector.runtime_unavailable"
+    CONNECTOR_UNAVAILABLE = "plugin.connector.unavailable"
+    CONNECTOR_TOOL_UNAVAILABLE = "plugin.connector.tool_unavailable"
+    CONNECTOR_TOOL_SCHEMA_INVALID = "plugin.connector.tool_schema_invalid"
+    MCP_AUTHORIZATION_REQUIRED = "plugin.mcp.authorization_required"
+    MCP_CONNECTION_FAILED = "plugin.mcp.connection_failed"
+    MCP_TOOL_SCHEMA_INVALID = "plugin.mcp.tool_schema_invalid"
     TOOL_NAME_COLLISION = "plugin.tool.name_collision"
+    TOOL_OVERRIDE_UNUSED = "plugin.tool_override.unused"
 
     @property
     def fatal(self) -> bool:

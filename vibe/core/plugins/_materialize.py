@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import shutil
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from vibe.core.plugins._native import (
@@ -16,7 +16,10 @@ from vibe.core.plugins._native import (
     PluginLibraryDefinition,
     ResolvedPluginSet,
 )
-from vibe.core.plugins._snapshot import PluginToolExposure
+from vibe.core.plugins._snapshot import PluginSourceKind, PluginToolExposure
+
+if TYPE_CHECKING:
+    from vibe.core.plugins._catalog import PluginConnectorCatalog, PluginMCPDiscovery
 
 _PLUGIN_NODE_PATHS_ENV = "UNIFIED_HARNESS_PLUGIN_NODE_PATHS"
 _NODE_LOADER_REGISTER = """import { register } from \"node:module\";
@@ -70,6 +73,7 @@ class PluginToolDefinition:
 
 @dataclass(frozen=True, slots=True)
 class PluginToolGroup:
+    plugin_name: str
     name: str
     description: str
     tools: tuple[PluginToolDefinition, ...]
@@ -80,6 +84,7 @@ class PluginToolRoute:
     plugin_name: str
     group_name: str
     function_name: str
+    source_kind: PluginSourceKind
     source_id: str
     source_tool_name: str
     execution_name: str
@@ -87,13 +92,33 @@ class PluginToolRoute:
 
 
 @dataclass(frozen=True, slots=True)
-class MaterializedPluginSet:
-    resolution: ResolvedPluginSet
-    # A tool group is the catalogue a plugin's declared sources answered with, so
-    # it exists only once those sources are connected. Nothing connects them yet:
-    # both stay empty, and the snapshot slots they feed stay empty with them.
+class PluginToolCatalog:
     tool_groups: tuple[PluginToolGroup, ...]
     tool_routes: Mapping[tuple[str, str], PluginToolRoute]
+    # Connected means the source answered, including with an empty catalog.
+    connected_mcp_sources: frozenset[tuple[str, str]]
+    connected_connector_sources: frozenset[tuple[str, str]]
+
+    @classmethod
+    def empty(cls) -> PluginToolCatalog:
+        return cls(
+            tool_groups=(),
+            tool_routes=MappingProxyType({}),
+            connected_mcp_sources=frozenset(),
+            connected_connector_sources=frozenset(),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MaterializedPluginSet:
+    resolution: ResolvedPluginSet
+    # A tool group is the catalog a plugin's declared sources answered with, so
+    # it exists only once those sources are connected. A materializer built
+    # without the ports that connect them leaves both empty.
+    tool_groups: tuple[PluginToolGroup, ...]
+    tool_routes: Mapping[tuple[str, str], PluginToolRoute]
+    connected_mcp_sources: frozenset[tuple[str, str]]
+    connected_connector_sources: frozenset[tuple[str, str]]
     knowledge: tuple[PluginKnowledgeDefinition, ...]
     libraries: tuple[PluginLibraryDefinition, ...]
     process_environment: Mapping[str, str]
@@ -105,6 +130,8 @@ class MaterializedPluginSet:
             resolution=resolution,
             tool_groups=(),
             tool_routes=MappingProxyType({}),
+            connected_mcp_sources=frozenset(),
+            connected_connector_sources=frozenset(),
             knowledge=(),
             libraries=(),
             process_environment=MappingProxyType({}),
@@ -113,6 +140,15 @@ class MaterializedPluginSet:
 
 
 class PluginMaterializer:
+    def __init__(
+        self,
+        *,
+        mcp_discovery: PluginMCPDiscovery | None = None,
+        connector_catalog: PluginConnectorCatalog | None = None,
+    ) -> None:
+        self._mcp_discovery = mcp_discovery
+        self._connector_catalog = connector_catalog
+
     async def materialize(self, resolution: ResolvedPluginSet) -> MaterializedPluginSet:
         issues = list(resolution.issues)
         async with asyncio.TaskGroup() as tasks:
@@ -122,17 +158,35 @@ class PluginMaterializer:
             libraries_task = tasks.create_task(
                 asyncio.to_thread(self._materialize_libraries, resolution, issues)
             )
+            tools_task = tasks.create_task(self._materialize_tools(resolution, issues))
 
         knowledge = knowledge_task.result()
         libraries, process_environment = libraries_task.result()
+        catalog = tools_task.result()
         return MaterializedPluginSet(
             resolution=resolution,
-            tool_groups=(),
-            tool_routes=MappingProxyType({}),
+            tool_groups=catalog.tool_groups,
+            tool_routes=catalog.tool_routes,
+            connected_mcp_sources=catalog.connected_mcp_sources,
+            connected_connector_sources=catalog.connected_connector_sources,
             knowledge=knowledge,
             libraries=libraries,
             process_environment=process_environment,
             issues=tuple(issues),
+        )
+
+    async def _materialize_tools(
+        self, resolution: ResolvedPluginSet, issues: list[PluginConfigIssue]
+    ) -> PluginToolCatalog:
+        if not resolution.mcp_servers and not resolution.connectors:
+            return PluginToolCatalog.empty()
+        from vibe.core.plugins._catalog import build_tool_catalog
+
+        return await build_tool_catalog(
+            resolution,
+            mcp_discovery=self._mcp_discovery,
+            connector_catalog=self._connector_catalog,
+            issues=issues,
         )
 
     @staticmethod

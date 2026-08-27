@@ -34,20 +34,27 @@ Trace the production composition and request path. Name current owners, public
 contracts, persisted state, and important failure behavior. Link exact source
 files, tests, specifications, and runtime evidence.
 
-Use an evidence table when useful:
+Use an evidence table when several claims affect the design. Omit it when a
+short paragraph is clearer.
 
-| Claim | Evidence | Confidence |
-| :--- | :--- | :--- |
-| <current behavior> | <source, test, or run link> | Source-confirmed / Test-confirmed / Runtime-verified |
+| Observation | Source | Verification status | Design consequence |
+| :--- | :--- | :--- | :--- |
+| <current behavior> | <source, test, or run link> | Source-confirmed / Test-confirmed / Runtime-verified | <constraint or decision caused by this evidence> |
 
 ## 7. Proposed Design
 
-### 7.1 User and Product Behavior
+### 7.1 Decision Summary and High-Level Overview
+
+State the selected decisions and their consequences. Then describe one normal
+end-to-end path. Do not repeat the rationale from the alternatives section.
+Explain the normal path before failure cases.
+
+### 7.2 User and Product Behavior
 
 Describe the visible workflow, defaults, affordances, progress, errors,
 cancellation, retries, and degraded behavior.
 
-### 7.2 Architecture and Ownership
+### 7.3 Architecture and Ownership
 
 Name the owner of each policy, state transition, effect, and persisted record.
 Show dependency direction and composition or selection boundaries.
@@ -61,36 +68,51 @@ flowchart LR
 
 Delete the diagram when it adds no information beyond the prose.
 
-### 7.3 Contracts and Data
+### 7.4 Contracts and Data
 
 Specify proposed APIs, routes, commands, events, models, versioning, validation,
 and redaction. Clearly distinguish new shapes from existing ones.
 
-### 7.4 Lifecycle, State, and Concurrency
+### 7.5 Lifecycle, State, and Concurrency
 
 Describe ordering, state transitions, locks or serialization, idempotency,
 interrupts, cancellation, shutdown, and restart/recovery behavior.
 
-### 7.5 Failure Semantics
+### 7.6 Failure Semantics
 
 Cover validation failures, unavailable dependencies, partial success, retries,
 timeouts, cleanup, and what remains active or persisted after each failure.
+Keep a case in the review path when it changes the design or prevents serious
+security, authorization, data-loss, or repeated-effect risk. Put lower-impact
+cases that require separate behavior in implementation details. When one rule
+already determines the safe response, state the rule once and test
+representative cases instead of listing every permutation.
 
 | Failure point | Caller result | Durable state | Recovery or retry |
 | :--- | :--- | :--- | :--- |
 | <failure> | <typed/public result> | <state after failure> | <next action> |
 
-### 7.6 Compatibility and Migration
+### 7.7 Compatibility and Migration
 
 Describe coexistence, feature or process selection, old data or wire handling,
 rollout ordering, fallback policy, and the removal condition for temporary
 compatibility code.
 
-### 7.7 Observability, Privacy, and Security
+### 7.8 Observability, Privacy, and Security (When Applicable)
 
-Specify logs, metrics, traces, redaction, credentials, permissions, trust
-boundaries, and operator-visible convergence signals. State why no new signal
-is needed when that is the decision.
+Include this section only when the feature introduces a relevant behavior,
+risk, or operational need. Otherwise, omit it.
+
+- For security, name the changed trust boundary, authorization decision,
+  credential flow, untrusted-input path, or access to protected data and where
+  the design enforces the response.
+- For privacy, name the user or sensitive data that the feature collects,
+  sends, stores, retains, or logs differently and what happens to it.
+- For observability, name the feature-specific event or failure, the signal
+  that records it, and what an operator can do with that information.
+
+Do not repeat inherited controls or add generic requirements such as "add
+logs", "track latency", or "emit metrics".
 
 ## 8. Implementation Plan
 
@@ -106,45 +128,69 @@ repository update required by the design.
 
 ## 9. Validation Plan
 
+Start with a short, visible checklist of the conditions required to complete
+the work. Reference earlier sections instead of repeating their details.
+
+- Every implementation slice meets its exit criteria.
+- The detailed validation checks below pass.
+- Required migrations, generated artifacts, documentation, ADRs, release notes,
+  and sibling-repository updates are complete.
+- Deferred compatibility removal has a named owner and removal condition.
+- No material decision or implementation blocker remains unresolved.
+
+<details>
+<summary>Detailed validation checks</summary>
+
 Map every goal and material failure mode to an executable check. Include exact
 commands only after verifying them in the current checkout.
 
-| Requirement or risk | Test level | Path or command | Expected evidence |
+| Requirement or risk | Test level | Path or command | Expected result |
 | :--- | :--- | :--- | :--- |
 | <goal or failure> | Unit / Contract / Integration / End-to-end / Manual | <verified location> | <observable assertion> |
 
 Distinguish source review, focused tests, full suites, CI frontiers, and live
 runtime validation. Define the complete acceptance boundary.
 
-## 10. Alternatives and Decision Summary
+</details>
+
+## 10. Alternatives
 
 | Option | Advantages | Costs and risks | Decision crux |
 | :--- | :--- | :--- | :--- |
 | <chosen option> | <benefits> | <tradeoffs> | <why it wins> |
 | <alternative> | <benefits> | <tradeoffs> | <why rejected> |
 
-Summarize the chosen design and the tradeoff the team is accepting.
+Explain why the selected option wins and which tradeoff the team accepts.
 
 ## 11. Rollout and Document Lifecycle
 
 - **Release plan:** <ordering, gating, and rollback>
 - **Compatibility removal:** <condition and owner>
-- **Monitoring plan:** <signals and response>
+- **Monitoring plan, when applicable:** <feature-specific signals and response>
 - **Document lifecycle:** <retain, replace with ADR, or remove after completion>
 
 ---
 
 ## Appendix
 
-### A. Relevant Source Boundaries
+Every appendix section is optional. Include only sections that add information
+beyond the main document, and omit the appendix when none apply.
+
+### Implementation Reference
+
+Use this section for exact implementation material that spans several design
+sections or would make the relevant section hard to follow. Omit it when
+collapsible sections already contain that material, and do not repeat the same
+content in both places.
+
+This material can include data classes, JSON documents, stored formats, method
+signatures, protocol field mappings, naming and hashing rules with example
+inputs and outputs, and platform-specific algorithms.
+
+### Source Map
+
+Include this section when the work spans enough modules, packages, or
+repositories that a consolidated navigation list helps the implementer or
+`/goal` agent. Otherwise, omit it.
 
 - `<path>` - <ownership or relevance>
-
-### B. Definition of Done
-
-- Every goal has an implemented mechanism and passing acceptance check.
-- Required cross-surface, backend, persistence, migration, and platform behavior
-  is verified at the appropriate boundary.
-- No unresolved material design decision or implementation blocker remains.
-- Temporary compatibility code has a named removal condition.
-- Documentation and ADR follow-ups required by the design are complete.

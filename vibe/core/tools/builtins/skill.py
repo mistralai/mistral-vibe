@@ -53,7 +53,7 @@ class SkillResult(BaseModel):
     )
 
 
-def _sample_skill_files(skill_dir: Path | None) -> list[str]:
+def sample_skill_files(skill_dir: Path | None) -> list[str]:
     if skill_dir is None or not (skill_dir / "SKILL.md").is_file():
         return []
     files: list[str] = []
@@ -103,14 +103,18 @@ def render_skill_result(skill_info: SkillInfo, files: list[str]) -> SkillResult:
     )
 
 
+def already_loaded_message(name: str) -> str:
+    return (
+        f"Skill '{name}' is already loaded earlier in this "
+        "conversation. Reuse those instructions."
+    )
+
+
 def already_loaded_result(skill_info: SkillInfo) -> SkillResult:
     skill_dir = skill_info.skill_dir
     return SkillResult(
         name=skill_info.name,
-        content=(
-            f"Skill '{skill_info.name}' is already loaded earlier in this "
-            "conversation. Reuse those instructions."
-        ),
+        content=already_loaded_message(skill_info.name),
         skill_dir=None if skill_dir is None else str(skill_dir),
     )
 
@@ -120,7 +124,7 @@ async def build_skill_result(
 ) -> SkillResult:
     if already_loaded:
         return already_loaded_result(skill_info)
-    files = await asyncio.to_thread(_sample_skill_files, skill_info.skill_dir)
+    files = await asyncio.to_thread(sample_skill_files, skill_info.skill_dir)
     return render_skill_result(skill_info, files)
 
 

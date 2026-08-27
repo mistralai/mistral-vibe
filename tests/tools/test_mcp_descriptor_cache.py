@@ -253,3 +253,54 @@ async def test_failed_forced_refresh_never_reuses_persistent_stale_descriptors(
         assert set(await registry.get_tools_async([server])) == {"linear_new"}
 
     assert discovery.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_legacy_descriptor_cache_keeps_both_schemas_across_repeated_reads(
+    tmp_path: Path,
+) -> None:
+    """A read rewrites the entry it read, so a lossy decode erases the schemas.
+
+    Plugin tool routes are fingerprinted over both schemas, so a cache hit that
+    answered with an empty one would report every restored route as drifted.
+    """
+    descriptor = RemoteTool.model_validate({
+        "name": "search",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}},
+        "outputSchema": {"type": "object", "properties": {"hit": {"type": "string"}}},
+    })
+    cache = LegacyMCPDescriptorCache(tmp_path)
+    assert await cache.write(_key(), source_name="linear", descriptors=(descriptor,))
+
+    await cache.read(_key(), source_name="linear")
+    reread = await cache.read(_key(), source_name="linear")
+
+    assert reread is not None
+    assert reread.descriptors == (descriptor,)
+
+
+@pytest.mark.asyncio
+async def test_legacy_registry_serves_the_discovered_schemas_from_the_cache(
+    tmp_path: Path,
+) -> None:
+    server = _server()
+    descriptor = RemoteTool.model_validate({
+        "name": "search",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}},
+        "outputSchema": {"type": "object", "properties": {"hit": {"type": "string"}}},
+    })
+    first = MCPRegistry(descriptor_cache_root=tmp_path)
+    with patch(
+        "vibe.core.tools.mcp.registry.list_tools_http",
+        new=AsyncMock(return_value=[descriptor]),
+    ):
+        await first.get_tools_async([server])
+
+    second = MCPRegistry(descriptor_cache_root=tmp_path)
+    with patch(
+        "vibe.core.tools.mcp.registry.list_tools_http",
+        new=AsyncMock(side_effect=AssertionError("cache hit performed MCP I/O")),
+    ):
+        await second.get_tools_async([server])
+
+    assert second.descriptors_for(server.name) == (descriptor,)

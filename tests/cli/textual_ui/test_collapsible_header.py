@@ -106,3 +106,42 @@ async def test_expanding_section_preserves_scroll_position() -> None:
         await chat.mount(NoMarkupStatic("new content"))
         await pilot.pause()
         assert chat.is_at_bottom
+
+
+class _InertHeaderApp(App[None]):
+    CSS_PATH = Path(__file__).parents[3] / "vibe/cli/textual_ui/app.tcss"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.body_built = False
+
+        def factory() -> NoMarkupStatic:
+            self.body_built = True
+            return NoMarkupStatic("body")
+
+        self.section = HeaderCollapsibleSection(
+            factory, header_text="done", header_verb="Ran", collapsible=False
+        )
+
+    def compose(self) -> ComposeResult:
+        yield self.section
+
+
+@pytest.mark.asyncio
+async def test_inert_header_keeps_verb_and_never_opens() -> None:
+    # An empty result stays a single line: the verb is kept, the disclosure caret is
+    # replaced by a muted marker, and toggling/clicking never builds a body.
+    app = _InertHeaderApp()
+    async with app.run_test(size=(80, 10)) as pilot:
+        await pilot.pause()
+
+        assert app.query_one(".collapsible-header-verb", NoMarkupStatic)
+        marker = app.section._triangle
+        assert str(marker.render()) == "▪"
+        assert "success" not in marker.classes
+
+        app.section.toggle()
+        await pilot.pause()
+
+        assert app.section.is_collapsed is True
+        assert app.body_built is False

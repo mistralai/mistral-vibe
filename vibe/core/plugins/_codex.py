@@ -17,6 +17,7 @@ from vibe.core.plugins._compatibility import (
     DetectedPluginFormat,
     PluginAdapterDiagnostic,
     PluginAdapterResult,
+    author_display_name,
     resolve_declared_path,
     typescript_identifier,
 )
@@ -30,6 +31,7 @@ class _CodexPluginManifest(BaseModel):
     name: str | None = Field(default=None, max_length=256)
     version: str | None = None
     description: str | None = None
+    author: JsonValue = None
     skills: JsonValue = None
     mcp_servers: JsonValue = Field(default=None, alias="mcpServers")
     apps: JsonValue = None
@@ -125,6 +127,7 @@ class CodexPluginAdapter:
             mcp_servers=mcp_servers,
             tool_overrides=MappingProxyType({}),
             private_metadata=MappingProxyType(private_metadata),
+            author=author_display_name(manifest.author),
         )
         return PluginAdapterResult(
             package=package,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum, auto
+from functools import cache
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -46,6 +47,10 @@ from vibe.app_server.models import (
     JsonPatchOperation,
     MCPState,
     MentionStats,
+    PluginCatalogComponent as PluginCatalogComponent,
+    PluginCatalogDropped as PluginCatalogDropped,
+    PluginCatalogEntry as PluginCatalogEntry,
+    PluginCatalogState,
     PluginComponent as PluginComponent,
     PluginComponentKind as PluginComponentKind,
     PluginInfo,
@@ -127,6 +132,8 @@ SERVER_METHODS: tuple[str, ...] = (
     "narration/summarize",
     "plugin/info",
     "plugin/reload",
+    "plugins/read",
+    "plugin_catalog/read",
     "projectLinks/create",
     "projectLinks/inspectRoot",
     "projectLinks/link",
@@ -740,6 +747,22 @@ class PluginInfoParams(ProtocolModel):
 
 class PluginInfoResponse(ProtocolModel):
     info: PluginInfo
+
+
+class PluginReloadParams(ProtocolModel):
+    session_id: str
+
+
+class PluginReloadResponse(ProtocolModel):
+    """Empty: reload allocates no identity, and ``plugin/info`` reads the result."""
+
+
+class PluginCatalogReadParams(ProtocolModel):
+    session_id: str
+
+
+class PluginCatalogReadResponse(ProtocolModel):
+    plugins: PluginCatalogState
 
 
 class RuntimeReadParams(ProtocolModel):
@@ -1823,11 +1846,14 @@ type JsonRpcEnvelope = (
     Notification | ServerRequest | JsonRpcSuccessResponse | JsonRpcErrorResponse
 )
 
-_JSON_RPC_ENVELOPE_ADAPTER = TypeAdapter(JsonRpcEnvelope)
+
+@cache
+def _json_rpc_envelope_adapter() -> TypeAdapter[JsonRpcEnvelope]:
+    return TypeAdapter(JsonRpcEnvelope)
 
 
 def validate_json_rpc_envelope(value: object) -> JsonRpcEnvelope:
-    return _JSON_RPC_ENVELOPE_ADAPTER.validate_python(
+    return _json_rpc_envelope_adapter().validate_python(
         value, by_alias=True, by_name=False
     )
 

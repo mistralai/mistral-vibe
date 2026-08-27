@@ -102,6 +102,8 @@ class CollapsibleSection(ClickWithoutDragMixin, Vertical):
     # Whether a lazily-built body mounts before the toggle row (overflow layout)
     # or after it (header layout). Concrete subclasses set this.
     _body_before_toggle: bool = False
+    # When False the header is inert: no toggle affordance and clicks do not fold.
+    _collapsible: bool = True
 
     class Toggled(Message):
         def __init__(self, section: CollapsibleSection, is_collapsed: bool) -> None:
@@ -149,6 +151,8 @@ class CollapsibleSection(ClickWithoutDragMixin, Vertical):
             self._body.display = False
 
     def toggle(self) -> None:
+        if not self._collapsible:
+            return
         if self._is_collapsed:
             chat = next(
                 (ancestor for ancestor in self.ancestors if ancestor.id == "chat"), None
@@ -179,6 +183,8 @@ class CollapsibleSection(ClickWithoutDragMixin, Vertical):
         return self._is_click_within(event, self._toggle_row)
 
     async def on_click(self, event: events.Click) -> None:
+        if not self._collapsible:
+            return
         if self._click_is_passive(event):
             return
         event.stop()
@@ -205,14 +211,20 @@ class HeaderCollapsibleSection(CollapsibleSection):
         header_suffix: str = "",
         header_success: bool = True,
         header_muted: bool = False,
+        collapsible: bool = True,
     ) -> None:
         super().__init__(body)
+        self._collapsible = collapsible
         # Collapsed shows a flattened one-liner; expanded restores newlines so a
         # multi-line command (heredoc, for-loop) reads as it was written.
         self._collapsed_text = _single_line(header_text)
         self._expanded_text = _multi_line(header_text)
         self._header_text = self._collapsed_text
-        if not header_muted:
+        if not collapsible:
+            # No body to open: show a muted, non-caret marker in the disclosure slot so
+            # the row keeps its verb and alignment but nothing signals it can unfold.
+            self._triangle.update("▪")
+        elif not header_muted:
             self._triangle.add_class("success" if header_success else "error")
 
         verb_widget = (

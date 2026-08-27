@@ -58,6 +58,9 @@ class RemoteTool(BaseModel):
         default_factory=lambda: {"type": "object", "properties": {}},
         validation_alias="inputSchema",
     )
+    output_schema: dict[str, Any] | None = Field(
+        default=None, validation_alias="outputSchema"
+    )
 
     @field_validator("name")
     @classmethod
@@ -71,16 +74,27 @@ class RemoteTool(BaseModel):
     def _normalize_schema(cls, v: Any) -> dict[str, Any]:
         if v is None:
             return {"type": "object", "properties": {}}
-        if isinstance(v, dict):
-            return v
-        dump = getattr(v, "model_dump", None)
-        if callable(dump):
-            try:
-                v = dump()
-            except Exception:
-                raise ValueError(
-                    "inputSchema must be a dict or have a valid model_dump method"
-                )
-        if not isinstance(v, dict):
-            raise ValueError("inputSchema must be a dict")
-        return v
+        return _coerce_schema(v, "inputSchema")
+
+    @field_validator("output_schema", mode="before")
+    @classmethod
+    def _normalize_output_schema(cls, v: Any) -> dict[str, Any] | None:
+        if v is None:
+            return None
+        return _coerce_schema(v, "outputSchema")
+
+
+def _coerce_schema(value: Any, field: str) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        try:
+            value = dump()
+        except Exception:
+            raise ValueError(
+                f"{field} must be a dict or have a valid model_dump method"
+            )
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be a dict")
+    return value
