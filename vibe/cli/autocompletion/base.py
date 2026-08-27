@@ -13,6 +13,7 @@ class CompletionResult(StrEnum):
 class CompletionEntry(NamedTuple):
     label: str
     description: str
+    requires_argument: bool = False
 
 
 class CompletionView(Protocol):

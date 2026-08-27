@@ -26,6 +26,10 @@ class Command:
     handler: str
     exits: bool = False
     side_channel: bool = False
+    # Accepting this command from the completion dropdown must not submit it: the
+    # command is unusable without an argument, so Enter has to leave the input
+    # open for the user to type one.
+    requires_argument: bool = False
     # A command that resets the conversation (e.g. /clear) supersedes any
     # prompts queued before it: at drain time the queue drops those pending
     # prompts instead of running an LLM turn on the widgets the command is
@@ -172,6 +176,7 @@ class CommandRegistry:
                 description="Rename the current session",
                 handler="_rename_session",
                 side_channel=True,
+                requires_argument=True,
             ),
             "mcp": Command(
                 aliases=frozenset(["/mcp", "/connectors"]),

@@ -112,7 +112,7 @@ class ChatInputContainer(Vertical):
 
     def _get_slash_entries(self) -> list[CompletionEntry]:
         entries = [
-            CompletionEntry(alias, command.description)
+            CompletionEntry(alias, command.description, command.requires_argument)
             for command in self._command_registry.commands.values()
             for alias in sorted(command.aliases)
         ]
