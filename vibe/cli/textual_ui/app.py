@@ -2945,6 +2945,8 @@ class VibeApp(App):  # noqa: PLR0904
         self._queue.start_drain_if_needed()
         await self._refresh_windowing_from_history()
         self._terminal_notifier.notify(NotificationContext.COMPLETE)
+        if getattr(self, "_auto_exit", False):
+            self.exit()
 
     def _resolve_turn_error_message(self, e: Exception) -> str:
         if not isinstance(e, AppServerTurnError):
