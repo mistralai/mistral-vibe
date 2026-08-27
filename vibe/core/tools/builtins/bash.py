@@ -284,7 +284,7 @@ class BashToolConfig(BaseToolConfig):
 class BashArgs(BaseModel):
     command: str = Field(description="The shell command to execute")
     timeout: int | None = Field(
-        default=None, description="Override the default command timeout."
+        default=None, description="Override the default command timeout in seconds."
     )
 
 
