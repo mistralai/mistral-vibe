@@ -39,6 +39,7 @@ class TestTeleportAgentLoopTelemetry:
     ) -> None:
         class FakeTeleportService:
             message_context: TeleportMessageContext | None = None
+            conversation_id: str | None = None
 
             async def __aenter__(self) -> FakeTeleportService:
                 return self
@@ -52,6 +53,7 @@ class TestTeleportAgentLoopTelemetry:
                 self.message_context = cast(
                     TeleportMessageContext | None, kwargs.get("message_context")
                 )
+                self.conversation_id = cast(str | None, kwargs.get("conversation_id"))
                 yield TeleportCheckingGitEvent()
                 yield TeleportStartingWorkflowEvent()
                 yield TeleportCompleteEvent(url="https://chat.example.com/123")
@@ -71,6 +73,7 @@ class TestTeleportAgentLoopTelemetry:
         assert service.message_context.summary == "Prior CLI context"
         assert service.message_context.source is not None
         assert service.message_context.source.entrypoint == "unknown"
+        assert service.conversation_id == agent_loop.session_id
         assert telemetry_events[-1]["event_name"] == "vibe.teleport_completed"
         assert {
             "push_required": False,

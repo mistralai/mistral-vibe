@@ -33,8 +33,8 @@ from vibe.core.teleport.types import (
     TeleportPushResponseEvent,
     TeleportStartingWorkflowEvent,
 )
-from vibe.core.utils.http import VibeAsyncHTTPClient
 from vibe.core.vibe_code_project import VibeProjectsStore
+from vibe.utils.http import VibeAsyncHTTPClient
 
 
 @pytest.fixture(autouse=True)
@@ -201,6 +201,7 @@ class TestTeleportServiceExecute:
         request = service._build_nuage_request(
             prompt="test prompt",
             project_id="project-id",
+            conversation_id="cli-conversation-id",
             git_info=GitRepoInfo(
                 remote_name="origin",
                 remote_url="https://github.com/owner/repo",
@@ -213,6 +214,7 @@ class TestTeleportServiceExecute:
         )
 
         assert request.project_id == "project-id"
+        assert request.conversation_id == "cli-conversation-id"
         assert (
             request.model_dump(mode="json", by_alias=True, exclude_none=True)[
                 "projectId"
@@ -274,6 +276,7 @@ class TestTeleportServiceExecute:
                             entrypoint="acp", client_name="mistral-vibe-vscode"
                         ),
                     ),
+                    conversation_id="cli-conversation-id",
                 )
             ]
 
@@ -284,6 +287,7 @@ class TestTeleportServiceExecute:
         assert seen_url == f"https://chat.example.com{TELEPORT_SESSIONS_PATH}"
         assert seen_body is not None
         assert seen_body["projectId"] == "project-id"
+        assert seen_body["conversationId"] == "cli-conversation-id"
         assert seen_body["message"] == {
             "role": "user",
             "parts": [{"type": "text", "text": "test prompt"}],

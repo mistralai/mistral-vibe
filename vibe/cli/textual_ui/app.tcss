@@ -45,7 +45,7 @@ TextArea > .text-area--cursor {
     align: left middle;
 }
 
-#clipboard-notice {
+#inline-notice {
     width: auto;
     height: 1;
     color: $text-muted;
@@ -103,6 +103,19 @@ TextArea > .text-area--cursor {
     width: 1fr;
     height: auto;
     background: transparent;
+}
+
+#process-title {
+    width: auto;
+    height: auto;
+    background: transparent;
+    padding: 0;
+    margin: 0 0 0 1;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 #messages {
@@ -246,6 +259,15 @@ OptionList, OptionList:focus {
         &:ansi {
             text-style: dim;
         }
+    }
+
+    & .text-area--suggestion {
+        color: $foreground;
+        text-opacity: 45%;
+    }
+
+    &:ansi .text-area--suggestion {
+        text-style: dim;
     }
 }
 
@@ -434,16 +456,15 @@ Markdown {
 .reasoning-indicator {
     width: auto;
     height: auto;
-    color: $foreground;
+    color: $text-muted;
     margin-right: 1;
 
-    &.success {
-        color: $success;
+    &:ansi {
+        text-style: dim;
     }
 }
 
-.reasoning-collapsed-text,
-.reasoning-triangle {
+.reasoning-collapsed-text {
     width: auto;
     height: auto;
     color: $text-muted;
@@ -452,10 +473,6 @@ Markdown {
     &:ansi {
         text-style: dim;
     }
-}
-
-.reasoning-triangle {
-    margin-left: 1;
 }
 
 .reasoning-message-content {
@@ -672,11 +689,70 @@ Markdown {
     height: auto;
 }
 
+/* Overflow toggle (OverflowCollapsibleSection): a small "+N lines"/"show less"
+   disclosure beneath the body -- shrinks to its content. */
 .collapsible-toggle {
     width: auto;
     height: auto;
     margin-top: 0;
     pointer: pointer;
+}
+
+/* Header toggle (HeaderCollapsibleSection): a summary line on top. It fills the
+   width so messages without suffixes ellipsis when collapsed and wrap when
+   expanded; the triangle and verb stay fixed-width on the first line. */
+.collapsible-toggle.header {
+    width: 1fr;
+}
+
+.collapsible-toggle.header .status-indicator-text {
+    width: 1fr;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+.collapsible-toggle.header.has-suffix .status-indicator-text {
+    width: auto;
+}
+
+.collapsible-toggle.header.expanded .status-indicator-text {
+    text-wrap: wrap;
+    text-overflow: clip;
+    text-opacity: 100%;
+
+    /* Restore full contrast on expand (see the dim rule below). */
+    &:ansi {
+        text-style: none;
+    }
+}
+
+/* Dim the collapsed summary (verb + message) so an expanded tool call stands
+   out. text-opacity handles truecolor themes; ANSI themes can't blend colours,
+   so they fall back to `text-style: dim`. The triangle keeps its full colour as
+   the status affordance. Set per child because Textual styles don't cascade
+   into child widgets. */
+.collapsible-toggle.header .status-indicator-text {
+    text-opacity: 55%;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+.collapsible-toggle.header .collapsible-header-verb {
+    text-opacity: 55%;
+
+    &:ansi {
+        text-style: bold dim;
+    }
+}
+
+.collapsible-toggle.header.expanded .collapsible-header-verb {
+    text-opacity: 100%;
+
+    &:ansi {
+        text-style: bold;
+    }
 }
 
 .collapsible-triangle {
@@ -685,22 +761,39 @@ Markdown {
     color: $text-muted;
     margin-right: 1;
 
+    /* Muted arrow (classic overflow, held error/skip): keep the muted intent
+       under ANSI themes. success/error carry meaning, so clear the dim there. */
     &:ansi {
         text-style: dim;
     }
+
+    &.success {
+        color: $success;
+
+        &:ansi {
+            text-style: none;
+        }
+    }
+
+    &.error {
+        color: $error;
+
+        &:ansi {
+            text-style: none;
+        }
+    }
+}
+
+.collapsible-header-verb {
+    width: auto;
+    height: auto;
+    margin-right: 1;
+    text-style: bold;
+    color: $primary;
 }
 
 .collapsible-toggle-label {
     width: auto;
-    height: auto;
-    color: $text-muted;
-
-    &:ansi {
-        text-style: dim;
-    }
-}
-
-.unknown-event {
     height: auto;
     color: $text-muted;
 
@@ -749,7 +842,7 @@ StatusMessage {
 }
 
 .status-indicator-suffix {
-    width: 1fr;
+    width: auto;
     height: auto;
     margin-left: 1;
     color: $text-muted;
@@ -766,17 +859,60 @@ StatusMessage {
     margin-top: 1;
 }
 
-.tool-call-header .status-indicator-text {
+.rewind-fork-message {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+.rewind-fork-message .status-indicator-text {
     width: auto;
     max-width: 100%;
     text-wrap: wrap;
 }
 
-.tool-call-header .status-indicator-suffix {
-    width: auto;
+.tool-group {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
 }
 
-.tool-call.no-gap {
+.tool-call-header .status-indicator-text {
+    /* 1fr (not auto) gives a definite width so long text wraps to the
+       available space instead of measuring unwrapped and overflowing. */
+    width: 1fr;
+    text-wrap: wrap;
+}
+
+/* With a suffix (e.g. "(scratchpad)") the title takes its content width so the
+   suffix sits directly after it instead of being pushed to the right edge by a
+   1fr title that fills the row. */
+.tool-call-header.has-suffix .status-indicator-text {
+    width: auto;
+    text-wrap: nowrap;
+}
+
+.tool-call-header.running.collapsible-result .status-indicator-text {
+    text-opacity: 55%;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+.tool-call-header.running.collapsible-result .collapsible-header-verb {
+    text-opacity: 55%;
+
+    &:ansi {
+        text-style: bold dim;
+    }
+}
+
+/* Children of a group are packed with no vertical gaps between them. */
+.tool-group > .tool-call,
+.tool-group > .tool-result,
+.tool-group > .reasoning-message {
     margin-top: 0;
 }
 
@@ -804,6 +940,10 @@ StatusMessage {
     padding: 0;
     background: transparent;
     color: $foreground;
+
+    &.has-gap {
+        margin-top: 1;
+    }
 
     &.error-text {
         color: $error;
@@ -865,6 +1005,9 @@ StatusMessage {
 .tool-approval-widget Markdown MarkdownFence {
     margin: 0;
     padding: 0;
+    /* Override the 95% cap on plain-message fences: tool-result bodies should
+       fill the width up to the content container's right padding. */
+    max-width: 100%;
 }
 
 .tool-call-detail,
@@ -902,60 +1045,16 @@ StatusMessage {
     }
 }
 
-.diff-removed,
-.diff-added,
-.diff-context {
+/* The whole diff renders as one DiffView. It must stay nowrap and grow to its
+   content width so wide lines scroll horizontally in .diff-scroll. The two-class
+   selector outranks `.tool-approval-widget Static { width: 100% }`, which would
+   otherwise clamp the width and force the long line to wrap. The per-row band
+   and gap color are painted in DiffView.render_line, not via CSS. */
+.diff-scroll .diff-view {
     width: auto;
     min-width: 100%;
-    height: 1;
-
-    .diff-gutter {
-        width: auto;
-        height: 1;
-    }
-
-    .diff-body {
-        width: auto;
-        height: 1;
-        text-wrap: nowrap;
-    }
-}
-
-.diff-removed {
-    &:dark {
-        background: $error 10%;
-    }
-
-    &:light {
-        background: $error 20%;
-    }
-
-    &:ansi {
-        background: initial;
-    }
-}
-
-.diff-added {
-    &:dark {
-        background: $success 10%;
-    }
-
-    &:light {
-        background: $success 20%;
-    }
-
-    &:ansi {
-        background: initial;
-    }
-}
-
-.diff-gap {
     height: auto;
-    color: $text-muted;
-
-    &:ansi {
-        text-style: dim;
-    }
+    text-wrap: nowrap;
 }
 
 .todo-empty,
@@ -1054,7 +1153,7 @@ StatusMessage {
 
 }
 
-#config-app, #voice-app, #mcp-app, #connectorauth-app, #mcpoauth-app {
+#config-app, #voice-app, #mcp-app, #plugins-app, #connectorauth-app, #mcpoauth-app {
     width: 100%;
     height: auto;
     background: transparent;
@@ -1063,9 +1162,17 @@ StatusMessage {
     margin: 0;
 }
 
-#config-content, #voice-content, #mcp-content, #connectorauth-content, #mcpoauth-content {
+#config-content, #voice-content, #mcp-content, #plugins-content, #connectorauth-content, #mcpoauth-content {
     width: 100%;
     height: auto;
+}
+
+#mcp-app {
+    height: 50vh;
+}
+
+#mcp-content {
+    height: 100%;
 }
 
 .settings-title {
@@ -1074,14 +1181,54 @@ StatusMessage {
     color: $primary;
 }
 
-#config-options, #mcp-options, #connectorauth-options, #mcpoauth-options {
+#config-options, #mcp-options, #plugins-options, #connectorauth-options, #mcpoauth-options {
     width: 100%;
     max-height: 50vh;
     border: none;
 }
 
-#config-options:focus, #mcp-options:focus, #connectorauth-options:focus, #mcpoauth-options:focus {
+#mcp-options {
+    height: 1fr;
+    max-height: 100%;
+}
+
+#mcp-search-row {
+    width: 100%;
+    height: 1;
+    background: transparent;
+    padding-left: 1;
+    margin-bottom: 1;
+}
+
+#mcp-search-icon {
+    width: 2;
+    height: 1;
+    color: $text-muted;
+    margin-right: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#mcp-search {
+    width: 1fr;
+    height: 1;
+    background: transparent;
     border: none;
+    padding: 0;
+}
+
+#config-options:focus, #mcp-options:focus, #plugins-options:focus, #connectorauth-options:focus, #mcpoauth-options:focus {
+    border: none;
+}
+
+#plugins-filter {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: none;
+    padding: 0;
 }
 
 #connectorauth-detail, #mcpoauth-detail {
@@ -1353,7 +1500,11 @@ NarratorStatus {
 }
 
 .banner-chat {
-    width: auto;
+    /* Pinned so the parent never renders the braille grid just to size it.
+       Braille output is a constant 3 rows (ceil(HEIGHT/4), HEIGHT=12) by
+       11 cols (ceil(WIDTH/2), WIDTH=22); see petit_chat.py / braille_renderer.py. */
+    width: 12;
+    height: 3;
 }
 
 #banner-info {
@@ -1365,7 +1516,7 @@ NarratorStatus {
 
 .banner-line {
     width: auto;
-    height: auto;
+    height: 1;
 }
 
 #banner-brand {
@@ -1385,7 +1536,7 @@ NarratorStatus {
 }
 
 #banner-model {
-    color: $secondary;
+    color: $foreground;
     width: auto;
 }
 
@@ -1405,6 +1556,7 @@ NarratorStatus {
 .petit-chat {
     color: $foreground;
     width: 12;
+    height: 3;
 }
 
 .whats-new-message {
@@ -1439,8 +1591,32 @@ NarratorStatus {
     margin-top: 1;
 }
 
+.greeting-message {
+    margin-bottom: 1;
+    margin-top: 1;
+    color: $foreground;
+}
+
 .vscode-extension-promo-message {
     border-left: heavy $mistral_orange;
+    margin-bottom: 1;
+
+    Markdown {
+        padding: 0 0 0 1;
+        margin: 0;
+
+        & > MarkdownBlock:first-child {
+            margin-top: 0;
+        }
+
+        & > MarkdownBlock:last-child {
+            margin-bottom: 0;
+        }
+    }
+}
+
+.custom-tools-deprecation-message {
+    border-left: heavy $warning;
     margin-bottom: 1;
 
     Markdown {
@@ -1768,6 +1944,65 @@ NarratorStatus {
     }
 }
 
+#loglevelpicker-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid $foreground-muted;
+    padding: 0 1;
+    margin: 0;
+}
+
+#loglevelpicker-content {
+    width: 100%;
+    height: auto;
+}
+
+.loglevelpicker-title {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+}
+
+.loglevelpicker-subtitle {
+    height: auto;
+    color: $text-muted;
+    margin-bottom: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#loglevelpicker-options {
+    width: 100%;
+    max-height: 50vh;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    border: none;
+}
+
+#loglevelpicker-options:focus {
+    border: none;
+}
+
+.loglevelpicker-persist {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+}
+
+.loglevelpicker-help {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    margin-top: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
 #themepicker-app {
     width: 100%;
     height: auto;
@@ -1819,6 +2054,18 @@ FeedbackBar {
 
 .user-message.rewind-selected {
     .user-message-content {
+        text-style: bold reverse;
+    }
+}
+
+.user-message.queue-selected {
+    .user-message-content {
+        text-style: bold reverse;
+    }
+}
+
+.bash-output-message.queue-selected {
+    .bash-command {
         text-style: bold reverse;
     }
 }

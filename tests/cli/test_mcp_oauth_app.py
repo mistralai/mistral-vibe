@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 from textual.widgets import OptionList
 
+from vibe.app_server.protocol import MCPAuthUrlParams
 from vibe.cli.textual_ui.widgets.mcp_oauth_app import (
     MCPOAuthApp,
     _LoginResult,
@@ -14,23 +15,21 @@ from vibe.cli.textual_ui.widgets.mcp_oauth_app import (
 )
 
 
-class FakeLoginRegistry:
+class FakeMCPResource:
     def __init__(self, *, error: Exception | None = None) -> None:
         self.error = error
         self.login_calls: list[str] = []
 
-    async def login(
-        self, alias: str, *, on_url: Callable[[str], Awaitable[None]]
-    ) -> None:
+    async def login(self, alias: str) -> AsyncGenerator[MCPAuthUrlParams, None]:
         self.login_calls.append(alias)
-        await on_url("https://auth.example.com/oauth")
+        yield MCPAuthUrlParams(name=alias, url="https://auth.example.com/oauth")
         if self.error:
             raise self.error
 
 
-def _make_app(registry: FakeLoginRegistry | None = None) -> MCPOAuthApp:
+def _make_app(resource: FakeMCPResource | None = None) -> MCPOAuthApp:
     return MCPOAuthApp(
-        server_name="oauth", mcp_registry=cast(Any, registry or FakeLoginRegistry())
+        server_name="oauth", mcp=cast(Any, resource or FakeMCPResource())
     )
 
 
@@ -89,21 +88,21 @@ class TestMCPOAuthApp:
         assert _OAuthOptionId.SHOW in option_ids
 
     @pytest.mark.asyncio
-    async def test_run_login_starts_registry_login(self) -> None:
-        registry = FakeLoginRegistry()
-        app = _make_app(registry)
+    async def test_run_login_streams_auth_url(self) -> None:
+        resource = FakeMCPResource()
+        app = _make_app(resource)
         _wire_query(app)
 
         result = await app._run_login()
 
         assert result == _LoginResult(authenticated=True)
-        assert registry.login_calls == ["oauth"]
+        assert resource.login_calls == ["oauth"]
         assert app._auth_url == "https://auth.example.com/oauth"
 
     @pytest.mark.asyncio
     async def test_run_login_returns_error(self) -> None:
-        registry = FakeLoginRegistry(error=ValueError("bad auth"))
-        app = _make_app(registry)
+        resource = FakeMCPResource(error=ValueError("bad auth"))
+        app = _make_app(resource)
         _wire_query(app)
 
         result = await app._run_login()

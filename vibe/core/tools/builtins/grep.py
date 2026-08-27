@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 
 from vibe.core.tools.base import (
     BaseTool,
@@ -19,10 +19,17 @@ from vibe.core.tools.base import (
 )
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import resolve_file_tool_permission
+from vibe.core.tools.utils import (
+    DEFAULT_SENSITIVE_PATTERNS,
+    ToolPath,
+    matches_sensitive_pattern,
+    resolve_file_tool_permission,
+    resolve_tool_path,
+)
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils import kill_async_subprocess
-from vibe.core.utils.io import decode_safe, read_safe
+from vibe.utils.io import decode_console_safe, read_safe
+from vibe.utils.tool_presentation import ToolEffectKind
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -36,7 +43,7 @@ class GrepBackend(StrEnum):
 class GrepToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
     sensitive_patterns: list[str] = Field(
-        default=["**/.env", "**/.env.*"],
+        default_factory=lambda: list(DEFAULT_SENSITIVE_PATTERNS),
         description="File patterns that trigger ASK even when permission is ALWAYS.",
     )
 
@@ -85,7 +92,7 @@ class GrepToolConfig(BaseToolConfig):
 
 class GrepArgs(BaseModel):
     pattern: str = Field(description="The regex pattern to search for in file contents")
-    path: str = Field(
+    path: ToolPath = Field(
         default=".",
         description="The file or directory to search in. Defaults to the current working directory.",
     )
@@ -102,11 +109,14 @@ class GrepMatch(BaseModel):
     line: int | None = None
 
     @classmethod
-    def from_output_line(cls, raw: str) -> GrepMatch | None:
+    def from_output_line(cls, raw: str, base: Path) -> GrepMatch | None:
         """Parse a single grep/rg output line in `file:line:content` format.
 
         Handles Windows drive-letter paths like ``C:\\repo\\file.py:10:match``
-        by skipping a single-letter first segment.
+        by skipping a single-letter first segment. Relative paths (rg/grep emit
+        them relative to the search cwd) are anchored on `base`, not the process
+        cwd, so the resolved path is correct regardless of where the agent was
+        launched from.
         """
         parts = raw.split(":", 3)
         MIN_MATCH_PARTS = 2
@@ -131,21 +141,32 @@ class GrepMatch(BaseModel):
             line_num = int(line_str) if line_str else None
         except (ValueError, TypeError):
             line_num = None
-        return cls(path=str(Path(file_path).resolve()), line=line_num)
+        return cls(path=str((base / file_path).resolve()), line=line_num)
 
 
 class GrepResult(BaseModel):
     matches: str
     match_count: int
+    pattern: str = ""
     was_truncated: bool = Field(
         description="True if output was cut short by max_matches or max_output_bytes."
+    )
+    cwd: str = Field(
+        default_factory=lambda: str(Path.cwd()),
+        exclude=True,
+        description=(
+            "Search working directory that relative match paths resolve against. "
+            "Excluded from serialization: it feeds parsed_matches only, and the "
+            "absolute host path must not reach the model-facing result text."
+        ),
     )
 
     @property
     def parsed_matches(self) -> list[GrepMatch]:
+        base = Path(self.cwd)
         results: list[GrepMatch] = []
         for line in self.matches.splitlines():
-            if match := GrepMatch.from_output_line(line):
+            if match := GrepMatch.from_output_line(line, base):
                 results.append(match)
         return results
 
@@ -154,6 +175,19 @@ class Grep(
     BaseTool[GrepArgs, GrepResult, GrepToolConfig, BaseToolState],
     ToolUIData[GrepArgs, GrepResult],
 ):
+    effect_kind = ToolEffectKind.FILE_SEARCH
+
+    @classmethod
+    def project_result(cls, result: GrepResult) -> JsonValue:
+        return {
+            "matches": result.matches,
+            "match_count": result.match_count,
+            "was_truncated": result.was_truncated,
+            "parsed_matches": [
+                match.model_dump(mode="json") for match in result.parsed_matches
+            ],
+        }
+
     def resolve_permission(self, args: GrepArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.path,
@@ -162,6 +196,8 @@ class Grep(
             denylist=self.config.denylist,
             config_permission=self.config.permission,
             sensitive_patterns=self.config.sensitive_patterns,
+            workspace=self.workspace,
+            scratchpad_dir=self.scratchpad_dir,
         )
 
     def _detect_backend(self) -> GrepBackend:
@@ -185,24 +221,20 @@ class Grep(
         stdout = await self._execute_search(cmd)
 
         yield self._parse_output(
-            stdout, args.max_matches or self.config.default_max_matches
+            stdout, args.max_matches or self.config.default_max_matches, args.pattern
         )
 
     def _validate_args(self, args: GrepArgs) -> None:
         if not args.pattern.strip():
             raise ToolError("Empty search pattern provided.")
 
-        path_obj = Path(args.path).expanduser()
-        if not path_obj.is_absolute():
-            path_obj = Path.cwd() / path_obj
-
-        if not path_obj.exists():
+        if not resolve_tool_path(args.path, self.cwd).exists():
             raise ToolError(f"Path does not exist: {args.path}")
 
     def _collect_exclude_patterns(self) -> list[str]:
         patterns = list(self.config.exclude_patterns)
 
-        codeignore_path = Path.cwd() / self.config.codeignore_file
+        codeignore_path = self.cwd / self.config.codeignore_file
         if codeignore_path.is_file():
             patterns.extend(self._load_codeignore_patterns(codeignore_path))
 
@@ -279,7 +311,10 @@ class Grep(
     async def _execute_search(self, cmd: list[str]) -> str:
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.cwd,
             )
 
             try:
@@ -292,16 +327,8 @@ class Grep(
                     f"Search timed out after {self.config.default_timeout}s"
                 )
 
-            stdout = (
-                decode_safe(stdout_bytes, from_subprocess=True).text
-                if stdout_bytes
-                else ""
-            )
-            stderr = (
-                decode_safe(stderr_bytes, from_subprocess=True).text
-                if stderr_bytes
-                else ""
-            )
+            stdout = decode_console_safe(stdout_bytes) if stdout_bytes else ""
+            stderr = decode_console_safe(stderr_bytes) if stderr_bytes else ""
 
             if proc.returncode not in {0, 1}:
                 error_msg = stderr or f"Process exited with code {proc.returncode}"
@@ -314,8 +341,25 @@ class Grep(
         except Exception as exc:
             raise ToolError(f"Error running grep: {exc}") from exc
 
-    def _parse_output(self, stdout: str, max_matches: int) -> GrepResult:
+    def _drop_sensitive_matches(self, lines: list[str]) -> list[str]:
+        """Remove matches from files that read/edit tools gate as sensitive."""
+        patterns = self.config.sensitive_patterns
+        if not patterns:
+            return lines
+
+        kept: list[str] = []
+        for line in lines:
+            match = GrepMatch.from_output_line(line, self.cwd)
+            if match and matches_sensitive_pattern(match.path, patterns):
+                continue
+            kept.append(line)
+        return kept
+
+    def _parse_output(
+        self, stdout: str, max_matches: int, pattern: str = ""
+    ) -> GrepResult:
         output_lines = stdout.splitlines() if stdout else []
+        output_lines = self._drop_sensitive_matches(output_lines)
 
         truncated_lines = output_lines[:max_matches]
         truncated_output = "\n".join(truncated_lines)
@@ -330,19 +374,27 @@ class Grep(
         return GrepResult(
             matches=final_output,
             match_count=len(truncated_lines),
+            pattern=pattern,
             was_truncated=was_truncated,
+            cwd=str(self.cwd),
         )
 
     @classmethod
     def format_call_display(cls, args: GrepArgs) -> ToolCallDisplay:
-        summary = f"Grepping '{args.pattern}'"
+        message = f"'{args.pattern}'"
         if args.path != ".":
-            summary += f" in {args.path}"
+            message += f" in {args.path}"
         if args.max_matches:
-            summary += f" (max {args.max_matches} matches)"
+            message += f" (max {args.max_matches} matches)"
         if not args.use_default_ignore:
-            summary += " [no-ignore]"
-        return ToolCallDisplay(summary=summary)
+            message += " [no-ignore]"
+        return ToolCallDisplay(
+            summary=f"Grepping {message}",
+            verb="Searching",
+            message=message,
+            settled_verb="Searched",
+            settled_message=message,
+        )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -351,10 +403,17 @@ class Grep(
                 success=False, message=event.error or event.skip_reason or "No result"
             )
 
-        message = f"Found {event.result.match_count} matches"
+        count = event.result.match_count
+        word = "match" if count == 1 else "matches"
+        pattern = event.result.pattern
         suffix = "(truncated)" if event.result.was_truncated else ""
 
-        return ToolResultDisplay(success=True, message=message, suffix=suffix)
+        return ToolResultDisplay(
+            success=True,
+            verb="Searched",
+            message=f"{pattern} ({count} {word})" if pattern else f"({count} {word})",
+            suffix=suffix,
+        )
 
     @classmethod
     def get_status_text(cls) -> str:

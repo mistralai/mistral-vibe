@@ -262,62 +262,27 @@ async def test_auto_compact_emits_terminal_telemetry(
 
 
 @pytest.mark.asyncio
-async def test_auto_compact_observer_sees_user_msg_not_summary() -> None:
-    """Observer sees the original user message and final response.
-
-    Compact internals (summary request, LLM summary) are invisible
-    to the observer because they happen inside silent() / reset().
-    """
-    observed: list[tuple[Role, str | None]] = []
-
-    def observer(msg: LLMMessage) -> None:
-        observed.append((msg.role, msg.content))
-
+async def test_auto_compact_events_exclude_summary_messages() -> None:
     backend = FakeBackend([
         [mock_llm_chunk(content="<summary>done</summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
-    agent = build_test_agent_loop(
-        config=cfg, message_observer=observer, backend=backend
-    )
+    agent = build_test_agent_loop(config=cfg, backend=backend)
     agent.stats.context_tokens = 2
 
-    [_ async for _ in agent.act("Hello")]
+    events = [event async for event in agent.act("Hello")]
 
-    roles = [r for r, _ in observed]
-    assert roles == [Role.system, Role.user, Role.assistant]
-    assert observed[1][1] == "Hello"
-    assert observed[2][1] == "<final>"
+    messages = [
+        event.content
+        for event in events
+        if isinstance(event, UserMessageEvent | AssistantEvent)
+    ]
+    assert messages == ["Hello", "<final>"]
 
 
 @pytest.mark.asyncio
-async def test_auto_compact_observer_does_not_see_summary_request() -> None:
-    """The compact summary request and LLM response must not leak to observer."""
-    observed: list[tuple[Role, str | None]] = []
-
-    def observer(msg: LLMMessage) -> None:
-        observed.append((msg.role, msg.content))
-
-    backend = FakeBackend([
-        [mock_llm_chunk(content="<summary>done</summary>")],
-        [mock_llm_chunk(content="<final>")],
-    ])
-    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
-    agent = build_test_agent_loop(
-        config=cfg, message_observer=observer, backend=backend
-    )
-    agent.stats.context_tokens = 2
-
-    [_ async for _ in agent.act("Hello")]
-
-    contents = [c for _, c in observed]
-    assert "<summary>" not in contents
-    assert all("compact" not in (c or "").lower() for c in contents)
-
-
-@pytest.mark.asyncio
-async def test_compact_replaces_messages_with_context() -> None:
+async def test_compact_keeps_history_and_sends_compacted_context() -> None:
     backend = FakeBackend([
         [mock_llm_chunk(content="<summary>done</summary>")],
         [mock_llm_chunk(content="<final>")],
@@ -328,7 +293,12 @@ async def test_compact_replaces_messages_with_context() -> None:
 
     [_ async for _ in agent.act("Hello")]
 
-    # After compact + final response: system, compaction context, final.
+    assert [
+        message.content for message in agent.messages if message.role is not Role.system
+    ][0] == "Hello"
+    assert any(message.context_boundary == "compaction" for message in agent.messages)
+    # The retried model request starts at the compacted context.
+    assert backend.requests_messages[1][1].context_boundary == "compaction"
     assert agent.messages[0].role == Role.system
     assert agent.messages[-1].role == Role.assistant
     assert agent.messages[-1].content == "<final>"
@@ -548,22 +518,23 @@ async def test_compact_message_shape_preserves_prior_user_messages() -> None:
     await agent.compact()
 
     final = list(agent.messages)
-    assert len(final) == 2  # [system, compaction_context]
+    assert len(final) == 7
     assert final[0] is system_message_before
-    assert final[1].role == Role.user
-    assert final[1].injected is True
-    assert parse_previous_user_messages(final[1].content or "") == [
+    boundary = final[-1]
+    assert boundary.role == Role.user
+    assert boundary.injected is True
+    assert boundary.context_boundary == "compaction"
+    assert parse_previous_user_messages(boundary.content or "") == [
         "first real ask",
         "follow-up ask",
     ]
     assert "Here are some of the most recent previous user messages" in (
-        final[1].content or ""
+        boundary.content or ""
     )
-    assert "<compaction_summary>" in (final[1].content or "")
-    assert "fresh summary body" in (final[1].content or "")
-    # Injected and prior-summary user messages must be filtered out.
-    assert all("middleware ping" not in (m.content or "") for m in final)
-    assert sum("prior summary blob" in (m.content or "") for m in final) == 0
+    assert "<compaction_summary>" in (boundary.content or "")
+    assert "fresh summary body" in (boundary.content or "")
+    assert "middleware ping" not in (boundary.content or "")
+    assert "prior summary blob" not in (boundary.content or "")
 
 
 @pytest.mark.asyncio
@@ -586,11 +557,16 @@ async def test_compact_preserves_user_messages_across_repeated_compactions() -> 
     await agent.compact()
 
     final = list(agent.messages)
-    assert len(final) == 2
-    assert parse_previous_user_messages(final[1].content or "") == [
+    assert len(final) == 5
+    assert parse_previous_user_messages(final[-1].content or "") == [
         "first ask",
         "second ask",
     ]
+    second_compaction_request = backend.requests_messages[1]
+    assert second_compaction_request[1].context_boundary == "compaction"
+    assert all(
+        message.content != "first ask" for message in second_compaction_request[1:]
+    )
 
 
 @pytest.mark.asyncio
@@ -620,7 +596,7 @@ async def test_compact_uses_fallback_when_primary_returns_tool_call(
     assert not any(
         e.get("event_name") == "vibe.compaction_failed" for e in telemetry_events
     )
-    assert "recovered" in (agent.messages[1].content or "")
+    assert "recovered" in (agent.messages[-1].content or "")
 
 
 @pytest.mark.asyncio
@@ -680,7 +656,12 @@ async def test_reactive_compaction_recovers_from_overflow() -> None:
         isinstance(ev, AssistantEvent) and ev.content == "<final>" for ev in events
     )
     assert agent.messages[-1].content == "<final>"
-    assert parse_previous_user_messages(agent.messages[1].content or "") == ["Hello"]
+    boundary = next(
+        message
+        for message in reversed(agent.messages)
+        if message.context_boundary == "compaction"
+    )
+    assert parse_previous_user_messages(boundary.content or "") == ["Hello"]
     # The compaction summary is a utility call; the retried turn is the main one.
     call_types = [(m or {}).get("call_type") for m in backend.requests_metadata]
     assert call_types == ["secondary_call", "main_call"]
@@ -749,7 +730,7 @@ async def test_compact_trims_history_when_summary_overflows() -> None:
     summary = await agent.compact()
 
     assert summary == "ok"
-    assert parse_previous_user_messages(agent.messages[1].content or "") == [
+    assert parse_previous_user_messages(agent.messages[-1].content or "") == [
         "oldest ask",
         "newest ask",
     ]

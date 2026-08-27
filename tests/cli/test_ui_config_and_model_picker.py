@@ -3,96 +3,52 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from textual.widgets import OptionList
 
 from tests.conftest import build_test_vibe_app, build_test_vibe_config
+from vibe.app_server.config import THINKING_LEVELS
+from vibe.app_server.protocol import (
+    ConfigFieldKind,
+    ConfigFieldsReadResponse,
+    ConfigFieldWire,
+    ConfigLayerValueWire,
+)
 from vibe.cli.textual_ui.app import BottomApp
-from vibe.cli.textual_ui.widgets.config_app import ConfigApp
 from vibe.cli.textual_ui.widgets.model_picker import ModelPickerApp
 from vibe.cli.textual_ui.widgets.thinking_picker import ThinkingPickerApp
-from vibe.core.config import THINKING_LEVELS, ModelConfig
+from vibe.core.config import ModelConfig
 
 
-def _make_config_with_models(**kwargs):
-    models = [
+def _model_configs() -> list[ModelConfig]:
+    return [
         ModelConfig(name="model-a", provider="mistral", alias="alpha"),
         ModelConfig(name="model-b", provider="mistral", alias="beta"),
         ModelConfig(name="model-c", provider="mistral", alias="gamma"),
     ]
-    return build_test_vibe_config(models=models, active_model="alpha", **kwargs)
 
 
-# --- /config command ---
+def _make_config_with_models(**kwargs):
+    return build_test_vibe_config(
+        models=_model_configs(), active_model="alpha", **kwargs
+    )
 
 
-@pytest.mark.asyncio
-async def test_config_opens_config_app() -> None:
-    app = build_test_vibe_app(config=_make_config_with_models())
-    async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await app._show_config()
-        await pilot.pause(0.2)
-
-        assert app._current_bottom_app == BottomApp.Config
-        assert len(app.query(ConfigApp)) == 1
-
-
-@pytest.mark.asyncio
-async def test_config_escape_returns_to_input() -> None:
-    app = build_test_vibe_app(config=_make_config_with_models())
-    async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await app._show_config()
-        await pilot.pause(0.2)
-
-        await pilot.press("escape")
-        await pilot.pause(0.2)
-
-        assert app._current_bottom_app == BottomApp.Input
-        assert len(app.query(ConfigApp)) == 0
-
-
-@pytest.mark.asyncio
-async def test_config_toggle_autocopy() -> None:
-    config = _make_config_with_models(autocopy_to_clipboard=False)
-    app = build_test_vibe_app(config=config)
-    async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await app._show_config()
-        await pilot.pause(0.2)
-
-        # Navigate down to Auto-copy (third item, after Model + Thinking) and toggle
-        await pilot.press("down")
-        await pilot.press("down")
-        await pilot.press("enter")
-        await pilot.pause(0.1)
-
-        # Verify the toggle happened in the widget
-        config_app = app.query_one(ConfigApp)
-        assert config_app.changes.get("autocopy_to_clipboard") == "On"
-
-
-@pytest.mark.asyncio
-async def test_config_escape_saves_changes() -> None:
-    config = _make_config_with_models(autocopy_to_clipboard=False)
-    app = build_test_vibe_app(config=config)
-    async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await app._show_config()
-        await pilot.pause(0.2)
-
-        # Toggle auto-copy (skip Model + Thinking rows)
-        await pilot.press("down")
-        await pilot.press("down")
-        await pilot.press("enter")
-        await pilot.pause(0.1)
-
-        await pilot.press("escape")
-        await pilot.pause(0.2)
-
-        assert app.agent_loop.config_orchestrator.config.autocopy_to_clipboard is True
+def _make_unpinned_config(**kwargs):
+    # active_model="" is the unpinned/default sentinel.
+    return build_test_vibe_config(models=_model_configs(), active_model="", **kwargs)
 
 
 # --- /model command ---
+
+
+def test_ui_unpinned_sentinel_matches_schema() -> None:
+    # The textual layer keeps its own copy of the sentinel to avoid importing
+    # vibe.core (see test_app_server_boundary); guard against value drift so
+    # "select Default" always persists a value the schema treats as unpinned.
+    from vibe.cli.textual_ui.constants import UNPINNED_ACTIVE_MODEL as ui_value
+    from vibe.core.config.vibe_schema import UNPINNED_ACTIVE_MODEL as schema_value
+
+    assert ui_value == schema_value
 
 
 @pytest.mark.asyncio
@@ -116,8 +72,45 @@ async def test_model_picker_shows_all_models() -> None:
         await pilot.pause(0.2)
 
         picker = app.query_one(ModelPickerApp)
-        assert picker._model_aliases == ["alpha", "beta", "gamma"]
+        assert [model.alias for model in picker._models] == ["alpha", "beta", "gamma"]
         assert picker._current_model == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_model_picker_shows_display_name_but_persists_alias() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="alpha"),
+        ModelConfig(
+            name="zai-glm-5-2",
+            provider="mistral",
+            alias="glm-5-2",
+            display_name="glm-5.2 (Mistral Hosted)",
+        ),
+    ]
+    config = build_test_vibe_config(models=models, active_model="alpha")
+    app = build_test_vibe_app(config=config)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_model()
+        await pilot.pause(0.2)
+
+        picker = app.query_one(ModelPickerApp)
+        assert [model.display_name for model in picker._models] == [
+            "alpha",
+            "glm-5.2 (Mistral Hosted)",
+        ]
+        option_list = picker.query_one(OptionList)
+        # Row 2 is the routed model, offset by the leading Default row.
+        assert "glm-5.2 (Mistral Hosted)" in str(
+            option_list.get_option_at_index(2).prompt
+        )
+
+        # Selecting it still persists the alias, not the label.
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+
+        assert app.config.active_model.alias == "glm-5-2"
 
 
 @pytest.mark.asyncio
@@ -143,11 +136,13 @@ async def test_model_picker_escape_does_not_save() -> None:
         await app._show_model()
         await pilot.pause(0.2)
 
-        with patch.object(app.agent_loop.config_orchestrator, "set_field") as mock_save:
+        with patch.object(
+            app.app_server.resources.config, "update", new=AsyncMock()
+        ) as update_config:
             await pilot.press("escape")
             await pilot.pause(0.2)
 
-            mock_save.assert_not_called()
+            update_config.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -163,7 +158,7 @@ async def test_model_picker_select_model() -> None:
         await pilot.press("enter")
         await pilot.pause(0.2)
 
-        assert app.agent_loop.config_orchestrator.config.active_model == "beta"
+        assert app.config.active_model.alias == "beta"
         assert app._current_bottom_app == BottomApp.Input
         assert len(app.query(ModelPickerApp)) == 0
 
@@ -180,98 +175,113 @@ async def test_model_picker_select_current_model() -> None:
         await pilot.press("enter")
         await pilot.pause(0.2)
 
-        assert app.agent_loop.config_orchestrator.config.active_model == "alpha"
+        assert app.config.active_model.alias == "alpha"
         assert app._current_bottom_app == BottomApp.Input
 
 
-# --- config -> model picker flow ---
-
-
 @pytest.mark.asyncio
-async def test_config_model_entry_opens_model_picker() -> None:
-    """Pressing Enter on the Model row in /config opens the model picker."""
+async def test_model_picker_blocked_when_active_model_enforced() -> None:
     app = build_test_vibe_app(config=_make_config_with_models())
-    async with app.run_test() as pilot:
+    async with app.run_test(notifications=True) as pilot:
         await pilot.pause(0.1)
-        await app._show_config()
+        await app._show_model()
         await pilot.pause(0.2)
 
-        # Model row is the first item, already highlighted. Press enter.
-        await pilot.press("enter")
-        await pilot.pause(0.3)
+        enforced_response = ConfigFieldsReadResponse(
+            fields=[
+                ConfigFieldWire(
+                    name="active_model",
+                    kind=ConfigFieldKind.ENUM,
+                    description="",
+                    value="alpha",
+                    path="/active_model",
+                    layer_values=[ConfigLayerValueWire(layer="admin", value="alpha")],
+                )
+            ],
+            targets=["user-toml"],
+        )
 
-        assert app._current_bottom_app == BottomApp.ModelPicker
-        assert len(app.query(ModelPickerApp)) == 1
-        assert len(app.query(ConfigApp)) == 0
+        with patch.object(
+            app.app_server.resources.config,
+            "read_fields",
+            new=AsyncMock(return_value=enforced_response),
+        ):
+            await pilot.press("down")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
 
-
-@pytest.mark.asyncio
-async def test_config_to_model_picker_escape_returns_to_input() -> None:
-    """Opening model picker from config, then ESC, returns to input (not config)."""
-    app = build_test_vibe_app(config=_make_config_with_models())
-    async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await app._show_config()
-        await pilot.pause(0.2)
-
-        # Open model picker from config
-        await pilot.press("enter")
-        await pilot.pause(0.3)
-
-        # Escape model picker
-        await pilot.press("escape")
-        await pilot.pause(0.2)
-
+        assert app.config.active_model.alias == "alpha"
         assert app._current_bottom_app == BottomApp.Input
         assert len(app.query(ModelPickerApp)) == 0
-        assert len(app.query(ConfigApp)) == 0
 
 
 @pytest.mark.asyncio
-async def test_config_to_model_picker_select_returns_to_input() -> None:
-    """Opening model picker from config, selecting a model, returns to input."""
+async def test_model_picker_offers_default_row() -> None:
+    """A leading Default row precedes the configured models."""
     app = build_test_vibe_app(config=_make_config_with_models())
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_config()
+        await app._show_model()
         await pilot.pause(0.2)
 
-        # Open model picker from config
-        await pilot.press("enter")
-        await pilot.pause(0.3)
-
-        # Select second model
-        await pilot.press("down")
-        await pilot.press("enter")
-        await pilot.pause(0.2)
-
-        assert app.agent_loop.config_orchestrator.config.active_model == "beta"
-        assert app._current_bottom_app == BottomApp.Input
+        picker = app.query_one(ModelPickerApp)
+        option_list = picker.query_one(OptionList)
+        # Default + the three configured models.
+        assert option_list.option_count == 4
+        # A pinned model pre-highlights that model, not the Default row.
+        assert picker._is_pinned is True
+        assert option_list.highlighted == 1  # "alpha", offset by Default row
 
 
 @pytest.mark.asyncio
-async def test_config_pending_changes_saved_before_model_picker() -> None:
-    """Toggle changes in config are saved before switching to model picker."""
-    config = _make_config_with_models(autocopy_to_clipboard=False)
-    app = build_test_vibe_app(config=config)
+async def test_model_picker_default_row_current_when_unpinned() -> None:
+    app = build_test_vibe_app(config=_make_unpinned_config())
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_config()
+        await app._show_model()
         await pilot.pause(0.2)
 
-        # Toggle auto-copy (third row, after Model + Thinking)
-        await pilot.press("down")
-        await pilot.press("down")
-        await pilot.press("enter")
+        picker = app.query_one(ModelPickerApp)
+        assert picker._is_pinned is False
+        # The Default row (index 0) is pre-highlighted for an unpinned user.
+        assert picker.query_one(OptionList).highlighted == 0
+
+
+@pytest.mark.asyncio
+async def test_model_picker_select_default_unpins() -> None:
+    """Selecting Default from a pinned config clears the pin (persists "")."""
+    app = build_test_vibe_app(config=_make_config_with_models())
+    async with app.run_test() as pilot:
         await pilot.pause(0.1)
+        await app._show_model()
+        await pilot.pause(0.2)
 
-        # Go back up to model row and open model picker
-        await pilot.press("up")
+        # Highlight starts on pinned "alpha" (index 1); move up to Default.
         await pilot.press("up")
         await pilot.press("enter")
-        await pilot.pause(0.3)
+        await pilot.pause(0.2)
 
-        assert app.agent_loop.config_orchestrator.config.autocopy_to_clipboard is True
+        assert app.config.active_model_pinned is False
+        assert app._current_bottom_app == BottomApp.Input
+        assert len(app.query(ModelPickerApp)) == 0
+
+
+@pytest.mark.asyncio
+async def test_model_picker_select_default_persists_empty_alias() -> None:
+    app = build_test_vibe_app(config=_make_config_with_models())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_model()
+        await pilot.pause(0.2)
+
+        with patch.object(
+            app.app_server.resources.config, "update", new=AsyncMock()
+        ) as update_config:
+            await pilot.press("up")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+        update_config.assert_awaited_once_with({"active_model": ""})
 
 
 # --- /thinking command ---
@@ -327,23 +337,18 @@ async def test_thinking_picker_select_level() -> None:
 
         # Navigate down to "low" (second item) and select
         await pilot.press("down")
-        set_field = AsyncMock(return_value=[])
         with (
             patch.object(app, "_reload_config", new=AsyncMock()),
-            patch.object(app.agent_loop.config_orchestrator, "set_field", set_field),
+            patch.object(
+                app.app_server.resources.config, "set_thinking", new=AsyncMock()
+            ) as set_thinking,
         ):
             await pilot.press("enter")
             await pilot.pause(0.2)
 
         assert app._current_bottom_app == BottomApp.Input
         assert len(app.query(ThinkingPickerApp)) == 0
-        expected_model = (
-            app.config
-            .get_active_model()
-            .model_copy(update={"thinking": "low"})
-            .model_dump(mode="json")
-        )
-        set_field.assert_awaited_once_with("/models/alpha", expected_model)
+        set_thinking.assert_awaited_once_with("low")
 
 
 @pytest.mark.asyncio
@@ -358,95 +363,13 @@ async def test_thinking_picker_select_high() -> None:
         await pilot.press("down")
         await pilot.press("down")
         await pilot.press("down")
-        set_field = AsyncMock(return_value=[])
         with (
             patch.object(app, "_reload_config", new=AsyncMock()),
-            patch.object(app.agent_loop.config_orchestrator, "set_field", set_field),
+            patch.object(
+                app.app_server.resources.config, "set_thinking", new=AsyncMock()
+            ) as set_thinking,
         ):
             await pilot.press("enter")
             await pilot.pause(0.2)
 
-        expected_model = (
-            app.config
-            .get_active_model()
-            .model_copy(update={"thinking": "high"})
-            .model_dump(mode="json")
-        )
-        set_field.assert_awaited_once_with("/models/alpha", expected_model)
-
-
-# --- config -> thinking picker flow ---
-
-
-@pytest.mark.asyncio
-async def test_config_thinking_entry_opens_thinking_picker() -> None:
-    app = build_test_vibe_app(config=_make_config_with_models())
-    async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await app._show_config()
-        await pilot.pause(0.2)
-
-        # Thinking row is the second item (after Model). Navigate down and press enter.
-        await pilot.press("down")
-        await pilot.press("enter")
-        await pilot.pause(0.3)
-
-        assert app._current_bottom_app == BottomApp.ThinkingPicker
-        assert len(app.query(ThinkingPickerApp)) == 1
-        assert len(app.query(ConfigApp)) == 0
-
-
-@pytest.mark.asyncio
-async def test_config_to_thinking_picker_escape_returns_to_input() -> None:
-    app = build_test_vibe_app(config=_make_config_with_models())
-    async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await app._show_config()
-        await pilot.pause(0.2)
-
-        # Open thinking picker from config
-        await pilot.press("down")
-        await pilot.press("enter")
-        await pilot.pause(0.3)
-
-        # Escape thinking picker
-        await pilot.press("escape")
-        await pilot.pause(0.2)
-
-        assert app._current_bottom_app == BottomApp.Input
-        assert len(app.query(ThinkingPickerApp)) == 0
-        assert len(app.query(ConfigApp)) == 0
-
-
-@pytest.mark.asyncio
-async def test_config_to_thinking_picker_select_returns_to_input() -> None:
-    app = build_test_vibe_app(config=_make_config_with_models())
-    async with app.run_test() as pilot:
-        await pilot.pause(0.1)
-        await app._show_config()
-        await pilot.pause(0.2)
-
-        # Open thinking picker from config
-        await pilot.press("down")
-        await pilot.press("enter")
-        await pilot.pause(0.3)
-
-        # Select "medium" (3rd item = 2 downs from "off")
-        await pilot.press("down")
-        await pilot.press("down")
-        set_field = AsyncMock(return_value=[])
-        with (
-            patch.object(app, "_reload_config", new=AsyncMock()),
-            patch.object(app.agent_loop.config_orchestrator, "set_field", set_field),
-        ):
-            await pilot.press("enter")
-            await pilot.pause(0.2)
-
-        assert app._current_bottom_app == BottomApp.Input
-        expected_model = (
-            app.config
-            .get_active_model()
-            .model_copy(update={"thinking": "medium"})
-            .model_dump(mode="json")
-        )
-        set_field.assert_awaited_once_with("/models/alpha", expected_model)
+        set_thinking.assert_awaited_once_with("high")

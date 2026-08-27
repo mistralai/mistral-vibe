@@ -135,6 +135,65 @@ class TestTextualNotificationAdapter:
         app.bell.assert_called_once()
         app._driver.write.assert_not_called()
 
+    def test_set_default_title_writes_when_focused(
+        self, adapter_enabled: TextualNotificationAdapter, fake_app: MagicMock
+    ) -> None:
+        adapter_enabled.set_default_title("Fix login bug")
+
+        fake_app._driver.write.assert_called_once_with("\x1b]0;Fix login bug\x07")
+
+    def test_set_default_title_strips_control_characters(
+        self, adapter_enabled: TextualNotificationAdapter, fake_app: MagicMock
+    ) -> None:
+        adapter_enabled.set_default_title("Fix\x1b]0;pwned\x07 login")
+
+        (written,), _ = fake_app._driver.write.call_args
+        assert written.startswith("\x1b]0;") and written.endswith("\x07")
+        payload = written[4:-1]
+        assert "\x1b" not in payload and "\x07" not in payload
+
+    def test_set_default_title_defers_while_blurred(
+        self, adapter_enabled: TextualNotificationAdapter, fake_app: MagicMock
+    ) -> None:
+        adapter_enabled.on_blur()
+
+        adapter_enabled.set_default_title("Fix login bug")
+
+        fake_app._driver.write.assert_not_called()
+
+        adapter_enabled.on_focus()
+        fake_app._driver.write.assert_called_once_with("\x1b]0;Fix login bug\x07")
+
+    def test_set_default_title_updates_notification_suffix(
+        self, adapter_enabled: TextualNotificationAdapter, fake_app: MagicMock
+    ) -> None:
+        adapter_enabled.set_default_title("Fix login bug")
+        adapter_enabled.on_blur()
+        fake_app.reset_mock()
+
+        adapter_enabled.notify(NotificationContext.ACTION_REQUIRED)
+
+        fake_app._driver.write.assert_called_once_with(
+            "\x1b]0;Fix login bug - Action Required\x07"
+        )
+
+    def test_set_default_title_noop_when_unchanged(
+        self, adapter_enabled: TextualNotificationAdapter, fake_app: MagicMock
+    ) -> None:
+        adapter_enabled.set_default_title("Vibe")
+
+        fake_app._driver.write.assert_not_called()
+
+    def test_set_default_title_blank_falls_back_to_vibe(
+        self, adapter_enabled: TextualNotificationAdapter, fake_app: MagicMock
+    ) -> None:
+        adapter_enabled.set_default_title("Custom")
+        fake_app.reset_mock()
+
+        adapter_enabled.set_default_title("   ")
+
+        fake_app._driver.write.assert_called_once_with("\x1b]0;Vibe\x07")
+
     def test_enabled_callback_reads_live_value(self, fake_app: MagicMock) -> None:
         enabled = True
         adapter = TextualNotificationAdapter(

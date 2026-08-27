@@ -6,7 +6,7 @@ import shlex
 import subprocess
 import tempfile
 
-from vibe.core.utils.io import read_safe
+from vibe.utils.io import read_safe
 
 
 class ExternalEditor:

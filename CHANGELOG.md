@@ -5,6 +5,253 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.24.5] - 2026-08-27
+
+### Added
+
+- Fuzzy search in the MCP servers and connectors browser
+
+### Changed
+
+- Faster startup through additional lazy imports and deferred schema builds
+
+### Fixed
+
+- Trust prompt is skipped when `--worktree` or `--trust` already grants access
+- Links are normalized before opening to prevent broken clicks
+- Themes apply correctly at startup
+- Retried Mistral responses are released back into the connection pool
+
+
+## [2.24.4] - 2026-08-26
+
+### Added
+
+- LLM-generated session titles and terminal title
+- Queue selection and edit mode for queued messages
+- Git info is shown in the session header
+
+### Changed
+
+- Model connections are reused across tool turns for faster responses
+
+### Fixed
+
+- `/mcp login <connector>` routes to the connector auth flow
+- Rate-limited calls retry with adaptive backoff and pacing
+- Model retry state stays authoritative across clients
+- Loading nix-managed skills through a symlinked `SKILL.md` no longer freezes
+- Chat-completion connections are closed to avoid pool timeouts
+
+
+## [2.24.3] - 2026-08-20
+
+### Added
+
+- Slash commands and setting pickers can be used while the agent or a command is running
+- The process is named "Vibe CLI" and the bottom bar shows its PID
+
+### Changed
+
+- Models are shown by display name instead of the raw config alias
+- Python dependencies updated to clear known security advisories
+
+### Fixed
+
+- Connector bootstrap failures are surfaced instead of reporting no connectors
+
+
+## [2.24.2] - 2026-08-18
+
+### Added
+
+- In-app session picker with live preview
+- `/log-level` command for runtime log-level control
+- `/retry` is exposed to ACP clients
+- Created worktrees are shown in the transcript
+- Worktrees are cleaned up when their local session is deleted
+
+### Changed
+
+- Faster startup: the TUI renders before session initialization and imports are deferred
+- Faster session resume
+- Edit and read tool headers show paths relative to the current directory
+- Admin config fetch retries with exponential backoff
+- Custom tools are flagged as deprecated
+
+### Fixed
+
+- New worktrees branch from the remote default instead of local HEAD
+- Configured temperature is respected for reasoning models
+- Thinking setting updates correctly for routed models
+- Path picker stays open on `/` and supports `../` traversal
+- Escape sequences in command output no longer flood the input box
+- Live tool-permission bypass propagates to child agent loops
+- Managed shell output is no longer sent to the LLM twice
+- Adding a tool to the allowlist keeps the default allowlist
+- OpenTelemetry traces are sent to the correct endpoint
+
+
+## [2.24.1] - 2026-08-11
+
+### Added
+
+- Inline ghost-text completion for mid-prompt skills
+- `/clear` and `/new` accept an optional first prompt and show the resume id
+- Compacted conversation history is preserved
+- OpenTelemetry tracing configuration is now available
+
+### Changed
+
+- Default agent renamed to `ask` and defaults to accept-edits
+- Auto worktrees are named with a model
+- Faster resume by deferring sub-agent instantiation
+
+### Fixed
+
+- Surface MCP server startup failures to the user
+- Text selection is now visible in the chat input
+- Provider reasoning is replayed verbatim
+- Detect and retry incomplete LLM streams
+- Surface voice transcription errors instead of swallowing them
+- Proactively refresh expired MCP OAuth tokens
+- Theme switching is now responsive
+- Crash on undo of a large multiline insert in the chat input
+- Config modal headers stay visible on wrap, with a tighter layout
+- Trusting the cwd no longer untrusts `<cwd>/.vibe`
+- Home directory is no longer treated as a project root
+- Explain the fallback when the configured default model is invalid
+- Scope sensitive-file read grants and stop chat bypass
+- Git Bash paths no longer create bogus `C:\c\...` directories on Windows
+- Use POSIX separators when shortening home paths in display
+- `/clear` resume hint gated on session persistability
+
+
+## [2.24.0] - 2026-08-05
+
+### Added
+
+- Admin config layer for shared/enforced config that applies over user config
+- "Default" (unpinned) model option in `/model` and `/config` to track the recommended model without pinning a specific alias
+- Server-side default model routing via experiment, never overriding explicit pins
+- LLM retries surfaced in ACP/VS Code conversations via `_session/retrying` notification
+- Explore subagent can load skills
+- Local sessions start in the selected worktree
+- User and project config layers compose; trusted project config overlays user config instead of replacing it
+- Startup duration telemetry (`vibe.startup`)
+
+### Changed
+
+- Experiment variants routed through the config schema; TOML/env/overrides now take precedence over GrowthBook assignments
+- Autocopy: keyboard copy shortcuts give feedback, double/triple-click drag improved, and `autocopy_to_clipboard` documented
+
+### Fixed
+
+- Drag-and-drop of files into the terminal when unfocused (iTerm2, Ghostty)
+- Subagent session handoff after compaction
+- Stale `devstral-small` thinking setting migrated to off
+- Noisy non-Vibe events dropped from Sentry
+- ACP returns `max_turn_requests` stop reason instead of erroring on turn limit
+- `/resume` listing speed no longer scales with total session count (persistent index)
+
+
+## [2.23.3] - 2026-08-03
+
+### Added
+
+- `/retry` command to retry an interrupted response
+- `/rewind` now lets you choose between forking and rewinding in place
+- LLM retries surfaced in the UI and logs
+- Read the config catalogue without an attached session
+
+### Changed
+
+- `/status` shows provider prompt-cache usage and discounts cached tokens from the session cost
+- Native copy hint on the clipboard notice
+
+### Fixed
+
+- Refused config change no longer wipes the picker
+- Git fsmonitor hook disabled in project context
+- Signed reasoning blocks preserved
+- Tab hint colored in config edit modal
+- UPX disabled in the PyInstaller specs
+- List formatting preserved when copying a selection from the TUI
+- Duplicate approval widget prevented when callbacks overlap
+- ACP usage update sent on session resume, fork, and new
+- Context token display updated on session resume
+- More frequent context window updates in ACP
+
+### Removed
+
+- Unreachable chat mode
+
+## [2.23.2] - 2026-07-30
+
+ ### Added
+
+- Skill-creator built-in skill: a guided flow to author, update, and delete your own skills
+- Browser sign-in can target a custom login domain for self-hosted or private-gateway deployments
+- Session stats now track provider cache-hit (cached) tokens
+
+### Changed
+
+- Redesigned `/config` as a searchable, full-screen settings browser with typed edit modals and per-layer origin display
+- App-server protocol extended and packaged as a standalone `vibe-app-server` binary for desktop integration
+
+### Fixed
+
+- Cached-token counts now reported in session stats instead of always zero
+- Zed ACP packaging preserves symlinks by shipping `.tar.gz` archives
+- `grep` result chips open the correct file and no longer leak absolute host paths into context (ACP)
+- ACP `/rewind` truncates in place instead of forking
+- Extra fields in the whoami response no longer rejected
+- ACP session history sorted by recency
+- Blank permission prompt and duplicated user message in the ACP/VS Code webview
+- WhoAmI result again tolerates extra fields
+
+
+## [2.23.1] - 2026-07-28
+
+### Fixed
+
+- Crash when `@`-mentioning a file, which aborted the turn
+
+
+## [2.23.0] - 2026-07-28
+
+### Added
+
+- [A/B testing] OS-native managed shell tools
+- `vibe mcp add` and `vibe mcp remove` commands to add and remove remote MCP servers without editing TOML
+- Auto theme that follows terminal/OS appearance
+- ACP project links surface for desktop integration
+- Dense, grouped tool-call rendering in the TUI
+
+### Changed
+
+- Trust dialog now defaults to "Trust folder" and is simplified
+- Tool descriptions compressed to reduce context bloat
+- Smoother, faster scrolling in long conversations
+- Fixed unnecessary textual relayout computation on constant-size animation frames, removing lag spikes
+- Major internal refactor introducing a JSON-RPC 2.0 app server as the single runtime owner between delivery surfaces (TUI, `-p`, ACP) and the core engine, replacing direct `AgentLoop`/callback coupling with a typed, projected protocol
+
+### Fixed
+
+- Option+Left/Right word navigation in the chat input
+- Unsigned thinking blocks dropped on backend replay
+- SGR mouse protocol renegotiated when the emulator sends x10 bytes
+- Crash on `/resume` delete confirmation
+- Empty mapping treated as absent in CONCAT/UNION config merge
+- `LC_CTYPE` used instead of `LC_ALL` in the bash tool environment
+- Chunk text emitted before its tool call in the streaming loop
+- Text selection guarded against detached widgets
+- `OSError` on over-long `@`-mention autocompletion candidates
+- MCP registry created when the first server is added via `/mcp add`
+- CLI conversation ID preserved after teleport
+- Data-retention link accessible to non-admins
+
+
 ## [2.22.0] - 2026-07-21
 
 ### Added

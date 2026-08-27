@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 import errno
-from typing import Final, cast
+import time
+from typing import Final
 import urllib.parse
 
 import anyio.to_thread
@@ -21,8 +23,8 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAu
 from pydantic import AnyUrl, BaseModel, ConfigDict
 
 from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
-from vibe.core.utils.keyring import (
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.utils.keyring import (
     delete_api_key_from_keyring,
     get_api_key_from_keyring,
     set_api_key_in_keyring,
@@ -35,6 +37,7 @@ _MIN_REQUEST_LINE_PARTS: Final = 2
 _HEADER_TERMINATORS: Final = frozenset({b"\r\n", b"\n", b""})
 # OAuth 2.0 token-endpoint error signalling a permanently dead refresh token.
 _OAUTH_INVALID_GRANT: Final = "invalid_grant"
+_EXPIRED_TOKEN_TIME: Final = -1.0
 
 
 class MCPOAuthError(Exception):
@@ -110,6 +113,32 @@ class MCPOAuthLoginFailed(MCPOAuthError):
         )
 
 
+class MCPOAuthCredentialCleanupFailed(MCPOAuthError):
+    def __init__(self, *, server_alias: str, reason: str) -> None:
+        self.server_alias = server_alias
+        self.reason = reason
+        super().__init__(self._fmt())
+
+    def _fmt(self) -> str:
+        return (
+            f"Failed to remove OAuth credentials for MCP server "
+            f"{self.server_alias!r}: {self.reason}."
+        )
+
+
+class MCPOAuthCredentialRestoreFailed(MCPOAuthError):
+    def __init__(self, *, server_alias: str, reason: str) -> None:
+        self.server_alias = server_alias
+        self.reason = reason
+        super().__init__(self._fmt())
+
+    def _fmt(self) -> str:
+        return (
+            f"Failed to restore OAuth credentials for MCP server "
+            f"{self.server_alias!r} after an aborted removal: {self.reason}."
+        )
+
+
 def _kr_username(alias: str, kind: str) -> str:
     return f"{_USERNAME_PREFIX}:{alias}:{kind}"
 
@@ -176,6 +205,27 @@ class Fingerprint(BaseModel):
         await _kr_delete(_kr_username(alias, "fingerprint"))
 
 
+class StoredOAuthTokens(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    access_token: str
+    token_type: str = "Bearer"
+    expires_in: int | None = None
+    scope: str | None = None
+    refresh_token: str | None = None
+    expires_at: float | None = None
+
+    @classmethod
+    def from_token(cls, token: OAuthToken) -> StoredOAuthTokens:
+        expires_at = (
+            time.time() + token.expires_in if token.expires_in is not None else None
+        )
+        return cls(**token.model_dump(), expires_at=expires_at)
+
+    def to_token(self) -> OAuthToken:
+        return OAuthToken.model_validate(self.model_dump(exclude={"expires_at"}))
+
+
 class KeyringTokenStorage(TokenStorage):
     def __init__(
         self,
@@ -191,18 +241,27 @@ class KeyringTokenStorage(TokenStorage):
             raise MCPOAuthHeadlessError(server_alias=alias)
         self._alias = alias
         self._fallback_client_info = fallback_client_info
+        self.token_expiry_time: float | None = None
 
     async def get_tokens(self) -> OAuthToken | None:
         raw = await _kr_get(_kr_username(self._alias, "tokens"))
         if raw is None:
+            self.token_expiry_time = None
             return None
-        return OAuthToken.model_validate_json(raw)
+        stored = StoredOAuthTokens.model_validate_json(raw)
+        self.token_expiry_time = stored.expires_at
+        if stored.expires_at is None and stored.expires_in is not None:
+            self.token_expiry_time = _EXPIRED_TOKEN_TIME
+        return stored.to_token()
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
-        await _kr_set(_kr_username(self._alias, "tokens"), tokens.model_dump_json())
+        stored = StoredOAuthTokens.from_token(tokens)
+        self.token_expiry_time = stored.expires_at
+        await _kr_set(_kr_username(self._alias, "tokens"), stored.model_dump_json())
 
     async def delete_tokens(self) -> None:
         await _kr_delete(_kr_username(self._alias, "tokens"))
+        self.token_expiry_time = None
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         raw = await _kr_get(_kr_username(self._alias, "client_info"))
@@ -217,6 +276,74 @@ class KeyringTokenStorage(TokenStorage):
 
     async def delete_client_info(self) -> None:
         await _kr_delete(_kr_username(self._alias, "client_info"))
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthCredentialBackup:
+    """Opaque process-local backup used only to roll back catalog removal."""
+
+    keyring_available: bool
+    tokens: str | None = field(repr=False)
+    client_info: str | None = field(repr=False)
+    fingerprint: str | None = field(repr=False)
+
+
+async def snapshot_oauth_credentials(alias: str) -> OAuthCredentialBackup:
+    try:
+        KeyringTokenStorage(alias=alias)
+    except MCPOAuthHeadlessError:
+        return OAuthCredentialBackup(
+            keyring_available=False, tokens=None, client_info=None, fingerprint=None
+        )
+    try:
+        return OAuthCredentialBackup(
+            keyring_available=True,
+            tokens=await _kr_get(_kr_username(alias, "tokens")),
+            client_info=await _kr_get(_kr_username(alias, "client_info")),
+            fingerprint=await _kr_get(_kr_username(alias, "fingerprint")),
+        )
+    except keyring.errors.KeyringError as exc:
+        raise MCPOAuthCredentialCleanupFailed(
+            server_alias=alias, reason=f"could not snapshot credentials: {exc}"
+        ) from exc
+
+
+async def restore_oauth_credentials(alias: str, backup: OAuthCredentialBackup) -> None:
+    if not backup.keyring_available:
+        return
+    try:
+        for kind, value in (
+            ("tokens", backup.tokens),
+            ("client_info", backup.client_info),
+            ("fingerprint", backup.fingerprint),
+        ):
+            username = _kr_username(alias, kind)
+            if value is None:
+                await _kr_delete(username)
+            else:
+                await _kr_set(username, value)
+    except keyring.errors.KeyringError as exc:
+        raise MCPOAuthCredentialRestoreFailed(
+            server_alias=alias, reason=str(exc)
+        ) from exc
+
+
+async def delete_oauth_credentials(alias: str) -> None:
+    try:
+        storage = KeyringTokenStorage(alias=alias)
+        await storage.delete_tokens()
+        await storage.delete_client_info()
+        await Fingerprint.delete(alias)
+    except MCPOAuthHeadlessError:
+        # No usable keyring backend means nothing was ever stored, so there is
+        # nothing to delete. Deleting is a no-op rather than a failure.
+        return
+    except MCPOAuthError:
+        raise
+    except keyring.errors.KeyringError as exc:
+        raise MCPOAuthCredentialCleanupFailed(
+            server_alias=alias, reason=str(exc)
+        ) from exc
 
 
 _LOGO_SVG: Final = (
@@ -460,7 +587,7 @@ class RefreshAwareOAuthClientProvider(OAuthClientProvider):
         self,
         server_url: str,
         client_metadata: OAuthClientMetadata,
-        storage: TokenStorage,
+        storage: KeyringTokenStorage,
         *,
         server_alias: str,
         redirect_handler: Callable[[str], Awaitable[None]] | None = None,
@@ -476,17 +603,41 @@ class RefreshAwareOAuthClientProvider(OAuthClientProvider):
             client_metadata_url=client_metadata_url,
         )
         self._server_alias = server_alias
+        self._storage = storage
+
+    async def _initialize(self) -> None:
+        await super()._initialize()
+        self.context.token_expiry_time = self._storage.token_expiry_time
 
     async def _handle_refresh_response(self, response: httpx.Response) -> bool:
+        """Two corrections over the base class implementation:
+        1. Only clear stored tokens on a genuine invalid_grant error.
+        2. Preserve the previous refresh_token if the server did not return one.
+        """
         if response.status_code == httpx.codes.OK:
-            return await super()._handle_refresh_response(response)
+            previous_refresh_token = (
+                self.context.current_tokens.refresh_token
+                if self.context.current_tokens
+                else None
+            )
+            refreshed = await super()._handle_refresh_response(response)
+            tokens = self.context.current_tokens
+            if (
+                not refreshed
+                or tokens is None
+                or tokens.refresh_token is not None
+                or previous_refresh_token is None
+            ):
+                return refreshed
+            tokens = tokens.model_copy(update={"refresh_token": previous_refresh_token})
+            self.context.current_tokens = tokens
+            await self.context.storage.set_tokens(tokens)
+            return True
         reason, is_invalid_grant = await _classify_refresh_error(response)
         if is_invalid_grant:
             self.context.clear_tokens()
-            # storage is always KeyringTokenStorage (see build_oauth_provider)
-            storage = cast(KeyringTokenStorage, self.context.storage)
-            await storage.delete_tokens()
-            await storage.delete_client_info()
+            await self._storage.delete_tokens()
+            await self._storage.delete_client_info()
             raise MCPOAuthInvalidGrant(server_alias=self._server_alias, reason=reason)
         raise MCPOAuthTransientRefreshError(
             server_alias=self._server_alias, reason=reason
@@ -556,19 +707,23 @@ async def perform_oauth_login(
         server, redirect_handler=on_url, callback_handler=handler.serve_once
     )
     try:
-        async with VibeAsyncHTTPClient(
-            auth=provider, timeout=_LOGIN_TIMEOUT_SECONDS, verify=build_ssl_context()
-        ) as client:
-            await client.get(server.url)
-    except (OAuthTokenError, OAuthFlowError) as exc:
-        raise MCPOAuthLoginFailed(server_alias=server.name, reason=str(exc)) from exc
-    except MCPOAuthInvalidGrant:
-        async with VibeAsyncHTTPClient(
-            auth=provider, timeout=_LOGIN_TIMEOUT_SECONDS, verify=build_ssl_context()
-        ) as client:
-            await client.get(server.url)
+        try:
+            await _request_oauth_login(server, provider)
+        except MCPOAuthInvalidGrant:
+            await _request_oauth_login(server, provider)
     except MCPOAuthTransientRefreshError as exc:
         raise MCPOAuthLoginFailed(
             server_alias=server.name, reason=f"Transient error: {exc.reason}"
         ) from exc
+    except (OAuthTokenError, OAuthFlowError, httpx.HTTPError, OSError) as exc:
+        raise MCPOAuthLoginFailed(server_alias=server.name, reason=str(exc)) from exc
     await Fingerprint.compute(server).save(server.name)
+
+
+async def _request_oauth_login(
+    server: MCPHttp | MCPStreamableHttp, provider: OAuthClientProvider
+) -> None:
+    async with VibeAsyncHTTPClient(
+        auth=provider, timeout=_LOGIN_TIMEOUT_SECONDS, verify=build_ssl_context()
+    ) as client:
+        await client.get(server.url)

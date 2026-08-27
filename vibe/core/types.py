@@ -3,16 +3,15 @@ from __future__ import annotations
 from abc import ABC
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterator, Sequence
-from contextlib import contextmanager
 import copy
 from enum import StrEnum, auto
 from pathlib import Path
+import threading
 from typing import TYPE_CHECKING, Annotated, Any, Literal, overload
 from uuid import uuid4
 
 if TYPE_CHECKING:
     from vibe.core.tools.base import BaseTool
-    from vibe.core.tools.permissions import RequiredPermission
 else:
     BaseTool = Any
 
@@ -24,11 +23,14 @@ from pydantic import (
     JsonValue,
     PrivateAttr,
     computed_field,
-    field_validator,
     model_validator,
 )
 
 from vibe.core.experiments.models import EvalResponse
+from vibe.core.tools.models import RequiredPermission
+from vibe.user_content import UserDisplayContent, UserResource
+from vibe.utils.pricing import session_token_cost
+from vibe.utils.tool_presentation import ToolCallPresentation, ToolResultPresentation
 
 
 class ScheduledLoop(BaseModel):
@@ -50,6 +52,7 @@ class AgentStats(BaseModel):
     steps: int = 0
     session_prompt_tokens: int = 0
     session_completion_tokens: int = 0
+    session_cached_tokens: int = 0
     tool_calls_agreed: int = 0
     tool_calls_rejected: int = 0
     tool_calls_hook_denied: int = 0
@@ -60,11 +63,13 @@ class AgentStats(BaseModel):
 
     last_turn_prompt_tokens: int = 0
     last_turn_completion_tokens: int = 0
+    last_turn_cached_tokens: int = 0
     last_turn_duration: float = 0.0
     tokens_per_second: float = 0.0
 
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
+    cached_input_price_per_million: float | None = None
 
     _listeners: dict[str, Callable[[AgentStats], None]] = PrivateAttr(
         default_factory=dict
@@ -103,21 +108,25 @@ class AgentStats(BaseModel):
     @computed_field
     @property
     def session_cost(self) -> float:
-        """Calculate the total session cost in dollars based on token usage and pricing.
+        """Total session cost in dollars from token usage and pricing.
 
-        NOTE: This is a rough estimate and is worst-case scenario.
-        The actual cost may be lower due to prompt caching.
         If the model changes mid-session, this uses current pricing for all tokens.
         """
-        input_cost = (
-            self.session_prompt_tokens / 1_000_000
-        ) * self.input_price_per_million
-        output_cost = (
-            self.session_completion_tokens / 1_000_000
-        ) * self.output_price_per_million
-        return input_cost + output_cost
+        return session_token_cost(
+            prompt_tokens=self.session_prompt_tokens,
+            completion_tokens=self.session_completion_tokens,
+            cached_tokens=self.session_cached_tokens,
+            input_price_per_million=self.input_price_per_million,
+            output_price_per_million=self.output_price_per_million,
+            cached_input_price_per_million=self.cached_input_price_per_million,
+        )
 
-    def update_pricing(self, input_price: float, output_price: float) -> None:
+    def update_pricing(
+        self,
+        input_price: float,
+        output_price: float,
+        cached_input_price: float | None = None,
+    ) -> None:
         """Update pricing info when model changes.
 
         NOTE: session_cost will be recalculated using new pricing for all
@@ -127,6 +136,7 @@ class AgentStats(BaseModel):
         """
         self.input_price_per_million = input_price
         self.output_price_per_million = output_price
+        self.cached_input_price_per_million = cached_input_price
 
     def reset_context_state(self) -> None:
         """Reset context-related fields while preserving cumulative session stats.
@@ -137,6 +147,7 @@ class AgentStats(BaseModel):
         self.context_tokens = 0
         self.last_turn_prompt_tokens = 0
         self.last_turn_completion_tokens = 0
+        self.last_turn_cached_tokens = 0
         self.last_turn_duration = 0.0
         self.tokens_per_second = 0.0
 
@@ -149,6 +160,28 @@ class SessionInfo(BaseModel):
     save_dir: str
 
 
+class ChildSessionLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    tool_call_id: str
+    agent: str
+    relative_path: str | None = None
+
+
+# Session state rather than a message, because the worktree is created before
+# the session has a first turn: there is no message it could belong to, and the
+# transcript is rebuilt on every resume from what was persisted here.
+class WorktreeContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entry_id: str
+    name: str
+    branch: str
+    path: str
+    created_at: int
+
+
 class SessionMetadata(BaseModel):
     session_id: str
     parent_session_id: str | None = None
@@ -157,11 +190,24 @@ class SessionMetadata(BaseModel):
     git_commit: str | None
     git_branch: str | None
     environment: dict[str, str | None]
+    # Where the session began. ``environment.working_directory`` follows it as
+    # it moves, so between them the record names both the directory the user
+    # started in and the one the session is working in. Neither on its own can
+    # do that, which is the whole reason this field exists.
+    origin_directory: str | None = None
     username: str
+    child_sessions: list[ChildSessionLink] = Field(default_factory=list)
     loops: list[ScheduledLoop] = Field(default_factory=list)
     title: str | None = None
     title_source: Literal["auto", "manual"] = "auto"
+    # The sticky GrowthBook variant assignment, persisted so a resumed session
+    # keeps its buckets. NOTE: plan/org attributes and user_plan are user-scoped,
+    # not session-scoped, so they are deliberately NOT persisted here — they are
+    # re-resolved from the user-scoped whoami/identity cache on every session, so
+    # resuming never reports a stale plan.
     experiments: EvalResponse | None = None
+    import_provenance: dict[str, JsonValue] | None = None
+    created_worktree: WorktreeContext | None = None
 
 
 StrToolChoice = Literal["auto", "none", "any", "required"]
@@ -188,6 +234,7 @@ class ToolCall(BaseModel):
     index: int | None = None
     function: FunctionCall = Field(default_factory=FunctionCall)
     type: Literal["function"] = "function"
+    presentation: ToolCallPresentation | None = None
 
 
 def _content_before(v: Any) -> str:
@@ -217,39 +264,6 @@ class Role(StrEnum):
 class ApprovalResponse(StrEnum):
     YES = "y"
     NO = "n"
-
-
-IMAGE_EXTENSIONS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
-MAX_IMAGE_BYTES: int = 10 * 1024 * 1024
-MAX_IMAGES_PER_MESSAGE: int = 8
-
-type UserDisplayContentItem = dict[str, JsonValue]
-
-
-class UserDisplayContentMetadata(BaseModel):
-    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
-
-    version: str = Field(min_length=1)
-    host: str = Field(min_length=1)
-    content: list[UserDisplayContentItem]
-
-    @field_validator("version")
-    @classmethod
-    def validate_version(cls, value: str) -> str:
-        version = value.strip()
-        if not version:
-            raise ValueError("version must not be blank")
-
-        return version
-
-    @field_validator("host")
-    @classmethod
-    def validate_host(cls, value: str) -> str:
-        host = value.strip()
-        if not host:
-            raise ValueError("host must not be blank")
-
-        return host
 
 
 class FileImageSource(BaseModel):
@@ -290,6 +304,31 @@ class ImageAttachment(BaseModel):
         return value
 
 
+class PersistedToolResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    output: dict[str, JsonValue]
+    duration: float | None = Field(default=None, ge=0)
+    cancelled: bool = False
+    presentation: ToolResultPresentation | None = None
+
+
+class ManualShellContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: str
+    command: str
+    cwd: str
+    stdout: str = ""
+    stderr: str = ""
+    output_text: str = ""
+    exit_code: int
+    timed_out: bool = False
+    interrupted: bool = False
+    duration_ms: float = Field(default=0.0, ge=0)
+    created_at: int
+
+
 class LLMMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -298,14 +337,18 @@ class LLMMessage(BaseModel):
     images: list[ImageAttachment] | None = None
     injected: bool = False
     reasoning_content: Content | None = None
-    reasoning_state: list[str] | None = None
-    reasoning_signature: str | None = None
+    reasoning_payloads: list[dict[str, Any]] | None = None
     reasoning_message_id: str | None = None
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
     tool_call_id: str | None = None
+    tool_result: PersistedToolResult | None = None
     message_id: str | None = None
-    user_display_content: UserDisplayContentMetadata | None = None
+    user_display_content: UserDisplayContent | None = None
+    input_text: str | None = None
+    resources: list[UserResource] | None = None
+    manual_shell: ManualShellContext | None = None
+    context_boundary: Literal["compaction"] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -324,17 +367,21 @@ class LLMMessage(BaseModel):
             "role": role,
             "content": getattr(v, "content", ""),
             "reasoning_content": reasoning_content,
-            "reasoning_state": getattr(v, "reasoning_state", None),
-            "reasoning_signature": getattr(v, "reasoning_signature", None),
+            "reasoning_payloads": getattr(v, "reasoning_payloads", None),
             "reasoning_message_id": getattr(v, "reasoning_message_id", None)
             or (str(uuid4()) if reasoning_content else None),
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),
+            "tool_result": getattr(v, "tool_result", None),
             "images": getattr(v, "images", None),
             "message_id": getattr(v, "message_id", None)
             or (str(uuid4()) if role != "tool" else None),
             "user_display_content": getattr(v, "user_display_content", None),
+            "input_text": getattr(v, "input_text", None),
+            "resources": getattr(v, "resources", None),
+            "manual_shell": getattr(v, "manual_shell", None),
+            "context_boundary": getattr(v, "context_boundary", None),
         }
 
     def __add__(self, other: LLMMessage) -> LLMMessage:
@@ -358,18 +405,10 @@ class LLMMessage(BaseModel):
         if not reasoning_content:
             reasoning_content = None
 
-        reasoning_signature = (self.reasoning_signature or "") + (
-            other.reasoning_signature or ""
-        )
-        if not reasoning_signature:
-            reasoning_signature = None
-
-        reasoning_state: list[str] | None = None
-        if self.reasoning_state or other.reasoning_state:
-            reasoning_state = [
-                *(self.reasoning_state or []),
-                *(other.reasoning_state or []),
-            ]
+        reasoning_payloads = [
+            *(self.reasoning_payloads or []),
+            *(other.reasoning_payloads or []),
+        ] or None
 
         tool_calls_map = OrderedDict[int, ToolCall]()
         for tool_calls in [self.tool_calls or [], other.tool_calls or []]:
@@ -397,17 +436,22 @@ class LLMMessage(BaseModel):
             content=content,
             images=self.images if self.images is not None else other.images,
             reasoning_content=reasoning_content,
-            reasoning_state=reasoning_state,
-            reasoning_signature=reasoning_signature,
+            reasoning_payloads=reasoning_payloads,
             reasoning_message_id=self.reasoning_message_id
             or other.reasoning_message_id,
             tool_calls=list(tool_calls_map.values()) or None,
             name=self.name,
             tool_call_id=self.tool_call_id,
+            tool_result=self.tool_result or other.tool_result,
             message_id=self.message_id,
             user_display_content=self.user_display_content
             if self.user_display_content is not None
             else other.user_display_content,
+            input_text=(
+                self.input_text if self.input_text is not None else other.input_text
+            ),
+            resources=self.resources if self.resources is not None else other.resources,
+            context_boundary=self.context_boundary or other.context_boundary,
         )
 
 
@@ -415,11 +459,14 @@ class LLMUsage(BaseModel):
     model_config = ConfigDict(frozen=True)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Prompt tokens served from the provider cache; a subset of prompt_tokens.
+    cached_tokens: int = 0
 
     def __add__(self, other: LLMUsage) -> LLMUsage:
         return LLMUsage(
             prompt_tokens=self.prompt_tokens + other.prompt_tokens,
             completion_tokens=self.completion_tokens + other.completion_tokens,
+            cached_tokens=self.cached_tokens + other.cached_tokens,
         )
 
 
@@ -465,6 +512,9 @@ class BaseEvent(BaseModel, ABC):
 class UserMessageEvent(BaseEvent):
     content: str
     message_id: str
+    images: list[ImageAttachment] = Field(default_factory=list)
+    user_display_content: UserDisplayContent | None = None
+    resources: list[UserResource] = Field(default_factory=list)
 
 
 class AssistantEvent(BaseEvent):
@@ -492,6 +542,7 @@ class ToolCallEvent(BaseEvent):
     tool_class: type[BaseTool]
     tool_call_index: int | None = None
     args: BaseModel | None = None
+    presentation: ToolCallPresentation | None = None
 
 
 class ToolResultEvent(BaseEvent):
@@ -499,11 +550,13 @@ class ToolResultEvent(BaseEvent):
     tool_class: type[BaseTool] | None
     result: BaseModel | None = None
     error: str | None = None
+    error_display: str | None = None
     skipped: bool = False
     skip_reason: str | None = None
     cancelled: bool = False
     duration: float | None = None
     tool_call_id: str
+    presentation: ToolResultPresentation | None = None
 
 
 class ToolStreamEvent(BaseEvent):
@@ -516,6 +569,27 @@ class WaitingForInputEvent(BaseEvent):
     task_id: str
     label: str | None = None
     predefined_answers: list[str] | None = None
+
+
+class RequestEvent(BaseEvent):
+    request_id: str
+
+
+class ApprovalRequestEvent(RequestEvent):
+    tool_name: str
+    tool_args: BaseModel
+    tool_call_id: str
+    required_permissions: list[RequiredPermission] | None = None
+
+
+class UserInputRequestEvent(RequestEvent):
+    args: BaseModel
+    tool_call_id: str
+
+
+class TokenUsageUpdatedEvent(BaseEvent):
+    stats: AgentStats
+    context_window: int
 
 
 class CompactStartEvent(BaseEvent):
@@ -561,21 +635,8 @@ class ContextClearedEvent(BaseEvent):
 
 class SessionTitleUpdatedEvent(BaseEvent):
     title: str
+    session_id: str
 
-
-class OutputFormat(StrEnum):
-    TEXT = auto()
-    JSON = auto()
-    STREAMING = auto()
-
-
-type ApprovalCallback = Callable[
-    [str, BaseModel, str, list[RequiredPermission] | None],
-    Awaitable[tuple[ApprovalResponse, str | None]],
-]
-
-
-type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
 
 type SwitchAgentCallback = Callable[[str], Awaitable[None]]
 
@@ -583,26 +644,13 @@ type ClearContextCallback = Callable[[], Awaitable[None]]
 
 
 class MessageList(Sequence[LLMMessage]):
-    def __init__(
-        self,
-        initial: list[LLMMessage] | None = None,
-        observer: Callable[[LLMMessage], None] | None = None,
-    ) -> None:
+    def __init__(self, initial: list[LLMMessage] | None = None) -> None:
         self._data: list[LLMMessage] = list(initial) if initial else []
-        self._observer = observer
         self._reset_hooks: list[Callable[[], None]] = []
-        self._silent = False
-        if self._observer:
-            for msg in self._data:
-                self._observer(msg)
-
-    def _notify(self, msg: LLMMessage) -> None:
-        if not self._silent and self._observer is not None:
-            self._observer(msg)
+        self._lock = threading.RLock()
 
     def append(self, msg: LLMMessage) -> None:
         self._data.append(msg)
-        self._notify(msg)
 
     def insert(self, i: int, msg: LLMMessage) -> None:
         self._data.insert(i, msg)
@@ -616,34 +664,37 @@ class MessageList(Sequence[LLMMessage]):
         self._reset_hooks.append(hook)
 
     def reset(self, new: list[LLMMessage]) -> None:
-        """Replace contents silently (never notifies)."""
-        self._data = list(new)
-        for hook in self._reset_hooks:
-            hook()
+        """Replace contents and fire reset hooks (e.g. RewindManager)."""
+        with self._lock:
+            self._data = list(new)
+            for hook in self._reset_hooks:
+                hook()
 
-    def update_system_prompt(self, new: str, *, notify: bool = False) -> None:
+    def reset_preserving_system(self, tail: list[LLMMessage]) -> None:
+        """Atomically keep existing system messages and replace the rest.
+
+        Held under the same lock as ``update_system_prompt`` so a concurrent
+        deferred-init thread cannot interleave its system-prompt insert with
+        this read-then-replace and corrupt the list.
+        """
+        with self._lock:
+            system = [m for m in self._data if m.role is Role.system]
+            self._data = [*system, *tail]
+            for hook in self._reset_hooks:
+                hook()
+
+    def update_system_prompt(self, new: str) -> None:
         """Replace the system prompt, or insert it if none exists yet.
 
         Under deferred init the prompt can land after messages were already
         appended, so insert at the front rather than clobber slot 0.
         """
         msg = LLMMessage(role=Role.system, content=new)
-        if self._data and self._data[0].role == Role.system:
-            self._data[0] = msg
-        else:
-            self._data.insert(0, msg)
-        if notify:
-            self._notify(msg)
-
-    @contextmanager
-    def silent(self) -> Iterator[None]:
-        """Context manager that suppresses notifications."""
-        prev = self._silent
-        self._silent = True
-        try:
-            yield
-        finally:
-            self._silent = prev
+        with self._lock:
+            if self._data and self._data[0].role == Role.system:
+                self._data[0] = msg
+            else:
+                self._data.insert(0, msg)
 
     def __len__(self) -> int:
         return len(self._data)
@@ -656,7 +707,12 @@ class MessageList(Sequence[LLMMessage]):
         return self._data[index]
 
     def __iter__(self) -> Iterator[LLMMessage]:
-        return iter(self._data)
+        # Snapshot under the lock: only __iter__ hands element-by-element
+        # control back to Python, so the deferred-init thread's insert(0)
+        # could shift indices mid-iteration. Other read dunders are single
+        # C-level ops and stay atomic under the GIL without locking.
+        with self._lock:
+            return iter(list(self._data))
 
     def __contains__(self, item: object) -> bool:
         return item in self._data

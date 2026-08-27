@@ -9,9 +9,9 @@ if TYPE_CHECKING:
 
 def compute_connector_counts(
     config: VibeConfigSchema, connector_registry: ConnectorRegistry | None
-) -> tuple[int, int]:
+) -> tuple[int, int | None]:
     if connector_registry is None:
-        return (0, 0)
+        return (0, None)
     aliases = connector_registry.get_connector_names()
     if not aliases:
         return (0, 0)

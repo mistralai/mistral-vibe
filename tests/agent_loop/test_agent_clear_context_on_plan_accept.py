@@ -20,7 +20,7 @@ from vibe.core.types import (
     ToolCall,
     ToolStreamEvent,
 )
-from vibe.core.utils import VIBE_WARNING_TAG
+from vibe.utils import VIBE_WARNING_TAG
 
 
 class _ClearToolArgs(BaseModel):

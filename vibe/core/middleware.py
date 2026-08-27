@@ -6,7 +6,7 @@ from enum import StrEnum, auto
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vibe.core.agents import AgentProfile
-from vibe.core.utils import VIBE_WARNING_TAG
+from vibe.utils import VIBE_WARNING_TAG
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
@@ -174,14 +174,6 @@ This is the only file you are allowed to edit. Make sure to create it early and 
 
 
 PLAN_AGENT_EXIT = f"""<{VIBE_WARNING_TAG}>Plan mode has ended. If you have a plan ready, you can now start executing it. If not, you can now use editing tools and make changes to the system.</{VIBE_WARNING_TAG}>"""
-
-CHAT_AGENT_REMINDER = f"""<{VIBE_WARNING_TAG}>Chat mode is active. The user wants to have a conversation -- ask questions, get explanations, or discuss code and architecture. You MUST NOT make any edits, run any non-readonly tools, or otherwise make any changes to the system. This supersedes any other instructions you have received. Instead, you should:
-1. Answer the user's questions directly and comprehensively
-2. Explain code, concepts, or architecture as requested
-3. Use read-only tools (grep, read) to look up relevant code when needed
-4. Focus on being informative and conversational -- your response IS the deliverable, not a precursor to action</{VIBE_WARNING_TAG}>"""
-
-CHAT_AGENT_EXIT = f"""<{VIBE_WARNING_TAG}>Chat mode has ended. You can now use editing tools and make changes to the system.</{VIBE_WARNING_TAG}>"""
 
 
 class ReadOnlyAgentMiddleware:

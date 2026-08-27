@@ -32,6 +32,28 @@ if loaded:
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_importing_app_server_local_does_not_import_mcp_package() -> None:
+    code = """
+import sys
+import vibe.app_server.local
+
+blocked = [
+    "vibe.core.tools.mcp.tools",
+    "mcp",
+    "mistralai",
+]
+loaded = [name for name in blocked if name in sys.modules]
+if loaded:
+    raise SystemExit(f"unexpected app server modules loaded: {loaded}")
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", code], check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_importing_cli_entrypoint_does_not_import_git() -> None:
     code = """
 import sys
@@ -81,6 +103,7 @@ import vibe.core.tools.connectors.connector_registry
 blocked = [
     "vibe.core.tools.mcp.tools",
     "mcp",
+    "mistralai",
 ]
 loaded = [name for name in blocked if name in sys.modules]
 if loaded:
@@ -131,11 +154,48 @@ from vibe.core.config.harness_files import (
 
 class _Orchestrator:
     def __init__(self, config):
+        self._base_config = config
         self._config = config
+        self._layers = []
 
     @property
     def config(self):
         return self._config
+
+    @property
+    def layers(self):
+        return tuple(self._layers)
+
+    def insert_layer(self, layer, index):
+        self._layers.insert(index, layer)
+
+    def remove_layer(self, index):
+        return self._layers.pop(index)
+
+    def replace_or_append_layer(self, name, layer):
+        index = next(
+            (i for i, existing in enumerate(self._layers) if existing.name == name),
+            None,
+        )
+        if index is None:
+            self._layers.append(layer)
+            return
+        self._layers.pop(index)
+        self._layers.insert(index, layer)
+
+    def rebuild(self):
+        from vibe.core.config.builder import ConfigBuilder
+        from vibe.core.config.layers.overrides import OverridesLayer
+        from vibe.core.utils.concurrency import run_sync
+
+        builder = ConfigBuilder(type(self._base_config))
+        builder.add_layer(
+            OverridesLayer(
+                data=self._base_config.model_dump(mode="json"), name="fake-base"
+            )
+        )
+        builder.add_layers(list(self._layers))
+        self._config = run_sync(builder.build())
 
     async def set_field(self, *args, **kwargs):
         return []

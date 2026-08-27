@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+import importlib
+import sys
+import types
+
 import pytest
 from textual import events
+from textual._xterm_parser import XTermParser
 
+from vibe.cli.textual_ui import terminal_input_filter
 from vibe.cli.textual_ui.terminal_input_filter import (
+    _DRIVER_MODULE_PREFIX,
+    _ENABLE_SGR_MOUSE,
     FilteringXTermParser,
+    filter_input,
     patch_driver_parser,
     strip_malformed_mouse,
+    strip_terminal_reports,
 )
 
 NOISE = [
@@ -41,6 +52,48 @@ def test_strip_keeps_real_key_after_noise() -> None:
     assert strip_malformed_mouse("\x1b[<32;NaN;NaNM\x1b[A") == "\x1b[A"
 
 
+# OSC colour reports the terminal sends back in reply to Rich/Textual's colour
+# queries. They must never reach the input box.
+COLOR_REPORTS = [
+    "\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\",  # background, ST terminator
+    "\x1b]10;rgb:ffff/ffff/ffff\x07",  # foreground, BEL terminator
+    "\x1b]12;rgb:c0c0/c0c0/c0c0\x1b\\",  # cursor colour
+]
+
+
+@pytest.mark.parametrize("seq", COLOR_REPORTS)
+def test_strip_removes_osc_color_reports(seq: str) -> None:
+    assert strip_terminal_reports(seq) == ""
+
+
+def test_strip_removes_repeated_color_reports_keeping_real_key() -> None:
+    report = "\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\"
+    assert filter_input(report * 5 + "\x1b[A") == "\x1b[A"
+
+
+@pytest.mark.parametrize("seq", PRESERVED)
+def test_color_report_filter_preserves_real_input(seq: str) -> None:
+    assert strip_terminal_reports(seq) == seq
+
+
+def test_parser_emits_no_keys_for_color_report() -> None:
+    seq = "\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\"
+    tokens = list(FilteringXTermParser().feed(seq))
+    assert [t for t in tokens if isinstance(t, events.Key) and t.character] == []
+
+
+@pytest.mark.parametrize("split_at", range(1, len(COLOR_REPORTS[0])))
+def test_parser_buffers_color_report_across_input_chunks(split_at: int) -> None:
+    report = COLOR_REPORTS[0]
+    parser = FilteringXTermParser()
+
+    assert list(parser.feed(report[:split_at])) == []
+    tokens = list(parser.feed(report[split_at:] + "\x1b[A"))
+
+    assert [t for t in tokens if isinstance(t, events.Key) and t.character] == []
+    assert any(isinstance(t, events.Key) and t.key == "up" for t in tokens)
+
+
 @pytest.mark.parametrize("seq", NOISE)
 def test_parser_emits_no_keys_for_noise(seq: str) -> None:
     tokens = list(FilteringXTermParser().feed(seq))
@@ -61,15 +114,106 @@ def test_all_noise_chunk_does_not_trip_eof() -> None:
     )
 
 
-def test_patch_driver_parser_rebinds_module_global() -> None:
-    import sys
+# A legacy X10 mouse report. After tolerant decoding a high-column coordinate
+# byte becomes U+FFFD, but the `ESC [ M` introducer is intact.
+X10_MOUSE_REPORT = "\x1b[M@\ufffdC"
 
-    from textual.drivers.linux_driver import LinuxDriver
 
-    namespace = sys.modules[LinuxDriver.__module__].__dict__
-    original = namespace["XTermParser"]
-    try:
-        patch_driver_parser(LinuxDriver)
-        assert namespace["XTermParser"] is FilteringXTermParser
-    finally:
-        namespace["XTermParser"] = original
+@pytest.fixture
+def sent(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    written: list[str] = []
+
+    def record(sequence: str) -> bool:
+        written.append(sequence)
+        return True
+
+    monkeypatch.setattr(terminal_input_filter, "_write_to_terminal", record)
+    return written
+
+
+def test_x10_report_re_requests_sgr_mouse(sent: list[str]) -> None:
+    FilteringXTermParser().feed(X10_MOUSE_REPORT)
+    assert sent == [_ENABLE_SGR_MOUSE]
+
+
+def test_sgr_re_request_sent_only_once(sent: list[str]) -> None:
+    parser = FilteringXTermParser()
+    parser.feed(X10_MOUSE_REPORT)
+    parser.feed(X10_MOUSE_REPORT)
+    assert sent == [_ENABLE_SGR_MOUSE]
+
+
+def test_sgr_report_rearms_re_request(sent: list[str]) -> None:
+    parser = FilteringXTermParser()
+    parser.feed(X10_MOUSE_REPORT)
+    # Terminal switched to SGR; a later reattach must trigger a fresh request.
+    parser.feed("\x1b[<0;5;5M")
+    parser.feed(X10_MOUSE_REPORT)
+    assert sent == [_ENABLE_SGR_MOUSE, _ENABLE_SGR_MOUSE]
+
+
+def test_no_sgr_re_request_for_ordinary_input(sent: list[str]) -> None:
+    FilteringXTermParser().feed("\x1b[A")
+    assert sent == []
+
+
+def _driver_modules() -> dict[str, types.ModuleType]:
+    return {
+        name: module
+        for name, module in list(sys.modules.items())
+        if name.startswith(_DRIVER_MODULE_PREFIX)
+    }
+
+
+@pytest.fixture
+def restore_driver_parsers() -> Iterator[None]:
+    yield
+    for module in _driver_modules().values():
+        if module.__dict__.get("XTermParser") is FilteringXTermParser:
+            module.__dict__["XTermParser"] = XTermParser
+
+
+@pytest.mark.usefixtures("restore_driver_parsers")
+def test_patch_driver_parser_leaves_no_driver_module_unfiltered() -> None:
+    for name in ("linux_driver", "linux_inline_driver", "web_driver"):
+        importlib.import_module(_DRIVER_MODULE_PREFIX + name)
+
+    patch_driver_parser()
+
+    patched = {
+        name: module.__dict__["XTermParser"]
+        for name, module in _driver_modules().items()
+        if "XTermParser" in module.__dict__
+    }
+    assert set(patched.values()) == {FilteringXTermParser}
+    assert patched.keys() >= {
+        _DRIVER_MODULE_PREFIX + name
+        for name in ("linux_driver", "linux_inline_driver", "web_driver")
+    }
+
+
+@pytest.mark.usefixtures("restore_driver_parsers")
+def test_patch_driver_parser_rebinds_module_no_driver_class_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = types.ModuleType(_DRIVER_MODULE_PREFIX + "_fake_win32")
+    helper.__dict__["XTermParser"] = XTermParser
+    monkeypatch.setitem(sys.modules, helper.__name__, helper)
+
+    patch_driver_parser()
+
+    assert helper.__dict__["XTermParser"] is FilteringXTermParser
+
+
+@pytest.mark.usefixtures("restore_driver_parsers")
+def test_patch_driver_parser_ignores_unrelated_xterm_parser_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = object()
+    helper = types.ModuleType(_DRIVER_MODULE_PREFIX + "_fake_unrelated")
+    helper.__dict__["XTermParser"] = sentinel
+    monkeypatch.setitem(sys.modules, helper.__name__, helper)
+
+    patch_driver_parser()
+
+    assert helper.__dict__["XTermParser"] is sentinel

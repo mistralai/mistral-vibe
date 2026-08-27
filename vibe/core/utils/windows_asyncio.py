@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from vibe.core.utils.platform import is_windows
+from vibe.utils.platform import is_windows
 
 _PATCHED = False
 

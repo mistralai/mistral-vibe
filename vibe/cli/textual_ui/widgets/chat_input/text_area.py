@@ -3,17 +3,20 @@ from __future__ import annotations
 import platform
 import re
 import time
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
+from rich.style import Style
 from textual import events
+from textual._context import NoActiveAppError
 from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import TextArea
-from textual.widgets.text_area import Location, Selection
+from textual.widgets.text_area import Location, Selection, TextAreaTheme
 
 from vibe.cli.autocompletion.base import CompletionResult
 from vibe.cli.commands import CommandRegistry
 from vibe.cli.constants import CLIPBOARD_IMAGE_PASTE_SUPPORTED_SYSTEM
+from vibe.cli.input_modes import DEFAULT_MODE, InputMode
 from vibe.cli.textual_ui.external_editor import ExternalEditor
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
@@ -29,11 +32,11 @@ from vibe.cli.voice_manager.voice_manager_port import (
     VoiceManagerPort,
 )
 
-InputMode = Literal["!", "/", ">", "&"]
-
 _WORD = re.compile(r"\w+")
+_TRAILING_WORD = re.compile(r"\w+$")
 _DOUBLE_CLICK = 2
 _TRIPLE_CLICK = 3
+_DEFAULT_CLICK_CHAIN_TIME_THRESHOLD = 0.5
 
 FEEDBACK_RATING_KEYS: dict[str, str] = {"1": "good", "2": "fine", "3": "bad"}
 FEEDBACK_SNOOZE_KEY = "0"
@@ -42,6 +45,13 @@ FEEDBACK_SNOOZE_LABEL = "snooze"
 
 class ChatTextArea(TextArea):
     ALLOW_SELECT: ClassVar[bool] = False
+
+    _CHAT_THEME: ClassVar[TextAreaTheme] = TextAreaTheme(
+        name="vibe-chat",
+        base_style=None,
+        selection_style=Style(reverse=True),
+        cursor_line_style=None,
+    )
 
     BINDINGS: ClassVar[list[Binding]] = [
         Binding(
@@ -54,6 +64,10 @@ class ChatTextArea(TextArea):
         Binding("shift+backspace", "delete_left", "Delete character left", show=False),
         Binding("shift+delete", "delete_right", "Delete character right", show=False),
         Binding("ctrl+g", "open_external_editor", "External Editor", show=False),
+        Binding("alt+left", "cursor_word_left", "Word Left", show=False, priority=True),
+        Binding(
+            "alt+right", "cursor_word_right", "Word Right", show=False, priority=True
+        ),
         # Ctrl+V triggers an explicit clipboard-image paste on platforms where
         # we support it. On other platforms the binding is not registered, so
         # Textual's default text-paste action handles the key instead and the
@@ -73,7 +87,7 @@ class ChatTextArea(TextArea):
         ),
     ]
 
-    DEFAULT_MODE: ClassVar[Literal[">"]] = ">"
+    DEFAULT_MODE: ClassVar[InputMode] = DEFAULT_MODE
 
     class Submitted(Message):
         def __init__(self, value: str) -> None:
@@ -88,6 +102,24 @@ class ChatTextArea(TextArea):
 
     class HistoryReset(Message):
         """Message sent when history navigation should be reset."""
+
+    class QueueSelectionPrevious(Message):
+        """Move selection to the previous (older) queued item."""
+
+    class QueueSelectionNext(Message):
+        """Move selection to the next (newer) queued item."""
+
+    class QueueSelectionEnter(Message):
+        """Enter edit mode for the selected queued item."""
+
+    class QueueSelectionRemove(Message):
+        """Delete the selected queued item."""
+
+    class QueueSelectionExit(Message):
+        """Exit queue selection mode."""
+
+    class QueueEditCancelled(Message):
+        """Message sent when the user cancels queue-edit mode (Escape)."""
 
     class ModeChanged(Message):
         """Message sent when the input mode changes (>, !, /, &)."""
@@ -119,9 +151,13 @@ class ChatTextArea(TextArea):
     ) -> None:
         super().__init__(**kwargs)
         self._command_registry = command_registry
+        self.register_theme(self._CHAT_THEME)
+        self.theme = self._CHAT_THEME.name
         self._input_mode: InputMode = self.DEFAULT_MODE
         self._last_text = ""
         self._navigating_history = False
+        self._queue_edit_active = False
+        self._queue_selection_active = False
         self._applying_completion = False
         self._original_text: str = ""
         self._cursor_pos_after_load: tuple[int, int] | None = None
@@ -130,6 +166,20 @@ class ChatTextArea(TextArea):
         self._app_has_focus: bool = True
         self._voice_manager = voice_manager
         self._last_keystroke_time: float = 0.0
+        self._click_chain: int = 0
+        self._chain_consumed: bool = False
+        self._last_down_time: float | None = None
+        self._last_down_location: Location | None = None
+        self._drag_chain: int = 0
+        self._drag_anchor: Location | None = None
+        self._dragged: bool = False
+
+    # Workaround for an undo crash fixed upstream in
+    # https://github.com/Textualize/textual/pull/6687 — remove this override
+    # once that fix ships in our pinned Textual version.
+    def _recompute_cursor_offset(self) -> None:
+        cursor_location = self.clamp_visitable(self.cursor_location)
+        self._cursor_offset = self.wrapped_document.location_to_offset(cursor_location)
 
     def on_blur(self, event: events.Blur) -> None:
         # set_reactive avoids the selection watcher, which would call
@@ -147,18 +197,167 @@ class ChatTextArea(TextArea):
 
     def on_click(self, event: events.Click) -> None:
         self._mark_cursor_moved_if_needed()
-        if event.chain == _DOUBLE_CLICK:
-            self._select_word_at(self.get_target_document_location(event))
-        elif event.chain == _TRIPLE_CLICK:
-            self.select_line(self.get_target_document_location(event)[0])
 
     def _select_word_at(self, location: Location) -> None:
-        row, column = location
-        for match in _WORD.finditer(self.document[row]):
-            start, end = match.span()
-            if start <= column < end:
-                self.selection = Selection((row, start), (row, end))
-                return
+        boundary = self._word_boundary_around(location)
+        if boundary is not None:
+            self._set_selection(Selection(boundary[0], boundary[1]))
+
+    def _set_selection(self, selection: Selection) -> None:
+        # set_reactive avoids the selection watcher, which would call
+        # app.clear_selection() and wipe an in-progress selection.
+        self.set_reactive(TextArea.selection, selection)
+        self.refresh()
+
+    async def _on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button != 1:
+            return
+        event.prevent_default()
+        target = self.get_target_document_location(event)
+        self._set_selection(Selection.cursor(target))
+        # A mouse click relocates the caret without firing on_key/on_text_changed.
+        # Re-evaluate completions at the new caret so a now-invalid inline ghost
+        # clears, while the slash/path popups simply re-render in place.
+        if self._completion_manager:
+            self._completion_manager.on_text_changed(
+                self.get_full_text(), self._get_full_cursor_offset()
+            )
+        self._selecting = True
+        self.capture_mouse()
+        self._pause_blink(visible=False)
+        self.history.checkpoint()
+
+        self._dragged = False
+        self._update_click_chain(target, event.time)
+        self._drag_chain = self._click_chain
+        if self._click_chain >= _TRIPLE_CLICK:
+            self._drag_anchor = target
+            row = max(0, min(target[0], self.document.line_count - 1))
+            self._set_selection(Selection((row, 0), (row, len(self.document[row]))))
+        elif self._click_chain == _DOUBLE_CLICK:
+            self._drag_anchor = target
+            self._select_word_at(target)
+        else:
+            self._drag_anchor = None
+
+    async def _on_mouse_move(self, event: events.MouseMove) -> None:
+        event.prevent_default()
+        if (
+            self._selecting
+            and self._drag_anchor is not None
+            and self._drag_chain in {_DOUBLE_CLICK, _TRIPLE_CLICK}
+        ):
+            self._expand_drag_selection(event)
+        else:
+            await super()._on_mouse_move(event)
+
+    async def _on_mouse_up(self, event: events.MouseUp) -> None:
+        await super()._on_mouse_up(event)
+        if self._dragged:
+            self._click_chain = 0
+            self._chain_consumed = False
+            self._last_down_time = None
+            self._last_down_location = None
+        self._drag_chain = 0
+        self._drag_anchor = None
+        self._dragged = False
+
+    def _update_click_chain(self, target: Location, now: float) -> None:
+        try:
+            threshold = self.app.CLICK_CHAIN_TIME_THRESHOLD
+        except NoActiveAppError:
+            threshold = _DEFAULT_CLICK_CHAIN_TIME_THRESHOLD
+        within = (
+            self._last_down_location == target
+            and self._last_down_time is not None
+            and now - self._last_down_time <= threshold
+        )
+        if not within:
+            self._click_chain = 1
+            self._chain_consumed = False
+        elif self._chain_consumed:
+            # Wrap the chain back to a fresh single click so the cycle
+            # (char -> word -> paragraph) loops instead of sticking on CHAR.
+            self._click_chain = 1
+            self._chain_consumed = False
+        else:
+            self._click_chain += 1
+        if self._click_chain >= _TRIPLE_CLICK:
+            self._chain_consumed = True
+        self._last_down_time = now
+        self._last_down_location = target
+
+    def _expand_drag_selection(self, event: events.MouseMove) -> None:
+        anchor = self._drag_anchor
+        if anchor is None:
+            return
+        target = self.get_target_document_location(event)
+        if self._drag_chain >= _TRIPLE_CLICK:
+            start, end = self._snap_paragraph_drag(anchor, target)
+        else:
+            start, end = self._snap_word_drag(anchor, target)
+        new_selection = Selection(start, end)
+        changed = self.selection != new_selection
+        self._set_selection(new_selection)
+        if changed:
+            self._dragged = True
+
+    def _snap_word_drag(
+        self, anchor: Location, current: Location
+    ) -> tuple[Location, Location]:
+        if anchor <= current:
+            start_loc, end_loc = anchor, current
+        else:
+            start_loc, end_loc = current, anchor
+        return self._word_start_at(start_loc), self._word_end_at(end_loc)
+
+    def _snap_paragraph_drag(
+        self, anchor: Location, current: Location
+    ) -> tuple[Location, Location]:
+        if anchor <= current:
+            start_row, end_row = anchor[0], current[0]
+        else:
+            start_row, end_row = current[0], anchor[0]
+        return self._paragraph_start_at((start_row, 0)), self._paragraph_end_at((
+            end_row,
+            0,
+        ))
+
+    def _word_boundary_around(
+        self, location: Location
+    ) -> tuple[Location, Location] | None:
+        row, col = location
+        if not 0 <= row < self.document.line_count:
+            return None
+        line = self.document[row]
+        col = max(0, min(col, len(line)))
+        left = _TRAILING_WORD.search(line[:col])
+        right = _WORD.match(line[col:])
+        left_len = len(left.group()) if left else 0
+        right_len = len(right.group()) if right else 0
+        if not left_len and not right_len:
+            return None
+        return (row, col - left_len), (row, col + right_len)
+
+    def _word_start_at(self, location: Location) -> Location:
+        boundary = self._word_boundary_around(location)
+        return boundary[0] if boundary is not None else location
+
+    def _word_end_at(self, location: Location) -> Location:
+        boundary = self._word_boundary_around(location)
+        return boundary[1] if boundary is not None else location
+
+    def _paragraph_start_at(self, location: Location) -> Location:
+        row = location[0]
+        if not 0 <= row < self.document.line_count:
+            return location
+        return (row, 0)
+
+    def _paragraph_end_at(self, location: Location) -> Location:
+        row = location[0]
+        if not 0 <= row < self.document.line_count:
+            return location
+        return (row, len(self.document[row]))
 
     async def _on_paste(self, event: events.Paste) -> None:
         # Best-effort: terminals that emit bracketed paste sequences will
@@ -208,7 +407,12 @@ class ChatTextArea(TextArea):
             self.move_cursor((rewritten.count("\n"), len(last_line)))
             return
 
-        if not self._navigating_history and self.text != self._last_text:
+        if (
+            not self._navigating_history
+            and not self._queue_edit_active
+            and not self._queue_selection_active
+            and self.text != self._last_text
+        ):
             self._original_text = ""
             self._cursor_pos_after_load = None
             self._cursor_moved_since_load = False
@@ -227,6 +431,20 @@ class ChatTextArea(TextArea):
             self._completion_manager.on_text_changed(
                 self.get_full_text(), self._get_full_cursor_offset()
             )
+
+    def watch_selection(self, previous: Selection, selection: Selection) -> None:
+        # A pure caret move (arrow, word/line nav, home/end, …) leaves the text
+        # unchanged, so on_text_area_changed never fires. Re-evaluate completions
+        # at the new caret here so a now-invalid inline ghost clears. Edits,
+        # completion accepts and history loads change the text (their selection
+        # update runs before _last_text is refreshed), so they are skipped and
+        # handled by on_text_area_changed instead.
+        # getattr: the selection reactive can fire during TextArea.__init__,
+        # before this subclass sets _completion_manager / _last_text.
+        manager = getattr(self, "_completion_manager", None)
+        if manager is None or previous == selection or self.text != self._last_text:
+            return
+        manager.on_text_changed(self.get_full_text(), self._get_full_cursor_offset())
 
     def _mark_cursor_moved_if_needed(self) -> None:
         if (
@@ -292,6 +510,11 @@ class ChatTextArea(TextArea):
 
     feedback_active: bool = False
 
+    def replace_voice_manager(self, voice_manager: VoiceManagerPort | None) -> None:
+        # The text area holds the manager reference for Ctrl+R and stop/cancel;
+        # swap in the real one after the session is ready (cold mount-first path).
+        self._voice_manager = voice_manager
+
     async def _handle_voice_key(self, event: events.Key) -> bool:
         if not self._voice_manager:
             return False
@@ -313,7 +536,7 @@ class ChatTextArea(TextArea):
             try:
                 self._voice_manager.start_recording()
             except RecordingStartError as e:
-                self.notify(str(e), severity="warning")
+                self.notify(str(e), severity="warning", markup=False)
             return True
 
         return False
@@ -321,7 +544,7 @@ class ChatTextArea(TextArea):
     def time_since_last_keystroke(self) -> float:
         return time.monotonic() - self._last_keystroke_time
 
-    async def _on_key(self, event: events.Key) -> None:  # noqa: PLR0911
+    async def _on_key(self, event: events.Key) -> None:  # noqa: PLR0911, PLR0912, PLR0915
         self._last_keystroke_time = time.monotonic()
 
         if await self._handle_voice_key(event):
@@ -342,6 +565,34 @@ class ChatTextArea(TextArea):
                 return
             if event.character is not None:
                 self.post_message(self.NonFeedbackKeyPressed())
+
+        if self._queue_selection_active:
+            match event.key:
+                case "up":
+                    event.prevent_default()
+                    event.stop()
+                    self.post_message(self.QueueSelectionPrevious())
+                    return
+                case "down":
+                    event.prevent_default()
+                    event.stop()
+                    self.post_message(self.QueueSelectionNext())
+                    return
+                case "enter":
+                    event.prevent_default()
+                    event.stop()
+                    self.post_message(self.QueueSelectionEnter())
+                    return
+                case "backspace" | "delete":
+                    event.prevent_default()
+                    event.stop()
+                    self.post_message(self.QueueSelectionRemove())
+                    return
+                case "escape":
+                    event.prevent_default()
+                    event.stop()
+                    self.post_message(self.QueueSelectionExit())
+                    return
 
         manager = self._completion_manager
         if manager:
@@ -389,6 +640,12 @@ class ChatTextArea(TextArea):
             event.stop()
             return
 
+        if event.key == "escape" and self._queue_edit_active:
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.QueueEditCancelled())
+            return
+
         if event.key == "up" and self._handle_history_up():
             event.prevent_default()
             event.stop()
@@ -418,6 +675,12 @@ class ChatTextArea(TextArea):
             self._completion_manager.on_text_changed(
                 self.get_full_text(), self._get_full_cursor_offset()
             )
+
+    def set_inline_suggestion(self, suggestion: str) -> None:
+        self.suggestion = suggestion
+
+    def clear_inline_suggestion(self) -> None:
+        self.suggestion = ""
 
     def get_cursor_offset(self) -> int:
         text = self.text
@@ -498,7 +761,7 @@ class ChatTextArea(TextArea):
         return self.get_cursor_offset() + self._get_mode_prefix_length()
 
     def _get_mode_prefix_length(self) -> int:
-        return {">": 0, "/": 1, "!": 1, "&": 1}[self._input_mode]
+        return 0 if self.is_default_mode else 1
 
     @property
     def mode_characters(self) -> set[InputMode]:
@@ -510,6 +773,10 @@ class ChatTextArea(TextArea):
     @property
     def input_mode(self) -> InputMode:
         return self._input_mode
+
+    @property
+    def is_default_mode(self) -> bool:
+        return self._input_mode == self.DEFAULT_MODE
 
     def set_mode(self, mode: InputMode) -> None:
         if self._input_mode != mode:

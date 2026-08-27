@@ -39,6 +39,7 @@ def setup_e2e_env(
     monkeypatch.setenv("MISTRAL_API_KEY", "fake-key")
     monkeypatch.setenv("VIBE_HOME", str(vibe_home))
     monkeypatch.setenv("VIBE_TEST_DISABLE_KEYRING", "1")
+    monkeypatch.setenv("VIBE_TEST_DISABLE_AUTO_TITLE", "1")
     monkeypatch.setenv("TERM", "xterm-256color")
 
 
@@ -67,6 +68,7 @@ def spawned_vibe_process() -> SpawnedVibeFactory:
         captured = io.StringIO()
         env = os.environ.copy()
         env["VIBE_TEST_DISABLE_KEYRING"] = "1"
+        env["VIBE_TEST_DISABLE_AUTO_TITLE"] = "1"
         child = pexpect.spawn(
             "uv",
             ["run", "vibe", "--workdir", str(workdir), *(extra_args or [])],

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 
 import pytest
 
@@ -28,7 +27,6 @@ from vibe.core.types import (
     CompactEndEvent,
     CompactStartEvent,
     FunctionCall,
-    LLMMessage,
     Role,
     ToolCall,
     UserMessageEvent,
@@ -41,6 +39,7 @@ def make_config(
     active_model: str = "devstral-latest",
     input_price: float = 0.4,
     output_price: float = 2.0,
+    cached_input_price: float | None = None,
     disable_logging: bool = True,
     auto_compact_threshold: int = 0,
     include_project_context: bool = False,
@@ -55,6 +54,7 @@ def make_config(
             alias="devstral-latest",
             input_price=input_price,
             output_price=output_price,
+            cached_input_price=cached_input_price,
             auto_compact_threshold=auto_compact_threshold,
         ),
         ModelConfig(
@@ -101,16 +101,6 @@ def make_config(
     )
 
 
-@pytest.fixture
-def observer_capture() -> tuple[list[LLMMessage], Callable[[LLMMessage], None]]:
-    observed: list[LLMMessage] = []
-
-    def observer(msg: LLMMessage) -> None:
-        observed.append(msg)
-
-    return observed, observer
-
-
 class TestAgentStatsHelpers:
     def test_update_pricing(self) -> None:
         stats = AgentStats()
@@ -123,11 +113,13 @@ class TestAgentStatsHelpers:
             steps=5,
             session_prompt_tokens=1000,
             session_completion_tokens=500,
+            session_cached_tokens=400,
             tool_calls_succeeded=3,
             tool_calls_failed=1,
             context_tokens=800,
             last_turn_prompt_tokens=100,
             last_turn_completion_tokens=50,
+            last_turn_cached_tokens=80,
             last_turn_duration=1.5,
             tokens_per_second=33.3,
             input_price_per_million=0.4,
@@ -139,6 +131,7 @@ class TestAgentStatsHelpers:
         assert stats.steps == 5
         assert stats.session_prompt_tokens == 1000
         assert stats.session_completion_tokens == 500
+        assert stats.session_cached_tokens == 400
         assert stats.tool_calls_succeeded == 3
         assert stats.tool_calls_failed == 1
         assert stats.input_price_per_million == 0.4
@@ -147,6 +140,7 @@ class TestAgentStatsHelpers:
         assert stats.context_tokens == 0
         assert stats.last_turn_prompt_tokens == 0
         assert stats.last_turn_completion_tokens == 0
+        assert stats.last_turn_cached_tokens == 0
         assert stats.last_turn_duration == 0.0
         assert stats.tokens_per_second == 0.0
 
@@ -163,6 +157,85 @@ class TestAgentStatsHelpers:
         stats.update_pricing(2.0, 4.0)
         # Cost = 1M * $2/M + 0.5M * $4/M = $2 + $2 = $4
         assert stats.session_cost == 4.0
+
+
+class TestCachedTokenStats:
+    @pytest.mark.asyncio
+    async def test_cached_tokens_accumulate_across_turns(self) -> None:
+        backend = FakeBackend([
+            [mock_llm_chunk(content="R1", prompt_tokens=100, cached_tokens=40)],
+            [mock_llm_chunk(content="R2", prompt_tokens=120, cached_tokens=90)],
+        ])
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
+
+        async for _ in agent.act("First"):
+            pass
+        assert agent.stats.last_turn_cached_tokens == 40
+        assert agent.stats.session_cached_tokens == 40
+
+        async for _ in agent.act("Second"):
+            pass
+        assert agent.stats.last_turn_cached_tokens == 90
+        assert agent.stats.session_cached_tokens == 130
+
+    def test_cached_tokens_serialized_in_stats_dump(self) -> None:
+        stats = AgentStats(session_cached_tokens=42, last_turn_cached_tokens=7)
+        dumped = stats.model_dump()
+        assert dumped["session_cached_tokens"] == 42
+        assert dumped["last_turn_cached_tokens"] == 7
+
+    def test_session_cost_discounts_cached_tokens(self) -> None:
+        stats = AgentStats(
+            session_prompt_tokens=1_000_000,
+            session_completion_tokens=0,
+            session_cached_tokens=400_000,
+            input_price_per_million=1.0,
+            output_price_per_million=2.0,
+            cached_input_price_per_million=0.1,
+        )
+        # 600k * $1/M + 400k * $0.1/M = $0.6 + $0.04 = $0.64
+        assert stats.session_cost == pytest.approx(0.64)
+
+    def test_session_cost_bills_cached_at_input_rate_when_unset(self) -> None:
+        stats = AgentStats(
+            session_prompt_tokens=1_000_000,
+            session_completion_tokens=0,
+            session_cached_tokens=400_000,
+            input_price_per_million=1.0,
+            output_price_per_million=2.0,
+        )
+        assert stats.session_cost == pytest.approx(1.0)
+
+    def test_session_cost_never_negative_when_cached_exceeds_prompt(self) -> None:
+        stats = AgentStats(
+            session_prompt_tokens=100_000,
+            session_completion_tokens=0,
+            session_cached_tokens=190_000,
+            input_price_per_million=1.0,
+            output_price_per_million=2.0,
+            cached_input_price_per_million=0.1,
+        )
+        # cached is clamped to the 100k prompt tokens, all billed at $0.1/M.
+        assert stats.session_cost == pytest.approx(0.01)
+
+    def test_update_pricing_sets_cached_rate(self) -> None:
+        stats = AgentStats(
+            session_prompt_tokens=1_000_000, session_cached_tokens=1_000_000
+        )
+        stats.update_pricing(1.0, 2.0, 0.1)
+        assert stats.cached_input_price_per_million == 0.1
+        assert stats.session_cost == pytest.approx(0.1)
+
+    @pytest.mark.asyncio
+    async def test_cached_price_wired_from_active_model(self) -> None:
+        backend = FakeBackend(mock_llm_chunk(content="Response"))
+        config = make_config(input_price=1.0, cached_input_price=0.1)
+        agent = build_test_agent_loop(config=config, backend=backend)
+
+        async for _ in agent.act("Hello"):
+            pass
+
+        assert agent.stats.cached_input_price_per_million == 0.1
 
 
 class TestReloadPreservesStats:
@@ -389,23 +462,6 @@ class TestReloadPreservesMessages:
         assert len(agent.messages) == 1
         assert agent.messages[0].role == Role.system
 
-    @pytest.mark.asyncio
-    async def test_reload_does_not_reemit_to_observer(self, observer_capture) -> None:
-        observed, observer = observer_capture
-        backend = FakeBackend(mock_llm_chunk(content="Response"))
-        agent = build_test_agent_loop(
-            config=make_config(), message_observer=observer, backend=backend
-        )
-
-        async for _ in agent.act("Hello"):
-            pass
-
-        observed.clear()
-
-        await agent.reload_with_initial_messages()
-
-        assert len(observed) == 0
-
 
 class TestConcurrentReloads:
     @pytest.mark.asyncio
@@ -434,7 +490,7 @@ class TestConcurrentReloads:
 
         assert results == [None, None]
         assert agent.messages[0].content == winning_system_prompt
-        assert agent.base_config.system_prompt_id == "cli"
+        assert agent.config.system_prompt_id == "cli"
 
 
 class TestCompactStatsHandling:
@@ -514,7 +570,7 @@ class TestCompactStatsHandling:
         assert agent.stats.tool_calls_succeeded == 1
 
     @pytest.mark.asyncio
-    async def test_compact_resets_session_id(self) -> None:
+    async def test_compact_keeps_session_id(self) -> None:
         backend = FakeBackend([
             [mock_llm_chunk(content="Long response " * 100)],
             [mock_llm_chunk(content="<summary>")],
@@ -533,26 +589,19 @@ class TestCompactStatsHandling:
 
         await agent.compact()
 
-        assert agent.session_id != original_session_id
+        assert agent.session_id == original_session_id
         assert agent.session_id == agent.session_logger.session_id
 
 
 class TestAutoCompactIntegration:
     @pytest.mark.asyncio
     async def test_auto_compact_triggers_and_preserves_stats(self) -> None:
-        observed: list[tuple[Role, str | None]] = []
-
-        def observer(msg: LLMMessage) -> None:
-            observed.append((msg.role, msg.content))
-
         backend = FakeBackend([
             [mock_llm_chunk(content="<summary>done</summary>")],
             [mock_llm_chunk(content="<final>")],
         ])
         cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
-        agent = build_test_agent_loop(
-            config=cfg, message_observer=observer, backend=backend
-        )
+        agent = build_test_agent_loop(config=cfg, backend=backend)
         agent.stats.context_tokens = 2
 
         events = [ev async for ev in agent.act("Hello")]
@@ -569,10 +618,7 @@ class TestAutoCompactIntegration:
         assert start.current_context_tokens == 2
         assert start.threshold == 1
         assert final.content == "<final>"
-
-        roles = [r for r, _ in observed]
-        assert roles == [Role.system, Role.user, Role.assistant]
-        assert observed[1][1] == "Hello"
+        assert events[0].content == "Hello"
 
 
 class TestClearHistoryFullReset:
@@ -665,33 +711,24 @@ class TestClearHistoryFullReset:
         assert agent.parent_session_id is None
 
 
-class TestClearHistoryObserverBugfix:
+class TestClearHistoryMessageReset:
     @pytest.mark.asyncio
-    async def test_clear_history_observer_sees_new_messages(
-        self, observer_capture
-    ) -> None:
-        """Bug fix: clear_history previously left a stale index, so new messages
-        appended after clearing were never observed.
-        """
-        observed, observer = observer_capture
+    async def test_clear_history_accepts_new_messages(self) -> None:
         backend = FakeBackend([
             [mock_llm_chunk(content="First")],
             [mock_llm_chunk(content="Second")],
         ])
-        agent = build_test_agent_loop(
-            config=make_config(), message_observer=observer, backend=backend
-        )
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
 
         async for _ in agent.act("Hello"):
             pass
 
         await agent.clear_history()
-        observed.clear()
 
         async for _ in agent.act("After clear"):
             pass
 
-        roles = [msg.role for msg in observed]
+        roles = [msg.role for msg in agent.messages]
         assert Role.user in roles
         assert Role.assistant in roles
 

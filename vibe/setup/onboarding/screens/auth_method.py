@@ -84,7 +84,7 @@ class AuthMethodScreen(OnboardingScreen):
         self.app.switch_screen("api_key")
 
     def action_browser(self) -> None:
-        self.app.switch_screen("browser_sign_in")
+        self.app.switch_screen("sign_in_target")
 
     def action_move_up(self) -> None:
         self._selected_index = (self._selected_index - 1) % len(self._option_widgets)

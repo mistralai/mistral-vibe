@@ -10,7 +10,7 @@ from vibe.cli.update_notifier import (
     UpdateGatewayCause,
     UpdateGatewayError,
 )
-from vibe.core.utils.http import VibeAsyncHTTPClient
+from vibe.utils.http import VibeAsyncHTTPClient
 
 Handler = Callable[[httpx.Request], httpx.Response]
 

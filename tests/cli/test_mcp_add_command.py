@@ -84,6 +84,7 @@ async def test_mcp_add_saves_oauth_server_and_prints_next_steps(
     app = build_test_vibe_app(config=build_test_vibe_config())
     mounted_widgets = _capture_mounted_widgets(app, monkeypatch)
 
+    await app.prepare()
     await app._mcp_add("https://mcp.linear.app/mcp --no-login")
 
     server = (await build_default_orchestrator()).config.mcp_servers[0]
@@ -104,6 +105,7 @@ async def test_mcp_add_saves_name_and_scopes(monkeypatch: pytest.MonkeyPatch) ->
     app = build_test_vibe_app(config=build_test_vibe_config())
     mounted_widgets = _capture_mounted_widgets(app, monkeypatch)
 
+    await app.prepare()
     await app._mcp_add(
         "https://mcp.example.com/mcp --name docs --scope read --scope write --no-login"
     )
@@ -125,6 +127,7 @@ async def test_mcp_add_saves_http_transport(monkeypatch: pytest.MonkeyPatch) -> 
     app = build_test_vibe_app(config=build_test_vibe_config())
     _capture_mounted_widgets(app, monkeypatch)
 
+    await app.prepare()
     await app._mcp_add("https://mcp.example.com/mcp --transport http --no-login")
 
     server = (await build_default_orchestrator()).config.mcp_servers[0]
@@ -142,6 +145,7 @@ async def test_mcp_add_delegates_to_login_by_default(
     login = AsyncMock()
     monkeypatch.setattr(app, "_mcp_login", login)
 
+    await app.prepare()
     await app._mcp_add("https://mcp.linear.app/mcp")
 
     login.assert_awaited_once_with("linear")
@@ -159,6 +163,7 @@ async def test_mcp_add_no_login_skips_login(monkeypatch: pytest.MonkeyPatch) -> 
     login = AsyncMock()
     monkeypatch.setattr(app, "_mcp_login", login)
 
+    await app.prepare()
     await app._mcp_add("https://mcp.linear.app/mcp --no-login")
 
     login.assert_not_awaited()
@@ -201,6 +206,7 @@ async def test_mcp_subcommand_handler_recognizes_add(
     app = build_test_vibe_app(config=build_test_vibe_config())
     mounted_widgets = _capture_mounted_widgets(app, monkeypatch)
 
+    await app.prepare()
     handled = await app._maybe_handle_mcp_subcommand(
         "add https://mcp.linear.app/mcp --no-login"
     )

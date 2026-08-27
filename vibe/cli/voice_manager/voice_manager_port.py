@@ -1,21 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from enum import StrEnum, auto
 from typing import Protocol
 
-from vibe.core.audio_recorder.audio_recorder_port import RecordingMode
+from vibe.utils.audio import RecordingMode
 
 
 class TranscribeState(StrEnum):
     IDLE = auto()
     RECORDING = auto()
     FLUSHING = auto()
-
-
-@dataclass(frozen=True, slots=True)
-class VoiceToggleResult:
-    enabled: bool
 
 
 class RecordingStartError(Exception):
@@ -32,6 +26,12 @@ class VoiceManagerListener:
     def on_transcribe_text(self, text: str) -> None:
         pass
 
+    def on_transcribe_error(self, message: str) -> None:
+        pass
+
+    def on_transcribe_notice(self, message: str) -> None:
+        pass
+
 
 class VoiceManagerPort(Protocol):
     @property
@@ -43,7 +43,7 @@ class VoiceManagerPort(Protocol):
     @property
     def peak(self) -> float: ...
 
-    def toggle_voice_mode(self) -> VoiceToggleResult: ...
+    def apply_enabled(self, enabled: bool) -> None: ...
 
     def start_recording(self, mode: RecordingMode = RecordingMode.STREAM) -> None: ...
 

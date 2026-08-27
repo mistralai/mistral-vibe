@@ -12,14 +12,22 @@ try:
 except OSError:
     pytest.skip("PortAudio library not available", allow_module_level=True)
 
-from vibe.core.audio_player.audio_player import AudioPlayer
-from vibe.core.audio_player.audio_player_port import (
+from vibe.cli.audio_player.audio_player import AudioPlayer
+from vibe.cli.audio_player.audio_player_port import (
     AlreadyPlayingError,
     AudioBackendUnavailableError,
     AudioFormat,
     NoAudioOutputDeviceError,
     UnsupportedAudioFormatError,
 )
+
+
+@pytest.fixture(autouse=True)
+def available_output_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "vibe.cli.audio_player.audio_player.sd.query_devices",
+        lambda *, kind: {"max_output_channels": 2},
+    )
 
 
 def _make_wav_bytes(
@@ -51,21 +59,21 @@ class TestAudioPlayerInitialState:
 
 
 class TestPlayback:
-    @patch("vibe.core.audio_player.audio_player.sd.RawOutputStream")
+    @patch("vibe.cli.audio_player.audio_player.sd.RawOutputStream")
     def test_play_sets_playing_state(self, mock_stream_cls: MagicMock) -> None:
         player = AudioPlayer()
         player.play(_make_wav_bytes(), AudioFormat.WAV)
         assert player.is_playing is True
         mock_stream_cls.return_value.start.assert_called_once()
 
-    @patch("vibe.core.audio_player.audio_player.sd.RawOutputStream")
+    @patch("vibe.cli.audio_player.audio_player.sd.RawOutputStream")
     def test_play_when_already_playing_raises(self, mock_stream_cls: MagicMock) -> None:
         player = AudioPlayer()
         player.play(_make_wav_bytes(), AudioFormat.WAV)
         with pytest.raises(AlreadyPlayingError):
             player.play(_make_wav_bytes(), AudioFormat.WAV)
 
-    @patch("vibe.core.audio_player.audio_player.sd.RawOutputStream")
+    @patch("vibe.cli.audio_player.audio_player.sd.RawOutputStream")
     def test_callback_feeds_audio_data(self, mock_stream_cls: MagicMock) -> None:
         wav_data = _make_wav_bytes(n_frames=512)
         player = AudioPlayer()
@@ -77,7 +85,7 @@ class TestPlayback:
 
         assert outdata != bytearray(512 * 2)
 
-    @patch("vibe.core.audio_player.audio_player.sd.RawOutputStream")
+    @patch("vibe.cli.audio_player.audio_player.sd.RawOutputStream")
     def test_callback_pads_silence_at_end(self, mock_stream_cls: MagicMock) -> None:
         wav_data = _make_wav_bytes(n_frames=256)
         player = AudioPlayer()
@@ -93,7 +101,7 @@ class TestPlayback:
         with pytest.raises(sd.CallbackStop):
             callback(outdata2, 256, {}, sd.CallbackFlags())
 
-    @patch("vibe.core.audio_player.audio_player.sd.RawOutputStream")
+    @patch("vibe.cli.audio_player.audio_player.sd.RawOutputStream")
     def test_on_finished_called_after_natural_completion(
         self, mock_stream_cls: MagicMock
     ) -> None:
@@ -111,7 +119,7 @@ class TestPlayback:
         assert player.is_playing is False
         assert len(finished) == 1
 
-    @patch("vibe.core.audio_player.audio_player.sd.RawOutputStream")
+    @patch("vibe.cli.audio_player.audio_player.sd.RawOutputStream")
     def test_can_play_multiple_times(self, mock_stream_cls: MagicMock) -> None:
         player = AudioPlayer()
 
@@ -123,7 +131,7 @@ class TestPlayback:
         player.play(_make_wav_bytes(), AudioFormat.WAV)
         assert player.is_playing is True
 
-    @patch("vibe.core.audio_player.audio_player.sd.RawOutputStream")
+    @patch("vibe.cli.audio_player.audio_player.sd.RawOutputStream")
     def test_creates_stream_with_correct_params(
         self, mock_stream_cls: MagicMock
     ) -> None:
@@ -138,14 +146,14 @@ class TestPlayback:
 
 
 class TestStop:
-    @patch("vibe.core.audio_player.audio_player.sd.RawOutputStream")
+    @patch("vibe.cli.audio_player.audio_player.sd.RawOutputStream")
     def test_stop_closes_stream(self, mock_stream_cls: MagicMock) -> None:
         player = AudioPlayer()
         player.play(_make_wav_bytes(), AudioFormat.WAV)
         player.stop()
         mock_stream_cls.return_value.close.assert_called_once()
 
-    @patch("vibe.core.audio_player.audio_player.sd.RawOutputStream")
+    @patch("vibe.cli.audio_player.audio_player.sd.RawOutputStream")
     def test_finished_callback_resets_state(self, mock_stream_cls: MagicMock) -> None:
         player = AudioPlayer()
         player.play(_make_wav_bytes(), AudioFormat.WAV)
@@ -160,7 +168,7 @@ class TestStop:
         player.stop()
         assert player.is_playing is False
 
-    @patch("vibe.core.audio_player.audio_player.sd.RawOutputStream")
+    @patch("vibe.cli.audio_player.audio_player.sd.RawOutputStream")
     def test_stop_triggers_on_finished_via_callback(
         self, mock_stream_cls: MagicMock
     ) -> None:
@@ -188,15 +196,15 @@ class TestUnsupportedFormat:
 
 class TestGuardAudioOutput:
     def test_raises_when_no_sounddevice(self) -> None:
-        with patch("vibe.core.audio_player.audio_player.sd", None):
+        with patch("vibe.cli.audio_player.audio_player.sd", None):
             player = AudioPlayer()
             with pytest.raises(AudioBackendUnavailableError):
                 player.play(_make_wav_bytes(), AudioFormat.WAV)
 
-    @patch("vibe.core.audio_player.audio_player.sd.RawOutputStream")
+    @patch("vibe.cli.audio_player.audio_player.sd.RawOutputStream")
     def test_raises_when_no_output_device(self, mock_stream_cls: MagicMock) -> None:
         with patch(
-            "vibe.core.audio_player.audio_player.sd.query_devices",
+            "vibe.cli.audio_player.audio_player.sd.query_devices",
             side_effect=sd.PortAudioError(-1),
         ):
             player = AudioPlayer()

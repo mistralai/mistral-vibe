@@ -9,12 +9,13 @@ from urllib.parse import urljoin
 import httpx
 
 from vibe import __version__
-from vibe.core.config import ProviderConfig, VibeConfigSchema, resolve_api_key
+from vibe.core.config import ProviderConfig, VibeConfigSchema
+from vibe.core.config.admin_config import AdminConfigOutcome
 from vibe.core.llm.format import ResolvedToolCall
-from vibe.core.logger import logger
 from vibe.core.telemetry.build_metadata import build_base_metadata
 from vibe.core.telemetry.types import (
     AttachmentKind,
+    ExperimentAssignment,
     LaunchContext,
     ProjectPickerTelemetryPayload,
     RemoteProjectOutcome,
@@ -23,11 +24,18 @@ from vibe.core.telemetry.types import (
     TeleportFailureDetails,
     TeleportFailureStage,
 )
-from vibe.core.utils import get_server_url_from_api_base, get_user_agent
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.observability.logging import logger
+from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.http import (
+    VibeAsyncHTTPClient,
+    build_ssl_context,
+    get_server_url_from_api_base,
+    get_user_agent,
+)
 
 if TYPE_CHECKING:
     from vibe.core.agent_loop import ToolDecision
+    from vibe.core.experiments.models import ExperimentAttributes
 
 _DEFAULT_TELEMETRY_BASE_URL = "https://api.mistral.ai"
 _DATALAKE_EVENTS_PATH = "/v1/datalake/events"
@@ -71,8 +79,11 @@ class TelemetryClient:
         session_id_getter: Callable[[], str | None] | None = None,
         parent_session_id_getter: Callable[[], str | None] | None = None,
         launch_context: LaunchContext | None = None,
-        experiments_getter: Callable[[], dict[str, str]] | None = None,
+        experiments_getter: Callable[[], list[ExperimentAssignment]] | None = None,
         user_plan_getter: Callable[[], str | None] | None = None,
+        experiment_attributes_getter: (
+            Callable[[], ExperimentAttributes | None] | None
+        ) = None,
     ) -> None:
         self._config_getter = config_getter
         self._session_id_getter = session_id_getter
@@ -80,6 +91,7 @@ class TelemetryClient:
         self._launch_context = launch_context
         self._experiments_getter = experiments_getter
         self._user_plan_getter = user_plan_getter
+        self._experiment_attributes_getter = experiment_attributes_getter
         self._client: VibeAsyncHTTPClient | None = None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self.last_correlation_id: str | None = None
@@ -133,22 +145,24 @@ class TelemetryClient:
         return self._user_plan_getter()
 
     def build_client_event_metadata(self) -> dict[str, Any]:
-        experiments = (
+        experiment_assignments = (
             self._experiments_getter() if self._experiments_getter is not None else None
+        )
+        attributes = (
+            self._experiment_attributes_getter()
+            if self._experiment_attributes_getter is not None
+            else None
         )
         return build_base_metadata(
             launch_context=self._launch_context,
             session_id=self.session_id,
             parent_session_id=self.parent_session_id,
-            experiments=experiments,
+            experiment_assignments=experiment_assignments,
             user_plan=self.user_plan,
+            experiment_attributes=(
+                attributes.model_dump(exclude_none=True) if attributes else None
+            ),
         )
-
-    def _is_experimental_bash_tool_enabled(self) -> bool:
-        try:
-            return self._config_getter().experimental_bash_tool
-        except Exception:
-            return False
 
     def send_telemetry_event(
         self,
@@ -229,6 +243,17 @@ class TelemetryClient:
                     )
         return nb_files_created, nb_files_modified, file_extension
 
+    def _extract_bash_background(
+        self, tool_call: ResolvedToolCall, result: dict[str, Any] | None
+    ) -> bool | None:
+        # Result reports the actual mode (a sync command that soft-timed-out
+        # becomes background); fall back to the requested mode on the failure
+        # path where no result is available.
+        if result is not None and isinstance(result.get("background"), bool):
+            return result["background"]
+        requested = tool_call.args_dict.get("background")
+        return requested if isinstance(requested, bool) else None
+
     def send_tool_call_finished(
         self,
         *,
@@ -246,8 +271,9 @@ class TelemetryClient:
         nb_files_created, nb_files_modified, file_extension = (
             self._calculate_file_metrics(tool_call, status, result)
         )
+        bash_background = self._extract_bash_background(tool_call, result)
 
-        payload = {
+        payload: dict[str, Any] = {
             "tool_name": tool_call.tool_name,
             "status": status,
             "decision": verdict_value,
@@ -259,6 +285,8 @@ class TelemetryClient:
             "file_extension": file_extension,
             "message_id": message_id,
         }
+        if bash_background is not None:
+            payload["bash_background"] = bash_background
         self.send_telemetry_event("vibe.tool_call_finished", payload)
 
     def send_user_copied_text(self, text: str) -> None:
@@ -325,16 +353,30 @@ class TelemetryClient:
                 if lc and lc.terminal_emulator is not None
                 else None
             ),
-            "experimental_bash_tool": self._is_experimental_bash_tool_enabled(),
         }
         self.send_telemetry_event("vibe.new_session", payload)
 
     def send_session_closed(self) -> None:
         self.send_telemetry_event("vibe.session_closed", {})
 
-    def send_onboarding_api_key_added(self) -> None:
+    def send_admin_config_applied(
+        self,
+        *,
+        outcome: AdminConfigOutcome,
+        enforced_keys: list[str] | None = None,
+        error: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {"outcome": outcome.value}
+        if enforced_keys is not None:
+            payload["nb_enforced_fields"] = len(enforced_keys)
+        if error is not None:
+            payload["has_error"] = True
+        self.send_telemetry_event("vibe.admin_config_applied", payload)
+
+    def send_onboarding_api_key_added(self, *, custom_domain: bool = False) -> None:
         self.send_telemetry_event(
-            "vibe.onboarding_api_key_added", {"version": __version__}
+            "vibe.onboarding_api_key_added",
+            {"version": __version__, "custom_domain": custom_domain},
         )
 
     def send_request_sent(

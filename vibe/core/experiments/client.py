@@ -10,8 +10,8 @@ from vibe.core.experiments._constants import (
     build_eval_url,
 )
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
-from vibe.core.logger import logger
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.observability.logging import logger
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 
 class RemoteEvalClient:

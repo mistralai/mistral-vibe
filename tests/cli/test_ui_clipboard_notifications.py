@@ -6,7 +6,7 @@ import pytest
 from textual.selection import Selection
 from textual.widget import Widget
 
-from vibe.cli.clipboard import copy_selection_to_clipboard
+from vibe.cli.clipboard import ClipboardCopyResult, copy_selection_to_clipboard
 from vibe.cli.textual_ui.app import VibeApp
 
 
@@ -29,7 +29,7 @@ async def test_ui_clipboard_notification_does_not_crash_on_markup_text(
 ) -> None:
     async with vibe_app.run_test(notifications=True) as pilot:
         await vibe_app.mount(ClipboardSelectionWidget("[/]"))
-        with patch("vibe.cli.clipboard._copy_to_clipboard"):
+        with patch("vibe.cli.clipboard.copy_to_clipboard", return_value=True):
             copy_selection_to_clipboard(vibe_app)
 
         await pilot.pause(0.1)
@@ -38,3 +38,39 @@ async def test_ui_clipboard_notification_does_not_crash_on_markup_text(
         notification = notifications[-1]
         assert notification.markup is False
         assert "Selection copied to clipboard" in notification.message
+
+
+def test_clipboard_notice_omits_hint_when_copy_is_verified(vibe_app: VibeApp) -> None:
+    result = ClipboardCopyResult(text="hello", verified=True)
+
+    assert vibe_app._clipboard_notice_message(result) == "Copied to clipboard"
+
+
+def test_clipboard_notice_uses_generic_hint_when_copy_is_unverified(
+    vibe_app: VibeApp,
+) -> None:
+    result = ClipboardCopyResult(text="hello", verified=False)
+
+    assert vibe_app._clipboard_notice_message(result) == (
+        "Copied · if paste fails, hold Shift (Option in iTerm2, Fn in Terminal.app) "
+        "while selecting for native copy"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verified", [True, False])
+async def test_action_copy_selection_shows_clipboard_notice(
+    vibe_app: VibeApp, verified: bool
+) -> None:
+    async with vibe_app.run_test() as pilot:
+        await vibe_app.mount(ClipboardSelectionWidget("hello"))
+        with (
+            patch("vibe.cli.clipboard.copy_to_clipboard", return_value=verified),
+            patch.object(vibe_app._inline_notice, "show") as show_notice,
+        ):
+            vibe_app.action_copy_selection()
+            await pilot.pause(0.1)
+
+        show_notice.assert_called_once()
+        message = show_notice.call_args.args[0]
+        assert ("if paste fails" in message) is not verified

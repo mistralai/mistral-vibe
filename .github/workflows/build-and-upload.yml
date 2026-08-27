@@ -105,10 +105,39 @@ jobs:
         shell: bash
         run: bash ./scripts/ci/package-pyinstaller-artifacts.sh ${{ matrix.os }} ${{ matrix.arch }} ${{ steps.get_version.outputs.version }} vibe-acp vibe
 
+      - name: Smoke Zed ACP archive
+        shell: bash
+        run: |
+          extract_dir="dist/zed-acp-smoke-dir"
+          mkdir -p "$extract_dir"
+
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            archive="dist/release-assets/vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}.zip"
+            powershell -NoProfile -Command "Expand-Archive -Path '$archive' -DestinationPath '$extract_dir' -Force"
+          else
+            archive="dist/release-assets/vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}.tar.gz"
+            tar -xzf "$archive" -C "$extract_dir"
+          fi
+
+          if [ "${{ matrix.os }}" = "darwin" ] && [ -d "$extract_dir/_internal/Python.framework" ]; then
+            test -e "$extract_dir/_internal/Python"
+            test -L "$extract_dir/_internal/Python"
+            file -L "$extract_dir/_internal/Python" | grep -q "Mach-O"
+          fi
+
+          uv run --no-dev python tests/acp/smoke_binary.py "$extract_dir"
+
       - name: Upload ACP release asset
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: dist/release-assets/vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}.zip
+          archive: false
+
+      - name: Upload ACP tar release asset
+        if: ${{ matrix.os != 'windows' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: dist/release-assets/vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}.tar.gz
           archive: false
 
       - name: Upload CLI release asset
@@ -168,15 +197,25 @@ jobs:
 
       - name: Set up Python (container)
         if: ${{ matrix.container }}
-        run: yum install -y python3.11 python3.11-pip unzip
+        run: yum install -y python3.11 python3.11-pip unzip tar gzip
 
       - name: Install smoke test deps
         run: ${{ matrix.container && 'python3.11' || 'python' }} -m pip install agent-client-protocol==0.11.0
 
-      - name: Download ACP artifact
+      - name: Download ACP zip artifact
+        if: ${{ matrix.os == 'windows' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-*.zip
+          merge-multiple: true
+          skip-decompress: true
+          path: artifacts/vibe-acp
+
+      - name: Download ACP tar artifact
+        if: ${{ matrix.os != 'windows' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-*.tar.gz
           merge-multiple: true
           skip-decompress: true
           path: artifacts/vibe-acp
@@ -195,7 +234,7 @@ jobs:
           shopt -s nullglob
           mkdir -p dist/vibe-acp-dir dist/vibe-dir
 
-          extract_asset() {
+          extract_zip_asset() {
             local artifact_dir="$1"
             local output_dir="$2"
             local zips=("$artifact_dir"/*.zip)
@@ -213,8 +252,26 @@ jobs:
             unzip -oq "${zips[0]}" -d "$output_dir"
           }
 
-          extract_asset artifacts/vibe-acp dist/vibe-acp-dir
-          extract_asset artifacts/vibe dist/vibe-dir
+          extract_tar_asset() {
+            local artifact_dir="$1"
+            local output_dir="$2"
+            local tarballs=("$artifact_dir"/*.tar.gz)
+
+            if [ "${#tarballs[@]}" -ne 1 ]; then
+              echo "Expected one tar.gz in $artifact_dir, found ${#tarballs[@]}" >&2
+              exit 1
+            fi
+
+            tar -xzf "${tarballs[0]}" -C "$output_dir"
+          }
+
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            extract_zip_asset artifacts/vibe-acp dist/vibe-acp-dir
+          else
+            extract_tar_asset artifacts/vibe-acp dist/vibe-acp-dir
+          fi
+
+          extract_zip_asset artifacts/vibe dist/vibe-dir
 
       - name: Run ACP smoke tests
         run: ${{ matrix.container && 'python3.11' || 'python' }} tests/acp/smoke_binary.py dist/vibe-acp-dir
@@ -243,11 +300,14 @@ jobs:
         run: |
           mkdir release-assets
           find artifacts -name '*.zip' -exec cp {} release-assets/ \;
-          test "$(find release-assets -name '*.zip' | wc -l)" -gt 0
+          find artifacts -name '*.tar.gz' -exec cp {} release-assets/ \;
+          test "$(find release-assets -type f | wc -l)" -gt 0
 
       - name: Attach binaries to release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
-          files: release-assets/*.zip
+          files: |
+            release-assets/*.zip
+            release-assets/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

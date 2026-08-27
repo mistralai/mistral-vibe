@@ -12,6 +12,7 @@ from vibe.core.checkpoints import (
     FileSnapshot,
     FileState,
 )
+from vibe.core.compaction import select_model_context
 from vibe.core.rewind import RewindError, RewindManager
 from vibe.core.types import LLMMessage, MessageList, Role
 
@@ -224,6 +225,57 @@ class TestRewind:
         assert saved_lengths == [3]
         assert reset_calls == []
         assert len(messages) == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("message_index", "expected_context", "expected_boundaries"),
+        [
+            pytest.param(1, ["system"], 0, id="before-compaction"),
+            pytest.param(
+                4, ["system", "first compacted context"], 1, id="between-compactions"
+            ),
+            pytest.param(
+                7, ["system", "second compacted context"], 2, id="after-compactions"
+            ),
+        ],
+    )
+    async def test_rewind_uses_latest_remaining_compaction_boundary(
+        self, message_index: int, expected_context: list[str], expected_boundaries: int
+    ) -> None:
+        messages = MessageList([
+            LLMMessage(role=Role.system, content="system"),
+            LLMMessage(role=Role.user, content="first", message_id="u1"),
+            LLMMessage(role=Role.assistant, content="first reply"),
+            LLMMessage(
+                role=Role.user,
+                content="first compacted context",
+                injected=True,
+                context_boundary="compaction",
+            ),
+            LLMMessage(role=Role.user, content="second", message_id="u2"),
+            LLMMessage(role=Role.assistant, content="second reply"),
+            LLMMessage(
+                role=Role.user,
+                content="second compacted context",
+                injected=True,
+                context_boundary="compaction",
+            ),
+            LLMMessage(role=Role.user, content="third", message_id="u3"),
+            LLMMessage(role=Role.assistant, content="third reply"),
+        ])
+        sh = _shells(messages)
+
+        await sh.rewind.rewind_to_message(
+            message_index, restore_files=False, inplace=True
+        )
+
+        assert [message.content for message in select_model_context(messages)] == (
+            expected_context
+        )
+        assert (
+            sum(message.context_boundary == "compaction" for message in messages)
+            == expected_boundaries
+        )
 
     @pytest.mark.asyncio
     async def test_rewind_to_first_message_inplace_opts_into_empty_persist(

@@ -10,6 +10,7 @@ import pytest
 from textual.app import WINDOWS
 
 from tests.conftest import build_test_vibe_app, build_test_vibe_config
+from tests.stubs.app_config import build_test_app_config
 from vibe.cli.textual_ui.app import VibeApp, _run_app_with_cleanup
 from vibe.cli.textual_ui.quit_manager import QUIT_CONFIRM_DELAY, QuitManager
 
@@ -19,12 +20,26 @@ def app() -> VibeApp:
     return build_test_vibe_app()
 
 
+@pytest.fixture(autouse=True)
+def app_config_view(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = build_test_app_config()
+    monkeypatch.setattr(VibeApp, "config", property(lambda _app: config))
+
+
 @pytest.fixture
 def qm() -> QuitManager:
     mock_app = MagicMock()
     mock_app.query_one.side_effect = Exception("not mounted")
     mock_app.set_timer.return_value = MagicMock()
     return QuitManager(mock_app)
+
+
+class _SessionReadyApp:
+    """Warm-path base: app_server is set so the cold-path force-quit guard is skipped."""
+
+    @pytest.fixture(autouse=True)
+    def _set_app_server(self, app: VibeApp) -> None:
+        app._app_server = MagicMock()
 
 
 class TestQuitManager:
@@ -83,7 +98,7 @@ class TestQuitManager:
         assert qm.confirm_key is None
 
 
-class TestActionInterruptOrQuit:
+class TestActionInterruptOrQuit(_SessionReadyApp):
     def test_clears_input_when_has_value(self, app: VibeApp) -> None:
         mock_container = MagicMock()
         mock_container.value = "some text"
@@ -138,7 +153,7 @@ class TestActionInterruptOrQuit:
         mock_confirm.assert_called_once_with("Ctrl+C", "")
 
 
-class TestActionDeleteRightOrQuit:
+class TestActionDeleteRightOrQuit(_SessionReadyApp):
     def test_deletes_right_when_input_has_value(self, app: VibeApp) -> None:
         mock_input = MagicMock()
         mock_container = MagicMock()
@@ -187,10 +202,17 @@ class TestActionDeleteRightOrQuit:
             "Ctrl+D", "1 queued message will be discarded"
         )
 
-    def test_quits_immediately_when_confirmation_disabled(self) -> None:
+    def test_quits_immediately_when_confirmation_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         app = build_test_vibe_app(
             config=build_test_vibe_config(ask_confirmation_on_exit=False)
         )
+        app._app_server = MagicMock()
+        config = build_test_app_config().model_copy(
+            update={"ask_confirmation_on_exit": False}
+        )
+        monkeypatch.setattr(VibeApp, "config", property(lambda _app: config))
         with (
             patch.object(app, "_get_chat_input", return_value=None),
             patch.object(app, "_force_quit") as mock_quit,
@@ -230,25 +252,24 @@ async def test_shutdown_disables_future_queue_drains(app: VibeApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_begin_shutdown_stops_scheduled_loop_runner(app: VibeApp) -> None:
-    with (
-        patch.object(app._queue, "shutdown", new_callable=AsyncMock) as queue_shutdown,
-        patch.object(app._loop_runner, "stop", new_callable=AsyncMock) as loop_stop,
-    ):
+async def test_begin_shutdown_stops_the_input_queue(app: VibeApp) -> None:
+    await app.prepare()
+    with patch.object(app._queue, "shutdown", new_callable=AsyncMock) as queue_shutdown:
         await app._begin_shutdown()
 
     queue_shutdown.assert_awaited_once()
-    loop_stop.assert_awaited_once()
+    await app.shutdown_cleanup()
 
 
 @pytest.mark.asyncio
 async def test_shutdown_cleanup_flushes_telemetry(app: VibeApp) -> None:
+    await app.prepare()
     with patch.object(
-        app.agent_loop.telemetry_client, "aclose", new_callable=AsyncMock
-    ) as telemetry_aclose:
+        app.app_server.resources.telemetry, "flush", new_callable=AsyncMock
+    ) as telemetry_flush:
         await app.shutdown_cleanup()
 
-    telemetry_aclose.assert_awaited_once()
+    telemetry_flush.assert_awaited_once()
 
 
 @pytest.mark.asyncio

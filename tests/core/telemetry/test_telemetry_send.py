@@ -20,18 +20,25 @@ from vibe.core.telemetry.build_metadata import (
 from vibe.core.telemetry.send import TelemetryClient, _extract_file_extension
 from vibe.core.telemetry.types import (
     AttachmentKind,
+    ExperimentAssignment,
     LaunchContext,
     TelemetryRequestMetadata,
     TerminalEmulator,
 )
 from vibe.core.tools.base import BaseTool, ToolPermission
 from vibe.core.types import Backend
-from vibe.core.utils import get_platform_id, get_platform_version, get_user_agent
+from vibe.core.utils import get_platform_id, get_platform_version
+from vibe.utils.http import get_user_agent
 
 _original_send_telemetry_event = TelemetryClient.send_telemetry_event
 from vibe.core.tools.builtins.edit import Edit, EditArgs
 from vibe.core.tools.builtins.read_file import ReadFile, ReadFileArgs
 from vibe.core.tools.builtins.write_file import WriteFile, WriteFileArgs
+
+
+class _BashArgs(BaseModel):
+    command: str = ""
+    background: bool = False
 
 
 def _make_resolved_tool_call(
@@ -55,6 +62,12 @@ def _make_resolved_tool_call(
         case "read_file":
             validated = ReadFileArgs(file_path=args_dict.get("file_path", "foo.txt"))
             cls = ReadFile
+        case "bash":
+            validated = _BashArgs(
+                command=args_dict.get("command", "echo hi"),
+                background=args_dict.get("background", False),
+            )
+            cls = FakeTool
         case _:
             validated = FakeToolArgs()
             cls = FakeTool
@@ -216,7 +229,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=decision,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
         )
 
@@ -228,11 +241,12 @@ class TestTelemetryClient:
         assert properties["status"] == "success"
         assert properties["decision"] == "execute"
         assert properties["approval_type"] == "always"
-        assert properties["agent_profile_name"] == "default"
+        assert properties["agent_profile_name"] == "ask"
         assert properties["model"] == "mistral-large"
         assert properties["nb_files_created"] == 0
         assert properties["nb_files_modified"] == 0
         assert properties["file_extension"] is None
+        assert "bash_background" not in properties
         assert properties["message_id"] is None
 
     def test_send_tool_call_finished_with_message_id(
@@ -246,7 +260,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             message_id="msg-123",
         )
@@ -264,7 +278,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={},
         )
@@ -286,7 +300,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={},
         )
@@ -306,7 +320,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={},
         )
@@ -328,7 +342,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="success",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={},
         )
@@ -346,13 +360,125 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="failure",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
             result={},
         )
 
         assert telemetry_events[0]["properties"]["nb_files_created"] == 0
         assert telemetry_events[0]["properties"]["file_extension"] is None
+
+    def test_send_tool_call_finished_bash_background_false_for_sync_command(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+        tool_call = _make_resolved_tool_call("bash", {"background": False})
+
+        client.send_tool_call_finished(
+            tool_call=tool_call,
+            status="success",
+            decision=None,
+            agent_profile_name="ask",
+            model="mistral-large",
+            result={"background": False},
+        )
+
+        assert telemetry_events[0]["properties"]["bash_background"] is False
+
+    def test_send_tool_call_finished_bash_background_true_for_background_command(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+        tool_call = _make_resolved_tool_call("bash", {"background": True})
+
+        client.send_tool_call_finished(
+            tool_call=tool_call,
+            status="success",
+            decision=None,
+            agent_profile_name="ask",
+            model="mistral-large",
+            result={"background": True},
+        )
+
+        assert telemetry_events[0]["properties"]["bash_background"] is True
+
+    def test_send_tool_call_finished_bash_background_uses_result_over_requested(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+        tool_call = _make_resolved_tool_call("bash", {"background": False})
+
+        client.send_tool_call_finished(
+            tool_call=tool_call,
+            status="success",
+            decision=None,
+            agent_profile_name="ask",
+            model="mistral-large",
+            result={"background": True},
+        )
+
+        assert telemetry_events[0]["properties"]["bash_background"] is True
+
+    def test_send_tool_call_finished_bash_background_falls_back_to_requested_on_failure(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+        tool_call = _make_resolved_tool_call("bash", {"background": True})
+
+        client.send_tool_call_finished(
+            tool_call=tool_call,
+            status="failure",
+            decision=None,
+            agent_profile_name="ask",
+            model="mistral-large",
+        )
+
+        assert telemetry_events[0]["properties"]["bash_background"] is True
+
+    def test_send_tool_call_finished_bash_background_covers_managed_shell_family(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+        tool_call = _make_resolved_tool_call("git_bash", {"background": True})
+
+        client.send_tool_call_finished(
+            tool_call=tool_call,
+            status="success",
+            decision=None,
+            agent_profile_name="ask",
+            model="mistral-large",
+            result={"background": True},
+        )
+
+        assert telemetry_events[0]["properties"]["bash_background"] is True
+
+    def test_send_tool_call_finished_bash_background_none_when_field_absent(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+        tool_call = ResolvedToolCall(
+            tool_name="bash",
+            tool_class=FakeTool,
+            validated_args=FakeToolArgs(),
+            call_id="call_1",
+        )
+
+        client.send_tool_call_finished(
+            tool_call=tool_call,
+            status="success",
+            decision=None,
+            agent_profile_name="ask",
+            model="mistral-large",
+            result={"returncode": 0},
+        )
+
+        assert "bash_background" not in telemetry_events[0]["properties"]
 
     def test_send_tool_call_finished_decision_none(
         self, telemetry_events: list[dict[str, Any]]
@@ -365,7 +491,7 @@ class TestTelemetryClient:
             tool_call=tool_call,
             status="skipped",
             decision=None,
-            agent_profile_name="default",
+            agent_profile_name="ask",
             model="mistral-large",
         )
 
@@ -700,18 +826,24 @@ class TestTelemetryClient:
         assert properties["client_name"] == "vscode"
         assert properties["client_version"] == "1.96.0"
         assert properties["terminal_emulator"] == "vscode"
-        assert properties["experimental_bash_tool"] is False
+        assert "experimental_bash_tool" not in properties
         assert "version" in properties
         assert type(properties["terminal_emulator"]) is str
         _assert_system_metadata(properties, TerminalEmulator.VSCODE)
 
-    def test_send_new_session_payload_includes_experimental_bash_tool_flag(
+    def test_send_new_session_metadata_includes_managed_shell_experiment(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(
-            enable_telemetry=True, experimental_bash_tool=True
+        config = build_test_vibe_config(enable_telemetry=True)
+        assignment = ExperimentAssignment(
+            experiment_id="vibe_cli_managed_shell_tools",
+            experiment_name="vibe_cli_managed_shell_tools",
+            variation_name="managed",
+            variation_id=1,
         )
-        client = TelemetryClient(config_getter=lambda: config)
+        client = TelemetryClient(
+            config_getter=lambda: config, experiments_getter=lambda: [assignment]
+        )
 
         client.send_new_session(
             has_agents_md=False, nb_skills=0, nb_mcp_servers=0, nb_models=1
@@ -719,7 +851,17 @@ class TestTelemetryClient:
 
         assert len(telemetry_events) == 1
         assert telemetry_events[0]["event_name"] == "vibe.new_session"
-        assert telemetry_events[0]["properties"]["experimental_bash_tool"] is True
+        properties = telemetry_events[0]["properties"]
+        assert "experimental_bash_tool" not in properties
+        assert properties["experiments"] == {"vibe_cli_managed_shell_tools": "managed"}
+        assert properties["experiment_assignments"] == [
+            {
+                "experiment_id": "vibe_cli_managed_shell_tools",
+                "experiment_name": "vibe_cli_managed_shell_tools",
+                "variation_name": "managed",
+                "variation_id": 1,
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_send_session_closed_payload(

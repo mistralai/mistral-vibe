@@ -88,7 +88,38 @@ Example:
 LOG_LEVEL=DEBUG uv run vibe
 ```
 
-You can also view logs in real-time within the application by pressing `Ctrl+\` to open the debug console.
+#### Runtime log level
+
+You can change the log level at runtime without restarting:
+
+```text
+/log-level                       # show current levels (session, env, config, effective)
+/log-level set DEBUG             # override for this process
+/log-level set-global INFO       # also persist to config.toml
+/log-level unset                 # clear the session override
+```
+
+You can also set `log_level` in `config.toml` (optional, defaults to `WARNING` when absent):
+
+```toml
+log_level = "DEBUG"
+```
+
+Precedence: session override > `LOG_LEVEL` env var > `log_level` in config.toml > default.
+
+The debug console (`Ctrl+\`) streams the file log in real time — change the level with `/log-level` and new entries appear immediately.
+
+#### Logging conventions for contributors
+
+- Import the logger from `vibe.observability.logging`:
+  ```python
+  from vibe.observability.logging import logger
+  ```
+- Pass variables as `%s` positional args, not f-string interpolation — this defers formatting to the logging framework (skipped entirely when the level gates the message out):
+  ```python
+  logger.info("Model call completed model=%s duration_ms=%d", alias, duration_ms)
+  ```
+- Use `DEBUG` for "about to do X" diagnostics and `INFO` for "here's what happened" outcomes with metadata (duration, token counts, error type). Never log raw model messages, tool arguments, or tool output — only metadata.
 
 ### Running Tests
 
@@ -96,6 +127,14 @@ Run all tests:
 
 ```bash
 uv run pytest
+```
+
+By default, pytest uses `max(1, ceil(available CPUs / 2) - 1)` workers to leave
+resources available for the rest of the machine. Set
+`PYTEST_XDIST_AUTO_NUM_WORKERS` to a positive integer to override that limit:
+
+```bash
+PYTEST_XDIST_AUTO_NUM_WORKERS=4 uv run pytest
 ```
 
 Run tests with verbose output:

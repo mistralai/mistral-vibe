@@ -18,88 +18,17 @@ from vibe.core.agents._migration import migrate_agent_profile_config
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import (
     BUILTIN_AGENTS,
-    CHAT,
     AgentProfile,
     AgentSafety,
     AgentType,
     BuiltinAgentName,
-    _deep_merge,
 )
 from vibe.core.config import VibeConfigSchema
+from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.manager import ToolManager
 from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
-
-
-class TestDeepMerge:
-    def test_simple_merge(self) -> None:
-        base = {"a": 1, "b": 2}
-        override = {"c": 3}
-        result = _deep_merge(base, override)
-        assert result == {"a": 1, "b": 2, "c": 3}
-
-    def test_override_existing_key(self) -> None:
-        base = {"a": 1, "b": 2}
-        override = {"b": 3}
-        result = _deep_merge(base, override)
-        assert result == {"a": 1, "b": 3}
-
-    def test_nested_dict_merge(self) -> None:
-        base = {"a": {"x": 1, "y": 2}}
-        override = {"a": {"y": 3, "z": 4}}
-        result = _deep_merge(base, override)
-        assert result == {"a": {"x": 1, "y": 3, "z": 4}}
-
-    def test_deeply_nested_merge(self) -> None:
-        base = {"a": {"b": {"c": 1}}}
-        override = {"a": {"b": {"d": 2}}}
-        result = _deep_merge(base, override)
-        assert result == {"a": {"b": {"c": 1, "d": 2}}}
-
-    def test_override_dict_with_non_dict(self) -> None:
-        base = {"a": {"x": 1}}
-        override = {"a": "replaced"}
-        result = _deep_merge(base, override)
-        assert result == {"a": "replaced"}
-
-    def test_override_non_dict_with_dict(self) -> None:
-        base = {"a": "string"}
-        override = {"a": {"x": 1}}
-        result = _deep_merge(base, override)
-        assert result == {"a": {"x": 1}}
-
-    def test_preserves_original_base(self) -> None:
-        base = {"a": 1, "b": {"c": 2}}
-        override = {"b": {"d": 3}}
-        _deep_merge(base, override)
-        assert base == {"a": 1, "b": {"c": 2}}
-
-    def test_empty_override(self) -> None:
-        base = {"a": 1, "b": 2}
-        override: dict = {}
-        result = _deep_merge(base, override)
-        assert result == {"a": 1, "b": 2}
-
-    def test_empty_base(self) -> None:
-        base: dict = {}
-        override = {"a": 1}
-        result = _deep_merge(base, override)
-        assert result == {"a": 1}
-
-    def test_lists_are_overridden_not_merged(self) -> None:
-        """Lists should be replaced entirely, not merged element-by-element."""
-        base = {"tools": ["read", "grep", "bash"]}
-        override = {"tools": ["write_file"]}
-        result = _deep_merge(base, override)
-        assert result == {"tools": ["write_file"]}
-
-    def test_nested_lists_are_overridden_not_merged(self) -> None:
-        """Nested lists in dicts should also be replaced, not merged."""
-        base = {"config": {"enabled_tools": ["a", "b", "c"], "other": 1}}
-        override = {"config": {"enabled_tools": ["x", "y"]}}
-        result = _deep_merge(base, override)
-        assert result == {"config": {"enabled_tools": ["x", "y"], "other": 1}}
 
 
 class TestAgentSafety:
@@ -109,8 +38,8 @@ class TestAgentSafety:
         assert AgentSafety.DESTRUCTIVE == "destructive"
         assert AgentSafety.YOLO == "yolo"
 
-    def test_default_agent_is_neutral(self) -> None:
-        assert BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].safety == AgentSafety.NEUTRAL
+    def test_ask_agent_is_neutral(self) -> None:
+        assert BUILTIN_AGENTS[BuiltinAgentName.ASK].safety == AgentSafety.NEUTRAL
 
     def test_auto_approve_agent_is_yolo(self) -> None:
         assert BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].safety == AgentSafety.YOLO
@@ -127,11 +56,10 @@ class TestAgentSafety:
 
 class TestAgentProfile:
     def test_all_builtin_agents_have_valid_names(self) -> None:
-        acp_only = {BuiltinAgentName.CHAT}
-        assert set(BUILTIN_AGENTS.keys()) == set(BuiltinAgentName) - acp_only
+        assert set(BUILTIN_AGENTS.keys()) == set(BuiltinAgentName)
 
     def test_display_name_property(self) -> None:
-        assert BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].display_name == "Default"
+        assert BUILTIN_AGENTS[BuiltinAgentName.ASK].display_name == "Ask"
         assert (
             BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].display_name == "Auto Approve"
         )
@@ -141,9 +69,7 @@ class TestAgentProfile:
         )
 
     def test_description_property(self) -> None:
-        assert (
-            "approval" in BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].description.lower()
-        )
+        assert "approval" in BUILTIN_AGENTS[BuiltinAgentName.ASK].description.lower()
         assert (
             "auto" in BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].description.lower()
         )
@@ -162,7 +88,7 @@ class TestAgentProfile:
             if profile.agent_type == AgentType.AGENT
         ]
         assert set(agents) == {
-            BuiltinAgentName.DEFAULT,
+            BuiltinAgentName.ASK,
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
             BuiltinAgentName.AUTO_APPROVE,
@@ -170,22 +96,57 @@ class TestAgentProfile:
         }
 
 
+ENABLED_TOOLS_PROFILE = AgentProfile(
+    name="enabled-tools",
+    display_name="Enabled Tools",
+    description="Profile with an explicit enabled_tools allowlist",
+    safety=AgentSafety.SAFE,
+    overrides={
+        "bypass_tool_permissions": True,
+        "enabled_tools": ["grep", "read_file", "ask_user_question", "task"],
+    },
+)
+
+
+def _apply_profile(
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    base: VibeConfigSchema,
+    overrides: dict[str, object],
+) -> VibeConfigSchema:
+    orchestrator = load_orchestrator(base)
+    orchestrator.insert_layer(
+        AgentProfileLayer(data=overrides), len(orchestrator.layers)
+    )
+    orchestrator.rebuild()
+    return orchestrator.config
+
+
 class TestAgentApplyToConfig:
     def test_profile_disabled_tools_are_merged_with_base_config(
-        self, make_config: Callable[..., VibeConfigSchema]
+        self,
+        make_config: Callable[..., VibeConfigSchema],
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         base = make_config(disabled_tools=["ask_user_question"])
 
-        result = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].apply_to_config(base)
+        result = _apply_profile(
+            load_orchestrator, base, BUILTIN_AGENTS[BuiltinAgentName.ASK].overrides
+        )
 
         assert set(result.disabled_tools) == {"ask_user_question", "exit_plan_mode"}
 
     def test_profile_disabled_tools_preserve_user_disabled_tools(
-        self, make_config: Callable[..., VibeConfigSchema]
+        self,
+        make_config: Callable[..., VibeConfigSchema],
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         base = make_config(disabled_tools=["ask_user_question", "custom_tool"])
 
-        result = BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].apply_to_config(base)
+        result = _apply_profile(
+            load_orchestrator,
+            base,
+            BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].overrides,
+        )
 
         assert set(result.disabled_tools) == {
             "ask_user_question",
@@ -194,10 +155,14 @@ class TestAgentApplyToConfig:
         }
 
     def test_disabled_tools_filter_profile_enabled_tools_at_runtime(
-        self, make_config: Callable[..., VibeConfigSchema]
+        self,
+        make_config: Callable[..., VibeConfigSchema],
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         base = make_config(disabled_tools=["ask_*"])
-        result = CHAT.apply_to_config(base)
+        result = _apply_profile(
+            load_orchestrator, base, ENABLED_TOOLS_PROFILE.overrides
+        )
         manager = ToolManager(lambda: result)
 
         assert "ask_user_question" in result.enabled_tools
@@ -209,11 +174,15 @@ class TestAgentApplyToConfig:
         assert "task" in available_tools
 
     def test_empty_base_disabled_tools_leaves_enabled_tools_untouched(
-        self, make_config: Callable[..., VibeConfigSchema]
+        self,
+        make_config: Callable[..., VibeConfigSchema],
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         base = make_config(disabled_tools=[])
 
-        result = CHAT.apply_to_config(base)
+        result = _apply_profile(
+            load_orchestrator, base, ENABLED_TOOLS_PROFILE.overrides
+        )
 
         assert "ask_user_question" in result.enabled_tools
 
@@ -221,6 +190,7 @@ class TestAgentApplyToConfig:
         self,
         mock_prompts_dirs: tuple[Path, Path],
         make_config: Callable[..., VibeConfigSchema],
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         _, global_prompts = mock_prompts_dirs
         (global_prompts / "cc.md").write_text("Global custom prompt")
@@ -233,7 +203,7 @@ class TestAgentApplyToConfig:
             safety=AgentSafety.NEUTRAL,
             overrides={"system_prompt_id": "cc"},
         )
-        result = agent.apply_to_config(base)
+        result = _apply_profile(load_orchestrator, base, agent.overrides)
         assert result.system_prompt_id == "cc"
         assert result.system_prompt == "Global custom prompt"
 
@@ -340,7 +310,7 @@ class TestAgentProfileMigration:
         assert data == {"base_disabled": "exit_plan_mode"}
 
     def test_from_toml_normalizes_legacy_profile_in_memory(
-        self, tmp_path: Path
+        self, tmp_path: Path, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
     ) -> None:
         agent_file = tmp_path / "legacy.toml"
         agent_file.write_text(
@@ -353,9 +323,8 @@ class TestAgentProfileMigration:
         )
 
         agent = AgentProfile.from_toml(agent_file)
-        result = agent.apply_to_config(
-            build_test_vibe_config(disabled_tools=["ask_user_question"])
-        )
+        base = build_test_vibe_config(disabled_tools=["ask_user_question"])
+        result = _apply_profile(load_orchestrator, base, agent.overrides)
 
         assert agent.overrides == {"disabled_tools": ["bash", "exit_plan_mode"]}
         assert result.disabled_tools == ["ask_user_question", "bash", "exit_plan_mode"]
@@ -394,18 +363,18 @@ class TestAgentProfileMigration:
             raise RuntimeError("migration failed")
 
         monkeypatch.setattr(
-            "vibe.core.agents.manager.migrate_agent_profile_files", fail_migration
+            "vibe.core.agents.registry.migrate_agent_profile_files", fail_migration
         )
         config = build_test_vibe_config()
 
         manager = AgentManager(load_orchestrator(config))
 
-        assert "default" in manager.available_agents
+        assert "ask" in manager.available_agents
 
 
 class TestAgentProfileOverrides:
-    def test_default_agent_disables_exit_plan_mode(self) -> None:
-        overrides = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].overrides
+    def test_ask_agent_disables_exit_plan_mode(self) -> None:
+        overrides = BUILTIN_AGENTS[BuiltinAgentName.ASK].overrides
         assert "exit_plan_mode" in overrides.get("disabled_tools", [])
 
     def test_auto_approve_agent_sets_bypass_tool_permissions(self) -> None:
@@ -456,11 +425,11 @@ class TestAgentManagerCycling:
         self, make_config: Callable[..., VibeConfigSchema], backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=make_config(), agent_name=BuiltinAgentName.DEFAULT, backend=backend
+            config=make_config(), agent_name=BuiltinAgentName.ASK, backend=backend
         )
         order = agent.agent_manager.get_agent_order()
         assert len(order) == 4
-        assert BuiltinAgentName.DEFAULT in order
+        assert BuiltinAgentName.ASK in order
         assert BuiltinAgentName.AUTO_APPROVE in order
         assert BuiltinAgentName.PLAN in order
         assert BuiltinAgentName.ACCEPT_EDITS in order
@@ -469,7 +438,7 @@ class TestAgentManagerCycling:
         self, make_config: Callable[..., VibeConfigSchema], backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=make_config(), agent_name=BuiltinAgentName.DEFAULT, backend=backend
+            config=make_config(), agent_name=BuiltinAgentName.ASK, backend=backend
         )
         order = agent.agent_manager.get_agent_order()
         current = agent.agent_manager.active_profile
@@ -483,7 +452,7 @@ class TestAgentManagerCycling:
         self, make_config: Callable[..., VibeConfigSchema], backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=make_config(), agent_name=BuiltinAgentName.DEFAULT, backend=backend
+            config=make_config(), agent_name=BuiltinAgentName.ASK, backend=backend
         )
         order = agent.agent_manager.get_agent_order()
         last_profile = agent.agent_manager.get_agent(order[-1])
@@ -518,7 +487,7 @@ class TestAgentSwitchAgent:
         self, make_config: Callable[..., VibeConfigSchema], backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=make_config(), agent_name=BuiltinAgentName.DEFAULT, backend=backend
+            config=make_config(), agent_name=BuiltinAgentName.ASK, backend=backend
         )
         await agent.switch_agent(BuiltinAgentName.PLAN)
 
@@ -542,19 +511,19 @@ class TestAgentSwitchAgent:
             config=make_config(), agent_name=BuiltinAgentName.PLAN, backend=backend
         )
 
-        await agent.switch_agent(BuiltinAgentName.DEFAULT)
+        await agent.switch_agent(BuiltinAgentName.ASK)
 
         # Write tools should revert to default ASK permission
         write_config = agent.tool_manager.get_tool_config("write_file")
         assert write_config.permission == ToolPermission.ASK
-        assert agent.agent_profile.name == BuiltinAgentName.DEFAULT
+        assert agent.agent_profile.name == BuiltinAgentName.ASK
 
     @pytest.mark.asyncio
     async def test_switch_agent_preserves_conversation_history(
         self, make_config: Callable[..., VibeConfigSchema], backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=make_config(), agent_name=BuiltinAgentName.DEFAULT, backend=backend
+            config=make_config(), agent_name=BuiltinAgentName.ASK, backend=backend
         )
         user_msg = LLMMessage(role=Role.user, content="Hello")
         assistant_msg = LLMMessage(role=Role.assistant, content="Hi there")
@@ -572,14 +541,14 @@ class TestAgentSwitchAgent:
         self, make_config: Callable[..., VibeConfigSchema], backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=make_config(), agent_name=BuiltinAgentName.DEFAULT, backend=backend
+            config=make_config(), agent_name=BuiltinAgentName.ASK, backend=backend
         )
         original_config = agent.config
 
-        await agent.switch_agent(BuiltinAgentName.DEFAULT)
+        await agent.switch_agent(BuiltinAgentName.ASK)
 
         assert agent.config is original_config
-        assert agent.agent_profile.name == BuiltinAgentName.DEFAULT
+        assert agent.agent_profile.name == BuiltinAgentName.ASK
 
 
 class TestAcceptEditsAgent:
@@ -660,12 +629,12 @@ class TestAgentManagerFiltering:
         make_config: Callable[..., VibeConfigSchema],
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        config = make_config(enabled_agents=["default", "plan"])
-        manager = AgentManager(load_orchestrator(config))
+        config = make_config(enabled_agents=["ask", "plan"])
+        manager = AgentManager(load_orchestrator(config), initial_agent="ask")
 
         agents = manager.available_agents
         assert len(agents) < len(manager._discovered)
-        assert "default" in agents
+        assert "ask" in agents
         assert "plan" in agents
         assert "auto-approve" not in agents
         assert "accept-edits" not in agents
@@ -676,11 +645,11 @@ class TestAgentManagerFiltering:
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         config = make_config(disabled_agents=["auto-approve", "accept-edits"])
-        manager = AgentManager(load_orchestrator(config))
+        manager = AgentManager(load_orchestrator(config), initial_agent="ask")
 
         agents = manager.available_agents
         assert len(agents) < len(manager._discovered)
-        assert "default" in agents
+        assert "ask" in agents
         assert "plan" in agents
         assert "auto-approve" not in agents
         assert "accept-edits" not in agents
@@ -691,14 +660,14 @@ class TestAgentManagerFiltering:
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         config = make_config(
-            enabled_agents=["default"],
-            disabled_agents=["default"],  # Should be ignored
+            enabled_agents=["ask"],
+            disabled_agents=["ask"],  # Should be ignored
         )
-        manager = AgentManager(load_orchestrator(config))
+        manager = AgentManager(load_orchestrator(config), initial_agent="ask")
 
         agents = manager.available_agents
         assert len(agents) == 1
-        assert "default" in agents
+        assert "ask" in agents
 
     def test_glob_pattern_matching(
         self,
@@ -706,10 +675,10 @@ class TestAgentManagerFiltering:
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         config = make_config(disabled_agents=["auto-*", "accept-*"])
-        manager = AgentManager(load_orchestrator(config))
+        manager = AgentManager(load_orchestrator(config), initial_agent="ask")
 
         agents = manager.available_agents
-        assert "default" in agents
+        assert "ask" in agents
         assert "plan" in agents
         assert "auto-approve" not in agents
         assert "accept-edits" not in agents
@@ -719,12 +688,12 @@ class TestAgentManagerFiltering:
         make_config: Callable[..., VibeConfigSchema],
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        config = make_config(enabled_agents=["re:^(default|plan)$"])
-        manager = AgentManager(load_orchestrator(config))
+        config = make_config(enabled_agents=["re:^(ask|plan)$"])
+        manager = AgentManager(load_orchestrator(config), initial_agent="ask")
 
         agents = manager.available_agents
         assert len(agents) == 2
-        assert "default" in agents
+        assert "ask" in agents
         assert "plan" in agents
 
     def test_empty_enabled_agents_returns_all(
@@ -736,7 +705,7 @@ class TestAgentManagerFiltering:
         manager = AgentManager(load_orchestrator(config))
 
         agents = manager.available_agents
-        assert "default" in agents
+        assert "ask" in agents
         assert "plan" in agents
         assert "auto-approve" in agents
         assert "explore" in agents
@@ -797,6 +766,7 @@ class TestAgentLoopInitialization:
         patched_agents = {**BUILTIN_AGENTS, "custom_test_agent": custom_agent}
         monkeypatch.setattr("vibe.core.agents.models.BUILTIN_AGENTS", patched_agents)
         monkeypatch.setattr("vibe.core.agents.manager.BUILTIN_AGENTS", patched_agents)
+        monkeypatch.setattr("vibe.core.agents.registry.BUILTIN_AGENTS", patched_agents)
 
         config = make_config(system_prompt_id="cli")
         assert config.system_prompt_id == "cli", (

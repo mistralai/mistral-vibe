@@ -33,8 +33,8 @@ from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.paths import VIBE_HOME
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.types import Backend
-from vibe.core.utils.http import build_ssl_context, configure_ssl_context
 from vibe.setup.onboarding.context import OnboardingContext
+from vibe.utils.http import build_ssl_context, configure_ssl_context
 
 
 class _ProviderConfigOverrides(TypedDict, total=False):
@@ -263,8 +263,7 @@ class TestSystemTrustStoreConfig:
 
             default_ctx = MagicMock(spec=ssl.SSLContext)
             with patch(
-                "vibe.core.utils.http.ssl.create_default_context",
-                return_value=default_ctx,
+                "vibe.utils.http.ssl.create_default_context", return_value=default_ctx
             ):
                 await make_orchestrator()
                 assert build_ssl_context() is default_ctx
@@ -275,8 +274,7 @@ class TestSystemTrustStoreConfig:
 
             truststore_ctx = MagicMock(spec=ssl.SSLContext)
             with patch(
-                "vibe.core.utils.http.truststore.SSLContext",
-                return_value=truststore_ctx,
+                "vibe.utils.http.truststore.SSLContext", return_value=truststore_ctx
             ):
                 await make_orchestrator()
                 assert build_ssl_context() is truststore_ctx
@@ -932,6 +930,123 @@ class TestMigrateMistralVibeCliLatestDefaults:
         with config_file.open("rb") as f:
             result = tomllib.load(f)
         assert result["models"][0]["supports_images"] is False
+
+
+class TestMigrateDevstralSmallThinking:
+    def test_forces_thinking_off_when_set_to_non_off(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        run_migration: Callable[[], None],
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "devstral-small-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-small",
+                    "thinking": "high",
+                }
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        run_migration()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["thinking"] == "off"
+
+    def test_adds_thinking_off_when_missing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        run_migration: Callable[[], None],
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "devstral-small-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-small",
+                }
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        run_migration()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["thinking"] == "off"
+
+    def test_noop_when_already_off(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        run_migration: Callable[[], None],
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "devstral-small-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-small",
+                    "thinking": "off",
+                }
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        run_migration()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["thinking"] == "off"
+
+    def test_does_not_touch_other_models(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        run_migration: Callable[[], None],
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "mistral-medium-3.5",
+                    "thinking": "high",
+                }
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        run_migration()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["thinking"] == "high"
 
 
 class TestAutoCompactThresholdFallback:

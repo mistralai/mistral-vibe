@@ -87,13 +87,17 @@ def reasoning_tool_use(
 
 
 def _delta_stream(
-    deltas: list[dict[str, Any]], *, prompt_tokens: int, completion_tokens: int
+    deltas: list[dict[str, Any]],
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    finish_reason: str,
 ) -> list[Chunk]:
     events = [
         {"choices": [{"delta": {"role": "assistant"}}]},
         *({"choices": [{"delta": delta}]} for delta in deltas),
         {
-            "choices": [{"delta": {}}],
+            "choices": [{"delta": {}, "finish_reason": finish_reason}],
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
@@ -110,6 +114,7 @@ def reasoning_text_stream(
         [{"content": text}],
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        finish_reason="stop",
     )
 
 
@@ -132,4 +137,5 @@ def reasoning_thinking_tool_use_stream(
         [{"content": [_thinking_block(reasoning)]}, {"tool_calls": [tool_call]}],
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        finish_reason="tool_calls",
     )

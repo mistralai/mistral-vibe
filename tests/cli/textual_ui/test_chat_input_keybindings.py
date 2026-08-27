@@ -6,6 +6,33 @@ from textual.selection import Selection
 
 from tests.conftest import build_test_vibe_app
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer, ChatTextArea
+from vibe.cli.textual_ui.widgets.messages import UserMessage
+
+OPTION_WORD_LEFT_KEYS = ["alt+left", "ctrl+left"]
+OPTION_WORD_RIGHT_KEYS = ["alt+right", "ctrl+right"]
+
+
+@pytest.mark.asyncio
+async def test_undo_large_multiline_insert_does_not_crash() -> None:
+    app = build_test_vibe_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.1)
+
+        text_area = app.query_one(ChatTextArea)
+        text_area.focus()
+        await pilot.pause(0.1)
+
+        text_area.insert("line0\nline1\n")
+        await pilot.pause(0.1)
+
+        big_text = "\n".join(f"line{i}" for i in range(2, 50))
+        text_area.insert(big_text)
+        await pilot.pause(0.1)
+
+        text_area.undo()
+        await pilot.pause(0.1)
+
+        assert text_area.text == "line0\nline1\n"
 
 
 @pytest.mark.asyncio
@@ -107,3 +134,35 @@ async def test_blur_does_not_clear_other_widget_selection() -> None:
 
         assert text_area.selected_text == ""
         assert app.screen.selections == sentinel
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("left_key", "right_key"),
+    zip(OPTION_WORD_LEFT_KEYS, OPTION_WORD_RIGHT_KEYS, strict=True),
+)
+async def test_option_left_and_option_right_move_by_word(
+    left_key: str, right_key: str
+) -> None:
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        chat_input = app.query_one(ChatInputContainer)
+        text_area = app.query_one(ChatTextArea)
+        text_area.focus()
+        text_area.insert("hello brave world")
+        text_area.move_cursor((0, len("hello brave world")))
+        await pilot.pause()
+
+        assert text_area.cursor_location == (0, len("hello brave world"))
+
+        await pilot.press(left_key)
+        assert text_area.cursor_location == (0, len("hello brave "))
+
+        await pilot.press(left_key)
+        assert text_area.cursor_location == (0, len("hello "))
+
+        await pilot.press(right_key)
+        assert text_area.cursor_location == (0, len("hello brave"))
+
+        assert chat_input.value == "hello brave world"
+        assert len(app.query(UserMessage)) == 0

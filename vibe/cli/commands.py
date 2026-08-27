@@ -10,6 +10,10 @@ from vibe.cli.constants import CLIPBOARD_IMAGE_PASTE_SUPPORTED_SYSTEM
 @dataclass(frozen=True)
 class CommandContext:
     vibe_code_enabled: bool = False
+    # Whether the backend answered a plugin catalogue read. Only the Unified
+    # Harness resolves plugins, and without one there is nothing to list and
+    # nothing a reload could re-pin.
+    plugins_enabled: bool = False
 
 
 CommandAvailability = Callable[[CommandContext], bool]
@@ -21,6 +25,12 @@ class Command:
     description: str
     handler: str
     exits: bool = False
+    side_channel: bool = False
+    # A command that resets the conversation (e.g. /clear) supersedes any
+    # prompts queued before it: at drain time the queue drops those pending
+    # prompts instead of running an LLM turn on the widgets the command is
+    # about to tear down.
+    flushes_pending: bool = False
     is_available: CommandAvailability | None = None
 
 
@@ -28,13 +38,13 @@ class CommandRegistry:
     def __init__(
         self,
         excluded_commands: list[str] | None = None,
-        vibe_code_enabled: bool = False,
+        context: CommandContext | None = None,
     ) -> None:
         if excluded_commands is None:
             excluded_commands = []
         self._disabled_commands = set(excluded_commands)
         self._commands: dict[str, Command] = {}
-        self.refresh(CommandContext(vibe_code_enabled))
+        self.refresh(context)
 
     def _build_commands(self) -> dict[str, Command]:
         return {
@@ -42,21 +52,25 @@ class CommandRegistry:
                 aliases=frozenset(["/help"]),
                 description="Show help message",
                 handler="_show_help",
+                side_channel=True,
             ),
             "config": Command(
                 aliases=frozenset(["/config"]),
                 description="Edit config settings",
                 handler="_show_config",
+                side_channel=True,
             ),
             "model": Command(
                 aliases=frozenset(["/model"]),
                 description="Select active model",
                 handler="_show_model",
+                side_channel=True,
             ),
             "thinking": Command(
                 aliases=frozenset(["/thinking"]),
                 description="Select thinking level",
                 handler="_show_thinking",
+                side_channel=True,
             ),
             "reload": Command(
                 aliases=frozenset(["/reload"]),
@@ -65,18 +79,23 @@ class CommandRegistry:
             ),
             "clear": Command(
                 aliases=frozenset(["/clear", "/new"]),
-                description="Clear conversation history",
+                description=(
+                    "Start a new conversation. Optionally pass a prompt to seed it."
+                ),
                 handler="_clear_history",
+                flushes_pending=True,
             ),
             "copy": Command(
                 aliases=frozenset(["/copy"]),
                 description="Copy the last agent message to the clipboard",
                 handler="_copy_last_agent_message",
+                side_channel=True,
             ),
             "paste-image": Command(
                 aliases=frozenset(["/paste-image"]),
                 description="Paste an image from the OS clipboard into the prompt",
                 handler="_paste_clipboard_image_command",
+                side_channel=True,
                 is_available=lambda _ctx: (
                     platform.system() == CLIPBOARD_IMAGE_PASTE_SUPPORTED_SYSTEM
                 ),
@@ -85,11 +104,21 @@ class CommandRegistry:
                 aliases=frozenset(["/log"]),
                 description="Show path to current interaction log file",
                 handler="_show_log_path",
+                side_channel=True,
+            ),
+            "log-level": Command(
+                aliases=frozenset(["/log-level"]),
+                description=(
+                    "Change the log level for this session or persist it to config.toml."
+                ),
+                handler="_log_level_command",
+                side_channel=True,
             ),
             "debug": Command(
                 aliases=frozenset(["/debug"]),
                 description="Toggle debug console",
                 handler="action_toggle_debug_console",
+                side_channel=True,
             ),
             "compact": Command(
                 aliases=frozenset(["/compact"]),
@@ -101,11 +130,19 @@ class CommandRegistry:
                 description="Exit the application",
                 handler="_exit_app",
                 exits=True,
+                side_channel=True,
             ),
             "status": Command(
                 aliases=frozenset(["/status"]),
                 description="Display agent statistics",
                 handler="_show_status",
+                side_channel=True,
+            ),
+            "whoami": Command(
+                aliases=frozenset(["/whoami"]),
+                description="Display the Mistral signed-in user, workspace, and plan",
+                handler="_show_whoami",
+                side_channel=True,
             ),
             "teleport": Command(
                 aliases=frozenset(["/teleport"]),
@@ -123,6 +160,7 @@ class CommandRegistry:
                 aliases=frozenset(["/proxy-setup"]),
                 description="Configure proxy and SSL certificate settings",
                 handler="_show_proxy_setup",
+                side_channel=True,
             ),
             "resume": Command(
                 aliases=frozenset(["/resume", "/continue"]),
@@ -133,6 +171,7 @@ class CommandRegistry:
                 aliases=frozenset(["/rename"]),
                 description="Rename the current session",
                 handler="_rename_session",
+                side_channel=True,
             ),
             "mcp": Command(
                 aliases=frozenset(["/mcp", "/connectors"]),
@@ -144,10 +183,26 @@ class CommandRegistry:
                 ),
                 handler="_show_mcp",
             ),
+            # Withheld from this release: the handlers, the catalogue probe and
+            # the `PluginsApp` behind them all stay wired, only the two entry
+            # points are unregistered. Restore both entries to bring them back.
+            # "plugins": Command(
+            #     aliases=frozenset(["/plugins"]),
+            #     description="Display the plugins this session is running",
+            #     handler="_show_plugins",
+            #     is_available=lambda ctx: ctx.plugins_enabled,
+            # ),
+            # "reload-plugins": Command(
+            #     aliases=frozenset(["/reload-plugins"]),
+            #     description="Re-pin this session's plugins and report what changed",
+            #     handler="_reload_plugins",
+            #     is_available=lambda ctx: ctx.plugins_enabled,
+            # ),
             "voice": Command(
                 aliases=frozenset(["/voice"]),
                 description="Configure voice settings",
                 handler="_show_voice_settings",
+                side_channel=True,
             ),
             "leanstall": Command(
                 aliases=frozenset(["/leanstall"]),
@@ -164,6 +219,14 @@ class CommandRegistry:
                 description="Rewind to a previous message (or press Esc twice)",
                 handler="_start_rewind_mode",
             ),
+            "retry": Command(
+                aliases=frozenset(["/retry"]),
+                description=(
+                    "Continue an interrupted model response; optionally pass "
+                    "additional instructions"
+                ),
+                handler="_retry",
+            ),
             "loop": Command(
                 aliases=frozenset(["/loop"]),
                 description=(
@@ -176,11 +239,13 @@ class CommandRegistry:
                 aliases=frozenset(["/data-retention"]),
                 description="Show data retention information",
                 handler="_show_data_retention",
+                side_channel=True,
             ),
             "theme": Command(
                 aliases=frozenset(["/theme"]),
                 description="Select theme",
                 handler="_show_theme",
+                side_channel=True,
             ),
         }
 
@@ -247,7 +312,7 @@ class CommandRegistry:
             "- `Ctrl+C` Quit (or clear input if text present)",
             "- `Ctrl+G` Edit input in external editor",
             "- `Ctrl+O` Toggle tool output view",
-            "- `Shift+Tab` Cycle through agents (default, plan, ...)",
+            "- `Shift+Tab` Cycle through agents (ask, plan, ...)",
             "- `Esc Esc` Rewind to a previous message (when input is empty)",
             "",
             "### Special Features",

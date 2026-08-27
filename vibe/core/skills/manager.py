@@ -5,8 +5,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.logger import logger
+from vibe.core.config.harness_files import (
+    HarnessFilesManager,
+    get_harness_files_manager,
+)
 from vibe.core.skills.builtins import BUILTIN_SKILLS
 from vibe.core.skills.models import (
     ParsedSkillCommand,
@@ -16,15 +18,22 @@ from vibe.core.skills.models import (
 )
 from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
 from vibe.core.utils import name_matches
-from vibe.core.utils.io import read_safe
+from vibe.observability.logging import logger
+from vibe.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
 
 
 class SkillManager:
-    def __init__(self, config_getter: Callable[[], VibeConfigSchema]) -> None:
+    def __init__(
+        self,
+        config_getter: Callable[[], VibeConfigSchema],
+        *,
+        harness_files: HarnessFilesManager | None = None,
+    ) -> None:
         self._config_getter = config_getter
+        self._harness_files = harness_files or get_harness_files_manager()
         self._search_paths = self._compute_search_paths(self._config)
         self._config_issues: list[SkillConfigIssue] = []
         self.available_skills: Mapping[str, SkillInfo] = MappingProxyType(
@@ -61,15 +70,14 @@ class SkillManager:
             }
         return dict(skills)
 
-    @staticmethod
-    def _compute_search_paths(config: VibeConfigSchema) -> list[Path]:
+    def _compute_search_paths(self, config: VibeConfigSchema) -> list[Path]:
         paths: list[Path] = []
 
         for path in config.skill_paths:
             if path.is_dir():
                 paths.append(path)
 
-        mgr = get_harness_files_manager()
+        mgr = self._harness_files
         paths.extend(mgr.project_skills_dirs)
         paths.extend(mgr.user_skills_dirs)
 

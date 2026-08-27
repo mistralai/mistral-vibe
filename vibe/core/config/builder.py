@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 import copy
 from dataclasses import dataclass
 from typing import Any, cast
@@ -28,8 +28,11 @@ class _LayerData:
 class ConfigBuilder[S: ConfigSchema]:
     """Collects layers and merges them into an immutable Config[S]."""
 
-    def __init__(self, schema: type[S]) -> None:
+    def __init__(
+        self, schema: type[S], *, validation_context: dict[str, Any] | None = None
+    ) -> None:
         self._schema = schema
+        self._validation_context = validation_context
         self._layers: list[ConfigLayer[RawConfig]] = []
         self._lock = asyncio.Lock()
 
@@ -39,29 +42,50 @@ class ConfigBuilder[S: ConfigSchema]:
     def add_layers(self, layers: list[ConfigLayer[RawConfig]]) -> None:
         self._layers.extend(layers)
 
+    def insert_layer(self, layer: ConfigLayer[RawConfig], index: int) -> None:
+        self._layers.insert(index, layer)
+
+    def remove_layer(self, index: int) -> ConfigLayer[RawConfig]:
+        return self._layers.pop(index)
+
     @property
     def layers(self) -> list[ConfigLayer[RawConfig]]:
         return self._layers
 
     def copy(self) -> ConfigBuilder[S]:
         """Return a new builder for the same schema with deep-copied layers."""
-        new_builder = ConfigBuilder(self._schema)
+        new_builder = ConfigBuilder(
+            self._schema, validation_context=copy.deepcopy(self._validation_context)
+        )
         new_builder.add_layers([copy.deepcopy(layer) for layer in self._layers])
         return new_builder
 
-    async def build(self, force_load: bool = False) -> S:
+    def validate(self, data: dict[str, Any]) -> S:
+        return self._schema.model_validate(data, context=self._validation_context)
+
+    async def build(
+        self,
+        force_load: bool = False,
+        *,
+        layer_overrides: Mapping[str, RawConfig] | None = None,
+    ) -> S:
         """Merge all layers and return a validated schema.
 
         Untrusted and empty layers are skipped.
         Pass ``force_load=True`` to bypass caching.
+        ``layer_overrides`` previews already-validated layer values without
+        mutating the layer or its backing store.
         """
         async with self._lock:
             internal_layers = self._layers.copy()
+            overrides = layer_overrides or {}
 
             layer_dicts: list[_LayerData] = []
             for layer in internal_layers:
                 try:
-                    data = await layer.load(force=force_load)
+                    data = overrides.get(layer.name)
+                    if data is None:
+                        data = await layer.load(force=force_load)
                     raw = data.model_dump()
                     if raw:
                         layer_dicts.append(_LayerData(name=layer.name, data=raw))
@@ -69,13 +93,15 @@ class ConfigBuilder[S: ConfigSchema]:
                     continue
 
             merged, origins = self._merge_fields(self._schema, layer_dicts)
-            return self._schema(origins=origins, **merged)
+            return self._schema.validate_merged(
+                merged, origins=origins, context=self._validation_context
+            )
 
     def _merge_fields(
         self, schema: type[S], layer_dicts: list[_LayerData]
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         accumulated: dict[str, Any] = defaultdict(dict)
-        origins: dict[str, Any] = {}
+        origins: dict[str, str] = {}
 
         for ld in layer_dicts:
             for key, value in ld.data.items():

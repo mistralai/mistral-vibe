@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable
 
-from vibe.core.audio_recorder import (
-    AlreadyRecordingError,
-    AudioRecording,
-    RecordingMode,
-)
+from vibe.cli.audio_recorder import AlreadyRecordingError, AudioRecording, RecordingMode
 
 FAKE_WAV_DATA = b"RIFF\x00\x00\x00\x00WAVEfmt "
 
@@ -15,9 +11,11 @@ class FakeAudioRecorder:
     def __init__(self, *, fake_wav_data: bytes = FAKE_WAV_DATA) -> None:
         self._recording = False
         self._peak = 0.0
+        self._has_signal = True
         self._mode = RecordingMode.BUFFER
         self._fake_wav_data = fake_wav_data
         self._stream_chunks: list[bytes] = []
+        self._duration = 1.0
 
     @property
     def is_recording(self) -> bool:
@@ -26,6 +24,10 @@ class FakeAudioRecorder:
     @property
     def peak(self) -> float:
         return self._peak
+
+    @property
+    def has_signal(self) -> bool:
+        return self._has_signal
 
     @property
     def mode(self) -> RecordingMode:
@@ -49,7 +51,7 @@ class FakeAudioRecorder:
         if not self._recording:
             return AudioRecording(data=b"", duration=0.0)
         self._recording = False
-        return AudioRecording(data=self._fake_wav_data, duration=1.0)
+        return AudioRecording(data=self._fake_wav_data, duration=self._duration)
 
     def cancel(self) -> None:
         self._recording = False
@@ -60,6 +62,12 @@ class FakeAudioRecorder:
 
     def set_peak(self, value: float) -> None:
         self._peak = value
+
+    def set_has_signal(self, value: bool) -> None:
+        self._has_signal = value
+
+    def set_duration(self, value: float) -> None:
+        self._duration = value
 
     def set_stream_chunks(self, chunks: list[bytes]) -> None:
         self._stream_chunks = chunks

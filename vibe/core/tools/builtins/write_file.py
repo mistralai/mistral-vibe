@@ -8,7 +8,7 @@ import anyio
 from pydantic import BaseModel, Field
 
 from vibe.core.checkpoints import FileSnapshot
-from vibe.core.scratchpad import is_scratchpad_path
+from vibe.core.scratchpad import is_scratchpad_display_path
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -17,14 +17,22 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.io_port import ToolIOPort
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import resolve_file_tool_permission
+from vibe.core.tools.utils import (
+    DEFAULT_SENSITIVE_PATTERNS,
+    ToolPath,
+    display_file_path,
+    resolve_file_tool_permission,
+    resolve_tool_path,
+)
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
+from vibe.utils.tool_presentation import ToolEffectKind
 
 
 class WriteFileArgs(BaseModel):
-    file_path: str = Field(
+    file_path: ToolPath = Field(
         description="The absolute path to the file to write (must be absolute, not relative)"
     )
     content: str = Field(description="The content to write to the file")
@@ -39,7 +47,7 @@ class WriteFileResult(BaseModel):
 class WriteFileConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ASK
     sensitive_patterns: list[str] = Field(
-        default=["**/.env", "**/.env.*"],
+        default_factory=lambda: list(DEFAULT_SENSITIVE_PATTERNS),
         description="File patterns that trigger ASK even when permission is ALWAYS.",
     )
     max_write_bytes: int = 64_000
@@ -50,22 +58,34 @@ class WriteFile(
     BaseTool[WriteFileArgs, WriteFileResult, WriteFileConfig, BaseToolState],
     ToolUIData[WriteFileArgs, WriteFileResult],
 ):
+    effect_kind = ToolEffectKind.FILE_WRITE
+
     @classmethod
     def format_call_display(cls, args: WriteFileArgs) -> ToolCallDisplay:
-        suffix = "(scratchpad)" if is_scratchpad_path(args.file_path) else ""
+        suffix = "(scratchpad)" if is_scratchpad_display_path(args.file_path) else ""
+        shown = display_file_path(args.file_path)
         return ToolCallDisplay(
-            summary=f"Writing {args.file_path}", content=args.content, suffix=suffix
+            summary=f"Writing {shown}",
+            content=args.content,
+            suffix=suffix,
+            verb="Creating",
+            message=shown,
+            settled_verb="Created",
+            settled_message=shown,
         )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
         if isinstance(event.result, WriteFileResult):
             suffix = (
-                "(scratchpad)" if is_scratchpad_path(event.result.file_path) else ""
+                "(scratchpad)"
+                if is_scratchpad_display_path(event.result.file_path)
+                else ""
             )
             return ToolResultDisplay(
                 success=True,
-                message=f"Created {Path(event.result.file_path).name}",
+                verb="Created",
+                message=display_file_path(event.result.file_path),
                 suffix=suffix,
             )
 
@@ -86,6 +106,8 @@ class WriteFile(
             denylist=self.config.denylist,
             config_permission=self.config.permission,
             sensitive_patterns=self.config.sensitive_patterns,
+            workspace=self.workspace,
+            scratchpad_dir=self.scratchpad_dir,
         )
 
     @final
@@ -94,7 +116,9 @@ class WriteFile(
     ) -> AsyncGenerator[ToolStreamEvent | WriteFileResult, None]:
         file_path, content_bytes = self._prepare_and_validate_path(args)
 
-        await self._write_file(args, file_path)
+        await self._write_file(
+            args, file_path, ctx.tool_io if ctx is not None else None
+        )
 
         yield WriteFileResult(
             file_path=str(file_path), bytes_written=content_bytes, content=args.content
@@ -110,10 +134,7 @@ class WriteFile(
                 f"Content exceeds {self.config.max_write_bytes} bytes limit"
             )
 
-        file_path = Path(args.file_path).expanduser()
-        if not file_path.is_absolute():
-            file_path = Path.cwd() / file_path
-        file_path = file_path.resolve()
+        file_path = resolve_tool_path(args.file_path, self.cwd)
 
         if file_path.exists():
             raise ToolError(
@@ -127,8 +148,13 @@ class WriteFile(
 
         return file_path, content_bytes
 
-    async def _write_file(self, args: WriteFileArgs, file_path: Path) -> None:
+    async def _write_file(
+        self, args: WriteFileArgs, file_path: Path, tool_io: ToolIOPort | None = None
+    ) -> None:
         try:
+            if tool_io is not None and tool_io.supports_write:
+                await tool_io.write_text(file_path, args.content)
+                return
             async with await anyio.Path(file_path).open(
                 mode="x", encoding="utf-8"
             ) as f:

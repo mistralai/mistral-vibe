@@ -4,8 +4,8 @@ from pathlib import Path
 import time
 
 from vibe.core.paths import PLANS_DIR
-from vibe.core.utils.io import read_safe
 from vibe.core.utils.slug import create_slug
+from vibe.utils.io import read_safe
 
 
 class PlanSession:

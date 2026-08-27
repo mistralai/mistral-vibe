@@ -21,6 +21,7 @@ from tests.stubs.fake_backend import FakeBackend
 from vibe import __version__
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
+from vibe.core.llm.exceptions import IncompleteStreamError
 from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import (
@@ -157,6 +158,49 @@ async def test_updates_tokens_stats_based_on_backend_response_streaming(
     [_ async for _ in agent.act("Hello")]
 
     assert agent.stats.context_tokens == 275
+
+
+@pytest.mark.asyncio
+async def test_streaming_without_finish_reason_records_partial_response(
+    vibe_config: VibeConfigSchema,
+):
+    backend = FakeBackend([mock_llm_chunk(content="partial", stop_reason=None)])
+    agent = build_test_agent_loop(
+        config=vibe_config, backend=backend, enable_streaming=True
+    )
+    agent.stats.context_tokens = 99
+
+    with pytest.raises(IncompleteStreamError):
+        [_ async for _ in agent.act("Hello")]
+
+    assert agent.messages[-1].role is Role.assistant
+    assert agent.messages[-1].content == "partial"
+    assert agent.stats.context_tokens == 99
+
+
+@pytest.mark.asyncio
+async def test_streaming_without_finish_reason_allowed_when_provider_opts_out(
+    build_config: ConfigBuilder,
+):
+    config = build_config(
+        providers=[
+            ProviderConfig(
+                name="mistral",
+                api_base="https://api.mistral.ai/v1",
+                api_key_env_var="MISTRAL_API_KEY",
+                backend=Backend.GENERIC,
+                emits_finish_reason=False,
+            )
+        ]
+    )
+    backend = FakeBackend([mock_llm_chunk(content="complete", stop_reason=None)])
+    agent = build_test_agent_loop(config=config, backend=backend, enable_streaming=True)
+
+    events = [event async for event in agent.act("Hello")]
+
+    assert events
+    assert agent.messages[-1].role is Role.assistant
+    assert agent.messages[-1].content == "complete"
 
 
 @pytest.mark.asyncio
@@ -453,7 +497,7 @@ async def test_auto_compact_emits_summary_and_next_turn_metadata(
     assert "parent_session_id" not in compact_metadata
     assert user_turn_metadata["call_type"] == "main_call"
     assert user_turn_metadata["session_id"] == agent.session_id
-    assert user_turn_metadata["parent_session_id"] == original_session_id
+    assert "parent_session_id" not in user_turn_metadata
 
     compact_headers = backend.requests_extra_headers[0]
     user_turn_headers = backend.requests_extra_headers[1]

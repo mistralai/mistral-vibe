@@ -52,13 +52,17 @@ Prefer "make it testable" refactors first: isolate I/O, extract pure functions, 
 
 ## Test Shape
 
-- Use descriptive test names; do not add test docstrings.
+- Stack: `pytest` + `pytest-asyncio` + `pytest-textual-snapshot` + `respx`.
+- Use descriptive test names; do not add test docstrings. Pytest displays docstrings instead of node IDs when present, which hurts.
 - Arrange, act, and assert clearly, but optimize for readability over ceremony.
 - Keep tests deterministic, fast, and explicit about failure.
-- Use autouse fixtures from `tests/conftest.py` for config/home/working-directory isolation.
+- Use autouse fixtures from `tests/conftest.py` (`config_dir`, `tmp_working_directory`) for config/home/working-directory isolation.
 - Mark async tests with `@pytest.mark.asyncio`.
 - Mock outbound HTTP with `respx`.
 - Use the narrowest relevant test first, then broaden when shared contracts are touched.
+- Tests are exempt from the `ANN` and `PLR` ruff rules (see `per-file-ignores`).
+- Changes to managed shell tools, managed shell backends, shell prompts, or shell dependencies require focused POSIX/common validation and passing Windows shell CI. If Windows shell CI is unavailable, the PR notes must include manual native Windows commands and results.
+- After app-server session behavior, backend adapters, or shared contract-fixture changes, run both backend contract commands. A failing Unified frontier is expected before parity; include its complete pytest summary in parity-related PRs.
 
 ## Avoid
 

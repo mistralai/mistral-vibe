@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
 from vibe.core.config.harness_files._paths import (
     GLOBAL_AGENTS_DIR,
     GLOBAL_AGENTS_SKILLS_DIR,
+    GLOBAL_PLUGINS_DIR,
     GLOBAL_PROMPTS_DIR,
     GLOBAL_SKILLS_DIR,
     GLOBAL_TOOLS_DIR,
@@ -18,8 +19,8 @@ from vibe.core.paths import (
     dedup_paths,
     find_local_config_dirs,
 )
-from vibe.core.trusted_folders import trusted_folders_manager
-from vibe.core.utils.io import read_safe
+from vibe.core.trusted_folders import TrustedFoldersManager, trusted_folders_manager
+from vibe.utils.io import read_safe
 
 FileSource = Literal["user", "project"]
 
@@ -29,18 +30,76 @@ class HarnessFilesManager:
     sources: tuple[FileSource, ...] = ("user",)
     cwd: Path | None = field(default=None)
     _additional_dirs: tuple[Path, ...] = ()
+    _session_root: Path | None = None
+    trust_store: TrustedFoldersManager = field(
+        default_factory=lambda: trusted_folders_manager, compare=False, repr=False
+    )
+
+    def for_session(
+        self, cwd: Path, *, workspace_roots: list[Path] | None = None
+    ) -> HarnessFilesManager:
+        """The manager for a session opened at *cwd*.
+
+        A listed root that is the cwd itself is the session's own position
+        rather than a directory the user reached out to, so it is held apart
+        from the rest: a later move replaces it, where the rest outlive one.
+        """
+        here = cwd.resolve()
+        listed = dedup_paths(workspace_roots or [])
+        return replace(
+            self,
+            cwd=cwd,
+            _additional_dirs=tuple(
+                dedup_paths([*self._additional_dirs, *(r for r in listed if r != here)])
+            ),
+            _session_root=here if here in listed else None,
+        )
+
+    def moved_to(self, cwd: Path) -> HarnessFilesManager:
+        """The manager for a session that has moved to *cwd*.
+
+        Unlike :meth:`for_session`, which merges, the directory being left stops
+        being a workspace root and the arrival takes its place. A sequence of
+        moves therefore never widens the set. Roots added for other reasons,
+        such as ``--add-dir`` entries, are kept, including the one the session
+        is sitting in. Only the position a move recorded is replaced, so
+        leaving a directory cannot revoke a root the user opened.
+        """
+        arriving = cwd.resolve()
+        return replace(self, cwd=arriving, _session_root=arriving)
 
     @property
     def _effective_cwd(self) -> Path:
         return self.cwd or Path.cwd()
 
     @property
+    def _listed_roots(self) -> list[Path]:
+        """Opted-in roots, plus the position a move put the session in."""
+        session_root = [self._session_root] if self._session_root is not None else []
+        return dedup_paths([*self._additional_dirs, *session_root])
+
+    @property
+    def workspace_roots(self) -> list[Path]:
+        cwd = self._effective_cwd.resolve()
+        return [cwd, *(root for root in self._listed_roots if root != cwd)]
+
+    @property
+    def cwd_is_user_config_home(self) -> bool:
+        """True when the cwd's ``.vibe`` dir is the user config dir itself."""
+        return (self._effective_cwd / ".vibe").resolve() == VIBE_HOME.path.resolve()
+
+    @property
+    def project_source_enabled(self) -> bool:
+        """True when the project layer is eligible for this cwd."""
+        return "project" in self.sources and not self.cwd_is_user_config_home
+
+    @property
     def _trusted_workdir(self) -> Path | None:
         """Return cwd if project source is enabled and trusted, else None."""
-        if "project" not in self.sources:
+        if not self.project_source_enabled:
             return None
         cwd = self._effective_cwd
-        if trusted_folders_manager.is_trusted(cwd) is not True:
+        if self.trust_store.is_trusted(cwd) is not True:
             return None
         return cwd
 
@@ -66,7 +125,7 @@ class HarnessFilesManager:
         contains the cwd, both survive (the add-dir contributes its own
         root-level discovery; cwd preserves walk-up semantics for AGENTS.md).
         """
-        add_dirs = dedup_paths(self._additional_dirs)
+        add_dirs = self._listed_roots
         workdir = self._trusted_workdir
         if workdir is None:
             return add_dirs
@@ -110,6 +169,13 @@ class HarnessFilesManager:
         d = GLOBAL_AGENTS_DIR.path
         return [d] if d.is_dir() else []
 
+    @property
+    def user_plugins_dirs(self) -> list[Path]:
+        if "user" not in self.sources:
+            return []
+        directory = GLOBAL_PLUGINS_DIR.path
+        return [directory] if directory.is_dir() else []
+
     def _collect_project_roots(self) -> LocalConfigDirs:
         result = LocalConfigDirs()
         for root in self.project_roots:
@@ -123,6 +189,10 @@ class HarnessFilesManager:
     @property
     def project_skills_dirs(self) -> list[Path]:
         return list(self._collect_project_roots().skills)
+
+    @property
+    def project_plugins_dirs(self) -> list[Path]:
+        return list(self._collect_project_roots().plugins)
 
     @property
     def project_agents_dirs(self) -> list[Path]:
@@ -222,7 +292,7 @@ class HarnessFilesManager:
         """
         by_dir: dict[Path, tuple[Path, str]] = {}
         for root in self.project_roots:
-            stop = trusted_folders_manager.find_trust_root(root) or root
+            stop = self.trust_store.find_trust_root(root) or root
             for d, content in self._collect_agents_md(root, stop, stop_inclusive=True):
                 by_dir.setdefault(d.resolve(), (d, content))
         return list(by_dir.values())

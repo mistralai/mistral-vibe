@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from pathlib import Path
 
 from vibe.core.config.layer import RawConfig
 from vibe.core.config.layers._base import BaseTomlConfigLayer
 from vibe.core.paths._vibe_home import VIBE_HOME
-from vibe.core.trusted_folders import trusted_folders_manager
+from vibe.core.trusted_folders import TrustedFoldersManager, trusted_folders_manager
 
 
 class ProjectConfigLayer(BaseTomlConfigLayer):
@@ -15,12 +16,57 @@ class ProjectConfigLayer(BaseTomlConfigLayer):
     until a trusted .vibe/config.toml is found.
     """
 
-    def __init__(self, *, path: Path | None = None, name: str = "project-toml") -> None:
+    NAME = "project-toml"
+
+    def __init__(
+        self,
+        *,
+        path: Path | None = None,
+        name: str = NAME,
+        trust_store: TrustedFoldersManager | None = None,
+    ) -> None:
         super().__init__(name=name)
         self._root = path or Path.cwd()
+        self._trust_store = trust_store or trusted_folders_manager
         self._config_file_path: Path | None = None
         self._is_set = False
         self._find_lock = asyncio.Lock()
+
+    def __deepcopy__(self, memo: dict[int, object]) -> ProjectConfigLayer:
+        copied = type(self)(
+            path=self._root, name=self.name, trust_store=self._trust_store
+        )
+        memo[id(self)] = copied
+        copied._config_file_path = self._config_file_path
+        copied._is_set = self._is_set
+        copied._state = copy.deepcopy(self._state, memo)
+        return copied
+
+    async def reroot(self, path: Path) -> None:
+        """Discover and write config under *path* from now on.
+
+        Mutates rather than returning a new layer because the orchestrator's
+        default-layer resolver closes over this object. A replacement would
+        leave that closure resolving a layer no longer in the stack, and every
+        implicit write would fail.
+
+        Trust is resolved again rather than carried over. It is cached on the
+        layer state, so without this the verdict earned by the old root would
+        decide the new one, and an untrusted directory would be read as though
+        it were trusted.
+
+        The reset takes the discovery lock. A find already running holds it
+        across its own await, and would otherwise land after this one, writing
+        the departure directory's config file back and marking discovery done
+        - so the find below would return early and the moved session would go
+        on reading and writing the project it left.
+        """
+        async with self._find_lock:
+            self._root = path
+            self._config_file_path = None
+            self._is_set = False
+        await self.resolve_trust()
+        await self.invalidate_cache()
 
     @property
     def config_file_path(self) -> Path | None:
@@ -48,43 +94,23 @@ class ProjectConfigLayer(BaseTomlConfigLayer):
         if self._config_file_path is None:
             return True
 
-        return bool(trusted_folders_manager.is_trusted(self._config_file_path.parent))
-
-    async def _on_trust_changed(self, old: bool | None, new: bool | None) -> None:
-        if new is None or self._config_file_path is None:
-            return
-
-        if new:
-            trusted_folders_manager.add_trusted(self._config_file_path.parent)
-        else:
-            trusted_folders_manager.add_untrusted(self._config_file_path.parent)
-
-    async def grant_trust(self) -> None:
-        await self._find_config_file()
-        if self._config_file_path is None:
-            return
-
-        await super().grant_trust()
-
-    async def revoke_trust(self) -> None:
-        await self._find_config_file()
-        if self._config_file_path is None:
-            return
-
-        await super().revoke_trust()
+        return bool(self._trust_store.is_trusted(self._config_file_path.parent))
 
     async def _find_config_file(self) -> None:
         async with self._find_lock:
             if self._is_set:
                 return
-
-            for directory in [self._root, *self._root.parents]:
-                if directory == VIBE_HOME.path.parent:
-                    break
-
-                candidate = directory / ".vibe" / "config.toml"
-                if candidate.is_file():
-                    self._config_file_path = candidate
-                    break
-
+            self._config_file_path = await asyncio.to_thread(
+                _discover_config_file, self._root, VIBE_HOME.path.parent
+            )
             self._is_set = True
+
+
+def _discover_config_file(root: Path, stop: Path) -> Path | None:
+    for directory in [root, *root.parents]:
+        if directory == stop:
+            break
+        candidate = directory / ".vibe" / "config.toml"
+        if candidate.is_file():
+            return candidate
+    return None

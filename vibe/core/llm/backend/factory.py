@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from vibe.core.config import ProviderConfig
 from vibe.core.types import Backend
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from vibe.core.config import ProviderConfig
     from vibe.core.llm.types import BackendLike
+    from vibe.core.utils import RetryObserver
 
 
 def _create_mistral_backend(**kwargs: Any) -> BackendLike:
@@ -38,13 +39,14 @@ def create_backend(
     timeout: float = 720.0,
     retry_max_elapsed_time: float = 300.0,
     enable_otel: bool = False,
+    on_retry: RetryObserver | None = None,
 ) -> BackendLike:
-    factory = BACKEND_FACTORY[provider.backend]
-    if provider.backend == Backend.MISTRAL:
-        return factory(
-            provider=provider,
-            timeout=timeout,
-            retry_max_elapsed_time=retry_max_elapsed_time,
-            enable_otel=enable_otel,
-        )
-    return factory(provider=provider, timeout=timeout)
+    backend = Backend(provider.backend)
+    factory = BACKEND_FACTORY[backend]
+    return factory(
+        provider=provider,
+        timeout=timeout,
+        retry_max_elapsed_time=retry_max_elapsed_time,
+        enable_otel=enable_otel,
+        on_retry=on_retry,
+    )

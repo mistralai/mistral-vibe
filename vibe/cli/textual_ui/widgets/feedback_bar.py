@@ -13,7 +13,7 @@ from vibe.cli.textual_ui.widgets.chat_input.text_area import (
     FEEDBACK_SNOOZE_LABEL,
     ChatTextArea,
 )
-from vibe.core.feedback import FEEDBACK_SNOOZED_COOLDOWN_SECONDS
+from vibe.feedback import FEEDBACK_SNOOZED_COOLDOWN_SECONDS
 
 THANK_YOU_DURATION = 2.0
 
@@ -30,7 +30,7 @@ class FeedbackBar(Widget):
     @staticmethod
     def _prompt_text() -> Text:
         text = Text()
-        text.append("How is Vibe doing so far?  ")
+        text.append("How's your session with Vibe?  ")
         for key, label in FEEDBACK_RATING_KEYS.items():
             text.append(key, style="blue")
             text.append(f": {label}  ")

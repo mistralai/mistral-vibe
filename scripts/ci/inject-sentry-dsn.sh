@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-target_file="${1:-vibe/core/sentry.py}"
+target_file="${1:-vibe/observability/sentry.py}"
 require_sentry_dsn="${REQUIRE_SENTRY_DSN:-false}"
 
 inject_dsn() {

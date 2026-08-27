@@ -7,19 +7,30 @@ from unittest.mock import patch
 
 from textual.pilot import Pilot
 
-from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
 from tests.snapshots.snap_compare import SnapCompare
+from tests.stubs.fake_account_gateway import FakeAccountGateway
 from tests.update_notifier.adapters.fake_update_cache_repository import (
     FakeUpdateCacheRepository,
 )
 from tests.update_notifier.adapters.fake_update_gateway import FakeUpdateGateway
-from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
+from vibe.app_server._account import WhoAmIResult
+from vibe.app_server.models import AccountPlanKind
+from vibe.cli.textual_ui.widgets.messages import WhatsNewMessage
 from vibe.cli.update_notifier import UpdateCache
 
 
+async def _wait_for_whats_new(pilot: Pilot) -> None:
+    for _ in range(200):
+        if pilot.app.query(WhatsNewMessage):
+            await pilot.pause()
+            return
+        await pilot.pause(0.01)
+    raise AssertionError("WhatsNewMessage was never mounted")
+
+
 class SnapshotTestAppWithWhatsNew(BaseSnapshotTestApp):
-    def __init__(self, gateway: FakeWhoAmIGateway | None = None):
+    def __init__(self, gateway: FakeAccountGateway | None = None):
         self._previous_api_key = os.environ.get("MISTRAL_API_KEY")
         os.environ["MISTRAL_API_KEY"] = "snapshot-api-key"
 
@@ -31,12 +42,13 @@ class SnapshotTestAppWithWhatsNew(BaseSnapshotTestApp):
             seen_whats_new_version=None,
         )
         update_cache_repository = FakeUpdateCacheRepository(update_cache=cache)
+        account_gateway = gateway or FakeAccountGateway(unavailable=True)
         super().__init__(
             config=config,
             update_notifier=update_notifier,
             update_cache_repository=update_cache_repository,
             current_version="1.0.0",
-            plan_offer_gateway=gateway,
+            account_gateway=account_gateway,
         )
 
     def on_unmount(self) -> None:
@@ -49,41 +61,41 @@ class SnapshotTestAppWithWhatsNew(BaseSnapshotTestApp):
 
 class SnapshotTestAppWithPlanUpgradeCTA(SnapshotTestAppWithWhatsNew):
     def __init__(self):
-        plan_offer_gateway = FakeWhoAmIGateway(
-            WhoAmIResponse(
-                plan_type=WhoAmIPlanType.API,
+        account_gateway = FakeAccountGateway(
+            WhoAmIResult(
+                plan_type=AccountPlanKind.API,
                 plan_name="FREE",
                 prompt_switching_to_pro_plan=False,
             )
         )
 
-        super().__init__(gateway=plan_offer_gateway)
+        super().__init__(gateway=account_gateway)
 
 
 class SnapshotTestAppWithSwitchKeyCTA(SnapshotTestAppWithWhatsNew):
     def __init__(self):
-        plan_offer_gateway = FakeWhoAmIGateway(
-            WhoAmIResponse(
-                plan_type=WhoAmIPlanType.API,
+        account_gateway = FakeAccountGateway(
+            WhoAmIResult(
+                plan_type=AccountPlanKind.API,
                 plan_name="FREE",
                 prompt_switching_to_pro_plan=True,
             )
         )
 
-        super().__init__(gateway=plan_offer_gateway)
+        super().__init__(gateway=account_gateway)
 
 
 class SnapshotTestAppWithWhatsNewNoPlanCTA(SnapshotTestAppWithWhatsNew):
     def __init__(self):
-        plan_offer_gateway = FakeWhoAmIGateway(
-            WhoAmIResponse(
-                plan_type=WhoAmIPlanType.CHAT,
+        account_gateway = FakeAccountGateway(
+            WhoAmIResult(
+                plan_type=AccountPlanKind.CHAT,
                 plan_name="INDIVIDUAL",
                 prompt_switching_to_pro_plan=False,
             )
         )
 
-        super().__init__(gateway=plan_offer_gateway)
+        super().__init__(gateway=account_gateway)
 
 
 def test_snapshot_shows_whats_new_message(
@@ -94,7 +106,7 @@ def test_snapshot_shows_whats_new_message(
     whats_new_file.write_text("# What's New\n\n- Feature 1\n- Feature 2\n- Feature 3")
 
     async def run_before(pilot: Pilot) -> None:
-        await pilot.pause(0.5)
+        await _wait_for_whats_new(pilot)
 
     with patch("vibe.cli.update_notifier.whats_new.VIBE_ROOT", tmp_path):
         assert snap_compare(
@@ -111,7 +123,7 @@ def test_snapshot_shows_upgrade_message(
     whats_new_file.write_text("# What's New\n\n- Feature 1\n- Feature 2\n- Feature 3")
 
     async def run_before(pilot: Pilot) -> None:
-        await pilot.pause(0.5)
+        await _wait_for_whats_new(pilot)
 
     with patch("vibe.cli.update_notifier.whats_new.VIBE_ROOT", tmp_path):
         assert snap_compare(
@@ -128,7 +140,7 @@ def test_snapshot_shows_switch_message(
     whats_new_file.write_text("# What's New\n\n- Feature 1\n- Feature 2\n- Feature 3")
 
     async def run_before(pilot: Pilot) -> None:
-        await pilot.pause(0.5)
+        await _wait_for_whats_new(pilot)
 
     with patch("vibe.cli.update_notifier.whats_new.VIBE_ROOT", tmp_path):
         assert snap_compare(
@@ -145,7 +157,7 @@ def test_snapshot_shows_no_plan_message(
     whats_new_file.write_text("# What's New\n\n- Feature 1\n- Feature 2\n- Feature 3")
 
     async def run_before(pilot: Pilot) -> None:
-        await pilot.pause(0.5)
+        await _wait_for_whats_new(pilot)
 
     with patch("vibe.cli.update_notifier.whats_new.VIBE_ROOT", tmp_path):
         assert snap_compare(

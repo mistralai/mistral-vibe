@@ -65,6 +65,22 @@ def test_exits_on_invalid_api_key_env_var(
     assert "set for this session only" not in out
 
 
+def test_warns_on_provider_config_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "exit", _exit_raiser)
+
+    onboarding.run_onboarding(
+        StubApp("provider_config_error:failed to persist provider config")
+    )
+
+    out = capsys.readouterr().out
+    assert "Could not save provider config" in out
+    assert "API key was saved" in out
+    assert "persisted to config.toml" in out
+    assert "set for this session only" not in out
+
+
 def test_successfully_completes(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

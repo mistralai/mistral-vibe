@@ -4,10 +4,10 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import final
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, JsonValue, PrivateAttr
 
 from vibe.core.checkpoints import FileSnapshot
-from vibe.core.scratchpad import is_scratchpad_path
+from vibe.core.scratchpad import is_scratchpad_display_path
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -16,21 +16,29 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.io_port import ToolIOPort
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import resolve_file_tool_permission
+from vibe.core.tools.utils import (
+    DEFAULT_SENSITIVE_PATTERNS,
+    ToolPath,
+    display_file_path,
+    resolve_file_tool_permission,
+    resolve_tool_path,
+)
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.core.utils.io import (
+from vibe.utils.io import (
     ReadSafeResult,
     atomic_replace,
     file_write_lock,
     read_safe_async,
 )
-from vibe.core.utils.text import line_contexts
+from vibe.utils.text import line_contexts
+from vibe.utils.tool_presentation import ToolEffectKind
 
 
 class EditArgs(BaseModel):
-    file_path: str = Field(description="The absolute path to the file to modify")
+    file_path: ToolPath = Field(description="The absolute path to the file to modify")
     old_string: str = Field(description="The text to replace")
     new_string: str = Field(
         description="The text to replace it with (must be different from old_string)"
@@ -66,7 +74,7 @@ class EditResult(BaseModel):
 class EditConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ASK
     sensitive_patterns: list[str] = Field(
-        default=["**/.env", "**/.env.*"],
+        default_factory=lambda: list(DEFAULT_SENSITIVE_PATTERNS),
         description="File patterns that trigger ASK even when permission is ALWAYS.",
     )
 
@@ -75,6 +83,8 @@ class Edit(
     BaseTool[EditArgs, EditResult, EditConfig, BaseToolState],
     ToolUIData[EditArgs, EditResult],
 ):
+    effect_kind = ToolEffectKind.FILE_EDIT
+
     def resolve_permission(self, args: EditArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.file_path,
@@ -83,6 +93,8 @@ class Edit(
             denylist=self.config.denylist,
             config_permission=self.config.permission,
             sensitive_patterns=self.config.sensitive_patterns,
+            workspace=self.workspace,
+            scratchpad_dir=self.scratchpad_dir,
         )
 
     def get_file_snapshot(self, args: EditArgs) -> FileSnapshot | None:
@@ -90,20 +102,28 @@ class Edit(
 
     @classmethod
     def format_call_display(cls, args: EditArgs) -> ToolCallDisplay:
-        suffix = "(scratchpad)" if is_scratchpad_path(args.file_path) else ""
+        suffix = "(scratchpad)" if is_scratchpad_display_path(args.file_path) else ""
+        shown = display_file_path(args.file_path)
         return ToolCallDisplay(
-            summary=f"Editing {Path(args.file_path).name}",
+            summary=f"Editing {shown}",
             content=f"old_string: {args.old_string!r}\nnew_string: {args.new_string!r}",
             suffix=suffix,
+            verb="Editing",
+            message=shown,
+            settled_verb="Edited",
+            settled_message=shown,
         )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
         if isinstance(event.result, EditResult):
-            suffix = "(scratchpad)" if is_scratchpad_path(event.result.file) else ""
+            suffix = (
+                "(scratchpad)" if is_scratchpad_display_path(event.result.file) else ""
+            )
             return ToolResultDisplay(
                 success=True,
-                message=f"Edited {Path(event.result.file).name}",
+                verb="Edited",
+                message=display_file_path(event.result.file),
                 suffix=suffix,
             )
         return ToolResultDisplay(
@@ -111,15 +131,41 @@ class Edit(
         )
 
     @classmethod
+    def project_result(cls, result: EditResult) -> JsonValue:
+        return {
+            "file": result.file,
+            "old_string": result.old_string,
+            "new_string": result.new_string,
+            "occurrences": [
+                {"start_line": start_line, "old_text": old_text, "new_text": new_text}
+                for start_line, old_text, new_text in result.ui_occurrences
+            ],
+        }
+
+    @classmethod
     def get_status_text(cls) -> str:
         return "Editing files"
 
-    async def _read_file(self, file_path: Path) -> ReadSafeResult:
+    async def _read_file(
+        self, file_path: Path, tool_io: ToolIOPort | None = None
+    ) -> ReadSafeResult:
+        if tool_io is not None and tool_io.supports_read:
+            return await tool_io.read_text(file_path)
         return await read_safe_async(file_path, raise_on_error=True)
 
     async def _write_file(
-        self, file_path: Path, content: str, encoding: str, newline: str
+        self,
+        file_path: Path,
+        content: str,
+        encoding: str,
+        newline: str,
+        tool_io: ToolIOPort | None = None,
     ) -> None:
+        if tool_io is not None and tool_io.supports_write:
+            await tool_io.write_text(
+                file_path, content, encoding=encoding, newline=newline
+            )
+            return
         await atomic_replace(file_path, content, encoding=encoding, newline=newline)
 
     @final
@@ -127,10 +173,11 @@ class Edit(
         self, args: EditArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | EditResult, None]:
         file_path = self._validate_args(args)
+        tool_io = ctx.tool_io if ctx is not None else None
 
         try:
             async with file_write_lock(file_path):
-                result = await self._read_file(file_path)
+                result = await self._read_file(file_path, tool_io)
                 original = result.text
 
                 if args.old_string not in original:
@@ -158,7 +205,7 @@ class Edit(
 
                 if modified != original:
                     await self._write_file(
-                        file_path, modified, result.encoding, result.newline
+                        file_path, modified, result.encoding, result.newline, tool_io
                     )
         except UnicodeDecodeError as e:
             raise ToolError(
@@ -209,10 +256,7 @@ class Edit(
                 "No changes to make — old_string and new_string are identical"
             )
 
-        file_path = Path(file_path_str).expanduser()
-        if not file_path.is_absolute():
-            file_path = Path.cwd() / file_path
-        file_path = file_path.resolve()
+        file_path = resolve_tool_path(file_path_str, self.cwd)
 
         if not file_path.exists():
             raise ToolError(f"File does not exist: {file_path}")

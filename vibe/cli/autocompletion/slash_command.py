@@ -2,25 +2,33 @@ from __future__ import annotations
 
 from textual import events
 
-from vibe.cli.autocompletion.base import CompletionResult, CompletionView
-from vibe.core.autocompletion.completers import CommandCompleter
+from vibe.cli.autocompletion.base import (
+    CompletionEntry,
+    CompletionResult,
+    CompletionView,
+)
+from vibe.cli.autocompletion.completers import CommandCompleter
 
 
 class SlashCommandController:
     def __init__(self, completer: CommandCompleter, view: CompletionView) -> None:
         self._completer = completer
         self._view = view
-        self._suggestions: list[tuple[str, str]] = []
+        self._suggestions: list[CompletionEntry] = []
         self._selected_index = 0
 
     def can_handle(self, text: str, cursor_index: int) -> bool:
         return text.startswith("/")
 
+    def is_showing(self) -> bool:
+        return bool(self._suggestions)
+
     def reset(self) -> None:
-        if self._suggestions:
-            self._suggestions.clear()
-            self._selected_index = 0
-            self._view.clear_completion_suggestions()
+        if not self._suggestions:
+            return
+        self._suggestions.clear()
+        self._selected_index = 0
+        self._view.clear_completion_suggestions()
 
     def on_text_changed(self, text: str, cursor_index: int) -> None:
         if cursor_index < 0 or cursor_index > len(text):
@@ -32,14 +40,18 @@ class SlashCommandController:
             return
 
         suggestions = self._completer.get_completion_items(text, cursor_index)
-        if suggestions:
-            self._suggestions = suggestions
-            self._selected_index = 0
-            self._view.render_completion_suggestions(
-                self._suggestions, self._selected_index
-            )
-        else:
+        if not suggestions:
             self.reset()
+            return
+
+        # Keep the highlighted item across re-renders that don't change the list
+        # (e.g. a caret move), so navigating with Up/Down survives cursor moves.
+        if suggestions != self._suggestions:
+            self._selected_index = 0
+        self._suggestions = suggestions
+        self._view.render_completion_suggestions(
+            self._suggestions, self._selected_index
+        )
 
     def on_key(
         self, event: events.Key, text: str, cursor_index: int
@@ -83,7 +95,7 @@ class SlashCommandController:
         if not self._suggestions:
             return False
 
-        alias, _ = self._suggestions[self._selected_index]
+        alias = self._suggestions[self._selected_index].label
         replacement_range = self._completer.get_replacement_range(text, cursor_index)
         if replacement_range is None:
             self.reset()

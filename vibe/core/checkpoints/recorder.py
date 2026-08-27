@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from vibe.core.checkpoints.checkpointer import Checkpointer
 from vibe.core.checkpoints.file_store import FileStore
 from vibe.core.checkpoints.models import FileState
-from vibe.core.logger import logger
+from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from vibe.core.types import MessageList
@@ -33,6 +33,10 @@ class CheckpointRecorder:
         self._checkpointer = checkpointer
         self._messages = messages
         self._files = files or FileStore()
+
+    def reset(self) -> None:
+        """Drop recorded checkpoints so rewind state never crosses sessions."""
+        self._checkpointer.clear()
 
     def create_checkpoint(self) -> None:
         """Start a new turn, re-reading known files so those mutated by tools

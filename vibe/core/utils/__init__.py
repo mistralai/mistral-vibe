@@ -1,78 +1,78 @@
 """Utilities package. Re-exports all public and test-used symbols from submodules.
 
-Import read_safe / read_safe_async / decode_safe (returns ReadSafeResult) from vibe.core.utils.io and create_slug from
+Import read_safe / read_safe_async / decode_safe (returns ReadSafeResult) from vibe.utils.io and create_slug from
 vibe.core.utils.slug when needed to avoid circular imports with config.
 """
 
 from __future__ import annotations
 
-from vibe.core.utils.async_subprocess import kill_async_subprocess
-from vibe.core.utils.concurrency import (
-    AsyncExecutor,
-    ConversationLimitException,
-    run_sync,
-)
-from vibe.core.utils.display import compact_complete_display
-from vibe.core.utils.http import (
-    VibeAsyncHTTPClient,
-    build_ssl_context,
-    configure_ssl_context,
-    get_server_url_from_api_base,
-    get_user_agent,
-)
-from vibe.core.utils.matching import name_matches
-from vibe.core.utils.merge import MergeConflictError, MergeStrategy
-from vibe.core.utils.paths import is_dangerous_directory
-from vibe.core.utils.platform import (
-    WindowsShell,
-    WindowsShellKind,
-    get_platform_display_name,
-    get_platform_id,
-    get_platform_version,
-    get_windows_bash_path,
-    is_windows,
-    resolve_windows_shell,
-)
-from vibe.core.utils.retry import async_generator_retry, async_retry
-from vibe.core.utils.sse import iter_sse_lines
-from vibe.core.utils.tags import (
-    CANCELLATION_TAG,
-    KNOWN_TAGS,
-    TOOL_ERROR_TAG,
-    VIBE_STOP_EVENT_TAG,
-    VIBE_WARNING_TAG,
-    CancellationReason,
-    TaggedText,
-    get_user_cancellation_message,
-    is_user_cancellation_event,
-)
-from vibe.core.utils.time import utc_now
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vibe.core.utils.async_subprocess import kill_async_subprocess
+    from vibe.core.utils.concurrency import (
+        AsyncExecutor,
+        ConversationLimitException,
+        run_sync,
+    )
+    from vibe.core.utils.matching import name_matches
+    from vibe.core.utils.merge import MergeConflictError, MergeStrategy
+    from vibe.core.utils.pacing import AdaptivePacer
+    from vibe.core.utils.retry import (
+        RetryCategory,
+        RetryObserver,
+        RetryReason,
+        StreamHTTPError,
+        async_generator_retry,
+        async_retry,
+    )
+    from vibe.core.utils.sse import iter_sse_lines
+    from vibe.core.utils.tags import (
+        CANCELLATION_TAG,
+        KNOWN_TAGS,
+        TOOL_ERROR_TAG,
+        VIBE_STOP_EVENT_TAG,
+        CancellationReason,
+        TaggedText,
+        get_user_cancellation_message,
+        is_user_cancellation_event,
+    )
+    from vibe.core.utils.time import utc_now
+    from vibe.utils.paths import is_dangerous_directory
+    from vibe.utils.platform import (
+        WindowsShell,
+        WindowsShellKind,
+        get_platform_display_name,
+        get_platform_id,
+        get_platform_version,
+        get_windows_bash_path,
+        is_windows,
+        resolve_windows_shell,
+    )
 
 __all__ = [
     "CANCELLATION_TAG",
     "KNOWN_TAGS",
     "TOOL_ERROR_TAG",
     "VIBE_STOP_EVENT_TAG",
-    "VIBE_WARNING_TAG",
+    "AdaptivePacer",
     "AsyncExecutor",
     "CancellationReason",
     "ConversationLimitException",
     "MergeConflictError",
     "MergeStrategy",
+    "RetryCategory",
+    "RetryObserver",
+    "RetryReason",
+    "StreamHTTPError",
     "TaggedText",
-    "VibeAsyncHTTPClient",
     "WindowsShell",
     "WindowsShellKind",
     "async_generator_retry",
     "async_retry",
-    "build_ssl_context",
-    "compact_complete_display",
-    "configure_ssl_context",
     "get_platform_display_name",
     "get_platform_id",
     "get_platform_version",
-    "get_server_url_from_api_base",
-    "get_user_agent",
     "get_user_cancellation_message",
     "get_windows_bash_path",
     "is_dangerous_directory",
@@ -85,3 +85,63 @@ __all__ = [
     "run_sync",
     "utc_now",
 ]
+
+_MAPPING: dict[str, tuple[str, str]] = {
+    "kill_async_subprocess": (
+        "vibe.core.utils.async_subprocess",
+        "kill_async_subprocess",
+    ),
+    "AsyncExecutor": ("vibe.core.utils.concurrency", "AsyncExecutor"),
+    "ConversationLimitException": (
+        "vibe.core.utils.concurrency",
+        "ConversationLimitException",
+    ),
+    "run_sync": ("vibe.core.utils.concurrency", "run_sync"),
+    "name_matches": ("vibe.core.utils.matching", "name_matches"),
+    "MergeConflictError": ("vibe.core.utils.merge", "MergeConflictError"),
+    "MergeStrategy": ("vibe.core.utils.merge", "MergeStrategy"),
+    "AdaptivePacer": ("vibe.core.utils.pacing", "AdaptivePacer"),
+    "RetryCategory": ("vibe.core.utils.retry", "RetryCategory"),
+    "RetryObserver": ("vibe.core.utils.retry", "RetryObserver"),
+    "RetryReason": ("vibe.core.utils.retry", "RetryReason"),
+    "StreamHTTPError": ("vibe.core.utils.retry", "StreamHTTPError"),
+    "async_generator_retry": ("vibe.core.utils.retry", "async_generator_retry"),
+    "async_retry": ("vibe.core.utils.retry", "async_retry"),
+    "iter_sse_lines": ("vibe.core.utils.sse", "iter_sse_lines"),
+    "CANCELLATION_TAG": ("vibe.core.utils.tags", "CANCELLATION_TAG"),
+    "KNOWN_TAGS": ("vibe.core.utils.tags", "KNOWN_TAGS"),
+    "TOOL_ERROR_TAG": ("vibe.core.utils.tags", "TOOL_ERROR_TAG"),
+    "VIBE_STOP_EVENT_TAG": ("vibe.core.utils.tags", "VIBE_STOP_EVENT_TAG"),
+    "CancellationReason": ("vibe.core.utils.tags", "CancellationReason"),
+    "TaggedText": ("vibe.core.utils.tags", "TaggedText"),
+    "get_user_cancellation_message": (
+        "vibe.core.utils.tags",
+        "get_user_cancellation_message",
+    ),
+    "is_user_cancellation_event": (
+        "vibe.core.utils.tags",
+        "is_user_cancellation_event",
+    ),
+    "utc_now": ("vibe.core.utils.time", "utc_now"),
+    "is_dangerous_directory": ("vibe.utils.paths", "is_dangerous_directory"),
+    "WindowsShell": ("vibe.utils.platform", "WindowsShell"),
+    "WindowsShellKind": ("vibe.utils.platform", "WindowsShellKind"),
+    "get_platform_display_name": ("vibe.utils.platform", "get_platform_display_name"),
+    "get_platform_id": ("vibe.utils.platform", "get_platform_id"),
+    "get_platform_version": ("vibe.utils.platform", "get_platform_version"),
+    "get_windows_bash_path": ("vibe.utils.platform", "get_windows_bash_path"),
+    "is_windows": ("vibe.utils.platform", "is_windows"),
+    "resolve_windows_shell": ("vibe.utils.platform", "resolve_windows_shell"),
+}
+
+
+def __getattr__(name: str) -> object:
+    if name in _MAPPING:
+        import importlib
+
+        module_name, attr_name = _MAPPING[name]
+        module = importlib.import_module(module_name)
+        value = getattr(module, attr_name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

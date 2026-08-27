@@ -30,13 +30,13 @@ class SnapshotTestAppWithReasoningContent(BaseSnapshotTestApp):
                 mock_llm_chunk(content=" This is the ultimate answer."),
             ]
         )
-        super().__init__(config=config)
-        self.agent_loop = build_test_agent_loop(
+        agent_loop = build_test_agent_loop(
             config=config,
             agent_name=self._current_agent_name,
             enable_streaming=True,
             backend=fake_backend,
         )
+        super().__init__(agent_loop=agent_loop)
 
 
 class SnapshotTestAppWithInterleavedReasoning(BaseSnapshotTestApp):
@@ -56,6 +56,37 @@ class SnapshotTestAppWithInterleavedReasoning(BaseSnapshotTestApp):
                 mock_llm_chunk(content="And here's the conclusion!"),
             ]
         )
+        agent_loop = build_test_agent_loop(
+            config=config,
+            agent_name=self._current_agent_name,
+            enable_streaming=True,
+            backend=fake_backend,
+        )
+        super().__init__(agent_loop=agent_loop)
+
+
+class SnapshotTestAppWithHiddenReasoning(BaseSnapshotTestApp):
+    """Same stream as the reasoning app, but thinking nodes are hidden."""
+
+    def __init__(self) -> None:
+        config = default_config(show_thinking_nodes=False)
+        fake_backend = FakeBackend(
+            chunks=[
+                mock_llm_chunk(
+                    content="",
+                    reasoning_content="Let me think about this step by step...",
+                ),
+                mock_llm_chunk(
+                    content="",
+                    reasoning_content=" First, I need to understand the question.",
+                ),
+                mock_llm_chunk(
+                    content="", reasoning_content=" Then I can formulate a response."
+                ),
+                mock_llm_chunk(content="The answer to your question is 42."),
+                mock_llm_chunk(content=" This is the ultimate answer."),
+            ]
+        )
         super().__init__(config=config)
         self.agent_loop = build_test_agent_loop(
             config=config,
@@ -73,6 +104,19 @@ def test_snapshot_shows_reasoning_content(snap_compare: SnapCompare) -> None:
 
     assert snap_compare(
         "test_ui_snapshot_reasoning_content.py:SnapshotTestAppWithReasoningContent",
+        terminal_size=(120, 36),
+        run_before=run_before,
+    )
+
+
+def test_snapshot_hides_reasoning_content(snap_compare: SnapCompare) -> None:
+    async def run_before(pilot: Pilot) -> None:
+        await pilot.press(*"What is the answer?")
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+
+    assert snap_compare(
+        "test_ui_snapshot_reasoning_content.py:SnapshotTestAppWithHiddenReasoning",
         terminal_size=(120, 36),
         run_before=run_before,
     )
@@ -122,13 +166,13 @@ class SnapshotTestAppWithBufferedReasoningTransition(BaseSnapshotTestApp):
                 mock_llm_chunk(content=" I hope this helps!"),
             ]
         )
-        super().__init__(config=config)
-        self.agent_loop = build_test_agent_loop(
+        agent_loop = build_test_agent_loop(
             config=config,
             agent_name=self._current_agent_name,
             enable_streaming=True,
             backend=fake_backend,
         )
+        super().__init__(agent_loop=agent_loop)
 
 
 def test_snapshot_buffered_reasoning_yields_before_content(

@@ -4,25 +4,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.stubs.app_config import build_test_app_config
 from tests.stubs.fake_audio_recorder import FakeAudioRecorder
 from tests.stubs.fake_transcribe_client import FakeTranscribeClient
+from vibe.cli.audio_recorder.audio_recorder_port import (
+    AudioBackendUnavailableError,
+    NoAudioInputDeviceError,
+)
+from vibe.cli.transcribe.transcribe_client_port import (
+    TranscribeDone,
+    TranscribeError,
+    TranscribeSessionCreated,
+    TranscribeTextDelta,
+)
 from vibe.cli.voice_manager.voice_manager import VoiceManager
 from vibe.cli.voice_manager.voice_manager_port import (
     RecordingStartError,
     TranscribeState,
     VoiceManagerListener,
-    VoiceToggleResult,
-)
-from vibe.core.audio_recorder.audio_recorder_port import (
-    AudioBackendUnavailableError,
-    NoAudioInputDeviceError,
-)
-from vibe.core.transcribe.transcribe_client_port import (
-    TranscribeDone,
-    TranscribeError,
-    TranscribeSessionCreated,
-    TranscribeTextDelta,
 )
 
 
@@ -31,6 +30,8 @@ class StateListener(VoiceManagerListener):
         self.state_changes: list[TranscribeState] = []
         self.voice_mode_changes: list[bool] = []
         self.transcribed_texts: list[str] = []
+        self.errors: list[str] = []
+        self.notices: list[str] = []
 
     def on_transcribe_state_change(self, state: TranscribeState) -> None:
         self.state_changes.append(state)
@@ -41,6 +42,12 @@ class StateListener(VoiceManagerListener):
     def on_transcribe_text(self, text: str) -> None:
         self.transcribed_texts.append(text)
 
+    def on_transcribe_error(self, message: str) -> None:
+        self.errors.append(message)
+
+    def on_transcribe_notice(self, message: str) -> None:
+        self.notices.append(message)
+
 
 def _make_manager(
     *,
@@ -50,7 +57,7 @@ def _make_manager(
 ) -> tuple[VoiceManager, FakeAudioRecorder, FakeTranscribeClient]:
     recorder = FakeAudioRecorder()
     client = transcribe_client or FakeTranscribeClient()
-    config = build_test_vibe_config(voice_mode_enabled=voice_mode_enabled)
+    config = build_test_app_config(voice_mode_enabled=voice_mode_enabled)
     manager = VoiceManager(
         config_getter=lambda: config,
         audio_recorder=recorder,
@@ -105,9 +112,56 @@ class TestStartRecording:
         assert manager.transcribe_state == TranscribeState.IDLE
 
     @pytest.mark.asyncio
+    async def test_start_no_backend_preserves_underlying_detail(self) -> None:
+        def raise_no_backend(*a, **kw):
+            raise AudioBackendUnavailableError(
+                "sounddevice is not available: some driver error"
+            )
+
+        manager, recorder, _ = _make_manager()
+        recorder.start = raise_no_backend
+        with pytest.raises(RecordingStartError, match="some driver error"):
+            manager.start_recording()
+
+    @pytest.mark.asyncio
+    async def test_start_no_backend_appends_hint_only_for_portaudio(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "vibe.cli.voice_manager.voice_manager.portaudio_install_hint",
+            lambda: " INSTALL_HINT",
+        )
+
+        def raise_portaudio(*a, **kw):
+            raise AudioBackendUnavailableError("PortAudio library not found")
+
+        manager, recorder, _ = _make_manager()
+        recorder.start = raise_portaudio
+        with pytest.raises(RecordingStartError, match="INSTALL_HINT"):
+            manager.start_recording()
+
+    @pytest.mark.asyncio
+    async def test_start_no_backend_omits_hint_for_non_portaudio(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "vibe.cli.voice_manager.voice_manager.portaudio_install_hint",
+            lambda: " INSTALL_HINT",
+        )
+
+        def raise_other(*a, **kw):
+            raise AudioBackendUnavailableError("some other driver failure")
+
+        manager, recorder, _ = _make_manager()
+        recorder.start = raise_other
+        with pytest.raises(RecordingStartError) as excinfo:
+            manager.start_recording()
+        assert "INSTALL_HINT" not in str(excinfo.value)
+
+    @pytest.mark.asyncio
     async def test_start_raises_when_no_transcribe_client(self) -> None:
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
@@ -116,6 +170,17 @@ class TestStartRecording:
         with pytest.raises(
             RecordingStartError, match="Transcribe client is not available"
         ):
+            manager.start_recording()
+        assert manager.transcribe_state == TranscribeState.IDLE
+        assert not recorder.is_recording
+
+    @pytest.mark.asyncio
+    async def test_start_raises_when_api_key_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        manager, recorder, _ = _make_manager()
+        with pytest.raises(RecordingStartError, match="MISTRAL_API_KEY"):
             manager.start_recording()
         assert manager.transcribe_state == TranscribeState.IDLE
         assert not recorder.is_recording
@@ -162,7 +227,7 @@ class TestStopRecording:
                 pass
 
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
@@ -194,7 +259,7 @@ class TestStopRecording:
                 pass
 
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
@@ -219,13 +284,11 @@ class TestStopRecording:
         assert manager.transcribe_state == TranscribeState.IDLE
 
     @pytest.mark.asyncio
-    async def test_stop_recovers_when_no_audio_was_sent(self) -> None:
+    async def test_empty_transcription_notifies_notice_not_error(self) -> None:
         client = FakeTranscribeClient(
             events=[
                 TranscribeSessionCreated(request_id="test-req-id"),
-                TranscribeError(
-                    message="Cannot flush audio before sending any audio bytes"
-                ),
+                TranscribeDone(),
             ]
         )
         manager, recorder, _ = _make_manager(transcribe_client=client)
@@ -237,6 +300,141 @@ class TestStopRecording:
 
         assert manager.transcribe_state == TranscribeState.IDLE
         assert not recorder.is_recording
+        assert listener.notices == ["No speech detected"]
+        assert listener.errors == []
+
+    @pytest.mark.asyncio
+    async def test_empty_transcription_without_signal_notifies_error(self) -> None:
+        client = FakeTranscribeClient(
+            events=[
+                TranscribeSessionCreated(request_id="test-req-id"),
+                TranscribeDone(),
+            ]
+        )
+        manager, recorder, _ = _make_manager(transcribe_client=client)
+        recorder.set_has_signal(False)
+        listener = StateListener()
+        manager.add_listener(listener)
+
+        manager.start_recording()
+        await manager.stop_recording()
+
+        assert listener.notices == []
+        assert len(listener.errors) == 1
+        assert "No audio detected from microphone" in listener.errors[0]
+
+    @pytest.mark.asyncio
+    async def test_short_recording_without_signal_notifies_notice_not_error(
+        self,
+    ) -> None:
+        client = FakeTranscribeClient(
+            events=[
+                TranscribeSessionCreated(request_id="test-req-id"),
+                TranscribeDone(),
+            ]
+        )
+        manager, recorder, _ = _make_manager(transcribe_client=client)
+        recorder.set_has_signal(False)
+        recorder.set_duration(0.1)
+        listener = StateListener()
+        manager.add_listener(listener)
+
+        manager.start_recording()
+        await manager.stop_recording()
+
+        assert listener.errors == []
+        assert listener.notices == ["No speech detected"]
+
+    @pytest.mark.asyncio
+    async def test_no_signal_error_appends_macos_hint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "vibe.cli.voice_manager.voice_manager.get_platform_id", lambda: "darwin"
+        )
+        client = FakeTranscribeClient(
+            events=[
+                TranscribeSessionCreated(request_id="test-req-id"),
+                TranscribeDone(),
+            ]
+        )
+        manager, recorder, _ = _make_manager(transcribe_client=client)
+        recorder.set_has_signal(False)
+        listener = StateListener()
+        manager.add_listener(listener)
+
+        manager.start_recording()
+        await manager.stop_recording()
+
+        assert "Privacy & Security" in listener.errors[0]
+
+    @pytest.mark.asyncio
+    async def test_no_signal_error_omits_hint_off_macos(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "vibe.cli.voice_manager.voice_manager.get_platform_id", lambda: "linux"
+        )
+        client = FakeTranscribeClient(
+            events=[
+                TranscribeSessionCreated(request_id="test-req-id"),
+                TranscribeDone(),
+            ]
+        )
+        manager, recorder, _ = _make_manager(transcribe_client=client)
+        recorder.set_has_signal(False)
+        listener = StateListener()
+        manager.add_listener(listener)
+
+        manager.start_recording()
+        await manager.stop_recording()
+
+        assert "Privacy & Security" not in listener.errors[0]
+
+    @pytest.mark.asyncio
+    async def test_no_signal_sends_error_telemetry(self) -> None:
+        client = FakeTranscribeClient(
+            events=[
+                TranscribeSessionCreated(request_id="test-req-id"),
+                TranscribeDone(),
+            ]
+        )
+        mock_telemetry = MagicMock()
+        manager, recorder, _ = _make_manager(
+            transcribe_client=client, telemetry_client=mock_telemetry
+        )
+        recorder.set_has_signal(False)
+
+        manager.start_recording()
+        await manager.stop_recording()
+
+        error_calls = _find_telemetry_calls(
+            mock_telemetry, "vibe.audio.transcription.error"
+        )
+        done_calls = _find_telemetry_calls(
+            mock_telemetry, "vibe.audio.transcription.done"
+        )
+        assert len(error_calls) == 1
+        assert done_calls == []
+
+    @pytest.mark.asyncio
+    async def test_transcribed_text_does_not_notify_notice(self) -> None:
+        client = FakeTranscribeClient(
+            events=[
+                TranscribeSessionCreated(request_id="test-req-id"),
+                TranscribeTextDelta(text="hello"),
+                TranscribeDone(),
+            ]
+        )
+        manager, _, _ = _make_manager(transcribe_client=client)
+        listener = StateListener()
+        manager.add_listener(listener)
+
+        manager.start_recording()
+        await manager.stop_recording()
+
+        assert listener.notices == []
+        assert listener.transcribed_texts == ["hello"]
 
 
 class TestCancelRecording:
@@ -265,7 +463,7 @@ class TestCancelRecording:
                 pass
 
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
@@ -288,22 +486,12 @@ class TestCancelRecording:
         assert listener.state_changes == []
 
 
-class TestToggleVoiceMode:
-    def test_toggle_enables(self) -> None:
-        manager, _, _ = _make_manager(voice_mode_enabled=False)
-        result = manager.toggle_voice_mode()
-        assert result == VoiceToggleResult(enabled=True)
-
-    def test_toggle_disables(self) -> None:
-        manager, _, _ = _make_manager(voice_mode_enabled=True)
-        result = manager.toggle_voice_mode()
-        assert result == VoiceToggleResult(enabled=False)
-
+class TestApplyVoiceMode:
     @pytest.mark.asyncio
-    async def test_toggle_disable_cancels_active_recording(self) -> None:
+    async def test_apply_disable_cancels_active_recording(self) -> None:
         manager, _, _ = _make_manager(voice_mode_enabled=True)
         manager.start_recording()
-        manager.toggle_voice_mode()
+        manager.apply_enabled(False)
         assert manager.transcribe_state == TranscribeState.IDLE
 
 
@@ -320,7 +508,7 @@ class TestListeners:
         manager, _, _ = _make_manager(voice_mode_enabled=False)
         listener = StateListener()
         manager.add_listener(listener)
-        manager.toggle_voice_mode()
+        manager.apply_enabled(True)
         assert listener.voice_mode_changes == [True]
 
     @pytest.mark.asyncio
@@ -434,7 +622,7 @@ class TestTranscription:
                 pass
 
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
@@ -448,16 +636,43 @@ class TestTranscription:
         assert manager.transcribe_state == TranscribeState.IDLE
         assert not recorder.is_recording
 
+    @pytest.mark.asyncio
+    async def test_transcription_exception_notifies_listeners(self) -> None:
+        class CrashingTranscribeClient:
+            async def transcribe(self, audio_stream):
+                raise RuntimeError("network error")
+                yield  # makes this an async generator
+
+            async def close(self) -> None:
+                pass
+
+        recorder = FakeAudioRecorder()
+        config = build_test_app_config(voice_mode_enabled=True)
+        manager = VoiceManager(
+            config_getter=lambda: config,
+            audio_recorder=recorder,
+            transcribe_client=CrashingTranscribeClient(),
+        )
+        listener = StateListener()
+        manager.add_listener(listener)
+
+        manager.start_recording()
+        task = manager._transcribe_task
+        assert task is not None
+        await task
+
+        assert listener.errors == ["network error"]
+
 
 def _find_telemetry_calls(
     mock: MagicMock, event_name: str
 ) -> list[dict[str, str | int | float | None]]:
     """Return the properties dicts for all calls matching a given event name."""
-    results: list[dict[str, str | int | float | None]] = []
-    for call in mock.send_telemetry_event.call_args_list:
-        if call[0][0] == event_name:
-            results.append(call[0][1])
-    return results
+    return [
+        dict(call.args[0].properties)
+        for call in mock.log.call_args_list
+        if call.args[0].name == event_name
+    ]
 
 
 class TestTelemetryTracking:
@@ -537,7 +752,7 @@ class TestTelemetryTracking:
                 pass
 
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         mock_telemetry = MagicMock()
         manager = VoiceManager(
             config_getter=lambda: config,
@@ -608,7 +823,7 @@ class TestTelemetryTracking:
                 pass
 
         recorder = FakeAudioRecorder()
-        config = build_test_vibe_config(voice_mode_enabled=True)
+        config = build_test_app_config(voice_mode_enabled=True)
         mock_telemetry = MagicMock()
         manager = VoiceManager(
             config_getter=lambda: config,

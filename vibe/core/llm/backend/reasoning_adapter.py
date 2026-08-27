@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-import json
 from typing import Any, ClassVar
 
 from vibe.core.config import ProviderConfig
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
-from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
+from vibe.core.llm.backend.base import (
+    APIAdapter,
+    PreparedRequest,
+    build_chat_payload,
+    finalize_chat_request,
+)
 from vibe.core.types import (
     AvailableTool,
     FunctionCall,
@@ -14,6 +18,7 @@ from vibe.core.types import (
     LLMMessage,
     LLMUsage,
     Role,
+    StopInfo,
     StrToolChoice,
     ToolCall,
 )
@@ -81,41 +86,6 @@ class ReasoningAdapter(APIAdapter):
 
         return result
 
-    def _build_payload(
-        self,
-        *,
-        model_name: str,
-        messages: list[dict[str, Any]],
-        temperature: float,
-        tools: list[AvailableTool] | None,
-        max_tokens: int | None,
-        tool_choice: StrToolChoice | AvailableTool | None,
-        thinking: str,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model": model_name,
-            "messages": messages,
-            "temperature": temperature,
-        }
-
-        if thinking != "off":
-            payload["reasoning_effort"] = thinking
-
-        if tools:
-            payload["tools"] = [tool.model_dump(exclude_none=True) for tool in tools]
-
-        if tool_choice:
-            payload["tool_choice"] = (
-                tool_choice
-                if isinstance(tool_choice, str)
-                else tool_choice.model_dump()
-            )
-
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
-
-        return payload
-
     def prepare_request(
         self,
         *,
@@ -132,7 +102,7 @@ class ReasoningAdapter(APIAdapter):
     ) -> PreparedRequest:
         converted_messages = [self._convert_message(msg) for msg in messages]
 
-        payload = self._build_payload(
+        payload = build_chat_payload(
             model_name=model_name,
             messages=converted_messages,
             temperature=temperature,
@@ -142,19 +112,13 @@ class ReasoningAdapter(APIAdapter):
             thinking=thinking,
         )
 
-        if enable_streaming:
-            payload["stream"] = True
-            payload["stream_options"] = {
-                "include_usage": True,
-                "stream_tool_calls": True,
-            }
-
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        return PreparedRequest(self.endpoint, headers, body)
+        return finalize_chat_request(
+            payload=payload,
+            enable_streaming=enable_streaming,
+            stream_options={"include_usage": True, "stream_tool_calls": True},
+            api_key=api_key,
+            endpoint=self.endpoint,
+        )
 
     @staticmethod
     def _parse_content_blocks(
@@ -228,9 +192,16 @@ class ReasoningAdapter(APIAdapter):
             message = LLMMessage(role=Role.assistant, content="")
 
         usage_data = data.get("usage") or {}
+        prompt_details = usage_data.get("prompt_tokens_details") or {}
         usage = LLMUsage(
             prompt_tokens=usage_data.get("prompt_tokens", 0),
             completion_tokens=usage_data.get("completion_tokens", 0),
+            cached_tokens=prompt_details.get("cached_tokens", 0),
+        )
+        choices = data.get("choices") or []
+        finish_reason = choices[0].get("finish_reason") if choices else None
+        stop = (
+            StopInfo(reason=str(finish_reason)) if finish_reason is not None else None
         )
 
-        return LLMChunk(message=message, usage=usage)
+        return LLMChunk(message=message, usage=usage, stop=stop)

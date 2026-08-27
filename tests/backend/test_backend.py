@@ -32,19 +32,111 @@ from tests.backend.data.fireworks import (
 )
 from tests.backend.data.mistral import (
     SIMPLE_CONVERSATION_PARAMS as MISTRAL_SIMPLE_CONVERSATION_PARAMS,
+    STREAMED_EMPTY_CHOICES_PARAMS as MISTRAL_STREAMED_EMPTY_CHOICES_PARAMS,
     STREAMED_SIMPLE_CONVERSATION_PARAMS as MISTRAL_STREAMED_SIMPLE_CONVERSATION_PARAMS,
     STREAMED_TOOL_CONVERSATION_PARAMS as MISTRAL_STREAMED_TOOL_CONVERSATION_PARAMS,
     TOOL_CONVERSATION_PARAMS as MISTRAL_TOOL_CONVERSATION_PARAMS,
 )
 from tests.constants import CHAT_COMPLETIONS_PATH
 from vibe.core.config import ModelConfig, ProviderConfig
+from vibe.core.llm.backend.base import build_chat_payload
 from vibe.core.llm.backend.factory import BACKEND_FACTORY, create_backend
-from vibe.core.llm.backend.generic import GenericBackend
-from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper
+from vibe.core.llm.backend.generic import GenericBackend, OpenAIAdapter
+from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper, _cached_tokens
 from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder
 from vibe.core.llm.types import BackendLike
 from vibe.core.types import Backend, FunctionCall, LLMChunk, LLMMessage, Role, ToolCall
-from vibe.core.utils import get_user_agent
+from vibe.utils.http import VibeAsyncHTTPClient, get_user_agent
+from vibe.utils.tool_presentation import (
+    EffectCallDisplay,
+    ToolCallPresentation,
+    ToolEffectKind,
+)
+
+
+def test_generic_backend_keeps_idle_connections_for_tool_turns() -> None:
+    provider = ProviderConfig(
+        name="generic", api_base="https://example.com/v1", api_key_env_var="API_KEY"
+    )
+    with patch(
+        "vibe.core.llm.backend.generic.VibeAsyncHTTPClient"
+    ) as create_http_client:
+        GenericBackend(provider=provider)._get_client()
+
+    limits = create_http_client.call_args.kwargs["limits"]
+    assert limits.keepalive_expiry == 60.0
+
+
+@pytest.mark.asyncio
+async def test_mistral_backend_keeps_idle_connections_for_tool_turns() -> None:
+    provider = ProviderConfig(
+        name="mistral", api_base="https://api.mistral.ai/v1", api_key_env_var="API_KEY"
+    )
+    backend = MistralBackend(provider=provider)
+    with (
+        patch(
+            "vibe.core.llm.backend.mistral.VibeAsyncHTTPClient"
+        ) as create_http_client,
+        patch("vibe.core.llm.backend.mistral.Mistral"),
+        patch("vibe.core.llm.backend.mistral._register_retry_hook"),
+    ):
+        backend._create_mistral_client()
+
+    limits = create_http_client.call_args.kwargs["limits"]
+    assert limits.keepalive_expiry == 60.0
+
+
+@pytest.mark.asyncio
+async def test_mistral_backend_bounds_the_connection_pool() -> None:
+    provider = ProviderConfig(
+        name="mistral", api_base="https://api.mistral.ai/v1", api_key_env_var="API_KEY"
+    )
+    backend = MistralBackend(provider=provider)
+    with (
+        patch(
+            "vibe.core.llm.backend.mistral.VibeAsyncHTTPClient"
+        ) as create_http_client,
+        patch("vibe.core.llm.backend.mistral.Mistral"),
+        patch("vibe.core.llm.backend.mistral._register_retry_hook"),
+    ):
+        backend._create_mistral_client()
+
+    limits = create_http_client.call_args.kwargs["limits"]
+    assert limits.max_connections == 20
+
+
+def test_internal_tool_presentation_is_not_sent_to_provider() -> None:
+    message = LLMMessage(
+        role=Role.assistant,
+        tool_calls=[
+            ToolCall(
+                id="call-1",
+                function=FunctionCall(name="bash", arguments='{"command":"pwd"}'),
+                presentation=ToolCallPresentation(
+                    kind=ToolEffectKind.SHELL,
+                    display=EffectCallDisplay(
+                        summary="bash: pwd", status_text="Running command"
+                    ),
+                ),
+            )
+        ],
+    )
+
+    request = OpenAIAdapter().prepare_request(
+        model_name="model",
+        messages=[message],
+        temperature=0.0,
+        tools=None,
+        max_tokens=None,
+        tool_choice=None,
+        enable_streaming=False,
+        provider=ProviderConfig(
+            name="provider", api_base="https://example.com/v1", api_key_env_var=""
+        ),
+    )
+
+    payload = json.loads(request.body)
+    assert "presentation" not in payload["messages"][0]["tool_calls"][0]
 
 
 class TestBackend:
@@ -111,6 +203,7 @@ class TestBackend:
                     result.usage.completion_tokens
                     == result_data["usage"]["completion_tokens"]
                 )
+                assert result.stop is not None
 
                 if result.message.tool_calls is None:
                     return
@@ -134,6 +227,7 @@ class TestBackend:
             *FIREWORKS_STREAMED_TOOL_CONVERSATION_PARAMS,
             *MISTRAL_STREAMED_SIMPLE_CONVERSATION_PARAMS,
             *MISTRAL_STREAMED_TOOL_CONVERSATION_PARAMS,
+            *MISTRAL_STREAMED_EMPTY_CHOICES_PARAMS,
         ],
     )
     async def test_backend_complete_streaming(
@@ -178,6 +272,8 @@ class TestBackend:
                 ):
                     results.append(result)
 
+                assert any(result.stop is not None for result in results)
+
                 for result, expected_result in zip(results, result_data, strict=True):
                     assert result.message.content == expected_result["message"]
                     assert result.usage is not None
@@ -205,6 +301,64 @@ class TestBackend:
                         assert (
                             tool_call.index == expected_result["tool_calls"][i]["index"]
                         )
+
+    @pytest.mark.asyncio
+    async def test_mistral_backend_streaming_closes_response_on_early_exit(self):
+        # Regression: terminating the streaming generator early (user interrupt,
+        # max-tokens truncation) used to leave the SDK stream -- and the httpx
+        # connection it holds -- open until async-gen finalization, exhausting
+        # the pool over a long session. The fix closes the SDK stream via its
+        # async context manager, so ``EventStreamAsync.__aexit__`` (which calls
+        # ``response.aclose()``) runs synchronously on every exit path.
+        from mistralai.client.utils.eventstreaming import EventStreamAsync
+
+        base_url, chunks, _ = MISTRAL_STREAMED_SIMPLE_CONVERSATION_PARAMS[0]
+        aexit_called = False
+        original_aexit = EventStreamAsync.__aexit__
+
+        async def spy_aexit(self, exc_type, exc_val, exc_tb):
+            nonlocal aexit_called
+            aexit_called = True
+            return await original_aexit(self, exc_type, exc_val, exc_tb)
+
+        with (
+            respx.mock(base_url=base_url) as mock_api,
+            patch.object(EventStreamAsync, "__aexit__", spy_aexit),
+        ):
+            route = mock_api.post(CHAT_COMPLETIONS_PATH).mock(
+                return_value=httpx.Response(
+                    status_code=200,
+                    stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            )
+            provider = ProviderConfig(
+                name="provider_name",
+                api_base=f"{base_url}/v1",
+                api_key_env_var="API_KEY",
+            )
+            backend = MistralBackend(provider=provider)
+            model = ModelConfig(
+                name="model_name", provider="provider_name", alias="model_alias"
+            )
+            messages = [LLMMessage(role=Role.user, content="List files")]
+
+            generator = backend.complete_streaming(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+            first = await generator.__anext__()
+            assert first is not None
+            # Simulate the consumer dropping the stream mid-flight.
+            await generator.aclose()
+
+            assert aexit_called, "SDK stream was not closed on early exit"
+            assert route.calls.last.response.is_closed
 
     @pytest.mark.asyncio
     async def test_backend_complete_streaming_keeps_unicode_line_breaks(self):
@@ -298,9 +452,11 @@ class TestBackend:
                 api_base=f"{base_url}/v1",
                 api_key_env_var="API_KEY",
             )
-            backend = backend_class(provider=provider)
-            if isinstance(backend, MistralBackend):
+            if issubclass(backend_class, MistralBackend):
+                backend = backend_class(provider=provider)
                 backend._retry_config = self._build_fast_retry_config()
+            else:
+                backend = backend_class(provider=provider, retry_max_elapsed_time=0.0)
             model = ModelConfig(
                 name="model_name", provider="provider_name", alias="model_alias"
             )
@@ -469,6 +625,61 @@ class TestBackend:
             assert mock_api.calls.last.request.headers["user-agent"] == user_agent
 
 
+def _mistral_client_mock() -> tuple[MagicMock, MagicMock]:
+    """A Mistral stand-in, plus the hook registry basesdk reaches for."""
+    client = MagicMock()
+    hooks = MagicMock()
+    client.sdk_configuration.__dict__["_hooks"] = hooks
+    return client, hooks
+
+
+class TestBackendFactory:
+    def test_create_backend_passes_retry_budget_to_mistral_backend(self):
+        provider = ProviderConfig(
+            name="test_provider",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="API_KEY",
+            backend=Backend.MISTRAL,
+        )
+
+        backend = create_backend(
+            provider=provider, timeout=7200.0, retry_max_elapsed_time=1234.0
+        )
+
+        assert isinstance(backend, MistralBackend)
+        assert backend._timeout == 7200.0
+        assert backend._retry_config.backoff.max_elapsed_time == 1234000
+
+    def test_create_backend_passes_enable_otel_to_generic_backend(self):
+        provider = ProviderConfig(
+            name="test_provider",
+            api_base="https://api.example.com/v1",
+            api_key_env_var="API_KEY",
+            backend=Backend.GENERIC,
+        )
+
+        backend = create_backend(provider=provider, enable_otel=True)
+
+        assert isinstance(backend, GenericBackend)
+        assert backend._enable_otel is True
+
+    def test_create_backend_passes_retry_budget_to_generic_backend(self):
+        provider = ProviderConfig(
+            name="test_provider",
+            api_base="https://api.example.com/v1",
+            api_key_env_var="API_KEY",
+            backend=Backend.GENERIC,
+        )
+
+        backend = create_backend(
+            provider=provider, timeout=7200.0, retry_max_elapsed_time=1234.0
+        )
+
+        assert isinstance(backend, GenericBackend)
+        assert backend._timeout == 7200.0
+        assert backend._retry_max_elapsed_time == 1234.0
+
+
 class TestMistralRetry:
     @staticmethod
     def _create_test_backend(
@@ -500,7 +711,7 @@ class TestMistralRetry:
         backend = self._create_test_backend()
 
         with patch("vibe.core.llm.backend.mistral.Mistral") as mock_mistral_class:
-            mock_mistral_class.return_value = MagicMock()
+            mock_mistral_class.return_value = _mistral_client_mock()[0]
             backend._get_client()
             call_kwargs = mock_mistral_class.call_args.kwargs
             assert call_kwargs["api_key"] == backend._api_key
@@ -509,27 +720,25 @@ class TestMistralRetry:
             assert call_kwargs["retry_config"] is backend._retry_config
             assert "async_client" in call_kwargs
 
+    @pytest.mark.asyncio
+    async def test_client_creation_registers_both_retry_seams(self):
+        """429/5xx are only visible to httpx; connection errors only to the SDK."""
+        backend = self._create_test_backend()
+
+        with patch("vibe.core.llm.backend.mistral.Mistral") as mock_mistral_class:
+            client, hooks = _mistral_client_mock()
+            mock_mistral_class.return_value = client
+            backend._get_client()
+
+            http_client = mock_mistral_class.call_args.kwargs["async_client"]
+            assert backend._on_response in http_client.event_hooks["response"]
+            hooks.register_after_error_hook.assert_called_once()
+
     def test_retry_budget_uses_explicit_config(self):
         backend = self._create_test_backend(
             timeout=7200.0, retry_max_elapsed_time=1234.0
         )
 
-        assert backend._timeout == 7200.0
-        assert backend._retry_config.backoff.max_elapsed_time == 1234000
-
-    def test_create_backend_passes_retry_budget(self):
-        provider = ProviderConfig(
-            name="test_provider",
-            api_base="https://api.mistral.ai/v1",
-            api_key_env_var="API_KEY",
-            backend=Backend.MISTRAL,
-        )
-
-        backend = create_backend(
-            provider=provider, timeout=7200.0, retry_max_elapsed_time=1234.0
-        )
-
-        assert isinstance(backend, MistralBackend)
         assert backend._timeout == 7200.0
         assert backend._retry_config.backoff.max_elapsed_time == 1234000
 
@@ -563,6 +772,136 @@ class TestMistralRetry:
 
             assert result.message.content == "Some content"
             assert route.call_count == 2
+
+    @staticmethod
+    def _rate_limited_stream() -> httpx.Response:
+        """A 429 whose body is still on the wire, as a real transport returns it.
+
+        respx pre-reads every mocked response, which is exactly the state this
+        test needs to avoid, so these cases drive a plain httpx MockTransport.
+        """
+        return httpx.Response(
+            status_code=429,
+            stream=httpx.ByteStream(b'{"message": "service tier capacity exceeded"}'),
+            headers={"content-type": "application/json", "retry-after": "0"},
+        )
+
+    @staticmethod
+    def _serving(handler):
+        return patch(
+            "vibe.core.llm.backend.mistral.VibeAsyncHTTPClient",
+            lambda **kwargs: VibeAsyncHTTPClient(
+                **kwargs, transport=httpx.MockTransport(handler)
+            ),
+        )
+
+    async def _drain_stream(self, backend: MistralBackend) -> None:
+        model = ModelConfig(
+            name="model_name", provider="test_provider", alias="model_alias"
+        )
+        messages = [LLMMessage(role=Role.user, content="Just say hi")]
+        async for _ in backend.complete_streaming(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            tools=None,
+            max_tokens=None,
+            tool_choice=None,
+            extra_headers=None,
+        ):
+            pass
+
+    @pytest.mark.asyncio
+    async def test_retried_streaming_response_releases_its_connection(self):
+        """A retried streaming response must not stay checked out of the pool.
+
+        The SDK issues the request with the body unread and holds the failed
+        response alive across the backoff without closing it, so nothing else
+        ever returns its connection.
+        """
+        _, chunks, _ = MISTRAL_STREAMED_SIMPLE_CONVERSATION_PARAMS[0]
+        served: list[httpx.Response] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            response = (
+                httpx.Response(
+                    status_code=200,
+                    stream=httpx.ByteStream(b"\n\n".join(chunks)),
+                    headers={"content-type": "text/event-stream"},
+                )
+                if served
+                else self._rate_limited_stream()
+            )
+            served.append(response)
+            return response
+
+        backend = self._create_test_backend()
+        backend._retry_config = self._build_fast_http_retry_config()
+        with self._serving(handler):
+            await self._drain_stream(backend)
+
+        assert len(served) == 2
+        retried = served[0]
+        assert retried.is_closed
+        assert "service tier capacity exceeded" in retried.text
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_retryable_body_still_retries(self):
+        """A body that cannot be read must not cost the turn its retry.
+
+        Decoding and protocol errors are permanent to the SDK, so letting one
+        escape the drain would turn a rate limit into a dead turn on the first
+        attempt.
+        """
+        _, chunks, _ = MISTRAL_STREAMED_SIMPLE_CONVERSATION_PARAMS[0]
+        served: list[httpx.Response] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            response = (
+                httpx.Response(
+                    status_code=200,
+                    stream=httpx.ByteStream(b"\n\n".join(chunks)),
+                    headers={"content-type": "text/event-stream"},
+                )
+                if served
+                else httpx.Response(
+                    status_code=429,
+                    stream=httpx.ByteStream(b"this is not gzip"),
+                    headers={
+                        "content-type": "application/json",
+                        "content-encoding": "gzip",
+                        "retry-after": "0",
+                    },
+                )
+            )
+            served.append(response)
+            return response
+
+        backend = self._create_test_backend()
+        backend._retry_config = self._build_fast_http_retry_config()
+        with self._serving(handler):
+            await self._drain_stream(backend)
+
+        assert len(served) == 2
+        assert served[0].is_closed
+
+    @pytest.mark.asyncio
+    async def test_exhausted_retries_still_carry_the_streamed_error_body(self):
+        served: list[httpx.Response] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            response = self._rate_limited_stream()
+            served.append(response)
+            return response
+
+        backend = self._create_test_backend()
+        backend._retry_config = TestBackend._build_fast_retry_config()
+        with self._serving(handler), pytest.raises(BackendError) as raised:
+            await self._drain_stream(backend)
+
+        assert raised.value.status == 429
+        assert "service tier capacity exceeded" in (raised.value.body_text or "")
+        assert all(response.is_closed for response in served)
 
 
 class TestMistralMapperPrepareMessage:
@@ -655,6 +994,29 @@ class TestMistralMapperPrepareMessage:
         assert result.content == "Hello!"
 
 
+class TestGenericBackendReasoningEffort:
+    @pytest.mark.parametrize(
+        ("thinking", "expect_in_payload"),
+        [("off", False), ("low", True), ("medium", True), ("high", True)],
+    )
+    def test_build_payload_reasoning_effort(
+        self, thinking: str, expect_in_payload: bool
+    ) -> None:
+        payload = build_chat_payload(
+            model_name="test-model",
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.7,
+            tools=None,
+            max_tokens=None,
+            tool_choice=None,
+            thinking=thinking,
+        )
+        if expect_in_payload:
+            assert payload["reasoning_effort"] == thinking
+        else:
+            assert "reasoning_effort" not in payload
+
+
 class TestMistralBackendReasoningEffort:
     """Tests that MistralBackend correctly passes reasoning_effort to the SDK."""
 
@@ -669,20 +1031,14 @@ class TestMistralBackendReasoningEffort:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("thinking", "expected_effort", "expected_temperature"),
-        [
-            ("off", None, 0.2),
-            ("low", "none", 1.0),
-            ("medium", "high", 1.0),
-            ("high", "high", 1.0),
-        ],
+        ("thinking", "expected_effort"),
+        [("off", None), ("low", "none"), ("medium", "high"), ("high", "high")],
     )
     async def test_complete_passes_reasoning_effort(
         self,
         backend: MistralBackend,
         thinking: Literal["off", "low", "medium", "high"],
         expected_effort: str | None,
-        expected_temperature: float,
     ) -> None:
         model = ModelConfig(
             name="mistral-small-latest",
@@ -715,7 +1071,7 @@ class TestMistralBackendReasoningEffort:
 
             call_kwargs = mock_client.chat.complete_async.call_args.kwargs
             assert call_kwargs["reasoning_effort"] == expected_effort
-            assert call_kwargs["temperature"] == expected_temperature
+            assert call_kwargs["temperature"] == 0.2
 
     @pytest.mark.asyncio
     async def test_complete_omits_reasoning_content_when_thinking_off(
@@ -876,3 +1232,105 @@ class TestBuildHttpErrorBodyReading:
             error=http_err, response=response, **self._COMMON_KWARGS
         )
         assert "http error with details" in err.body_text
+
+
+class TestCachedTokens:
+    @pytest.fixture
+    def provider(self) -> ProviderConfig:
+        return ProviderConfig(
+            name="provider_name",
+            api_base="https://api.example.com/v1",
+            api_key_env_var="API_KEY",
+        )
+
+    def test_openai_adapter_reads_cached_tokens(self, provider: ProviderConfig) -> None:
+        data = {
+            "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+            "usage": {
+                "prompt_tokens": 200,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 128},
+            },
+        }
+        chunk = OpenAIAdapter().parse_response(data, provider)
+        assert chunk.usage is not None
+        assert chunk.usage.cached_tokens == 128
+
+    def test_openai_adapter_defaults_cached_tokens_to_zero(
+        self, provider: ProviderConfig
+    ) -> None:
+        data = {
+            "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+            "usage": {"prompt_tokens": 200, "completion_tokens": 10},
+        }
+        chunk = OpenAIAdapter().parse_response(data, provider)
+        assert chunk.usage is not None
+        assert chunk.usage.cached_tokens == 0
+
+    def test_mistral_helper_reads_dict_details(self) -> None:
+        usage = MagicMock()
+        usage.prompt_tokens_details = {"cached_tokens": 77}
+        assert _cached_tokens(usage) == 77
+
+    def test_mistral_helper_reads_object_details(self) -> None:
+        details = MagicMock()
+        details.cached_tokens = 55
+        usage = MagicMock()
+        usage.prompt_tokens_details = details
+        assert _cached_tokens(usage) == 55
+
+    def test_mistral_helper_handles_missing_details(self) -> None:
+        usage = MagicMock()
+        usage.prompt_tokens_details = None
+        assert _cached_tokens(usage) == 0
+
+    def test_mistral_helper_handles_none_usage(self) -> None:
+        assert _cached_tokens(None) == 0
+
+    def test_mistral_helper_tolerates_unparsable_value(self) -> None:
+        usage = MagicMock()
+        usage.prompt_tokens_details = {"cached_tokens": "60.0"}
+        assert _cached_tokens(usage) == 0
+
+    def test_mistral_helper_coerces_numeric_string(self) -> None:
+        usage = MagicMock()
+        usage.prompt_tokens_details = {"cached_tokens": "60"}
+        assert _cached_tokens(usage) == 60
+
+    @pytest.mark.asyncio
+    async def test_mistral_backend_complete_flows_cached_tokens(self) -> None:
+        provider = ProviderConfig(
+            name="mistral",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="API_KEY",
+        )
+        backend = MistralBackend(provider=provider)
+        model = ModelConfig(
+            name="mistral-small-latest", provider="mistral", alias="mistral-small"
+        )
+
+        with patch.object(backend, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "hello"
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.usage.prompt_tokens = 200
+            mock_response.usage.completion_tokens = 5
+            mock_response.usage.prompt_tokens_details = {"cached_tokens": 128}
+            mock_client.chat.complete_async = AsyncMock(return_value=mock_response)
+            mock_get_client.return_value = mock_client
+
+            chunk = await backend.complete(
+                model=model,
+                messages=[LLMMessage(role=Role.user, content="hi")],
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+        assert chunk.usage is not None
+        assert chunk.usage.prompt_tokens == 200
+        assert chunk.usage.cached_tokens == 128

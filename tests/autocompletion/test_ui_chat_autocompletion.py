@@ -225,6 +225,7 @@ async def test_pressing_tab_writes_selected_path_name_and_hides_popup(
 
         await pilot.press(*"Print @REA")
         await pilot.press("tab")
+        await pilot.pause(0.2)
 
         assert chat_input.value == "Print @README.md "
         assert popup.styles.display == "none"

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Sequence
+import asyncio
+from collections.abc import AsyncGenerator, Callable, Sequence
+from concurrent.futures import CancelledError, Future
+from contextlib import suppress
 import json
+import logging
 import types
-from typing import TYPE_CHECKING, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import httpx
 from mistralai.client import Mistral
+from mistralai.client._hooks.types import AfterErrorHook
 from mistralai.client.errors import SDKError
 from mistralai.client.models import (
     AssistantMessage,
@@ -33,8 +38,8 @@ from mistralai.client.models import (
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 from mistralai.extra.observability.telemetry import configure_telemetry
 
-from vibe.core.config import resolve_api_key
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
+from vibe.core.llm.backend.base import MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.types import (
     AvailableTool,
@@ -44,14 +49,68 @@ from vibe.core.types import (
     LLMMessage,
     LLMUsage,
     Role,
+    StopInfo,
     StrToolChoice,
     ToolCall,
 )
-from vibe.core.utils import get_server_url_from_api_base
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.core.utils import RetryObserver, RetryReason
+from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.http import (
+    VibeAsyncHTTPClient,
+    build_ssl_context,
+    get_server_url_from_api_base,
+)
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
+
+logger = logging.getLogger("vibe")
+
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+_RETRYABLE_ERRORS = (httpx.NetworkError, httpx.TimeoutException)
+_MAX_CONNECTIONS = 20
+
+
+def _log_delivery_failure(future: Future[None]) -> None:
+    with suppress(CancelledError):
+        if (error := future.exception()) is not None:
+            logger.warning("Could not report retry: %s", error)
+
+
+class _RetryNoticeHook(AfterErrorHook):
+    def __init__(self, report: Callable[[Exception], None]) -> None:
+        self._report = report
+
+    def after_error(
+        self, hook_ctx: Any, response: httpx.Response | None, error: Exception | None
+    ) -> tuple[httpx.Response | None, Exception | None]:
+        if error is not None:
+            self._report(error)
+        return response, error
+
+
+def _register_retry_hook(client: Mistral, hook: AfterErrorHook) -> None:
+    registry = client.sdk_configuration.__dict__["_hooks"]
+    registry.register_after_error_hook(hook)
+
+
+def _cached_tokens(usage: object | None) -> int:
+    # Mistral reports cache hits under usage.prompt_tokens_details.cached_tokens.
+    # The SDK keeps this nested block as an untyped extra, so both its shape
+    # (dict vs object) and its value type are unvalidated; coerce defensively
+    # and fall back to 0 on anything odd.
+    if usage is None:
+        return 0
+    details = getattr(usage, "prompt_tokens_details", None)
+    value = (
+        details.get("cached_tokens")
+        if isinstance(details, dict)
+        else getattr(details, "cached_tokens", None)
+    )
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 class ParsedContent(NamedTuple):
@@ -203,11 +262,14 @@ class MistralBackend:
         timeout: float = 720.0,
         retry_max_elapsed_time: float = 300.0,
         enable_otel: bool = False,
+        on_retry: RetryObserver | None = None,
     ) -> None:
         self._client: Mistral | None = None
         self._http_client: VibeAsyncHTTPClient | None = None
         self._provider = provider
         self._enable_otel = enable_otel
+        self._on_retry = on_retry
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._mapper = MistralMapper()
         self._api_key = resolve_api_key(self._provider.api_key_env_var)
 
@@ -243,6 +305,50 @@ class MistralBackend:
             retry_connection_errors=True,
         )
 
+    async def _on_response(self, response: httpx.Response) -> None:
+        """Release the connection behind a retryable response, then report it.
+
+        Streaming requests are issued with the body unread, and the SDK holds a
+        failed response alive across the retry backoff without closing it, so its
+        pooled connection stays checked out for the lifetime of the client.
+        Reading the body here returns the connection to the pool and keeps the
+        error payload available to the terminal error path.
+
+        A truncated or badly encoded body is not retryable to the SDK, so letting
+        that surface would turn a rate limit into a dead turn. Close the response
+        instead and let the retry proceed on the status code alone.
+        """
+        if response.status_code not in _RETRYABLE_STATUS_CODES:
+            return
+        try:
+            await response.aread()
+        except Exception:
+            logger.debug(
+                "Could not read the body of a %s response", response.status_code
+            )
+            await response.aclose()
+        await self._notice_retry(RetryReason.from_http_status(response.status_code))
+
+    def _report_error(self, error: Exception) -> None:
+        # On a worker thread inside basesdk's except block: raising would
+        # replace the error being reported on.
+        if self._loop is None or not isinstance(error, _RETRYABLE_ERRORS):
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._notice_retry(RetryReason.from_error(error)), self._loop
+            )
+        except RuntimeError:  # loop already closed
+            return
+        future.add_done_callback(_log_delivery_failure)
+
+    async def _notice_retry(self, reason: RetryReason) -> None:
+        logger.warning(
+            "Retrying request category=%s detail=%s", reason.category, reason.detail
+        )
+        if self._on_retry is not None:
+            await self._on_retry(reason)
+
     async def __aenter__(self) -> MistralBackend:
         self._client = self._create_mistral_client()
         await self._client.__aenter__()
@@ -271,8 +377,15 @@ class MistralBackend:
         await self.__aexit__(None, None, None)
 
     def _create_mistral_client(self) -> Mistral:
+        self._loop = asyncio.get_running_loop()
         self._http_client = VibeAsyncHTTPClient(
-            verify=build_ssl_context(), follow_redirects=True
+            verify=build_ssl_context(),
+            follow_redirects=True,
+            event_hooks={"response": [self._on_response]},
+            limits=httpx.Limits(
+                max_connections=_MAX_CONNECTIONS,
+                keepalive_expiry=MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS,
+            ),
         )
         client = Mistral(
             api_key=self._api_key,
@@ -281,6 +394,7 @@ class MistralBackend:
             retry_config=self._retry_config,
             async_client=self._http_client,
         )
+        _register_retry_hook(client, _RetryNoticeHook(self._report_error))
         if self._enable_otel:
             configure_telemetry(client, provider="global")
         return client
@@ -304,8 +418,6 @@ class MistralBackend:
     ) -> LLMChunk:
         try:
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
-            if reasoning_effort is not None:
-                temperature = 1.0
             response = await self._get_client().chat.complete_async(
                 model=model.name,
                 messages=[
@@ -328,7 +440,8 @@ class MistralBackend:
                 reasoning_effort=reasoning_effort,
             )
 
-            message = response.choices[0].message
+            choice = response.choices[0]
+            message = choice.message
             parsed = (
                 self._mapper.parse_content(message.content)
                 if message and message.content
@@ -346,6 +459,12 @@ class MistralBackend:
                 usage=LLMUsage(
                     prompt_tokens=response.usage.prompt_tokens or 0,
                     completion_tokens=response.usage.completion_tokens or 0,
+                    cached_tokens=_cached_tokens(response.usage),
+                ),
+                stop=(
+                    StopInfo(reason=str(choice.finish_reason))
+                    if choice.finish_reason is not None
+                    else None
                 ),
             )
 
@@ -361,7 +480,7 @@ class MistralBackend:
                 has_tools=bool(tools),
                 tool_choice=tool_choice,
             ) from e
-        except httpx.RequestError as e:
+        except (httpx.RequestError, httpx.StreamError) as e:
             raise BackendErrorBuilder.build_request_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,
@@ -387,8 +506,6 @@ class MistralBackend:
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
-            if reasoning_effort is not None:
-                temperature = 1.0
 
             stream = await self._get_client().chat.stream_async(
                 model=model.name,
@@ -411,33 +528,46 @@ class MistralBackend:
                 reasoning_effort=reasoning_effort,
             )
             correlation_id = stream.response.headers.get("mistral-correlation-id")
-            async for chunk in stream:
-                parsed = (
-                    self._mapper.parse_content(chunk.data.choices[0].delta.content)
-                    if chunk.data.choices[0].delta.content
-                    else ParsedContent(content="", reasoning_content=None)
-                )
-                yield LLMChunk(
-                    message=LLMMessage(
-                        role=Role.assistant,
-                        content=parsed.content,
-                        reasoning_content=parsed.reasoning_content,
-                        tool_calls=self._mapper.parse_tool_calls(
-                            chunk.data.choices[0].delta.tool_calls
-                        )
-                        if chunk.data.choices[0].delta.tool_calls
-                        else None,
-                    ),
-                    usage=LLMUsage(
-                        prompt_tokens=chunk.data.usage.prompt_tokens or 0
-                        if chunk.data.usage
-                        else 0,
-                        completion_tokens=chunk.data.usage.completion_tokens or 0
-                        if chunk.data.usage
-                        else 0,
-                    ),
-                    correlation_id=correlation_id,
-                )
+            # Close the underlying httpx response on every exit path (normal
+            # completion, early termination of the outer generator, or an error
+            # mid-stream). Without this the connection stays checked out of the
+            # pool and a long-lived session eventually hits PoolTimeout.
+            async with stream:
+                async for chunk in stream:
+                    # Some models terminate the stream with a usage-only chunk that
+                    # carries no choices.
+                    choice = chunk.data.choices[0] if chunk.data.choices else None
+                    delta = choice.delta if choice else None
+                    parsed = (
+                        self._mapper.parse_content(delta.content)
+                        if delta and delta.content
+                        else ParsedContent(content="", reasoning_content=None)
+                    )
+                    yield LLMChunk(
+                        message=LLMMessage(
+                            role=Role.assistant,
+                            content=parsed.content,
+                            reasoning_content=parsed.reasoning_content,
+                            tool_calls=self._mapper.parse_tool_calls(delta.tool_calls)
+                            if delta and delta.tool_calls
+                            else None,
+                        ),
+                        usage=LLMUsage(
+                            prompt_tokens=chunk.data.usage.prompt_tokens or 0
+                            if chunk.data.usage
+                            else 0,
+                            completion_tokens=chunk.data.usage.completion_tokens or 0
+                            if chunk.data.usage
+                            else 0,
+                            cached_tokens=_cached_tokens(chunk.data.usage),
+                        ),
+                        correlation_id=correlation_id,
+                        stop=(
+                            StopInfo(reason=str(choice.finish_reason))
+                            if choice and choice.finish_reason is not None
+                            else None
+                        ),
+                    )
 
         except SDKError as e:
             raise BackendErrorBuilder.build_http_error(
@@ -451,7 +581,7 @@ class MistralBackend:
                 has_tools=bool(tools),
                 tool_choice=tool_choice,
             ) from e
-        except httpx.RequestError as e:
+        except (httpx.RequestError, httpx.StreamError) as e:
             raise BackendErrorBuilder.build_request_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,

@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from vibe.core.utils import compact_complete_display, get_server_url_from_api_base
-import vibe.core.utils.io as io_utils
-from vibe.core.utils.io import (
+import vibe.utils.io as io_utils
+from vibe.utils.io import (
     _FILE_WRITE_LOCKS,
+    decode_console_safe,
     decode_safe,
     encode_safe,
     file_write_lock,
@@ -17,34 +17,6 @@ from vibe.core.utils.io import (
     read_safe,
     read_safe_async,
 )
-
-
-@pytest.mark.parametrize(
-    ("api_base", "expected"),
-    [
-        ("https://api.mistral.ai/v1", "https://api.mistral.ai"),
-        ("https://on-prem.example.com/v1", "https://on-prem.example.com"),
-        ("http://localhost:8080/v2", "http://localhost:8080"),
-        ("not-a-url", None),
-        ("ftp://example.com/v1", None),
-    ],
-)
-def test_get_server_url_from_api_base(api_base, expected):
-    assert get_server_url_from_api_base(api_base) == expected
-
-
-class TestCompactCompleteDisplay:
-    def test_includes_session_ids_when_available(self) -> None:
-        assert compact_complete_display(
-            old_session_id="11111111-1111-1111-1111-111111111111",
-            new_session_id="22222222-2222-2222-2222-222222222222",
-        ) == (
-            "Compaction completed.\n"
-            "session: 11111111 (before compaction) → 22222222 (after compaction)"
-        )
-
-    def test_returns_base_message_without_session_ids(self) -> None:
-        assert compact_complete_display() == "Compaction completed."
 
 
 class TestReadSafe:
@@ -107,13 +79,13 @@ class TestReadSafe:
         with pytest.raises(FileNotFoundError):
             read_safe(tmp_path / "nope.txt")
 
-    def test_from_subprocess_prefers_oem_over_locale_ansi(
+    def test_console_decoding_prefers_oem_over_locale_ansi(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # \x82 is invalid UTF-8 and decodes differently across single-byte
         # encodings: cp1252 (Windows ANSI) -> "‚" (low-9 quote);
-        # cp850 (Windows OEM) -> "é". Subprocess output prefers OEM over the
-        # ANSI locale; file reads (from_subprocess=False) must not.
+        # cp850 (Windows OEM) -> "é". Console output prefers OEM over the
+        # ANSI locale; file reads must not.
         raw = "café\n".encode("cp850")
         monkeypatch.setattr(
             io_utils.locale, "getpreferredencoding", lambda _do_setlocale: "cp1252"
@@ -125,9 +97,7 @@ class TestReadSafe:
         assert from_file.encoding == "cp1252"
         assert from_file.text == raw.decode("cp1252")
 
-        from_subprocess = decode_safe(raw, from_subprocess=True)
-        assert from_subprocess.encoding == "cp850"
-        assert from_subprocess.text == "café\n"
+        assert decode_console_safe(raw) == "café\n"
 
     def test_utf8_bom_is_stripped_and_reported_as_sig(self) -> None:
         got = decode_safe("café\n".encode("utf-8-sig"))
@@ -231,6 +201,26 @@ class TestReadSafeNewlines:
         got = await read_safe_async(f)
         assert got.text == "a\nb\n"
         assert got.newline == "\r\n"
+
+    def test_console_output_keeps_every_newline_byte_verbatim(self) -> None:
+        # A byte-window reader can split a CRLF, so the renderer folds newlines.
+        assert decode_console_safe(b"a\r\n50%\r100%\r\n") == "a\r\n50%\r100%\r\n"
+
+    def test_console_output_leaves_lf_only_text_untouched(self) -> None:
+        assert decode_console_safe(b"a\nb\n") == "a\nb\n"
+
+    def test_console_decoding_is_a_pure_split_of_a_chunked_read(self) -> None:
+        raw = b"one\r\ntwo\r\n50%\rdone\r\n"
+        for split in range(len(raw) + 1):
+            head, tail = raw[:split], raw[split:]
+            assert decode_console_safe(head) + decode_console_safe(
+                tail
+            ) == decode_console_safe(raw)
+
+    def test_file_reads_still_treat_a_lone_cr_as_a_line_ending(self) -> None:
+        got = decode_safe(b"a\rb\r")
+        assert got.text == "a\nb\n"
+        assert got.newline == "\r"
 
 
 class TestEncodeSafe:

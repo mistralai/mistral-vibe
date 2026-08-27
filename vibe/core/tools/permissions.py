@@ -1,38 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from enum import StrEnum, auto
 import fnmatch
 
-from pydantic import BaseModel, Field
-
-from vibe.core.tools.base import ToolPermission
-
-
-class PermissionScope(StrEnum):
-    COMMAND_PATTERN = auto()
-    OUTSIDE_DIRECTORY = auto()
-    FILE_PATTERN = auto()
-    URL_PATTERN = auto()
-
-
-class RequiredPermission(BaseModel):
-    scope: PermissionScope
-    invocation_pattern: str
-    session_pattern: str
-    label: str
-
-
-class PermissionContext(BaseModel):
-    permission: ToolPermission
-    required_permissions: list[RequiredPermission] = Field(default_factory=list)
-    reason: str | None = None
-
-
-class ApprovedRule(BaseModel):
-    tool_name: str
-    scope: PermissionScope
-    session_pattern: str
+from vibe.core.tools.models import (
+    ApprovedRule,
+    PermissionContext as PermissionContext,
+    PermissionScope as PermissionScope,
+    RequiredPermission,
+    ToolPermission,
+)
 
 
 def wildcard_match(text: str, pattern: str) -> bool:
@@ -49,6 +26,11 @@ class PermissionStore:
         self._rules: list[ApprovedRule] = []
         self._tool_permissions: dict[str, ToolPermission] = {}
         self.lock = asyncio.Lock()
+
+    def reset(self) -> None:
+        """Drop all session-scoped approvals so they never leak across sessions."""
+        self._rules.clear()
+        self._tool_permissions.clear()
 
     def add_rule(self, rule: ApprovedRule) -> None:
         self._rules.append(rule)

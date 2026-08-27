@@ -7,7 +7,7 @@ import pytest
 
 from tests.mock.utils import collect_result
 from vibe.core.skills.manager import SkillManager
-from vibe.core.skills.models import SkillInfo
+from vibe.core.skills.models import SkillInfo, SkillMetadata
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError, ToolPermission
 from vibe.core.tools.builtins.skill import (
     Skill,
@@ -198,6 +198,35 @@ class TestSkillRun:
         assert "Inline instructions from Python object." in result.content
         assert "Base directory for this skill:" not in result.content
         assert result.skill_dir is None
+
+    @pytest.mark.asyncio
+    async def test_does_not_walk_nix_store_for_symlinked_skill(
+        self, tmp_path: Path, skill_tool: Skill
+    ) -> None:
+        nix_store = tmp_path / "nix" / "store"
+        nix_store.mkdir(parents=True)
+        (nix_store / "abc123-hm_SKILL.md").write_text(
+            "---\nname: linked\ndescription: d\n---\nbody", encoding="utf-8"
+        )
+
+        skill_dir = tmp_path / "skills" / "linked"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").symlink_to(nix_store / "abc123-hm_SKILL.md")
+
+        info = SkillInfo.from_metadata(
+            SkillMetadata(name="linked", description="d"),
+            skill_dir / "SKILL.md",
+            prompt="Linked skill body.",
+        )
+        manager = _make_skill_manager({"linked": info})
+        ctx = _make_ctx(manager)
+
+        result = await collect_result(skill_tool.run(SkillArgs(name="linked"), ctx))
+
+        assert isinstance(result, SkillResult)
+        assert "Linked skill body." in result.content
+        assert result.skill_dir == str(skill_dir.resolve())
+        assert "<skill_files>\n\n</skill_files>" in result.content
 
 
 class TestSkillErrors:

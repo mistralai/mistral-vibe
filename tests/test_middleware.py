@@ -3,11 +3,14 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from vibe.core.agents.models import BUILTIN_AGENTS, CHAT, AgentProfile, BuiltinAgentName
+from vibe.core.agents.models import (
+    BUILTIN_AGENTS,
+    AgentProfile,
+    AgentSafety,
+    BuiltinAgentName,
+)
 from vibe.core.config import VibeConfigSchema
 from vibe.core.middleware import (
-    CHAT_AGENT_EXIT,
-    CHAT_AGENT_REMINDER,
     PLAN_AGENT_EXIT,
     ConversationContext,
     MiddlewareAction,
@@ -56,7 +59,7 @@ class TestReadOnlyAgentMiddleware:
     @pytest.mark.parametrize(
         "agent_name",
         [
-            BuiltinAgentName.DEFAULT,
+            BuiltinAgentName.ASK,
             BuiltinAgentName.AUTO_APPROVE,
             BuiltinAgentName.ACCEPT_EDITS,
         ],
@@ -92,7 +95,7 @@ class TestReadOnlyAgentMiddleware:
 
         await middleware.before_turn(ctx)
 
-        current_profile = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT]
+        current_profile = BUILTIN_AGENTS[BuiltinAgentName.ASK]
         result = await middleware.before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
         assert result.message == EXIT_MSG
@@ -108,7 +111,7 @@ class TestReadOnlyAgentMiddleware:
         assert result1.action == MiddlewareAction.INJECT_MESSAGE
         assert result1.message == REMINDER
 
-        current_profile = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT]
+        current_profile = BUILTIN_AGENTS[BuiltinAgentName.ASK]
         result2 = await middleware.before_turn(ctx)
         assert result2.action == MiddlewareAction.INJECT_MESSAGE
         assert result2.message == EXIT_MSG
@@ -139,7 +142,7 @@ class TestReadOnlyAgentMiddleware:
 
         await middleware.before_turn(ctx)
 
-        current_profile = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT]
+        current_profile = BUILTIN_AGENTS[BuiltinAgentName.ASK]
         result = await middleware.before_turn(ctx)
         assert result.message == custom_exit
 
@@ -160,7 +163,7 @@ class TestReadOnlyAgentMiddleware:
 
         await middleware.before_turn(ctx)
 
-        current_profile = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT]
+        current_profile = BUILTIN_AGENTS[BuiltinAgentName.ASK]
         result = await middleware.before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
         assert result.message == EXIT_MSG
@@ -188,7 +191,7 @@ class TestReadOnlyAgentMiddleware:
 
         await middleware.before_turn(ctx)
 
-        current_profile = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT]
+        current_profile = BUILTIN_AGENTS[BuiltinAgentName.ASK]
         await middleware.before_turn(ctx)
 
         for _ in range(5):
@@ -209,7 +212,7 @@ class TestReadOnlyAgentMiddleware:
             assert result.action == MiddlewareAction.INJECT_MESSAGE
             assert result.message == REMINDER
 
-            current_profile = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT]
+            current_profile = BUILTIN_AGENTS[BuiltinAgentName.ASK]
             result = await middleware.before_turn(ctx)
             assert result.action == MiddlewareAction.INJECT_MESSAGE
             assert result.message == EXIT_MSG
@@ -230,7 +233,7 @@ class TestReadOnlyAgentMiddleware:
     async def test_switching_between_non_target_agents(
         self, ctx: ConversationContext
     ) -> None:
-        current_profile: AgentProfile = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT]
+        current_profile: AgentProfile = BUILTIN_AGENTS[BuiltinAgentName.ASK]
         middleware = _build_middleware(lambda: current_profile)
 
         result = await middleware.before_turn(ctx)
@@ -266,7 +269,7 @@ class TestReadOnlyAgentMiddleware:
         middleware = _build_middleware(lambda: current_profile)
 
         await middleware.before_turn(ctx)
-        current_profile = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT]
+        current_profile = BUILTIN_AGENTS[BuiltinAgentName.ASK]
         await middleware.before_turn(ctx)
 
         middleware.reset()
@@ -282,7 +285,7 @@ class TestReadOnlyAgentMiddleware:
         middleware = _build_middleware(lambda: current_profile)
 
         await middleware.before_turn(ctx)
-        current_profile = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT]
+        current_profile = BUILTIN_AGENTS[BuiltinAgentName.ASK]
         await middleware.before_turn(ctx)
 
         middleware.reset()
@@ -318,7 +321,7 @@ class TestReadOnlyAgentMiddleware:
         result = await middleware.before_turn(ctx)
         assert result.action == MiddlewareAction.CONTINUE
 
-        current_profile = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT]
+        current_profile = BUILTIN_AGENTS[BuiltinAgentName.ASK]
         result = await middleware.before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
         assert result.message == EXIT_MSG
@@ -386,7 +389,7 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
         pipeline = MiddlewarePipeline()
         pipeline.add(
             ReadOnlyAgentMiddleware(
-                lambda: BUILTIN_AGENTS[BuiltinAgentName.DEFAULT],
+                lambda: BUILTIN_AGENTS[BuiltinAgentName.ASK],
                 BuiltinAgentName.PLAN,
                 plan_reminder,
                 PLAN_AGENT_EXIT,
@@ -398,10 +401,18 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
         assert result.action == MiddlewareAction.CONTINUE
 
     @pytest.mark.asyncio
-    async def test_direct_plan_to_chat_transition_delivers_both_messages(
+    async def test_direct_transition_between_read_only_agents_delivers_both_messages(
         self, ctx: ConversationContext
     ) -> None:
         plan_reminder = make_plan_agent_reminder("/tmp/test-plan.md")
+        other_reminder = "Other read-only mode is active"
+        other_exit = "Other read-only mode has ended"
+        other_profile = AgentProfile(
+            name="other-read-only",
+            display_name="Other Read Only",
+            description="Second read-only agent",
+            safety=AgentSafety.SAFE,
+        )
         current_profile: AgentProfile = BUILTIN_AGENTS[BuiltinAgentName.PLAN]
         pipeline = MiddlewarePipeline()
         pipeline.add(
@@ -414,10 +425,7 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
         )
         pipeline.add(
             ReadOnlyAgentMiddleware(
-                lambda: current_profile,
-                BuiltinAgentName.CHAT,
-                CHAT_AGENT_REMINDER,
-                CHAT_AGENT_EXIT,
+                lambda: current_profile, other_profile.name, other_reminder, other_exit
             )
         )
 
@@ -425,16 +433,16 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
         assert result.action == MiddlewareAction.INJECT_MESSAGE
         assert PLAN_REMINDER_SNIPPET in (result.message or "")
 
-        current_profile = CHAT
+        current_profile = other_profile
         result = await pipeline.run_before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
         assert PLAN_AGENT_EXIT in (result.message or "")
-        assert CHAT_AGENT_REMINDER in (result.message or "")
+        assert other_reminder in (result.message or "")
 
         current_profile = BUILTIN_AGENTS[BuiltinAgentName.PLAN]
         result = await pipeline.run_before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
-        assert CHAT_AGENT_EXIT in (result.message or "")
+        assert other_exit in (result.message or "")
         assert PLAN_REMINDER_SNIPPET in (result.message or "")
 
 
@@ -466,7 +474,7 @@ class TestReadOnlyAgentMiddlewareIntegration:
         assert result.action == MiddlewareAction.INJECT_MESSAGE
         assert PLAN_REMINDER_SNIPPET in (result.message or "")
 
-        await agent.switch_agent(BuiltinAgentName.DEFAULT)
+        await agent.switch_agent(BuiltinAgentName.ASK)
 
         plan_middleware_after = _find_plan_middleware(agent)
         assert plan_middleware is plan_middleware_after
@@ -492,7 +500,7 @@ class TestReadOnlyAgentMiddlewareIntegration:
         )
         await plan_middleware.before_turn(ctx)
 
-        await agent.switch_agent(BuiltinAgentName.DEFAULT)
+        await agent.switch_agent(BuiltinAgentName.ASK)
 
         ctx = ConversationContext(
             messages=agent.messages, stats=agent.stats, config=agent.config
@@ -537,9 +545,7 @@ class TestReadOnlyAgentMiddlewareIntegration:
         config = build_test_vibe_config(
             include_model_info=False, include_commit_signature=False, enabled_tools=[]
         )
-        agent = build_test_agent_loop(
-            config=config, agent_name=BuiltinAgentName.DEFAULT
-        )
+        agent = build_test_agent_loop(config=config, agent_name=BuiltinAgentName.ASK)
 
         plan_middleware = _find_plan_middleware(agent)
 
@@ -581,8 +587,8 @@ class TestReadOnlyAgentMiddlewareIntegration:
         r = await plan_middleware.before_turn(_ctx())
         assert r.action == MiddlewareAction.CONTINUE
 
-        # 3. Switch to default: inject exit
-        await agent.switch_agent(BuiltinAgentName.DEFAULT)
+        # 3. Switch to ask: inject exit
+        await agent.switch_agent(BuiltinAgentName.ASK)
         r = await plan_middleware.before_turn(_ctx())
         assert r.action == MiddlewareAction.INJECT_MESSAGE
         assert r.message == PLAN_AGENT_EXIT
@@ -601,8 +607,8 @@ class TestReadOnlyAgentMiddlewareIntegration:
         r = await plan_middleware.before_turn(_ctx())
         assert r.action == MiddlewareAction.CONTINUE
 
-        # 7. Switch to default again: inject exit
-        await agent.switch_agent(BuiltinAgentName.DEFAULT)
+        # 7. Switch to ask again: inject exit
+        await agent.switch_agent(BuiltinAgentName.ASK)
         r = await plan_middleware.before_turn(_ctx())
         assert r.action == MiddlewareAction.INJECT_MESSAGE
         assert r.message == PLAN_AGENT_EXIT

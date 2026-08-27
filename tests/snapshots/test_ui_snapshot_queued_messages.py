@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import cast
 
 from textual.pilot import Pilot
@@ -17,8 +18,7 @@ class QueuedMessagesSnapshotApp(BaseSnapshotTestApp):
 async def _enqueue_while_busy(pilot: Pilot, submissions: list[str]) -> None:
     app = cast(VibeApp, pilot.app)
     chat_input = app.query_one(ChatInputContainer)
-    # leave _agent_running set so the queue drain stays blocked for the snapshot
-    app._agent_running = True
+    app._agent_task = asyncio.create_task(asyncio.Event().wait())
     for value in submissions:
         chat_input.post_message(ChatInputContainer.Submitted(value))
         await pilot.pause(0.1)

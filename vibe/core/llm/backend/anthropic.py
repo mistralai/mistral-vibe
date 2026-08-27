@@ -28,6 +28,9 @@ def _parse_stop_info(reason: str | None, raw: Any) -> StopInfo | None:
     return StopInfo.model_validate({"reason": reason, **details})
 
 
+REASONING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+
+
 class AnthropicMapper:
     """Shared mapper for converting messages to/from Anthropic API format."""
 
@@ -69,15 +72,11 @@ class AnthropicMapper:
         return re.sub(r"[^a-zA-Z0-9_-]", "_", tool_id or "")
 
     def _convert_assistant_message(self, msg: LLMMessage) -> dict[str, Any]:
-        content: list[dict[str, Any]] = []
-        if msg.reasoning_content:
-            block: dict[str, Any] = {
-                "type": "thinking",
-                "thinking": msg.reasoning_content,
-            }
-            if msg.reasoning_signature:
-                block["signature"] = msg.reasoning_signature
-            content.append(block)
+        content: list[dict[str, Any]] = [
+            block
+            for block in msg.reasoning_payloads or []
+            if block.get("type") in REASONING_BLOCK_TYPES
+        ]
         if msg.content:
             content.append({"type": "text", "text": msg.content})
         if msg.tool_calls:
@@ -154,17 +153,16 @@ class AnthropicMapper:
         content_blocks = data.get("content", [])
         text_parts: list[str] = []
         thinking_parts: list[str] = []
-        signature_parts: list[str] = []
+        reasoning_payloads: list[dict[str, Any]] = []
         tool_calls: list[ToolCall] = []
 
         for idx, block in enumerate(content_blocks):
             block_type = block.get("type")
             if block_type == "text":
                 text_parts.append(block.get("text", ""))
-            elif block_type == "thinking":
+            elif block_type in REASONING_BLOCK_TYPES:
+                reasoning_payloads.append(block)
                 thinking_parts.append(block.get("thinking", ""))
-                if "signature" in block:
-                    signature_parts.append(block["signature"])
             elif block_type == "tool_use":
                 tool_calls.append(
                     ToolCall(
@@ -178,7 +176,9 @@ class AnthropicMapper:
                 )
 
         usage_data = data.get("usage", {})
-        # Total input tokens = input_tokens + cache_creation + cache_read
+        # Anthropic excludes cached tokens from input_tokens, so fold cache
+        # creation and cache read back in to match the OpenTelemetry convention
+        # that prompt_tokens includes cached tokens.
         total_input_tokens = (
             usage_data.get("input_tokens", 0)
             + usage_data.get("cache_creation_input_tokens", 0)
@@ -187,6 +187,7 @@ class AnthropicMapper:
         usage = LLMUsage(
             prompt_tokens=total_input_tokens,
             completion_tokens=usage_data.get("output_tokens", 0),
+            cached_tokens=usage_data.get("cache_read_input_tokens", 0),
         )
 
         return LLMChunk(
@@ -194,7 +195,7 @@ class AnthropicMapper:
                 role=Role.assistant,
                 content="".join(text_parts) or None,
                 reasoning_content="".join(thinking_parts) or None,
-                reasoning_signature="".join(signature_parts) or None,
+                reasoning_payloads=reasoning_payloads or None,
                 tool_calls=tool_calls if tool_calls else None,
             ),
             usage=usage,
@@ -228,7 +229,10 @@ class AnthropicAdapter(APIAdapter):
 
     def __init__(self) -> None:
         self._mapper = AnthropicMapper()
-        self._current_index: int = 0
+        # Reasoning blocks arrive across several streaming events, so they are
+        # reassembled here and emitted once complete. This state is per-response,
+        # which is why the adapter is built per request rather than shared.
+        self._open_reasoning_blocks: dict[int, dict[str, Any]] = {}
 
     @staticmethod
     def _has_thinking_content(messages: list[dict[str, Any]]) -> bool:
@@ -239,7 +243,7 @@ class AnthropicAdapter(APIAdapter):
             if not isinstance(content, list):
                 continue
             for block in content:
-                if block.get("type") == "thinking":
+                if block.get("type") in REASONING_BLOCK_TYPES:
                     return True
         return False
 
@@ -383,7 +387,6 @@ class AnthropicAdapter(APIAdapter):
         empty_chunk = LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
 
         if event_type == "message_start":
-            self._current_index = 0
             return self._parse_message_start(data)
         if event_type == "content_block_start":
             return self._parse_content_block_start(data) or empty_chunk
@@ -403,6 +406,7 @@ class AnthropicAdapter(APIAdapter):
         return empty_chunk
 
     def _parse_message_start(self, data: dict[str, Any]) -> LLMChunk:
+        self._open_reasoning_blocks.clear()
         message = data.get("message", {})
         usage_data = message.get("usage", {})
         if not usage_data:
@@ -414,7 +418,11 @@ class AnthropicAdapter(APIAdapter):
         )
         return LLMChunk(
             message=LLMMessage(role=Role.assistant, content=None),
-            usage=LLMUsage(prompt_tokens=total_input_tokens, completion_tokens=0),
+            usage=LLMUsage(
+                prompt_tokens=total_input_tokens,
+                completion_tokens=0,
+                cached_tokens=usage_data.get("cache_read_input_tokens", 0),
+            ),
         )
 
     def _parse_content_block_start(self, data: dict[str, Any]) -> LLMChunk | None:
@@ -422,15 +430,16 @@ class AnthropicAdapter(APIAdapter):
         index = data.get("index", 0)
         block_type = content_block.get("type")
 
-        if block_type == "thinking":
+        if block_type in REASONING_BLOCK_TYPES:
+            self._open_reasoning_blocks[index] = dict(content_block)
+            if block_type == "redacted_thinking":
+                return None
             return LLMChunk(
                 message=LLMMessage(
                     role=Role.assistant,
                     reasoning_content=content_block.get("thinking", ""),
                 )
             )
-        if block_type == "redacted_thinking":
-            return None
         if block_type == "tool_use":
             return LLMChunk(
                 message=LLMMessage(
@@ -461,18 +470,18 @@ class AnthropicAdapter(APIAdapter):
                     )
                 )
             case "thinking_delta":
+                thinking = delta.get("thinking", "")
+                if block := self._open_reasoning_blocks.get(index):
+                    block["thinking"] = block.get("thinking", "") + thinking
                 return LLMChunk(
-                    message=LLMMessage(
-                        role=Role.assistant, reasoning_content=delta.get("thinking", "")
-                    )
+                    message=LLMMessage(role=Role.assistant, reasoning_content=thinking)
                 )
             case "signature_delta":
-                return LLMChunk(
-                    message=LLMMessage(
-                        role=Role.assistant,
-                        reasoning_signature=delta.get("signature", ""),
+                if block := self._open_reasoning_blocks.get(index):
+                    block["signature"] = block.get("signature", "") + delta.get(
+                        "signature", ""
                     )
-                )
+                return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
             case "input_json_delta":
                 return LLMChunk(
                     message=LLMMessage(
@@ -490,8 +499,15 @@ class AnthropicAdapter(APIAdapter):
             case _:
                 return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
 
-    def _parse_content_block_stop(self, _data: dict[str, Any]) -> LLMChunk:
-        return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
+    def _parse_content_block_stop(self, data: dict[str, Any]) -> LLMChunk:
+        block = self._open_reasoning_blocks.pop(data.get("index", 0), None)
+        return LLMChunk(
+            message=LLMMessage(
+                role=Role.assistant,
+                content=None,
+                reasoning_payloads=[block] if block else None,
+            )
+        )
 
     def _parse_message_delta(self, data: dict[str, Any]) -> LLMChunk:
         delta = data.get("delta", {})

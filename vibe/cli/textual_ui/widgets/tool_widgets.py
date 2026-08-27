@@ -1,41 +1,88 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import ClassVar
+from typing import Any, ClassVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 from textual.app import ComposeResult
-from textual.containers import Vertical, VerticalGroup
+from textual.containers import Vertical
 from textual.content import Content
+from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Markdown, Static
+from textual.widgets import Static
+from textual.worker import Worker
 
-from vibe.cli.textual_ui.widgets.collapsible import CollapsibleSection, lines_label
+from vibe.app_server.models import (
+    EffectDetail,
+    FileEditEffectInput as FileEditInput,
+    FileEditEffectOutput as FileEditOutput,
+    FileReadEffectInput as FileReadInput,
+    FileReadEffectOutput as FileReadOutput,
+    FileSearchEffectInput as FileSearchInput,
+    FileSearchEffectOutput as FileSearchOutput,
+    FileWriteEffectInput as FileWriteInput,
+    FileWriteEffectOutput as FileWriteOutput,
+    ShellEffectInput as ShellInput,
+    ShellEffectOutput as ShellOutput,
+    TodoEffectInput as TodoInput,
+    TodoEffectOutput as TodoOutput,
+    UserQuestionResult as AskUserQuestionResult,
+    WebFetchEffectOutput as WebFetchOutput,
+    WebSearchEffectOutput as WebSearchOutput,
+    WebSearchEffectSource as WebSearchSourceView,
+    effect_input_json,
+)
 from vibe.cli.textual_ui.widgets.diff_rendering import (
     DiffOccurrence,
-    diff_border_colors,
+    DiffView,
     edit_diff_inputs,
     language_for_path,
-    render_edit_diff,
+    render_edit_diff_async,
 )
 from vibe.cli.textual_ui.widgets.links import LinkStatic, link_content
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.tools.builtins.ask_user_question import AskUserQuestionResult
-from vibe.core.tools.builtins.bash import BashArgs, BashResult
-from vibe.core.tools.builtins.edit import EditArgs, EditResult
-from vibe.core.tools.builtins.grep import GrepArgs, GrepResult
-from vibe.core.tools.builtins.read_file import ReadFileArgs, ReadFileResult
-from vibe.core.tools.builtins.todo import TodoArgs, TodoResult
-from vibe.core.tools.builtins.web_fetch import WebFetchResult
-from vibe.core.tools.builtins.web_search import WebSearchResult, WebSearchSource
-from vibe.core.tools.builtins.write_file import WriteFileArgs, WriteFileResult
+from vibe.utils.tool_presentation import ToolEffectKind
 
 _LINE_NUMBER_PREFIX = re.compile(r"^ *\d+→")
 _BACKTICK_RUN = re.compile(r"`+")
 _UNSAFE_INFO_STRING = re.compile(r"[^A-Za-z0-9_+\-.]")
 _MAX_INFO_STRING_LEN = 32
+
+# ANSI escape sequences (CSI, OSC, and other ESC-prefixed forms).
+_ANSI_ESCAPE = re.compile(
+    r"\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])"
+)
+# Remaining control bytes to drop (keep tab \x09; newlines handled per line).
+_CONTROL_BYTES = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def clean_output(content: str) -> str:
+    """Sanitize captured command output for terminal-safe display.
+
+    Command output (e.g. uv's in-place progress bars) carries ANSI escapes,
+    carriage-return redraws, and other control bytes. Textual renders these
+    straight to the terminal (it does not strip ESC), corrupting the display,
+    and scrolling emits a different slice so the glitches shift. Collapse each
+    ``\\r``-redrawn line to its final state and strip escape/control bytes.
+
+    Mirrors the webview's ``collapseCarriageReturns``: a trailing ``\\r`` only
+    parks the cursor at column 0, so the line it sits on stands until something
+    overwrites it.
+    """
+    cleaned: list[str] = []
+    for line in content.replace("\r\n", "\n").split("\n"):
+        written = line.rstrip("\r")
+        cleaned.append(
+            _CONTROL_BYTES.sub("", _ANSI_ESCAPE.sub("", written.rsplit("\r", 1)[-1]))
+        )
+    return "\n".join(cleaned)
+
+
+class GenericToolData(BaseModel):
+    data: JsonValue = None
 
 
 def _strip_line_numbers(content: str) -> str:
@@ -84,7 +131,18 @@ class ToolApprovalWidget[TArgs: BaseModel](Vertical):
 
 
 class ToolResultWidget[TResult: BaseModel](Static):
-    PREVIEW_LINES: ClassVar[int] = 0
+    class BorderColorsChanged(Message):
+        def __init__(self, result_widget: ToolResultWidget[Any]) -> None:
+            self.result_widget = result_widget
+            super().__init__()
+
+        @property
+        def control(self) -> ToolResultWidget[Any]:
+            return self.result_widget
+
+    # When True the whole result collapses into a one-line header; when False it
+    # is always rendered in full (used by diff-style results like edit/write).
+    COLLAPSIBLE: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -105,50 +163,18 @@ class ToolResultWidget[TResult: BaseModel](Static):
         if extra:
             yield NoMarkupStatic(extra, classes="tool-result-hint")
 
-    def _yield_truncated_text(
+    def _yield_text(
         self, content: str, *, classes: str = "tool-result-detail"
     ) -> Iterable[Widget]:
-        yield from self._yield_truncated(
-            content, render=lambda chunk: NoMarkupStatic(chunk, classes=classes)
-        )
+        cleaned = clean_output(content.strip("\n"))
+        if cleaned:
+            yield NoMarkupStatic(cleaned, classes=classes)
 
-    def _yield_truncated_markdown(self, content: str, *, ext: str) -> Iterable[Widget]:
-        yield from self._yield_truncated(
-            content, render=lambda chunk: Markdown(_fenced_code_block(chunk, ext))
-        )
+    def _yield_markdown(self, content: str, *, ext: str) -> Iterable[Widget]:
+        if content:
+            from textual.widgets import Markdown
 
-    def _yield_truncated(
-        self, content: str, *, render: Callable[[str], Widget]
-    ) -> Iterable[Widget]:
-        if not content:
-            return
-        lines = content.strip("\n").split("\n")
-        if len(lines) <= self.PREVIEW_LINES:
-            yield render("\n".join(lines))
-            return
-        preview = lines[: self.PREVIEW_LINES]
-        overflow = lines[self.PREVIEW_LINES :]
-        if preview:
-            yield render("\n".join(preview))
-        yield CollapsibleSection(
-            render("\n".join(overflow)),
-            collapsed_label=lines_label(len(overflow), prefix="+" if preview else ""),
-        )
-
-    def _yield_truncated_widgets(self, widgets: Sequence[Widget]) -> Iterable[Widget]:
-        if len(widgets) <= self.PREVIEW_LINES:
-            yield from widgets
-            return
-        preview = widgets[: self.PREVIEW_LINES]
-        overflow = widgets[self.PREVIEW_LINES :]
-        yield from preview
-        overflow_wrapper = (
-            VerticalGroup(*overflow) if len(overflow) > 1 else overflow[0]
-        )
-        yield CollapsibleSection(
-            overflow_wrapper,
-            collapsed_label=lines_label(len(overflow), prefix="+" if preview else ""),
-        )
+            yield Markdown(_fenced_code_block(content.strip("\n"), ext))
 
     def compose(self) -> ComposeResult:
         if self.result:
@@ -159,25 +185,43 @@ class ToolResultWidget[TResult: BaseModel](Static):
                 and value not in ("", [])
             ]
             if lines:
-                yield from self._yield_truncated_text("\n".join(lines))
+                yield from self._yield_text("\n".join(lines))
         yield from self._footer()
 
 
-class BashApprovalWidget(ToolApprovalWidget[BashArgs]):
+class GenericToolResultWidget(ToolResultWidget[GenericToolData]):
     def compose(self) -> ComposeResult:
+        if self.result and (text := _format_generic_result(self.result.data)):
+            yield from self._yield_text(text)
+        yield from self._footer()
+
+
+def _format_generic_result(value: JsonValue) -> str:
+    if isinstance(value, dict):
+        return "\n".join(
+            f"{key}: {_format_generic_value(item)}"
+            for key, item in value.items()
+            if item is not None and item not in ("", [])
+        )
+    return _format_generic_value(value)
+
+
+def _format_generic_value(value: JsonValue) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+class BashApprovalWidget(ToolApprovalWidget[ShellInput]):
+    def compose(self) -> ComposeResult:
+        from textual.widgets import Markdown
+
         yield Markdown(_fenced_code_block(self.args.command, "bash"))
 
 
-class BashResultWidget(ToolResultWidget[BashResult]):
+class BashResultWidget(ToolResultWidget[ShellOutput]):
     def _collapsed_output(self) -> str:
-        if not self.result:
-            return ""
-        parts: list[str] = []
-        if self.result.stdout:
-            parts.append(self.result.stdout.strip("\n"))
-        if self.result.stderr:
-            parts.append(self.result.stderr.strip("\n"))
-        return "\n".join(parts)
+        return self.result.transcript.strip("\n") if self.result else ""
 
     def compose(self) -> ComposeResult:
         if not self.result:
@@ -185,14 +229,16 @@ class BashResultWidget(ToolResultWidget[BashResult]):
             return
         output = self._collapsed_output()
         if output:
-            yield from self._yield_truncated_text(output)
+            yield from self._yield_text(output)
         else:
             yield NoMarkupStatic("(no content)", classes="tool-result-detail")
         yield from self._footer()
 
 
-class WriteFileApprovalWidget(ToolApprovalWidget[WriteFileArgs]):
+class WriteFileApprovalWidget(ToolApprovalWidget[FileWriteInput]):
     def compose(self) -> ComposeResult:
+        from textual.widgets import Markdown
+
         yield NoMarkupStatic(
             f"File: {self.args.file_path}", classes="approval-description"
         )
@@ -204,81 +250,164 @@ class WriteFileApprovalWidget(ToolApprovalWidget[WriteFileArgs]):
         )
 
 
-class WriteFileResultWidget(ToolResultWidget[WriteFileResult]):
-    PREVIEW_LINES = 20
+class WriteFileResultWidget(ToolResultWidget[FileWriteOutput]):
+    COLLAPSIBLE = False
 
     def compose(self) -> ComposeResult:
         if not self.result:
             yield from self._footer()
             return
         if self.result.content:
-            yield from self._yield_truncated_markdown(
+            yield from self._yield_markdown(
                 self.result.content, ext=language_for_path(self.result.file_path)
             )
         yield from self._footer()
 
 
-class EditApprovalWidget(ToolApprovalWidget[EditArgs]):
-    _diff_container: Vertical
+class EditApprovalWidget(ToolApprovalWidget[FileEditInput]):
+    def __init__(self, args: FileEditInput) -> None:
+        super().__init__(args)
+        self._diff_view = DiffView([], ansi=False, dark=True)
+        self._occurrences: list[DiffOccurrence] | None = None
+        self._requested_render_theme: tuple[bool, bool] | None = None
+        self._render_worker: Worker[None] | None = None
 
     def compose(self) -> ComposeResult:
         yield NoMarkupStatic(
             f"File: {self.args.file_path}", classes="approval-description"
         )
         yield NoMarkupStatic("")
-        self._diff_container = Vertical(classes="diff-scroll")
-        yield self._diff_container
+        yield Vertical(self._diff_view, classes="diff-scroll")
 
         if self.args.replace_all:
             yield NoMarkupStatic("(replace_all)", classes="approval-description")
 
     async def on_mount(self) -> None:
         # Approximate: queued edits ahead of this one may shift the real lines.
-        occurrences = await edit_diff_inputs(
+        self._occurrences = await edit_diff_inputs(
             self.args.file_path,
             self.args.old_string,
             self.args.new_string,
             replace_all=self.args.replace_all,
         )
-        await self._diff_container.mount_all(
-            render_edit_diff(
-                occurrences,
-                language_for_path(self.args.file_path),
-                ansi=self.app.native_ansi_color,
-                dark=self.app.current_theme.dark,
+        if self.is_attached:
+            ansi, dark = self._requested_render_theme or (
+                self.app.native_ansi_color,
+                self.app.current_theme.dark,
             )
+            self.request_diff_render(ansi=ansi, dark=dark)
+
+    def request_diff_render(self, *, ansi: bool, dark: bool) -> Worker[None] | None:
+        self._diff_view.set_render_mode(ansi=ansi, dark=dark)
+        self._requested_render_theme = (ansi, dark)
+        if self._occurrences is None:
+            return None
+        if self._render_worker is None or self._render_worker.is_finished:
+            self._render_worker = self.run_worker(
+                self._drain_diff_renders(), group="edit-diff-render"
+            )
+        return self._render_worker
+
+    async def _drain_diff_renders(self) -> None:
+        rendered_theme: tuple[bool, bool] | None = None
+        while self.is_attached and rendered_theme != self._requested_render_theme:
+            rendered_theme = self._requested_render_theme
+            if rendered_theme is None or self._occurrences is None:
+                return
+            ansi, dark = rendered_theme
+            lines = await render_edit_diff_async(
+                self._occurrences,
+                language_for_path(self.args.file_path),
+                ansi=ansi,
+                dark=dark,
+            )
+            if rendered_theme != self._requested_render_theme:
+                continue
+            self._diff_view.set_render_data(lines, ansi=ansi, dark=dark)
+
+
+class EditResultWidget(ToolResultWidget[FileEditOutput]):
+    COLLAPSIBLE = False
+
+    def __init__(
+        self,
+        result: FileEditOutput | None,
+        success: bool,
+        message: str,
+        warnings: list[str] | None = None,
+    ) -> None:
+        super().__init__(result, success, message, warnings)
+        self._diff_view = DiffView([], ansi=False, dark=True)
+        self._requested_render_theme: tuple[bool, bool] | None = None
+        self._render_worker: Worker[None] | None = None
+        self._occurrences = (
+            [
+                DiffOccurrence(item.start_line, item.old_text, item.new_text)
+                for item in result.occurrences
+            ]
+            or [DiffOccurrence(None, result.old_string, result.new_string)]
+            if result
+            else []
         )
-
-
-class EditResultWidget(ToolResultWidget[EditResult]):
-    PREVIEW_LINES = 20
 
     def compose(self) -> ComposeResult:
         if not self.result:
             yield from self._footer()
             return
-        rows: list[Widget] = [
+        warnings = [
             NoMarkupStatic(f"⚠ {w}", classes="tool-result-warning")
             for w in self.warnings
         ]
-        occurrences = [
-            DiffOccurrence(start, old_lines, new_lines)
-            for start, old_lines, new_lines in self.result.ui_occurrences
-        ]
-        rows.extend(
-            render_edit_diff(
-                occurrences,
-                language_for_path(self.result.file),
-                ansi=self.app.native_ansi_color,
-                dark=self.app.current_theme.dark,
-            )
-        )
-        self.border_row_colors = diff_border_colors(rows)
-        yield Vertical(*self._yield_truncated_widgets(rows), classes="diff-scroll")
+        # Wrap the diff in a horizontal-scroll container so wide lines can be
+        # scrolled instead of clipped (overflow-x is `auto`, so the scrollbar
+        # only shows when a line overruns the width). For a diff taller than the
+        # viewport the bar sits at the bottom -- the same trade-off write_file's
+        # code fence makes -- but that beats silently truncating long lines.
+        yield Vertical(*warnings, self._diff_view, classes="diff-scroll")
         yield from self._footer()
 
+    def on_mount(self) -> None:
+        self.request_diff_render(
+            ansi=self.app.native_ansi_color, dark=self.app.current_theme.dark
+        )
 
-class TodoApprovalWidget(ToolApprovalWidget[TodoArgs]):
+    def request_diff_render(self, *, ansi: bool, dark: bool) -> Worker[None] | None:
+        self._diff_view.set_render_mode(ansi=ansi, dark=dark)
+        self._requested_render_theme = (ansi, dark)
+        if not self.result:
+            return None
+        if self._render_worker is None or self._render_worker.is_finished:
+            self._render_worker = self.run_worker(
+                self._drain_diff_renders(), group="edit-diff-render"
+            )
+        return self._render_worker
+
+    async def _drain_diff_renders(self) -> None:
+        rendered_theme: tuple[bool, bool] | None = None
+        while self.is_attached and rendered_theme != self._requested_render_theme:
+            rendered_theme = self._requested_render_theme
+            if rendered_theme is None or not self.result:
+                return
+            ansi, dark = rendered_theme
+            lines = await render_edit_diff_async(
+                self._occurrences,
+                language_for_path(self.result.file),
+                ansi=ansi,
+                dark=dark,
+            )
+            if rendered_theme != self._requested_render_theme:
+                continue
+            self._diff_view.set_render_data(lines, ansi=ansi, dark=dark)
+            # Border rows sit below the warning lines, so shift the diff's own row
+            # colors down by the number of warnings.
+            self.border_row_colors = {
+                len(self.warnings) + row: color
+                for row, color in self._diff_view.border_row_colors.items()
+            }
+            self.post_message(self.BorderColorsChanged(self))
+
+
+class TodoApprovalWidget(ToolApprovalWidget[TodoInput]):
     def compose(self) -> ComposeResult:
         yield NoMarkupStatic(
             f"Action: {self.args.action}", classes="approval-description"
@@ -289,7 +418,7 @@ class TodoApprovalWidget(ToolApprovalWidget[TodoArgs]):
             )
 
 
-class TodoResultWidget(ToolResultWidget[TodoResult]):
+class TodoResultWidget(ToolResultWidget[TodoOutput]):
     def compose(self) -> ComposeResult:
         if not self.result or not self.result.todos:
             yield NoMarkupStatic("No todos", classes="todo-empty")
@@ -320,7 +449,7 @@ class TodoResultWidget(ToolResultWidget[TodoResult]):
         return icons.get(status, "☐")
 
 
-class ReadApprovalWidget(ToolApprovalWidget[ReadFileArgs]):
+class ReadApprovalWidget(ToolApprovalWidget[FileReadInput]):
     def compose(self) -> ComposeResult:
         yield NoMarkupStatic(
             f"file_path: {self.args.file_path}", classes="approval-description"
@@ -335,7 +464,7 @@ class ReadApprovalWidget(ToolApprovalWidget[ReadFileArgs]):
             )
 
 
-class ReadResultWidget(ToolResultWidget[ReadFileResult]):
+class ReadResultWidget(ToolResultWidget[FileReadOutput]):
     def compose(self) -> ComposeResult:
         if not self.result:
             yield from self._footer()
@@ -344,13 +473,13 @@ class ReadResultWidget(ToolResultWidget[ReadFileResult]):
             yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
         if self.result.content:
             ext = Path(self.result.file_path).suffix.lstrip(".") or "text"
-            yield from self._yield_truncated_markdown(
+            yield from self._yield_markdown(
                 _strip_line_numbers(self.result.content), ext=ext
             )
         yield from self._footer()
 
 
-class GrepApprovalWidget(ToolApprovalWidget[GrepArgs]):
+class GrepApprovalWidget(ToolApprovalWidget[FileSearchInput]):
     def compose(self) -> ComposeResult:
         yield NoMarkupStatic(
             f"pattern: {self.args.pattern}", classes="approval-description"
@@ -362,41 +491,29 @@ class GrepApprovalWidget(ToolApprovalWidget[GrepArgs]):
             )
 
 
-class GrepResultWidget(ToolResultWidget[GrepResult]):
+class GrepResultWidget(ToolResultWidget[FileSearchOutput]):
     def compose(self) -> ComposeResult:
         for warning in self.warnings:
             yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
         if not self.result or not self.result.matches:
             yield from self._footer()
             return
-        yield from self._yield_truncated_text(self.result.matches)
+        yield from self._yield_text(self.result.matches)
         yield from self._footer()
 
 
 class AskUserQuestionResultWidget(ToolResultWidget[AskUserQuestionResult]):
+    # Shown as a single wrapping "Answered <question> → <answer>" line on the
+    # call widget (see get_result_display); no folded body.
+    COLLAPSIBLE = False
+
     def compose(self) -> ComposeResult:
-        if not self.result:
-            yield from self._footer()
-            return
-
-        answer_widgets: list[Widget] = []
-        multi = len(self.result.answers) > 1
-        for answer in self.result.answers:
-            if multi:
-                answer_widgets.append(
-                    NoMarkupStatic(answer.question, classes="tool-result-detail")
-                )
-            prefix = "(Other) " if answer.is_other else ""
-            answer_widgets.append(
-                NoMarkupStatic(f"{prefix}{answer.answer}", classes="ask-user-answer")
-            )
-        yield from self._yield_truncated_widgets(answer_widgets)
-        yield from self._footer()
+        yield from ()
 
 
-class WebSearchResultWidget(ToolResultWidget[WebSearchResult]):
+class WebSearchResultWidget(ToolResultWidget[WebSearchOutput]):
     @staticmethod
-    def _source_content(source: WebSearchSource) -> Content:
+    def _source_content(source: WebSearchSourceView) -> Content:
         label = source.title or source.url
         return Content("  • ") + link_content(label, source.url)
 
@@ -407,7 +524,7 @@ class WebSearchResultWidget(ToolResultWidget[WebSearchResult]):
         result = self.result
         yield NoMarkupStatic(f"query: {result.query}", classes="tool-result-detail")
         if result.answer:
-            yield from self._yield_truncated_text(f"answer: {result.answer}")
+            yield from self._yield_text(f"answer: {result.answer}")
         if result.sources:
             yield NoMarkupStatic("")
             if len(result.sources) > 1:
@@ -417,52 +534,92 @@ class WebSearchResultWidget(ToolResultWidget[WebSearchResult]):
         yield from self._footer()
 
 
-class WebFetchResultWidget(ToolResultWidget[WebFetchResult]):
+class WebFetchResultWidget(ToolResultWidget[WebFetchOutput]):
     def compose(self) -> ComposeResult:
         if not self.result:
             yield from self._footer()
             return
-        yield from self._yield_truncated_text(self.result.content)
+        yield from self._yield_text(self.result.content)
         yield from self._footer()
 
 
-APPROVAL_WIDGETS: dict[str, type[ToolApprovalWidget]] = {
-    "bash": BashApprovalWidget,
-    "read_file": ReadApprovalWidget,
-    "write_file": WriteFileApprovalWidget,
-    "edit": EditApprovalWidget,
-    "grep": GrepApprovalWidget,
-    "todo": TodoApprovalWidget,
+@dataclass(frozen=True, slots=True)
+class EffectWidgets:
+    approval: type[ToolApprovalWidget] = ToolApprovalWidget
+    output_model: type[BaseModel] | None = None
+    result: type[ToolResultWidget] = GenericToolResultWidget
+    linkify_result: bool = False
+
+
+EFFECT_WIDGETS: dict[ToolEffectKind, EffectWidgets] = {
+    ToolEffectKind.SHELL: EffectWidgets(
+        approval=BashApprovalWidget, output_model=ShellOutput, result=BashResultWidget
+    ),
+    ToolEffectKind.FILE_READ: EffectWidgets(
+        approval=ReadApprovalWidget,
+        output_model=FileReadOutput,
+        result=ReadResultWidget,
+    ),
+    ToolEffectKind.FILE_WRITE: EffectWidgets(
+        approval=WriteFileApprovalWidget,
+        output_model=FileWriteOutput,
+        result=WriteFileResultWidget,
+    ),
+    ToolEffectKind.FILE_EDIT: EffectWidgets(
+        approval=EditApprovalWidget,
+        output_model=FileEditOutput,
+        result=EditResultWidget,
+    ),
+    ToolEffectKind.FILE_SEARCH: EffectWidgets(
+        approval=GrepApprovalWidget,
+        output_model=FileSearchOutput,
+        result=GrepResultWidget,
+    ),
+    ToolEffectKind.TODO: EffectWidgets(
+        approval=TodoApprovalWidget, output_model=TodoOutput, result=TodoResultWidget
+    ),
+    ToolEffectKind.USER_QUESTION: EffectWidgets(
+        output_model=AskUserQuestionResult, result=AskUserQuestionResultWidget
+    ),
+    ToolEffectKind.WEB_SEARCH: EffectWidgets(
+        output_model=WebSearchOutput, result=WebSearchResultWidget
+    ),
+    ToolEffectKind.WEB_FETCH: EffectWidgets(
+        output_model=WebFetchOutput, result=WebFetchResultWidget, linkify_result=True
+    ),
 }
 
-RESULT_WIDGETS: dict[str, type[ToolResultWidget]] = {
-    "bash": BashResultWidget,
-    "read_file": ReadResultWidget,
-    "write_file": WriteFileResultWidget,
-    "edit": EditResultWidget,
-    "grep": GrepResultWidget,
-    "todo": TodoResultWidget,
-    "ask_user_question": AskUserQuestionResultWidget,
-    "web_search": WebSearchResultWidget,
-    "web_fetch": WebFetchResultWidget,
-}
 
-# Tools whose result message text is allowed to contain clickable URLs.
-# Opt-in: extend this set when a tool's message becomes URL-shaped.
-LINKIFY_RESULT_TOOLS: frozenset[str] = frozenset({"web_fetch"})
-
-
-def get_approval_widget(tool_name: str, args: BaseModel) -> ToolApprovalWidget:
-    widget_class = APPROVAL_WIDGETS.get(tool_name, ToolApprovalWidget)
-    return widget_class(args)
+def get_approval_widget(detail: EffectDetail) -> ToolApprovalWidget:
+    widgets = EFFECT_WIDGETS.get(detail.kind, EffectWidgets())
+    args = (
+        detail.input
+        if isinstance(detail.input, BaseModel)
+        else GenericToolData(data=effect_input_json(detail))
+    )
+    return widgets.approval(args)
 
 
 def get_result_widget(
-    tool_name: str,
-    result: BaseModel | None,
+    detail: EffectDetail,
+    result: JsonValue,
     success: bool,
     message: str,
     warnings: list[str] | None = None,
 ) -> ToolResultWidget:
-    widget_class = RESULT_WIDGETS.get(tool_name, ToolResultWidget)
-    return widget_class(result, success, message, warnings)
+    widgets = EFFECT_WIDGETS.get(detail.kind, EffectWidgets())
+    if result is None:
+        parsed = None
+    elif widgets.output_model is not None:
+        parsed = widgets.output_model.model_validate(result)
+    else:
+        parsed = GenericToolData(data=result)
+    return widgets.result(parsed, success, message, warnings)
+
+
+def linkify_effect_result(detail: EffectDetail) -> bool:
+    return EFFECT_WIDGETS.get(detail.kind, EffectWidgets()).linkify_result
+
+
+def effect_result_is_collapsible(detail: EffectDetail) -> bool:
+    return EFFECT_WIDGETS.get(detail.kind, EffectWidgets()).result.COLLAPSIBLE

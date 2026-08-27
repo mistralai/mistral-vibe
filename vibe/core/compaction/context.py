@@ -127,6 +127,9 @@ def parse_previous_user_messages(content: str) -> list[str]:
 
 
 def _is_compaction_context_message(message: LLMMessage) -> bool:
+    if message.context_boundary == "compaction":
+        return True
+
     content = message.content or ""
     return (
         message.role == Role.user
@@ -136,6 +139,24 @@ def _is_compaction_context_message(message: LLMMessage) -> bool:
         and _COMPACTION_SUMMARY_OPEN in content
         and _COMPACTION_SUMMARY_CLOSE in content
     )
+
+
+def select_model_context(messages: Sequence[LLMMessage]) -> list[LLMMessage]:
+    boundary_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if _is_compaction_context_message(messages[index])
+        ),
+        None,
+    )
+    if boundary_index is None:
+        return list(messages)
+
+    system_messages = [
+        message for message in messages[:boundary_index] if message.role == Role.system
+    ]
+    return [*system_messages, *messages[boundary_index:]]
 
 
 def collect_prior_user_messages(

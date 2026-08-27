@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from vibe.cli.textual_ui.windowing.history import (
     build_history_widgets,
-    non_system_history_messages,
+    shift_history_widget_indices,
 )
 from vibe.cli.textual_ui.windowing.history_windowing import (
     create_resume_plan,
@@ -23,7 +23,7 @@ __all__ = [
     "SessionWindowing",
     "build_history_widgets",
     "create_resume_plan",
-    "non_system_history_messages",
+    "shift_history_widget_indices",
     "should_resume_history",
     "sync_backfill_state",
 ]

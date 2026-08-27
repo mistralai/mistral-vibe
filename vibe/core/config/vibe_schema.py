@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
+import json
 import os
 from pathlib import Path
 import tomllib
@@ -12,9 +13,10 @@ from pydantic import (
     BeforeValidator,
     Field,
     PrivateAttr,
+    ValidationError,
+    ValidationInfo,
     model_validator,
 )
-from textual.theme import BUILTIN_THEMES
 
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config._defaults import (
@@ -29,6 +31,10 @@ from vibe.core.config._defaults import (
     DEFAULT_THEME,
     DEFAULT_VIBE_BASE_URL,
 )
+
+# DEFAULT_LOG_LEVEL is not imported here to avoid a circular dependency
+# (vibe_schema.py imports from vibe.observability.logging). The constant
+# lives in vibe.config_values.
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.models import (
     ConnectorConfig,
@@ -54,7 +60,6 @@ from vibe.core.config.schema import (
     WithReplaceMerge,
     WithUnionMerge,
 )
-from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.prompts import (
     SystemPrompt,
@@ -63,7 +68,9 @@ from vibe.core.prompts import (
     load_system_prompt,
 )
 from vibe.core.types import Backend
-from vibe.core.utils.keyring import get_api_key_from_keyring
+from vibe.core.utils.matching import name_matches
+from vibe.observability.logging import logger
+from vibe.utils.api_keys import resolve_api_key
 
 
 def _strip_bash_pattern_wildcard(pattern: str) -> str:
@@ -90,16 +97,6 @@ def load_dotenv_values(
         environ[key] = value
 
 
-def resolve_api_key(env_key: str) -> str | None:
-    """Resolve an API key value: process/.env environment first, then OS keyring."""
-    if not env_key:
-        return None
-    value = os.environ.get(env_key)
-    if value:
-        return value
-    return get_api_key_from_keyring(env_key)
-
-
 DEFAULT_PROVIDERS = [
     ProviderConfig(
         name="mistral",
@@ -120,9 +117,11 @@ DEFAULT_ACTIVE_MODEL_CONFIG = ModelConfig(
     name="mistral-vibe-cli-latest",
     provider="mistral",
     alias="mistral-medium-3.5",
+    display_name="Mistral Medium 3.5",
     temperature=1.0,
     input_price=1.5,
     output_price=7.5,
+    cached_input_price=0.15,
     thinking="high",
     supports_images=True,
 )
@@ -133,17 +132,25 @@ DEFAULT_MODELS = [
         name="devstral-small-latest",
         provider="mistral",
         alias="devstral-small",
+        display_name="Devstral Small",
         input_price=0.1,
         output_price=0.3,
+        cached_input_price=0.01,
     ),
     ModelConfig(
         name="devstral",
         provider="llamacpp",
+        display_name="Devstral (local)",
         alias="local",
         input_price=0.0,
         output_price=0.0,
     ),
 ]
+
+# Sentinel ``active_model`` value meaning "not pinned": the config resolves it to
+# the default model (see ``get_active_model``). Kept distinct from pinning the
+# alias that happens to be the current default, which is a deliberate choice.
+UNPINNED_ACTIVE_MODEL = ""
 
 DEFAULT_TRANSCRIBE_PROVIDERS = [
     TranscribeProviderConfig(
@@ -191,15 +198,6 @@ def get_persisted_config() -> dict[str, Any]:
         raise RuntimeError(f"Cannot read {file}: {e}") from e
 
 
-def resolve_theme_name(value: Any) -> str:
-    if not isinstance(value, str) or not value:
-        return DEFAULT_THEME
-    if value not in BUILTIN_THEMES:
-        logger.warning("Unknown theme=%s; falling back to %s", value, DEFAULT_THEME)
-        return DEFAULT_THEME
-    return value
-
-
 def _unique_by(key: str) -> Callable[[list[Any]], list[Any]]:
     def check(items: list[Any]) -> list[Any]:
         seen: set[str] = set()
@@ -233,6 +231,54 @@ def _normalize_tool_configs(v: Any) -> dict[str, dict[str, Any]]:
     return {name: cfg if isinstance(cfg, dict) else {} for name, cfg in v.items()}
 
 
+def _coerce_routed_model_config(v: str) -> ModelConfig | None:
+    try:
+        return ModelConfig.model_validate_json(v)
+    except ValidationError:
+        return None
+
+
+def _coerce_routed_extra_models(v: Any) -> list[ModelConfig]:
+    """Parse the GrowthBook-supplied extra-models payload, failing open.
+
+    The value arrives as a JSON-array string (like every other GrowthBook-mapped
+    config value). Invalid entries are dropped rather than raising so a malformed
+    A/B payload can never brick config loading.
+    """
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if not isinstance(v, list):
+        return []
+    coerced: list[ModelConfig] = []
+    for item in v:
+        try:
+            coerced.append(
+                item
+                if isinstance(item, ModelConfig)
+                else ModelConfig.model_validate(item)
+            )
+        except ValidationError:
+            continue
+    return coerced
+
+
+_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+
+
+def _normalize_log_level(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    normalized = value.strip().upper()
+    if normalized not in _LOG_LEVELS:
+        raise ValueError(
+            f"Invalid log level {value!r}; expected one of {sorted(_LOG_LEVELS)}"
+        )
+    return normalized
+
+
 class VibeConfigSchema(ConfigSchema):
     _validation_warnings: list[str] = PrivateAttr(default_factory=list)
 
@@ -241,7 +287,24 @@ class VibeConfigSchema(ConfigSchema):
         return tuple(self._validation_warnings)
 
     # Models
-    active_model: Annotated[str, WithReplaceMerge()] = DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    active_model: Annotated[str, WithReplaceMerge()] = UNPINNED_ACTIVE_MODEL
+    # Experiment-routed default model alias, populated at runtime by the
+    # GrowthBook layer. It only takes effect when ``active_model`` is unpinned.
+    routed_default_model: Annotated[str, WithReplaceMerge()] = ""
+    # Full definition of ``routed_default_model``, also supplied at runtime by the GrowthBook layer.
+    routed_model_config: Annotated[
+        ModelConfig | None,
+        WithReplaceMerge(),
+        BeforeValidator(_coerce_routed_model_config),
+    ] = None
+    # Extra models injected into the dropdown at runtime by the GrowthBook layer,
+    # for exposure/rollout without changing the default. Unlike
+    # ``routed_model_config``, these never influence ``resolve_default_model_alias``.
+    routed_extra_models: Annotated[
+        list[ModelConfig],
+        WithReplaceMerge(),
+        BeforeValidator(_coerce_routed_extra_models),
+    ] = Field(default_factory=list)
     providers: Annotated[list[ProviderConfig], WithUnionMerge(merge_key="name")] = (
         Field(default_factory=lambda: list(DEFAULT_PROVIDERS))
     )
@@ -254,6 +317,14 @@ class VibeConfigSchema(ConfigSchema):
         BeforeValidator(normalize_model_configs),
         AfterValidator(_non_empty),
     ] = Field(default_factory=lambda: normalize_model_configs(DEFAULT_MODELS))
+    allowed_models: Annotated[list[str], WithReplaceMerge()] = Field(
+        default_factory=list,
+        description=(
+            "An explicit list of model aliases/patterns to allow. If set, only these"
+            " models are selectable. An empty list allows all configured models."
+            " Supports glob patterns (e.g., 'mistral-*') and regex with 're:' prefix."
+        ),
+    )
     compaction_model: Annotated[ModelConfig | None, WithReplaceMerge()] = None
     auto_compact_threshold: Annotated[int, WithReplaceMerge()] = (
         DEFAULT_AUTO_COMPACT_THRESHOLD
@@ -358,10 +429,10 @@ class VibeConfigSchema(ConfigSchema):
         ),
     )
     default_agent: Annotated[str, WithReplaceMerge()] = Field(
-        default=BuiltinAgentName.DEFAULT,
+        default=BuiltinAgentName.ACCEPT_EDITS,
         description=(
             "Agent profile to use when no --agent flag is passed. "
-            "Builtin: default, plan, accept-edits, auto-approve. "
+            "Builtin: ask, plan, accept-edits, auto-approve. "
             "Applies in both interactive and programmatic (-p/--prompt) mode."
         ),
     )
@@ -406,31 +477,42 @@ class VibeConfigSchema(ConfigSchema):
     vibe_code_api_key_env_var: Annotated[str, WithReplaceMerge()] = (
         DEFAULT_MISTRAL_API_ENV_KEY
     )
-    enable_otel: Annotated[bool, WithReplaceMerge()] = False
-    otel_endpoint: Annotated[str, WithReplaceMerge()] = ""
-    otel_redaction: Annotated[OtelRedactionMode, WithReplaceMerge()] = (
-        OtelRedactionMode.DEFAULT
-    )
-    console_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_CONSOLE_BASE_URL
-    experimental_bash_tool: Annotated[bool, WithReplaceMerge()] = Field(
+
+    # Tracing
+    enable_otel: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
         description=(
-            "Use the experimental managed bash implementation instead of the "
-            "legacy one-off bash tool."
+            "Export OpenTelemetry traces for agent, model, and tool operations. "
+            "Requires enable_telemetry to be enabled."
         ),
     )
+    otel_endpoint: Annotated[str, WithReplaceMerge()] = Field(
+        default="",
+        description=(
+            "Base URL of a custom OTLP/HTTP collector. Vibe appends /v1/traces. "
+            "When empty, Vibe uses the configured Mistral telemetry endpoint."
+        ),
+    )
+    otel_redaction: Annotated[OtelRedactionMode, WithReplaceMerge()] = Field(
+        default=OtelRedactionMode.DEFAULT,
+        description=(
+            "Client-side span attribute redaction: default redacts sensitive "
+            "values, strict redacts sensitive attributes, and none disables "
+            "redaction."
+        ),
+    )
+    console_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_CONSOLE_BASE_URL
 
     # Top-level scalars
-    theme: Annotated[str, WithReplaceMerge(), BeforeValidator(resolve_theme_name)] = (
-        DEFAULT_THEME
-    )
-    experiment_overrides: Annotated[dict[str, str], WithReplaceMerge()] = Field(
-        default_factory=dict
-    )
+    theme: Annotated[str, WithReplaceMerge()] = DEFAULT_THEME
     applied_migrations: Annotated[list[str], WithConcatMerge()] = Field(
         default_factory=list
     )
     disable_welcome_banner_animation: Annotated[bool, WithReplaceMerge()] = False
+    show_greeting: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        description="Show greeting at startup (Mistral providers only, once per 24h).",
+    )
     autocopy_to_clipboard: Annotated[bool, WithReplaceMerge()] = True
     file_watcher_for_autocomplete: Annotated[bool, WithReplaceMerge()] = False
     ask_confirmation_on_exit: Annotated[bool, WithReplaceMerge()] = True
@@ -438,10 +520,12 @@ class VibeConfigSchema(ConfigSchema):
     context_warnings: Annotated[bool, WithReplaceMerge()] = False
     voice_mode_enabled: Annotated[bool, WithReplaceMerge()] = False
     narrator_enabled: Annotated[bool, WithReplaceMerge()] = False
+    show_thinking_nodes: Annotated[bool, WithReplaceMerge()] = False
     bypass_tool_permissions: Annotated[bool, WithReplaceMerge()] = False
     raise_on_compaction_failure: Annotated[bool, WithReplaceMerge()] = False
     enable_telemetry: Annotated[bool, WithReplaceMerge()] = True
     system_prompt_id: Annotated[str, WithReplaceMerge()] = SystemPrompt.CLI
+    managed_shell_tools_enabled: Annotated[bool, WithReplaceMerge()] = False
     compaction_prompt_id: Annotated[str, WithReplaceMerge()] = UtilityPrompt.COMPACT
     include_commit_signature: Annotated[bool, WithReplaceMerge()] = True
     include_model_info: Annotated[bool, WithReplaceMerge()] = True
@@ -459,6 +543,9 @@ class VibeConfigSchema(ConfigSchema):
     vibe_code_sessions_base_url: Annotated[str, WithReplaceMerge()] = (
         "https://chat.mistral.ai"
     )
+    log_level: Annotated[
+        str | None, WithReplaceMerge(), BeforeValidator(_normalize_log_level)
+    ] = None
 
     # Nested configs (REPLACE — simple nested models, no merge semantics)
     project_context: Annotated[ProjectContextConfig, WithReplaceMerge()] = Field(
@@ -471,8 +558,40 @@ class VibeConfigSchema(ConfigSchema):
         default_factory=ExperimentsConfig
     )
 
+    def resolve_default_model_alias(self) -> str:
+        available = self.available_models()
+        if self.routed_default_model and self.routed_default_model in available:
+            return self.routed_default_model
+        if DEFAULT_ACTIVE_MODEL_CONFIG.alias in available or not available:
+            # If there are no available models, fallback to default
+            return DEFAULT_ACTIVE_MODEL_CONFIG.alias
+        return next(iter(available))
+
+    def available_models(self) -> dict[str, ModelConfig]:
+        if not self.allowed_models:
+            return self.models
+        allowed = {
+            alias: model
+            for alias, model in self.models.items()
+            if name_matches(alias, self.allowed_models)
+        }
+        # A filter that matches nothing degrades to "allow all" rather than
+        # bricking model selection; the mismatch already surfaces as a warning.
+        return allowed or self.models
+
     def get_active_model(self) -> ModelConfig:
-        if model := self.models.get(self.active_model):
+        if self.active_model and self.active_model not in self.models:
+            raise ValueError(
+                f"Active model '{self.active_model}' not found in configuration."
+            )
+        # An allowlist-excluded pin never runs: fall back to the default allowed model.
+        available = self.available_models()
+        alias = (
+            self.active_model
+            if self.active_model in available
+            else self.resolve_default_model_alias()
+        )
+        if model := available.get(alias):
             return model
         raise ValueError(
             f"Active model '{self.active_model}' not found in configuration."
@@ -561,7 +680,11 @@ class VibeConfigSchema(ConfigSchema):
         )
 
     def build_tool_allowlist_update(
-        self, tool_name: str, patterns: list[str]
+        self,
+        tool_name: str,
+        patterns: list[str],
+        *,
+        current_allowlist: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """Extend a tool's allowlist in memory and return the persist payload.
 
@@ -571,13 +694,15 @@ class VibeConfigSchema(ConfigSchema):
         """
         if tool_name == "bash":
             patterns = [_strip_bash_pattern_wildcard(p) for p in patterns]
-        current_allowlist: list[str] = list(
-            self.tools.get(tool_name, {}).get("allowlist", [])
+        allowlist: list[str] = list(
+            current_allowlist
+            if current_allowlist is not None
+            else self.tools.get(tool_name, {}).get("allowlist", [])
         )
-        new_patterns = [p for p in patterns if p not in current_allowlist]
+        new_patterns = [p for p in patterns if p not in allowlist]
         if not new_patterns:
             return None
-        merged = sorted(current_allowlist + new_patterns)
+        merged = sorted(allowlist + new_patterns)
         self.tools.setdefault(tool_name, {})["allowlist"] = merged
         return {"tools": {tool_name: {"allowlist": merged}}}
 
@@ -592,6 +717,54 @@ class VibeConfigSchema(ConfigSchema):
             setting_name="compaction_prompt_id",
             builtins={"compact": UtilityPrompt.COMPACT.path},
         )
+
+    @model_validator(mode="after")
+    def _inject_routed_model(self) -> VibeConfigSchema:
+        alias = self.routed_default_model
+        model = self.routed_model_config
+        if not (alias and model is not None and model.alias == alias):
+            return self
+
+        existing = self.models.get(alias)
+        if existing is None:
+            object.__setattr__(self, "models", {**self.models, alias: model})
+        else:
+            user_overrides = {
+                field: getattr(existing, field) for field in existing.model_fields_set
+            }
+            object.__setattr__(
+                self,
+                "models",
+                {**self.models, alias: model.model_copy(update=user_overrides)},
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _inject_routed_extra_models(self) -> VibeConfigSchema:
+        # Adds models to the dropdown without touching ``routed_default_model``,
+        # so exposure/rollout never changes the resolved default. Composes with
+        # ``_inject_routed_model``: if ``routed_default_model`` names an alias
+        # added here, ``resolve_default_model_alias`` still promotes it to default.
+        if not self.routed_extra_models:
+            return self
+        models = dict(self.models)
+        for model in self.routed_extra_models:
+            # An empty alias collides with the unpinned ``active_model`` sentinel
+            # (""), so a malformed payload could hijack the resolved default. Skip
+            # it: injection must never touch the default.
+            if not model.alias:
+                continue
+            existing = models.get(model.alias)
+            if existing is None:
+                models[model.alias] = model
+                continue
+            # A user-defined entry for the same alias always wins over injection.
+            user_overrides = {
+                field: getattr(existing, field) for field in existing.model_fields_set
+            }
+            models[model.alias] = model.model_copy(update=user_overrides)
+        object.__setattr__(self, "models", models)
+        return self
 
     @model_validator(mode="after")
     def _apply_global_auto_compact_threshold(self) -> VibeConfigSchema:
@@ -610,7 +783,9 @@ class VibeConfigSchema(ConfigSchema):
 
     @model_validator(mode="after")
     def _apply_active_model_fallback(self) -> VibeConfigSchema:
-        if self.active_model not in self.models:
+        # The empty string is the "unpinned/default" sentinel: it is always valid
+        # and resolves to a configured model at read time (get_active_model).
+        if self.active_model and self.active_model not in self.models:
             unknown = self.active_model
             fallback = next(iter(self.models))
             logger.warning(
@@ -623,6 +798,21 @@ class VibeConfigSchema(ConfigSchema):
                 f"— defaulting to '{fallback}'."
             )
             object.__setattr__(self, "active_model", fallback)
+        return self
+
+    @model_validator(mode="after")
+    def _warn_unmatched_allowed_models(self) -> VibeConfigSchema:
+        for pattern in self.allowed_models:
+            if not (pattern or "").strip():
+                continue
+            if any(name_matches(alias, [pattern]) for alias in self.models):
+                continue
+            logger.warning(
+                "Allowed model '%s' matches none of your configured models.", pattern
+            )
+            self._validation_warnings.append(
+                f"Allowed model '{pattern}' matches none of your configured models."
+            )
         return self
 
     @model_validator(mode="after")
@@ -644,7 +834,9 @@ class VibeConfigSchema(ConfigSchema):
         return self
 
     @model_validator(mode="after")
-    def _check_api_key(self) -> VibeConfigSchema:
+    def _check_api_key(self, info: ValidationInfo) -> VibeConfigSchema:
+        if info.context is not None and not info.context.get("require_api_key", True):
+            return self
         try:
             provider = self.get_provider_for_model(self.get_active_model())
             api_key_env = provider.api_key_env_var

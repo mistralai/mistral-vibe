@@ -14,6 +14,14 @@ def app(monkeypatch: pytest.MonkeyPatch) -> RewindApp:
 
 
 class TestRewindAppVimKeybindings:
+    def test_action_help_describes_escape_as_previous(self, app: RewindApp):
+        assert "←/Esc previous" in app._help_text().plain
+
+    def test_persistence_help_describes_q_as_quit(self, app: RewindApp):
+        app._advance_to_persistence(restore_files=False)
+
+        assert "q quit" in app._help_text().plain
+
     def test_j_moves_down(self, app: RewindApp):
         assert app.selected_option == 0
 

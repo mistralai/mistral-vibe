@@ -4,12 +4,11 @@ import asyncio
 import codecs
 from collections.abc import AsyncGenerator
 from functools import lru_cache
-import os
 from pathlib import Path
 import shlex
-from typing import final
+from typing import ClassVar, final
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from tree_sitter import Language, Node, Parser
 import tree_sitter_bash as tsbash
 
@@ -23,21 +22,25 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.io_port import ShellCommandRequest
 from vibe.core.tools.permissions import (
     PermissionContext,
     PermissionScope,
     RequiredPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import is_path_within_workdir
-from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.core.utils import (
-    WindowsShellKind,
-    is_windows,
-    kill_async_subprocess,
-    resolve_windows_shell,
+from vibe.core.tools.utils import (
+    ambient_workspace,
+    is_path_within_workdir,
+    resolve_tool_path,
 )
-from vibe.core.utils.io import decode_safe
+from vibe.core.types import ToolResultEvent, ToolStreamEvent
+from vibe.core.utils import is_windows, kill_async_subprocess
+from vibe.core.utils.shell import spawn_shell_command, uses_posix_shell
+from vibe.core.workspace import Workspace
+from vibe.utils.io import decode_console_safe
+from vibe.utils.paths import normalize_windows_path
+from vibe.utils.tool_presentation import ToolEffectKind
 
 
 @lru_cache(maxsize=1)
@@ -76,81 +79,6 @@ def _extract_commands(command: str) -> list[str]:
 
     find_commands(tree.root_node)
     return commands
-
-
-def _get_shell_executable() -> str | None:
-    if is_windows():
-        return None
-    return os.environ.get("SHELL")
-
-
-async def _spawn_command(command: str) -> asyncio.subprocess.Process:
-    """Spawn ``command`` in the shell the current platform actually uses.
-
-    On Windows we prefer a real bash (``bash -c``) when one is available so
-    Unix-style commands work; otherwise we spawn cmd.exe explicitly. On Unix we
-    use ``$SHELL``. This must stay in sync with the system prompt, which
-    describes the same resolved shell.
-    """
-    env = _get_base_env()
-
-    if is_windows():
-        shell = resolve_windows_shell()
-        if shell.kind is WindowsShellKind.BASH and shell.executable is not None:
-            return await asyncio.create_subprocess_exec(
-                shell.executable,
-                "-c",
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.DEVNULL,
-                env=env,
-            )
-        # Use the resolved cmd.exe path instead of COMSPEC so prompt syntax and
-        # execution cannot diverge when COMSPEC points at another shell.
-        return await asyncio.create_subprocess_exec(
-            shell.executable or "cmd.exe",
-            "/d",
-            "/c",
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=asyncio.subprocess.DEVNULL,
-            env=env,
-        )
-
-    return await asyncio.create_subprocess_shell(
-        command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        stdin=asyncio.subprocess.DEVNULL,
-        env=env,
-        executable=_get_shell_executable(),
-        start_new_session=True,
-    )
-
-
-def _get_base_env() -> dict[str, str]:
-    base_env = {**os.environ, "CI": "true", "NONINTERACTIVE": "1", "NO_TTY": "1"}
-
-    if is_windows():
-        base_env["GIT_PAGER"] = "more"
-        base_env["PAGER"] = "more"
-    else:
-        base_env["TERM"] = "dumb"
-        base_env["DEBIAN_FRONTEND"] = "noninteractive"
-        base_env["GIT_PAGER"] = "cat"
-        base_env["PAGER"] = "cat"
-        base_env["LESS"] = "-FX"
-        base_env["LC_ALL"] = "en_US.UTF-8"
-
-    return base_env
-
-
-def _uses_posix_shell() -> bool:
-    if not is_windows():
-        return True
-    return resolve_windows_shell().kind is WindowsShellKind.BASH
 
 
 _READ_ONLY_COMMANDS_WINDOWS = ["dir", "findstr", "more", "type", "ver", "where"]
@@ -197,9 +125,7 @@ _READ_ONLY_COMMANDS_POSIX = [
 
 def default_read_only_commands() -> list[str]:
     return list(
-        _READ_ONLY_COMMANDS_POSIX
-        if _uses_posix_shell()
-        else _READ_ONLY_COMMANDS_WINDOWS
+        _READ_ONLY_COMMANDS_POSIX if uses_posix_shell() else _READ_ONLY_COMMANDS_WINDOWS
     )
 
 
@@ -211,7 +137,7 @@ def _get_default_allowlist() -> list[str]:
 def _get_default_denylist() -> list[str]:
     common = ["gdb", "pdb", "passwd"]
 
-    if not _uses_posix_shell():
+    if not uses_posix_shell():
         return common + ["cmd /k", "powershell -NoExit", "pwsh -NoExit", "notepad"]
 
     return common + [
@@ -232,7 +158,7 @@ def _get_default_denylist() -> list[str]:
 def _get_default_denylist_standalone() -> list[str]:
     common = ["python", "python3", "ipython"]
 
-    if not _uses_posix_shell():
+    if not uses_posix_shell():
         return common + ["cmd", "powershell", "pwsh", "notepad"]
 
     return common + ["bash", "sh", "nohup", "vi", "vim", "emacs", "nano", "su"]
@@ -249,7 +175,6 @@ _MUTATING_PATH_COMMANDS = {"cd", "chmod", "chown", "cp", "mkdir", "mv", "rm", "t
 _PATH_COMMANDS = _MUTATING_PATH_COMMANDS | set(_READ_ONLY_COMMANDS_POSIX)
 
 _FIND_EXECUTION_PREDICATES = {"-exec", "-execdir", "-ok", "-okdir"}
-_MSYS_DRIVE_PATH_PREFIX_LEN = 2
 
 
 def _split_command_tokens(command: str) -> list[str]:
@@ -268,27 +193,12 @@ def _split_command_tokens(command: str) -> list[str]:
         return command.split()
 
 
-def _normalize_bash_path_token(token: str) -> str:
-    if not is_windows():
-        return token
-    if not token.startswith("/"):
-        return token
-    if len(token) < _MSYS_DRIVE_PATH_PREFIX_LEN:
-        return token
-
-    drive = token[1]
-    if not drive.isascii() or not drive.isalpha():
-        return token
-    if len(token) > _MSYS_DRIVE_PATH_PREFIX_LEN and token[
-        _MSYS_DRIVE_PATH_PREFIX_LEN
-    ] not in {"/", "\\"}:
-        return token
-
-    suffix = token[_MSYS_DRIVE_PATH_PREFIX_LEN:].replace("\\", "/")
-    return f"{drive.upper()}:{suffix or '/'}"
-
-
-def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
+def _collect_outside_dirs(
+    command_parts: list[str],
+    *,
+    workspace: Workspace | None = None,
+    scratchpad_dir: Path | None = None,
+) -> set[str]:
     """Collect parent directories referenced outside the workdir.
 
     Iterates file-manipulating commands (see _PATH_COMMANDS) and inspects
@@ -303,6 +213,12 @@ def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
     look like /c/Users/... even though os.sep is "\\" there. Git Bash also
     accepts backslash-separated Windows paths.
     """
+    workspace = workspace or ambient_workspace()
+    resolved_cwd = workspace.cwd
+
+    def is_within_workdir(path: str) -> bool:
+        return is_path_within_workdir(path, workspace=workspace)
+
     dirs: set[str] = set()
     for part in command_parts:
         tokens = _split_command_tokens(part)
@@ -325,17 +241,12 @@ def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
                 or "\\" in token
             ):
                 continue
-            path_token = _normalize_bash_path_token(token)
-            if is_path_within_workdir(path_token):
+            path_token = normalize_windows_path(token)
+            if is_within_workdir(path_token):
                 continue
-            if is_scratchpad_path(path_token):
+            if is_scratchpad_path(path_token, scratchpad_dir=scratchpad_dir):
                 continue
-            # Resolve relative / home-relative paths, then collect parent dir
-            resolved = Path(path_token).expanduser()
-            if not resolved.is_absolute():
-                resolved = Path.cwd() / resolved
-            resolved = resolved.resolve()
-            # For a directory target use the dir itself; for a file use its parent
+            resolved = resolve_tool_path(path_token, resolved_cwd)
             parent = str(resolved) if resolved.is_dir() else str(resolved.parent)
             dirs.add(parent)
     return dirs
@@ -479,29 +390,64 @@ class BashArgs(BaseModel):
     )
 
 
-class BashResult(BaseModel):
+class CapturedShellResult(BaseModel):
+    """Result of a shell that captures stdout and stderr as two separate pipes."""
+
     command: str
-    stdout: str
-    stderr: str
-    returncode: int
+    shell: str = ""
+    exit_code: int = 0
+    stdout: str = ""
+    stderr: str = ""
+
+    # `model_dump` of a tool result is the `post_tool` hook payload, so dropping
+    # this key outright would break hooks that read `tool_output.returncode`.
+    @computed_field(description="Deprecated alias for `exit_code`.")
+    @property
+    def returncode(self) -> int:
+        return self.exit_code
+
+
+def completed_shell_result(
+    *, command: str, stdout: str, stderr: str, exit_code: int, shell: str = ""
+) -> CapturedShellResult:
+    if exit_code != 0:
+        message = f"Command failed: {command!r}\nReturn code: {exit_code}"
+        if stderr:
+            message += f"\nStderr: {stderr}"
+        if stdout:
+            message += f"\nStdout: {stdout}"
+        raise ToolError(message)
+
+    return CapturedShellResult(
+        command=command, shell=shell, exit_code=exit_code, stdout=stdout, stderr=stderr
+    )
 
 
 class Bash(
-    BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState],
-    ToolUIData[BashArgs, BashResult],
+    BaseTool[BashArgs, CapturedShellResult, BashToolConfig, BaseToolState],
+    ToolUIData[BashArgs, CapturedShellResult],
 ):
+    effect_kind = ToolEffectKind.SHELL
+    shell_rollout: ClassVar[str | None] = "legacy"
+
     @classmethod
     def format_call_display(cls, args: BashArgs) -> ToolCallDisplay:
-        return ToolCallDisplay(summary=f"bash: {args.command}")
+        return ToolCallDisplay(
+            summary=f"bash: {args.command}",
+            verb="Running",
+            message=args.command,
+            settled_verb="Ran",
+            settled_message=args.command,
+        )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
-        if not isinstance(event.result, BashResult):
+        if not isinstance(event.result, CapturedShellResult):
             return ToolResultDisplay(
                 success=False, message=event.error or event.skip_reason or "No result"
             )
 
-        return ToolResultDisplay(success=True, message=f"Ran {event.result.command}")
+        return ToolResultDisplay(success=True, verb="Ran", message=event.result.command)
 
     @classmethod
     def get_status_text(cls) -> str:
@@ -545,7 +491,7 @@ class Bash(
             return False
         base_command = parts[0]
         if len(parts) == 1:
-            command_name = os.path.basename(base_command)
+            command_name = Path(base_command).name
             if command_name in self.config.denylist_standalone:
                 return True
             if base_command in self.config.denylist_standalone:
@@ -653,7 +599,7 @@ class Bash(
         return required
 
     def resolve_permission(self, args: BashArgs) -> PermissionContext | None:
-        if not _uses_posix_shell():
+        if not uses_posix_shell():
             return None
 
         command_parts = _extract_commands(args.command)
@@ -666,7 +612,9 @@ class Bash(
             and guardrail_permission.permission == ToolPermission.NEVER
         ):
             return guardrail_permission
-        outside_dirs = _collect_outside_dirs(command_parts)
+        outside_dirs = _collect_outside_dirs(
+            command_parts, workspace=self.workspace, scratchpad_dir=self.scratchpad_dir
+        )
         if (
             self._is_unconditionally_allowed(command_parts, outside_dirs)
             and not guardrail_permission
@@ -687,32 +635,48 @@ class Bash(
     def _build_timeout_error(self, command: str, timeout: int) -> ToolError:
         return ToolError(f"Command timed out after {timeout}s: {command!r}")
 
-    @final
-    def _build_result(
-        self, *, command: str, stdout: str, stderr: str, returncode: int
-    ) -> BashResult:
-        if returncode != 0:
-            error_msg = f"Command failed: {command!r}\n"
-            error_msg += f"Return code: {returncode}"
-            if stderr:
-                error_msg += f"\nStderr: {stderr}"
-            if stdout:
-                error_msg += f"\nStdout: {stdout}"
-            raise ToolError(error_msg.strip())
-
-        return BashResult(
-            command=command, stdout=stdout, stderr=stderr, returncode=returncode
-        )
-
     async def run(
         self, args: BashArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | BashResult, None]:
+    ) -> AsyncGenerator[ToolStreamEvent | CapturedShellResult, None]:
         timeout = args.timeout or self.config.default_timeout
         max_bytes = self.config.max_output_bytes
 
+        if (
+            ctx is not None
+            and ctx.tool_io is not None
+            and ctx.tool_io.supports_terminal
+            and ctx.session_id is not None
+        ):
+            try:
+                result = await ctx.tool_io.run_shell(
+                    ShellCommandRequest(
+                        session_id=ctx.session_id,
+                        tool_call_id=ctx.tool_call_id,
+                        command=args.command,
+                        cwd=self.cwd,
+                        timeout=timeout,
+                        max_output_bytes=max_bytes,
+                    )
+                )
+            except TimeoutError:
+                raise self._build_timeout_error(args.command, timeout) from None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise ToolError(
+                    f"Error running command {args.command!r}: {exc}"
+                ) from exc
+            yield completed_shell_result(
+                command=args.command,
+                stdout=result.stdout[:max_bytes],
+                stderr=result.stderr[:max_bytes],
+                exit_code=result.returncode,
+            )
+            return
+
         proc = None
         try:
-            proc = await _spawn_command(args.command)
+            proc = await spawn_shell_command(args.command, cwd=self.cwd)
 
             stdout_buf = bytearray()
             stderr_buf = bytearray()
@@ -764,13 +728,11 @@ class Bash(
                 else ""
             )
 
-            returncode = proc.returncode or 0
-
-            yield self._build_result(
+            yield completed_shell_result(
                 command=args.command,
                 stdout=stdout,
                 stderr=stderr,
-                returncode=returncode,
+                exit_code=proc.returncode or 0,
             )
 
         except (ToolError, asyncio.CancelledError):

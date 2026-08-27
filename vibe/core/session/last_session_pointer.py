@@ -6,8 +6,8 @@ import re
 import sys
 from typing import TYPE_CHECKING
 
-from vibe.core.logger import logger
-from vibe.core.utils.io import read_safe
+from vibe.observability.logging import logger
+from vibe.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.config import SessionLoggingConfig

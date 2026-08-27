@@ -3,7 +3,9 @@ from __future__ import annotations
 from vibe.core.tools.base import BaseTool
 from vibe.core.tools.connectors.connector_registry import (
     ConnectorAuthAction,
+    ConnectorCatalogEntry,
     ConnectorRegistry,
+    ConnectorToolDefinition,
     RemoteTool,
     _normalize_name,
     create_connector_proxy_tool_class,
@@ -17,11 +19,15 @@ class FakeConnectorRegistry(ConnectorRegistry):
         self,
         connectors: dict[str, list[RemoteTool]] | None = None,
         auth_actions: dict[str, ConnectorAuthAction] | None = None,
+        bootstrap_error: str | None = None,
+        connector_errors: dict[str, str] | None = None,
     ) -> None:
         super().__init__(api_key="fake-key")
         self._fake_connectors = connectors or {}
         self._fake_auth_actions = auth_actions or {}
         self._build_cache()
+        self._bootstrap_error = bootstrap_error
+        self._connector_errors = connector_errors or {}
 
     def _build_cache(self) -> None:
         self._cache = {}
@@ -74,3 +80,27 @@ class FakeConnectorRegistry(ConnectorRegistry):
     async def refresh_connector_async(self, alias: str) -> dict[str, type[BaseTool]]:
         """No-op refresh for tests."""
         return {}
+
+    def catalog_entries(self) -> tuple[ConnectorCatalogEntry, ...]:
+        """Return the catalog represented by this fake executor."""
+        return tuple(
+            ConnectorCatalogEntry(
+                connector_id=f"fake-id-{connector_name}",
+                alias=_normalize_name(connector_name),
+                display_name=connector_name,
+                ready=bool(tools),
+                auth_action=self._fake_auth_actions.get(
+                    connector_name, ConnectorAuthAction.NONE
+                ),
+                tools=tuple(
+                    ConnectorToolDefinition(
+                        name=tool.name,
+                        description=tool.description,
+                        input_schema=tool.input_schema,
+                    )
+                    for tool in tools
+                ),
+                diagnostic=self._connector_errors.get(_normalize_name(connector_name)),
+            )
+            for connector_name, tools in self._fake_connectors.items()
+        )

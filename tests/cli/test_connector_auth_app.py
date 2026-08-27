@@ -7,31 +7,24 @@ import pytest
 from textual.content import Content
 from textual.widgets import OptionList
 
-from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from vibe.cli.textual_ui.shortcut_hints import SHORTCUT_STYLE
 from vibe.cli.textual_ui.widgets.connector_auth_app import (
     ConnectorAuthApp,
     _AuthOptionId,
 )
-from vibe.core.tools.connectors.connector_registry import RemoteTool
 
 
-def _make_registry(*, with_disconnected: bool = True) -> FakeConnectorRegistry:
-    connectors: dict[str, list[RemoteTool]] = {
-        "gmail": [RemoteTool(name="search", description="Search emails")]
-    }
-    if with_disconnected:
-        connectors["slack"] = []
-    return FakeConnectorRegistry(connectors=connectors)
+class FakeMCPResource:
+    async def connector_auth_url(self, name: str) -> str | None:
+        return f"https://auth.example.com/{name}"
+
+    async def refresh_connector(self, name: str) -> int:
+        return 1 if name else 0
 
 
-def _make_app(
-    connector_name: str = "slack", registry: FakeConnectorRegistry | None = None
-) -> ConnectorAuthApp:
-    reg = registry or _make_registry()
-    mgr = MagicMock()
+def _make_app(connector_name: str = "slack") -> ConnectorAuthApp:
     return ConnectorAuthApp(
-        connector_name=connector_name, connector_registry=reg, tool_manager=mgr
+        connector_name=connector_name, mcp=cast(Any, FakeMCPResource())
     )
 
 
@@ -259,7 +252,11 @@ class TestCloseAndRefresh:
     @pytest.mark.asyncio
     async def test_action_refresh_dispatches_worker(self) -> None:
         app = _make_app()
-        app.run_worker = MagicMock()
+
+        def close_worker(coroutine, **_kwargs: object) -> None:
+            coroutine.close()
+
+        app.run_worker = MagicMock(side_effect=close_worker)
         app.query_one = MagicMock()
 
         await app.action_refresh()

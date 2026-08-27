@@ -70,15 +70,6 @@ def test_prompts_md_overrides_builtin_description(tmp_path: Path) -> None:
     assert _descriptions(manager)["bash"] == "Custom bash description."
 
 
-def test_falls_back_to_builtin_description_when_no_override(tmp_path: Path) -> None:
-    config = build_test_vibe_config(tool_paths=[str(tmp_path)])
-    manager = ToolManager(lambda: config)
-
-    descriptions = _descriptions(manager)
-    assert descriptions["bash"] == Bash.get_full_description()
-    assert descriptions["bash"].startswith("Use `bash`")
-
-
 def test_empty_override_file_is_ignored(tmp_path: Path) -> None:
     (_prompts_dir(tmp_path) / "bash.md").write_text("   \n\t", encoding="utf-8")
     config = build_test_vibe_config(tool_paths=[str(tmp_path / "tools")])

@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 from textual import events
+from textual.screen import ModalScreen
+from textual.widgets import Static
 
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
@@ -219,3 +221,141 @@ async def test_text_change_hook_rewrites_quoted_image_path_with_spaces(
         await pilot.pause()
 
         assert chat_input.value == f"@'{img}'"
+
+
+@pytest.mark.asyncio
+async def test_paste_during_app_blur_forwards_to_chat_input(
+    vibe_app: VibeApp, tmp_path: Path
+) -> None:
+    img = tmp_path / "shot.png"
+    img.write_bytes(b"\x89PNG")
+
+    async with vibe_app.run_test() as pilot:
+        chat_input = vibe_app.query_one(ChatInputContainer)
+        text_area = chat_input.query_one(ChatTextArea)
+        text_area.focus()
+        await pilot.pause()
+
+        # Simulate iTerm2 drag-and-drop: AppBlur → Paste → AppFocus.
+        # The Paste arrives while no widget has focus (AppBlur cleared it),
+        # which is the bug — Textual forwards to the screen instead of the
+        # input widget.
+        vibe_app.post_message(events.AppBlur())
+        await pilot.pause()
+        assert vibe_app.focused is None
+
+        vibe_app.post_message(events.Paste(text=str(img)))
+        await pilot.pause()
+
+        vibe_app.post_message(events.AppFocus())
+        await pilot.pause()
+
+        assert chat_input.value == f"@{img}"
+
+
+@pytest.mark.asyncio
+async def test_paste_during_app_blur_forwards_non_image_path_untouched(
+    vibe_app: VibeApp, tmp_path: Path
+) -> None:
+    txt = tmp_path / "notes.md"
+    txt.write_text("hi")
+
+    async with vibe_app.run_test() as pilot:
+        chat_input = vibe_app.query_one(ChatInputContainer)
+        text_area = chat_input.query_one(ChatTextArea)
+        text_area.focus()
+        await pilot.pause()
+
+        vibe_app.post_message(events.AppBlur())
+        await pilot.pause()
+        assert vibe_app.focused is None
+
+        vibe_app.post_message(events.Paste(text=str(txt)))
+        await pilot.pause()
+
+        vibe_app.post_message(events.AppFocus())
+        await pilot.pause()
+
+        assert chat_input.value == str(txt)
+
+
+@pytest.mark.asyncio
+async def test_paste_during_app_blur_not_forwarded_when_modal_screen_open(
+    vibe_app: VibeApp, tmp_path: Path
+) -> None:
+    txt = tmp_path / "notes.md"
+    txt.write_text("hi")
+
+    class _BlankModal(ModalScreen[None]):
+        def compose(self):
+            yield Static("modal")
+
+    async with vibe_app.run_test() as pilot:
+        chat_input = vibe_app.query_one(ChatInputContainer)
+        text_area = chat_input.query_one(ChatTextArea)
+        text_area.focus()
+        await pilot.pause()
+
+        vibe_app.push_screen(_BlankModal())
+        await pilot.pause()
+        assert vibe_app.screen.is_modal
+
+        vibe_app.post_message(events.AppBlur())
+        await pilot.pause()
+
+        vibe_app.post_message(events.Paste(text=str(txt)))
+        await pilot.pause()
+
+        vibe_app.post_message(events.AppFocus())
+        await pilot.pause()
+
+        assert chat_input.value == ""
+
+
+@pytest.mark.asyncio
+async def test_normal_paste_with_focused_widget_not_intercepted(
+    vibe_app: VibeApp, tmp_path: Path
+) -> None:
+    txt = tmp_path / "notes.md"
+    txt.write_text("hi")
+
+    async with vibe_app.run_test() as pilot:
+        chat_input = vibe_app.query_one(ChatInputContainer)
+        text_area = chat_input.query_one(ChatTextArea)
+        text_area.focus()
+        await pilot.pause()
+        assert vibe_app.focused is not None
+
+        vibe_app.post_message(events.Paste(text=str(txt)))
+        await pilot.pause()
+
+        assert chat_input.value == str(txt)
+
+
+@pytest.mark.asyncio
+async def test_paste_during_app_blur_not_forwarded_when_input_disabled(
+    vibe_app: VibeApp, tmp_path: Path
+) -> None:
+    txt = tmp_path / "notes.md"
+    txt.write_text("hi")
+
+    async with vibe_app.run_test() as pilot:
+        chat_input = vibe_app.query_one(ChatInputContainer)
+        text_area = chat_input.query_one(ChatTextArea)
+        text_area.focus()
+        await pilot.pause()
+
+        chat_input.disabled = True
+        await pilot.pause()
+
+        vibe_app.post_message(events.AppBlur())
+        await pilot.pause()
+        assert vibe_app.focused is None
+
+        vibe_app.post_message(events.Paste(text=str(txt)))
+        await pilot.pause()
+
+        vibe_app.post_message(events.AppFocus())
+        await pilot.pause()
+
+        assert chat_input.value == ""

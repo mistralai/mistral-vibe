@@ -9,10 +9,10 @@ import sys
 from vibe import __version__
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.harness_files import init_harness_files_manager
-from vibe.core.logger import logger
-from vibe.core.paths import HISTORY_FILE
+from vibe.core.paths import HISTORY_FILE, LOG_FILE
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.utils.windows_asyncio import silence_proactor_transport_teardown_warnings
+from vibe.observability.logging import init_file_logging, logger
 
 # Configure line buffering for subprocess communication
 sys.stdout.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
@@ -42,7 +42,7 @@ def bootstrap_config_files() -> None:
             history_file.parent.mkdir(parents=True, exist_ok=True)
             history_file.write_text("Hello Vibe!\n", "utf-8")
         except Exception as e:
-            logger.error(f"Could not create history file: {e}")
+            logger.error("Could not create history file: %s", e)
             raise
 
 
@@ -66,11 +66,11 @@ def main() -> None:
 
     handle_debug_mode()
     init_harness_files_manager("user", "project")
+    init_file_logging(LOG_FILE.path)
 
-    from vibe.acp.acp_agent_loop import run_acp_server
+    from vibe.acp.agent import run_acp_server
     from vibe.core.config import load_dotenv_values
-    from vibe.core.sentry import SentryTarget, init_sentry
-    from vibe.core.tracing import setup_tracing
+    from vibe.observability.sentry import SentryTarget, init_sentry
     from vibe.setup.onboarding import run_onboarding
 
     environ_before_dotenv_load = os.environ.copy()
@@ -96,19 +96,15 @@ def main() -> None:
 
     if config is not None:
         try:
-            setup_tracing(config)
-        except Exception:
-            pass  # tracing disabled
-        try:
             init_sentry(
-                config,
+                enabled=config.enable_telemetry,
                 headless=True,
-                launch_context=build_launch_context(
+                tags=build_launch_context(
                     agent_entrypoint="acp",
                     agent_version=__version__,
                     client_name="vibe_acp",
                     client_version=__version__,
-                ),
+                ).sentry_tags(),
                 target=SentryTarget.ACP,
             )
         except Exception:

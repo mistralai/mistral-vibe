@@ -106,6 +106,34 @@ def escape_json_pointer_token(value: str) -> str:
     return value.replace("~", "~0").replace("/", "~1")
 
 
+def resolve_upsert_op(
+    existing: Any,
+    path: str,
+    key_field: str,
+    value: dict[str, Any],
+    target_layer_name: str | None = None,
+) -> AddOperationPatch | ReplaceOperationPatch:
+    """Pick the JSON Patch op that upserts *value* into a list at *path*.
+
+    When *existing* is a list, the entry whose ``key_field`` matches
+    ``value[key_field]`` is replaced in place; otherwise *value* is
+    appended. A missing or non-list *existing* creates the section fresh.
+    """
+    if not isinstance(existing, list) or not existing:
+        return AddOperationPatch(
+            path=path, value=[value], target_layer_name=target_layer_name
+        )
+    key_value = value.get(key_field)
+    for index, entry in enumerate(existing):
+        if isinstance(entry, dict) and entry.get(key_field) == key_value:
+            return ReplaceOperationPatch(
+                path=f"{path}/{index}", value=value, target_layer_name=target_layer_name
+            )
+    return AddOperationPatch(
+        path=f"{path}/-", value=value, target_layer_name=target_layer_name
+    )
+
+
 def ensure_parent_paths(
     data: dict[str, Any], operations: Sequence[PatchOp]
 ) -> dict[str, Any]:

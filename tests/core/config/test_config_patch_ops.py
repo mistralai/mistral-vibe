@@ -15,6 +15,7 @@ from vibe.core.config.patch import (
     PatchOp,
     ensure_parent_paths,
     escape_json_pointer_token,
+    resolve_upsert_op,
 )
 
 
@@ -286,3 +287,95 @@ def test_scenario_build_patch_incrementally() -> None:
         "replace '/active_model' = 'devstral-small'",
         "add '/tools/disabled_tools/-' = 'bash'",
     ]
+
+
+_PATH = "/providers"
+_PAYLOAD = {"name": "mistral", "api_base": "https://api.mistral.ai/v1"}
+
+
+def test_resolve_upsert_op_empty_list_creates_section() -> None:
+    op = resolve_upsert_op([], _PATH, "name", _PAYLOAD)
+
+    assert isinstance(op, AddOperationPatch)
+    assert op.path == _PATH
+    assert op.value == [_PAYLOAD]
+
+
+def test_resolve_upsert_op_non_list_existing_creates_section() -> None:
+    op = resolve_upsert_op("not-a-list", _PATH, "name", _PAYLOAD)
+
+    assert isinstance(op, AddOperationPatch)
+    assert op.path == _PATH
+    assert op.value == [_PAYLOAD]
+
+
+def test_resolve_upsert_op_missing_existing_creates_section() -> None:
+    # Mirrors how JsonPointer(...).resolve(raw, default=[]) surfaces a missing path.
+    op = resolve_upsert_op([], _PATH, "name", _PAYLOAD)
+
+    assert isinstance(op, AddOperationPatch)
+    assert op.value == [_PAYLOAD]
+
+
+def test_resolve_upsert_op_match_at_index_zero_replaces_in_place() -> None:
+    existing = [
+        {"name": "mistral", "api_base": "https://old.example/v1"},
+        {"name": "custom", "api_base": "https://custom.example/v1"},
+    ]
+
+    op = resolve_upsert_op(existing, _PATH, "name", _PAYLOAD)
+
+    assert isinstance(op, ReplaceOperationPatch)
+    assert op.path == f"{_PATH}/0"
+    assert op.value == _PAYLOAD
+
+
+def test_resolve_upsert_op_match_at_index_n_replaces_in_place() -> None:
+    existing = [
+        {"name": "custom", "api_base": "https://custom.example/v1"},
+        {"name": "mistral", "api_base": "https://old.example/v1"},
+    ]
+
+    op = resolve_upsert_op(existing, _PATH, "name", _PAYLOAD)
+
+    assert isinstance(op, ReplaceOperationPatch)
+    assert op.path == f"{_PATH}/1"
+    assert op.value == _PAYLOAD
+
+
+def test_resolve_upsert_op_no_match_appends_to_end() -> None:
+    existing = [{"name": "custom", "api_base": "https://custom.example/v1"}]
+
+    op = resolve_upsert_op(existing, _PATH, "name", _PAYLOAD)
+
+    assert isinstance(op, AddOperationPatch)
+    assert op.path == f"{_PATH}/-"
+    assert op.value == _PAYLOAD
+
+
+def test_resolve_upsert_op_first_match_wins_with_duplicate_keys() -> None:
+    existing = [
+        {"name": "mistral", "api_base": "https://first.example/v1"},
+        {"name": "mistral", "api_base": "https://second.example/v1"},
+    ]
+
+    op = resolve_upsert_op(existing, _PATH, "name", _PAYLOAD)
+
+    assert isinstance(op, ReplaceOperationPatch)
+    assert op.path == f"{_PATH}/0"
+
+
+def test_resolve_upsert_op_skips_non_dict_entries() -> None:
+    existing = ["stray", 42, {"name": "mistral", "api_base": "https://old.example/v1"}]
+
+    op = resolve_upsert_op(existing, _PATH, "name", _PAYLOAD)
+
+    assert isinstance(op, ReplaceOperationPatch)
+    assert op.path == f"{_PATH}/2"
+
+
+def test_resolve_upsert_op_forwards_target_layer_name() -> None:
+    op = resolve_upsert_op([], _PATH, "name", _PAYLOAD, target_layer_name="user")
+
+    assert isinstance(op, AddOperationPatch)
+    assert op.target_layer_name == "user"

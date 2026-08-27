@@ -18,10 +18,11 @@ from tests.e2e.common import (
     send_ctrl_c_until_quit_confirmation,
     strip_ansi,
     wait_for_main_screen,
-    wait_for_request_count,
+    wait_for_rendered_text,
+    wait_for_request_count_while_draining_child_output,
 )
 from tests.e2e.mock_server import StreamingMockServer
-from vibe.core.utils.io import read_safe
+from vibe.utils.io import read_safe
 
 
 def _usage_by_run_factory(
@@ -94,8 +95,12 @@ def _finish_turn(
     expected_request_count: int,
     request_count_getter: Callable[[], int],
 ) -> None:
-    wait_for_request_count(
-        request_count_getter, expected_count=expected_request_count, timeout=10
+    wait_for_request_count_while_draining_child_output(
+        child,
+        captured,
+        request_count_getter,
+        expected_count=expected_request_count,
+        timeout=10,
     )
     child.expect(ansi_tolerant_pattern(expected_reply), timeout=10)
 
@@ -168,6 +173,9 @@ def test_resumed_session_prints_only_fresh_token_usage_on_exit(
         resumed_captured,
     ):
         wait_for_main_screen(resumed_child, timeout=15)
+        wait_for_rendered_text(
+            resumed_child, resumed_captured, "Resumed session", timeout=15
+        )
         resumed_child.send("Second run")
         resumed_child.send("\r")
 
@@ -179,7 +187,7 @@ def test_resumed_session_prints_only_fresh_token_usage_on_exit(
             request_count_getter=lambda: len(streaming_mock_server.requests),
         )
         _wait_for_saved_session_usage(
-            expected_prompt_tokens=2, expected_completion_tokens=1
+            expected_prompt_tokens=13, expected_completion_tokens=8
         )
 
         send_ctrl_c_until_quit_confirmation(resumed_child, resumed_captured, timeout=5)

@@ -11,6 +11,7 @@ class SkillSource(StrEnum):
     BUILTIN = auto()
     LOCAL = auto()
     REGISTRY = auto()
+    PLUGIN = auto()
 
 
 class SkillScope(StrEnum):
@@ -134,7 +135,8 @@ class SkillInfo(BaseModel):
             metadata=meta.metadata,
             allowed_tools=meta.allowed_tools,
             user_invocable=meta.user_invocable,
-            skill_path=skill_path.resolve(),
+            # Preserve the configured directory when SKILL.md is a symlink.
+            skill_path=skill_path.parent.resolve() / skill_path.name,
             prompt=prompt,
             source=source,
             scope=scope,

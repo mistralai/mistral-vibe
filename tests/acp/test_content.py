@@ -12,8 +12,13 @@ from acp.schema import (
 import pytest
 
 from tests.stubs.fake_backend import FakeBackend
-from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
+from vibe.acp.agent import VibeAcpAgent as VibeAcpAgentLoop
+from vibe.app_server.models import (
+    PublicMessageEntry,
+    ResourceContentBlock as AppServerResourceContentBlock,
+)
 from vibe.core.types import Role
+from vibe.user_content import UserTextResource
 
 
 class TestACPContent:
@@ -76,6 +81,19 @@ class TestACPContent:
             + "\ncontent: def hello():\n    print('Hello, world!')"
         )
         assert user_message.content == expected_content
+        session = acp_agent_loop.sessions[session_response.session_id]
+        public_message = next(
+            entry
+            for entry in session.app_server.history
+            if isinstance(entry, PublicMessageEntry) and entry.role == "user"
+        )
+        resource = next(
+            block
+            for block in public_message.content
+            if isinstance(block, AppServerResourceContentBlock)
+        )
+        assert isinstance(resource.resource, UserTextResource)
+        assert resource.resource.text == "def hello():\n    print('Hello, world!')"
 
     @pytest.mark.asyncio
     async def test_resource_link_content(

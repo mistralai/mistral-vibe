@@ -67,6 +67,20 @@ class TestConcat:
         with pytest.raises(TypeError, match="CONCAT requires list operands"):
             MergeStrategy.CONCAT.apply([1], "b")
 
+    def test_empty_mapping_override_coalesces_to_base(self) -> None:
+        # An empty TOML table (e.g. `[installed_agents]`) deserializes to {}.
+        assert MergeStrategy.CONCAT.apply([1, 2], {}) == [1, 2]
+
+    def test_empty_mapping_base_coalesces_to_override(self) -> None:
+        assert MergeStrategy.CONCAT.apply({}, [1, 2]) == [1, 2]
+
+    def test_both_empty_mappings_return_none(self) -> None:
+        assert MergeStrategy.CONCAT.apply({}, {}) is None
+
+    def test_non_empty_mapping_still_raises(self) -> None:
+        with pytest.raises(TypeError, match="CONCAT requires list operands"):
+            MergeStrategy.CONCAT.apply([1], {"a": 1})
+
 
 class TestUnion:
     def test_merge_by_key_override_wins(self) -> None:
@@ -103,6 +117,12 @@ class TestUnion:
     def test_raises_type_error_for_non_list(self) -> None:
         with pytest.raises(TypeError, match="UNION requires list operands"):
             MergeStrategy.UNION.apply("a", [1], key_fn=str)
+
+    def test_empty_mapping_override_coalesces_to_base(self) -> None:
+        assert MergeStrategy.UNION.apply([1], {}, key_fn=str) == [1]
+
+    def test_empty_mapping_base_coalesces_to_override(self) -> None:
+        assert MergeStrategy.UNION.apply({}, [1], key_fn=str) == [1]
 
     def test_raises_merge_key_error_for_missing_key(self) -> None:
         base = [{"name": "a", "v": 1}]

@@ -6,6 +6,7 @@ from vibe import __version__
 from vibe.core.telemetry.types import (
     AgentEntrypoint,
     AttachmentKind,
+    ExperimentAssignment,
     LaunchContext,
     TelemetryBaseMetadata,
     TelemetryCallType,
@@ -13,7 +14,7 @@ from vibe.core.telemetry.types import (
     TerminalEmulator,
 )
 from vibe.core.types import LLMMessage
-from vibe.core.utils.platform import get_platform_id, get_platform_version
+from vibe.utils.platform import get_platform_id, get_platform_version
 
 
 def build_base_metadata(
@@ -21,12 +22,15 @@ def build_base_metadata(
     launch_context: LaunchContext | None,
     session_id: str | None,
     parent_session_id: str | None = None,
-    experiments: dict[str, str] | None = None,
+    experiment_assignments: list[ExperimentAssignment] | None = None,
     user_plan: str | None = None,
+    experiment_attributes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     launch_payload = (
         launch_context.telemetry_fields() if launch_context is not None else {}
     )
+    assignments = experiment_assignments or []
+    experiments = {a.experiment_id: a.variation_name for a in assignments}
     return cast(
         dict[str, Any],
         TelemetryBaseMetadata(
@@ -36,7 +40,9 @@ def build_base_metadata(
             session_id=session_id,
             parent_session_id=parent_session_id,
             experiments=experiments or None,
+            experiment_assignments=experiment_assignments or None,
             user_plan=user_plan,
+            experiment_attributes=experiment_attributes or None,
             **launch_payload,
         ).model_dump(exclude_none=True),
     )

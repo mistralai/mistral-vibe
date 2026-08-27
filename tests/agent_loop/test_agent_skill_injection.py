@@ -13,6 +13,7 @@ from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.types import (
     AssistantEvent,
     BaseEvent,
+    LLMMessage,
     Role,
     ToolCallEvent,
     ToolResultEvent,
@@ -114,6 +115,33 @@ async def test_skill_content_injected_only_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_skill_content_reloads_after_compaction_boundary(tmp_path: Path) -> None:
+    agent_loop = _make_loop(tmp_path, body="Follow the plan carefully.", turns=2)
+
+    await _act_and_collect(agent_loop, "/test-skill")
+    agent_loop.messages.append(
+        LLMMessage(
+            role=Role.user,
+            content="compacted context",
+            injected=True,
+            context_boundary="compaction",
+        )
+    )
+    await _act_and_collect(agent_loop, "/test-skill")
+
+    skill_tool_msgs = [
+        message
+        for message in agent_loop.messages
+        if message.role == Role.tool and message.name == "skill"
+    ]
+    assert len(skill_tool_msgs) == 2
+    assert all(
+        '<skill_content name="test-skill">' in (message.content or "")
+        for message in skill_tool_msgs
+    )
+
+
+@pytest.mark.asyncio
 async def test_reinvocation_still_emits_events(tmp_path: Path) -> None:
     agent_loop = _make_loop(tmp_path, turns=2)
 
@@ -129,20 +157,17 @@ async def test_reinvocation_still_emits_events(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_inject_user_context_emits_skill_events_via_callback(
-    tmp_path: Path,
-) -> None:
+async def test_inject_user_context_returns_skill_events(tmp_path: Path) -> None:
     agent_loop = _make_loop(tmp_path)
-    events: list[BaseEvent] = []
-
-    async def capture(event: BaseEvent) -> None:
-        events.append(event)
-
-    await agent_loop.inject_user_context(
-        "/test-skill", as_message=True, inject_implicit=True, on_event=capture
+    events = await agent_loop.inject_user_context(
+        "/test-skill", as_message=True, inject_implicit=True
     )
 
-    assert [type(e) for e in events] == [ToolCallEvent, ToolResultEvent]
+    assert [type(e) for e in events] == [
+        UserMessageEvent,
+        ToolCallEvent,
+        ToolResultEvent,
+    ]
 
 
 @pytest.mark.asyncio
@@ -160,16 +185,15 @@ async def test_inject_user_context_injects_skill_and_forwards_events(
     tmp_path: Path,
 ) -> None:
     agent_loop = _make_loop(tmp_path, body="Queued skill body.")
-    events: list[BaseEvent] = []
-
-    await agent_loop.inject_user_context(
-        "/test-skill",
-        as_message=True,
-        inject_implicit=True,
-        on_event=lambda e: _record(events, e),
+    events = await agent_loop.inject_user_context(
+        "/test-skill", as_message=True, inject_implicit=True
     )
 
-    assert [type(e) for e in events] == [ToolCallEvent, ToolResultEvent]
+    assert [type(e) for e in events] == [
+        UserMessageEvent,
+        ToolCallEvent,
+        ToolResultEvent,
+    ]
     tool_msg = next(m for m in agent_loop.messages if m.role == Role.tool)
     assert tool_msg.name == "skill"
     assert "Queued skill body." in (tool_msg.content or "")
@@ -181,10 +205,7 @@ async def test_inject_user_context_without_flag_does_not_inject_skill(
 ) -> None:
     agent_loop = _make_loop(tmp_path)
 
-    await agent_loop.inject_user_context("/test-skill", as_message=True)
+    events = await agent_loop.inject_user_context("/test-skill", as_message=True)
 
+    assert [type(event) for event in events] == [UserMessageEvent]
     assert not any(m.role == Role.tool for m in agent_loop.messages)
-
-
-async def _record(sink: list[BaseEvent], event: BaseEvent) -> None:
-    sink.append(event)

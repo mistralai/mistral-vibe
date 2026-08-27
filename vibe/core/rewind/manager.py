@@ -128,16 +128,11 @@ class RewindManager:
             self._is_rewinding = False
 
     def _on_messages_reset(self) -> None:
-        """Called when the message list is reset (session switch, clear, compact, etc.).
+        """Called when the message list is reset, such as on session switch or clear.
 
         Skipped while rewinding: the rewind's own _truncate handles the log. In
-        every other case the checkpoint log is cleared, including mid-act
-        compaction: the open turn's turn_id is now stale (it references a
-        pre-compaction message index), and keeping it would block
-        accepted_turn_frontier with PENDING hunks from a dead context. When a
-        turn was open (mid-act compaction), re-open one so the remaining tool
-        loop can keep recording snapshots — act() won't call create_checkpoint
-        again.
+        every other case the checkpoint log is cleared. When a turn was open,
+        re-open one so the remaining tool loop can keep recording snapshots.
         """
         if self._is_rewinding:
             return

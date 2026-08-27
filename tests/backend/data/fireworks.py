@@ -9,7 +9,7 @@ SIMPLE_CONVERSATION_PARAMS: list[tuple[Url, JsonResponse, ResultData]] = [
             "id": "fake_id_1234",
             "object": "chat.completion",
             "created": 1234567890,
-            "model": "accounts/fireworks/models/glm-4p5",
+            "model": "accounts/fireworks/models/mistral-test",
             "choices": [
                 {
                     "index": 0,
@@ -46,7 +46,7 @@ TOOL_CONVERSATION_PARAMS: list[tuple[Url, JsonResponse, ResultData]] = [
             "id": "fake_id_1234",
             "object": "chat.completion",
             "created": 1234567890,
-            "model": "accounts/fireworks/models/glm-4p5",
+            "model": "accounts/fireworks/models/mistral-test",
             "choices": [
                 {
                     "index": 0,
@@ -93,10 +93,10 @@ STREAMED_SIMPLE_CONVERSATION_PARAMS: list[tuple[Url, list[Chunk], list[ResultDat
     (
         "https://api.fireworks.ai",
         [
-            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"accounts/fireworks/models/glm-4p5","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}],"usage":null}',
-            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"accounts/fireworks/models/glm-4p5","choices":[{"index":0,"delta":{"reasoning_content":"Some reasoning content"},"finish_reason":null}],"usage":null}',
-            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"accounts/fireworks/models/glm-4p5","choices":[{"index":0,"delta":{"content":"Some content"},"finish_reason":null}],"usage":null}',
-            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"accounts/fireworks/models/glm-4p5","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"total_tokens":300,"completion_tokens":200,"prompt_tokens_details":{"cached_tokens":0}}}',
+            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"accounts/fireworks/models/mistral-test","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}],"usage":null}',
+            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"accounts/fireworks/models/mistral-test","choices":[{"index":0,"delta":{"reasoning_content":"Some reasoning content"},"finish_reason":null}],"usage":null}',
+            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"accounts/fireworks/models/mistral-test","choices":[{"index":0,"delta":{"content":"Some content"},"finish_reason":null}],"usage":null}',
+            rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"accounts/fireworks/models/mistral-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"total_tokens":300,"completion_tokens":200,"prompt_tokens_details":{"cached_tokens":0}}}',
             rb"data: [DONE]",
         ],
         [
@@ -116,12 +116,12 @@ STREAMED_TOOL_CONVERSATION_PARAMS: list[tuple[Url, list[Chunk], list[ResultData]
     (
         "https://api.fireworks.ai",
         [
-            rb'data: {"id": "fake_id_1234","object": "chat.completion.chunk","created": 1234567890,"model": "accounts/fireworks/models/glm-4p5","choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}],"usage": null}',
-            rb'data: {"id": "fake_id_1234","object": "chat.completion.chunk","created": 1234567890,"model": "accounts/fireworks/models/glm-4p5","choices": [{"index": 0,"delta": {"reasoning_content": "Some reasoning content"},"finish_reason": null}],"usage": null}',
-            rb'data: {"id": "fake_id_1234","object": "chat.completion.chunk","created": 1234567890,"model": "accounts/fireworks/models/glm-4p5","choices": [{"index": 0,"delta": {"content": "Some content"},"finish_reason": null}],"usage": null}',
-            rb'data: {"id": "fake_id_1234","object": "chat.completion.chunk","created": 1234567890,"model": "accounts/fireworks/models/glm-4p5","choices": [{"index": 0,"delta": {"tool_calls": [{"index": 0,"id": "fake_id_151617","type": "function","function": {"name": "some_tool"}}]},"finish_reason": null}],"usage": null}',
-            rb'data: {"id": "fake_id_1234","object": "chat.completion.chunk","created": 1234567890,"model": "accounts/fireworks/models/glm-4p5","choices": [{"index": 0,"delta": {"tool_calls": [{"index": 0,"id": null,"type": "function","function": {"arguments": "{\"some_argument\": \"some_arguments_value\"}"}}]},"finish_reason": null}],"usage": null}',
-            rb'data: {"id": "fake_id_1234","object": "chat.completion.chunk","created": 1234567890,"model": "accounts/fireworks/models/glm-4p5","choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],"usage": {"prompt_tokens": 100,"total_tokens": 300,"completion_tokens": 200,"prompt_tokens_details": {"cached_tokens": 190}}}',
+            rb'data: {"id": "fake_id_1234","object": "chat.completion.chunk","created": 1234567890,"model": "accounts/fireworks/models/mistral-test","choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}],"usage": null}',
+            rb'data: {"id": "fake_id_1234","object": "chat.completion.chunk","created": 1234567890,"model": "accounts/fireworks/models/mistral-test","choices": [{"index": 0,"delta": {"reasoning_content": "Some reasoning content"},"finish_reason": null}],"usage": null}',
+            rb'data: {"id": "fake_id_1234","object": "chat.completion.chunk","created": 1234567890,"model": "accounts/fireworks/models/mistral-test","choices": [{"index": 0,"delta": {"content": "Some content"},"finish_reason": null}],"usage": null}',
+            rb'data: {"id": "fake_id_1234","object": "chat.completion.chunk","created": 1234567890,"model": "accounts/fireworks/models/mistral-test","choices": [{"index": 0,"delta": {"tool_calls": [{"index": 0,"id": "fake_id_151617","type": "function","function": {"name": "some_tool"}}]},"finish_reason": null}],"usage": null}',
+            rb'data: {"id": "fake_id_1234","object": "chat.completion.chunk","created": 1234567890,"model": "accounts/fireworks/models/mistral-test","choices": [{"index": 0,"delta": {"tool_calls": [{"index": 0,"id": null,"type": "function","function": {"arguments": "{\"some_argument\": \"some_arguments_value\"}"}}]},"finish_reason": null}],"usage": null}',
+            rb'data: {"id": "fake_id_1234","object": "chat.completion.chunk","created": 1234567890,"model": "accounts/fireworks/models/mistral-test","choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],"usage": {"prompt_tokens": 100,"total_tokens": 300,"completion_tokens": 200,"prompt_tokens_details": {"cached_tokens": 190}}}',
             rb"data: [DONE]",
         ],
         [

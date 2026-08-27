@@ -4,17 +4,17 @@ from textual.pilot import Pilot
 
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp
 from tests.snapshots.snap_compare import SnapCompare
+from vibe.app_server.models import SavedSessionSummary
 from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
-from vibe.core.session.resume_sessions import ResumeSessionInfo
 
 _SESSIONS = [
-    ResumeSessionInfo(
+    SavedSessionSummary(
         session_id="local-session-0001",
         cwd="/test/workdir",
         title="Refactor the auth module",
         end_time=None,
     ),
-    ResumeSessionInfo(
+    SavedSessionSummary(
         session_id="local-session-0002",
         cwd="/test/workdir",
         title="Add unit tests for the API",

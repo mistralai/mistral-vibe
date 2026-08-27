@@ -54,6 +54,11 @@ class VertexCredentials:
             return creds.token
 
 
+# The adapter is built per request, so the access token is cached out here to keep
+# credential refreshes process-wide rather than once per call.
+_CREDENTIALS = VertexCredentials()
+
+
 class VertexAnthropicAdapter(AnthropicAdapter):
     """Vertex AI adapter — inherits all streaming/parsing from AnthropicAdapter."""
 
@@ -62,7 +67,7 @@ class VertexAnthropicAdapter(AnthropicAdapter):
 
     def __init__(self) -> None:
         super().__init__()
-        self.credentials = VertexCredentials()
+        self.credentials = _CREDENTIALS
 
     def prepare_request(
         self,

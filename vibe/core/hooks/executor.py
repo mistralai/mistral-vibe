@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from vibe.core.hooks.config import HookConfig
 from vibe.core.hooks.models import HookExecutionResult, HookInvocation
 from vibe.core.utils import kill_async_subprocess
-from vibe.core.utils.io import decode_safe
+from vibe.utils.io import decode_console_safe
 
 _MAX_OUTPUT_BYTES = 1024 * 1024
 
@@ -31,6 +32,9 @@ async def _read_capped(
 
 
 class HookExecutor:
+    def __init__(self, *, cwd: Path | None = None) -> None:
+        self._cwd = (cwd or Path.cwd()).resolve()
+
     async def run(
         self, hook: HookConfig, invocation: HookInvocation
     ) -> HookExecutionResult:
@@ -43,6 +47,7 @@ class HookExecutor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                cwd=self._cwd,
             )
         except OSError as e:
             return HookExecutionResult(
@@ -69,8 +74,8 @@ class HookExecutor:
                 self._run_process(process, stdin, stdin_data), timeout=hook.timeout
             )
 
-            stdout = decode_safe(stdout_bytes, from_subprocess=True).text.strip()
-            stderr = decode_safe(stderr_bytes, from_subprocess=True).text.strip()
+            stdout = decode_console_safe(stdout_bytes).strip()
+            stderr = decode_console_safe(stderr_bytes).strip()
             return HookExecutionResult(
                 hook_name=hook.name,
                 exit_code=process.returncode,

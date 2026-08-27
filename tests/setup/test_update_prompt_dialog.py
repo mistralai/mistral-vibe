@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from vibe.config_values import AUTO_THEME
 from vibe.setup.update_prompt.update_prompt_dialog import (
     UpdateChoice,
     UpdatePromptApp,
@@ -64,6 +65,21 @@ async def test_dialog_returns_update_failed_when_update_command_fails() -> None:
             await pilot.pause()
 
     assert app.return_value is UpdatePromptResult.UPDATE_FAILED
+
+
+@pytest.mark.asyncio
+async def test_auto_theme_is_resolved_before_showing_dialog() -> None:
+    with patch(
+        "vibe.cli._theme_detection.resolve_auto_theme", return_value="ansi-light"
+    ) as mock_resolve_auto_theme:
+        app = UpdatePromptApp(
+            current_version="1.0.0", latest_version="2.0.0", theme=AUTO_THEME
+        )
+
+    async with app.run_test():
+        assert app.theme == "ansi-light"
+
+    mock_resolve_auto_theme.assert_called_once_with()
 
 
 @pytest.mark.asyncio

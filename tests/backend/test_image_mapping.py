@@ -14,7 +14,13 @@ from vibe.core.llm.backend.generic import OpenAIAdapter
 from vibe.core.llm.backend.mistral import MistralMapper
 from vibe.core.llm.backend.openai_responses import OpenAIResponsesAdapter
 from vibe.core.llm.backend.reasoning_adapter import ReasoningAdapter
-from vibe.core.types import FileImageSource, ImageAttachment, LLMMessage, Role
+from vibe.core.types import (
+    FileImageSource,
+    ImageAttachment,
+    LLMMessage,
+    PersistedToolResult,
+    Role,
+)
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 EXPECTED_B64 = base64.b64encode(PNG_BYTES).decode("ascii")
@@ -86,6 +92,29 @@ def test_openai_adapter_emits_image_url_part(image_attachment: ImageAttachment) 
         "image_url": {"url": EXPECTED_DATA_URI},
     }
     assert "images" not in msg
+
+
+def test_openai_adapter_excludes_persisted_tool_result() -> None:
+    message = LLMMessage(
+        role=Role.tool,
+        content="model-facing result",
+        name="read_file",
+        tool_call_id="read-1",
+        tool_result=PersistedToolResult(
+            output={"privateMarker": "must-not-reach-provider"}, duration=0.1
+        ),
+    )
+
+    payload = _adapter_payload(OpenAIAdapter(), [message])
+
+    assert payload["messages"] == [
+        {
+            "role": "tool",
+            "content": "model-facing result",
+            "name": "read_file",
+            "tool_call_id": "read-1",
+        }
+    ]
 
 
 def test_openai_responses_adapter_emits_input_image_part(

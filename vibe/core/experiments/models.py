@@ -11,14 +11,14 @@ class ExperimentAttributes(BaseModel):
     """Client-side attributes sent to the GrowthBook proxy for evaluation.
 
     `userId` is the GrowthBook hash attribute used for variant bucketing.
-    We use a hash of the Mistral API key to be stable per user without
-    leaking the key. The attribute name must match the one selected in the
-    experiment's "Assign variation based on attribute" setting on
+    It is the Mistral user id resolved from ``/v1/users/me`` — stable per
+    user and server-owned. The attribute name must match the one selected in
+    the experiment's "Assign variation based on attribute" setting on
     GrowthBook (which in turn must be registered as a User Attribute in
     the org's Settings → Attributes).
     """
 
-    userId: str
+    userId: str | None = None
     entrypoint: AgentEntrypoint
     agent_version: str
     client_name: str | None = None
@@ -26,6 +26,12 @@ class ExperimentAttributes(BaseModel):
     os: Literal["darwin", "linux", "windows"] | str
     terminal_emulator: TerminalEmulator | None = None
     custom_system_prompt: bool = False
+    organizationId: str | None = None
+    organizationKind: str | None = None
+    workspaceId: str | None = None
+    customerId: str | None = None
+    planType: str | None = None
+    planName: str | None = None
 
 
 class TrackedExperiment(BaseModel):

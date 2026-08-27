@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import suppress
+import json
 import socket
 import time
 from types import TracebackType
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import urllib.parse
 
 import httpx
@@ -24,6 +25,7 @@ from vibe.core.auth.mcp_oauth import (
     Fingerprint,
     KeyringTokenStorage,
     LoopbackCallbackHandler,
+    MCPOAuthCredentialCleanupFailed,
     MCPOAuthError,
     MCPOAuthHeadlessError,
     MCPOAuthInvalidGrant,
@@ -32,7 +34,10 @@ from vibe.core.auth.mcp_oauth import (
     MCPOAuthTransientRefreshError,
     RefreshAwareOAuthClientProvider,
     build_oauth_provider,
+    delete_oauth_credentials,
     perform_oauth_login,
+    restore_oauth_credentials,
+    snapshot_oauth_credentials,
     unwrap_oauth_refresh_error,
 )
 from vibe.core.config import MCPOAuth, MCPStreamableHttp
@@ -151,7 +156,40 @@ class TestKeyringTokenStorage:
         assert loaded.access_token == "at"
         assert loaded.refresh_token == "rt"
         assert loaded.scope == "read write"
-        assert (_KEYRING_SERVICE, "mcp-oauth:linear:tokens") in memory_keyring.store
+        raw = memory_keyring.store[(_KEYRING_SERVICE, "mcp-oauth:linear:tokens")]
+        saved_at = json.loads(raw)["expires_at"]
+        assert saved_at == pytest.approx(time.time() + 3600, abs=1)
+
+    @pytest.mark.asyncio
+    async def test_loading_tokens_restores_absolute_expiry(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        storage = KeyringTokenStorage(alias="linear")
+        tokens = OAuthToken(access_token="at", expires_in=3600, refresh_token="rt")
+
+        with patch("vibe.core.auth.mcp_oauth.time.time", return_value=1000):
+            await storage.set_tokens(tokens)
+        with patch("vibe.core.auth.mcp_oauth.time.time", return_value=1600):
+            loaded = await storage.get_tokens()
+
+        assert loaded is not None
+        assert storage.token_expiry_time == 4600
+
+    @pytest.mark.asyncio
+    async def test_legacy_expiring_tokens_are_considered_expired(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        storage = KeyringTokenStorage(alias="linear")
+        memory_keyring.store[(_KEYRING_SERVICE, "mcp-oauth:linear:tokens")] = (
+            OAuthToken(
+                access_token="at", expires_in=3600, refresh_token="rt"
+            ).model_dump_json()
+        )
+
+        loaded = await storage.get_tokens()
+
+        assert loaded is not None
+        assert storage.token_expiry_time == -1
 
     @pytest.mark.asyncio
     async def test_round_trip_client_info(self, memory_keyring: _MemoryKeyring) -> None:
@@ -207,6 +245,60 @@ class TestKeyringTokenStorage:
             with pytest.raises(MCPOAuthHeadlessError) as exc_info:
                 KeyringTokenStorage(alias="notion")
         assert exc_info.value.server_alias == "notion"
+
+    @pytest.mark.asyncio
+    async def test_delete_oauth_credentials_wraps_keyring_failure(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        delete = AsyncMock(side_effect=keyring.errors.KeyringError("keyring locked"))
+
+        with patch("vibe.core.auth.mcp_oauth._kr_delete", delete):
+            with pytest.raises(MCPOAuthCredentialCleanupFailed, match="keyring locked"):
+                await delete_oauth_credentials("linear")
+
+    @pytest.mark.asyncio
+    async def test_delete_oauth_credentials_is_noop_when_headless(
+        self, headless_keyring: None
+    ) -> None:
+        # No keyring backend means nothing was ever stored, so removing an OAuth
+        # server (e.g. added with `--no-login` on CI) must not fail.
+        await delete_oauth_credentials("linear")
+
+    @pytest.mark.asyncio
+    async def test_oauth_credential_snapshot_restores_exact_keyring_state(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        """*Prepare*: One OAuth source has tokens, client registration, and fingerprint.
+        *Do*: Snapshot its keyring entries, delete them, and restore the snapshot.
+        *Assert*: Every opaque credential entry returns byte-for-byte unchanged.
+        """
+        # Prepare
+        storage = KeyringTokenStorage(alias="linear")
+        await storage.set_tokens(
+            OAuthToken(
+                access_token="access",
+                token_type="Bearer",
+                expires_in=3600,
+                refresh_token="refresh",
+            )
+        )
+        await storage.set_client_info(
+            OAuthClientInformationFull(
+                client_id="client",
+                redirect_uris=["http://127.0.0.1:47823/callback"],  # type: ignore[list-item]
+                token_endpoint_auth_method="none",
+            )
+        )
+        await Fingerprint.compute(_oauth_server(name="linear")).save("linear")
+        expected = dict(memory_keyring.store)
+
+        # Do
+        backup = await snapshot_oauth_credentials("linear")
+        await delete_oauth_credentials("linear")
+        await restore_oauth_credentials("linear", backup)
+
+        # Assert
+        assert memory_keyring.store == expected
 
 
 class TestFingerprint:
@@ -456,6 +548,54 @@ class TestRefreshAwareProvider:
         return provider
 
     @pytest.mark.asyncio
+    async def test_refresh_without_rotated_token_keeps_previous_refresh_token(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        provider = self._provider(memory_keyring)
+        response = httpx.Response(
+            200,
+            json={
+                "access_token": "NEW_ACCESS",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            },
+        )
+
+        assert await provider._handle_refresh_response(response)
+
+        tokens = provider.context.current_tokens
+        assert tokens is not None
+        assert tokens.access_token == "NEW_ACCESS"
+        assert tokens.refresh_token == "REFRESH"
+        stored = await provider.context.storage.get_tokens()
+        assert stored is not None
+        assert stored.refresh_token == "REFRESH"
+
+    @pytest.mark.asyncio
+    async def test_refresh_with_rotated_token_keeps_new_refresh_token(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        provider = self._provider(memory_keyring)
+        response = httpx.Response(
+            200,
+            json={
+                "access_token": "NEW_ACCESS",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "ROTATED_REFRESH",
+            },
+        )
+
+        assert await provider._handle_refresh_response(response)
+
+        tokens = provider.context.current_tokens
+        assert tokens is not None
+        assert tokens.refresh_token == "ROTATED_REFRESH"
+        stored = await provider.context.storage.get_tokens()
+        assert stored is not None
+        assert stored.refresh_token == "ROTATED_REFRESH"
+
+    @pytest.mark.asyncio
     async def test_invalid_grant_raises_and_clears_in_memory_tokens(
         self, memory_keyring: _MemoryKeyring
     ) -> None:
@@ -508,6 +648,26 @@ class TestRefreshAwareProvider:
 
         assert provider.context.current_tokens is not None
 
+    @pytest.mark.asyncio
+    async def test_initialize_restores_persisted_token_expiry(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        provider = self._provider(memory_keyring)
+        storage = KeyringTokenStorage(alias="demo")
+        with patch("vibe.core.auth.mcp_oauth.time.time", return_value=1000):
+            await storage.set_tokens(
+                OAuthToken(
+                    access_token="ACCESS", expires_in=3600, refresh_token="REFRESH"
+                )
+            )
+
+        provider.context.current_tokens = None
+        provider.context.token_expiry_time = None
+        with patch("vibe.core.auth.mcp_oauth.time.time", return_value=2000):
+            await provider._initialize()
+
+        assert provider.context.token_expiry_time == 4600
+
 
 class TestRefreshAwareProviderThroughHttpxFlow:
     """Drive the real httpx auth flow so the token-endpoint response reaches our
@@ -548,6 +708,47 @@ class TestRefreshAwareProviderThroughHttpxFlow:
     async def _drive_refresh(self, provider: RefreshAwareOAuthClientProvider) -> None:
         async with httpx.AsyncClient() as client:
             await client.get("https://mcp.sentry.dev/mcp", auth=provider)
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_expired_stored_token_is_refreshed_before_mcp_request(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        provider = self._armed_provider(memory_keyring)
+        storage = KeyringTokenStorage(alias="sentry")
+        client_info = provider.context.client_info
+        assert client_info is not None
+        await storage.set_client_info(client_info)
+        with patch("vibe.core.auth.mcp_oauth.time.time", return_value=1000):
+            await storage.set_tokens(
+                OAuthToken(
+                    access_token="EXPIRED", expires_in=3600, refresh_token="REFRESH"
+                )
+            )
+        provider.context.current_tokens = None
+        provider.context.client_info = None
+        provider.context.token_expiry_time = None
+        provider._initialized = False
+        refresh = respx.post("https://mcp.sentry.dev/token").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "FRESH",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "refresh_token": "NEXT_REFRESH",
+                },
+            )
+        )
+        mcp_request = respx.get("https://mcp.sentry.dev/mcp").mock(
+            return_value=httpx.Response(200)
+        )
+
+        with patch("vibe.core.auth.mcp_oauth.time.time", return_value=5000):
+            await self._drive_refresh(provider)
+
+        assert refresh.called
+        assert mcp_request.calls.last.request.headers["Authorization"] == "Bearer FRESH"
 
     @respx.mock
     @pytest.mark.asyncio
@@ -701,6 +902,52 @@ class TestPerformOAuthLogin:
         ):
             with pytest.raises(MCPOAuthLoginFailed, match="cancelled"):
                 await perform_oauth_login(srv, on_url=on_url)
+
+    @pytest.mark.parametrize("retry_after_invalid_grant", [False, True])
+    @pytest.mark.asyncio
+    async def test_network_error_becomes_login_failed(
+        self, retry_after_invalid_grant: bool, memory_keyring: _MemoryKeyring
+    ) -> None:
+        srv = _oauth_server(name="demo")
+        errors: list[Exception] = []
+        if retry_after_invalid_grant:
+            errors.append(
+                MCPOAuthInvalidGrant(server_alias="demo", reason="expired token")
+            )
+        errors.append(
+            httpx.ConnectError(
+                "connection refused", request=httpx.Request("GET", srv.url)
+            )
+        )
+
+        class NetworkFailingClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            async def __aenter__(self) -> NetworkFailingClient:
+                return self
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: TracebackType | None,
+            ) -> None:
+                pass
+
+            async def get(self, _url: str) -> None:
+                raise errors.pop(0)
+
+        async def on_url(_url: str) -> None:
+            pass
+
+        with patch(
+            "vibe.core.auth.mcp_oauth.VibeAsyncHTTPClient", new=NetworkFailingClient
+        ):
+            with pytest.raises(MCPOAuthLoginFailed, match="connection refused"):
+                await perform_oauth_login(srv, on_url=on_url)
+
+        assert errors == []
 
     @pytest.mark.asyncio
     async def test_full_flow_persists_tokens_and_fingerprint(
