@@ -16,11 +16,13 @@ class ProjectConfigLayer(BaseTomlConfigLayer):
     until a trusted .vibe/config.toml is found.
     """
 
+    NAME = "project-toml"
+
     def __init__(
         self,
         *,
         path: Path | None = None,
-        name: str = "project-toml",
+        name: str = NAME,
         trust_store: TrustedFoldersManager | None = None,
     ) -> None:
         super().__init__(name=name)
@@ -39,6 +41,32 @@ class ProjectConfigLayer(BaseTomlConfigLayer):
         copied._is_set = self._is_set
         copied._state = copy.deepcopy(self._state, memo)
         return copied
+
+    async def reroot(self, path: Path) -> None:
+        """Discover and write config under *path* from now on.
+
+        Mutates rather than returning a new layer because the orchestrator's
+        default-layer resolver closes over this object. A replacement would
+        leave that closure resolving a layer no longer in the stack, and every
+        implicit write would fail.
+
+        Trust is resolved again rather than carried over. It is cached on the
+        layer state, so without this the verdict earned by the old root would
+        decide the new one, and an untrusted directory would be read as though
+        it were trusted.
+
+        The reset takes the discovery lock. A find already running holds it
+        across its own await, and would otherwise land after this one, writing
+        the departure directory's config file back and marking discovery done
+        - so the find below would return early and the moved session would go
+        on reading and writing the project it left.
+        """
+        async with self._find_lock:
+            self._root = path
+            self._config_file_path = None
+            self._is_set = False
+        await self.resolve_trust()
+        await self.invalidate_cache()
 
     @property
     def config_file_path(self) -> Path | None:

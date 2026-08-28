@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
 import json
@@ -63,6 +64,24 @@ class ConnectorAuthAction(StrEnum):
                 return cls.CREDENTIALS_SETUP
             case _:
                 return cls.NONE
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectorToolDefinition:
+    name: str
+    description: str | None
+    input_schema: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectorCatalogEntry:
+    connector_id: str
+    alias: str
+    display_name: str
+    ready: bool
+    auth_action: ConnectorAuthAction
+    tools: tuple[ConnectorToolDefinition, ...]
+    diagnostic: str | None = None
 
 
 def _normalize_name(name: str) -> str:
@@ -391,7 +410,13 @@ class ConnectorRegistry:
     Fetches all connectors and their tools on first call, then caches.
     """
 
-    def __init__(self, api_key: str, server_url: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        server_url: str | None = None,
+        *,
+        catalog_entries: tuple[ConnectorCatalogEntry, ...] | None = None,
+    ) -> None:
         self._api_key = api_key
         self._server_url = server_url
         self._bootstrap_cache_key = _bootstrap_cache_key(api_key, server_url)
@@ -403,6 +428,62 @@ class ConnectorRegistry:
         self._bootstrap_error: str | None = None
         self._connector_errors: dict[str, str] = {}
         self._discover_lock = asyncio.Lock()
+        self._host_managed = catalog_entries is not None
+        self._host_catalog_entries = catalog_entries
+        if catalog_entries is not None:
+            self._accept_catalog(catalog_entries)
+
+    def clone_configuration(self) -> ConnectorRegistry:
+        return ConnectorRegistry(
+            api_key=self._api_key,
+            server_url=self._server_url,
+            catalog_entries=self._host_catalog_entries,
+        )
+
+    def reconfigure(self, entries: tuple[ConnectorCatalogEntry, ...]) -> None:
+        self._host_managed = True
+        self._host_catalog_entries = entries
+        self._accept_catalog(entries)
+
+    def _accept_catalog(self, entries: tuple[ConnectorCatalogEntry, ...]) -> None:
+        cache: dict[str, dict[str, type[BaseTool]]] = {}
+        connector_names: list[str] = []
+        connector_connected: dict[str, bool] = {}
+        connector_auth_action: dict[str, ConnectorAuthAction] = {}
+        connector_errors: dict[str, str] = {}
+        alias_to_id: dict[str, str] = {}
+
+        for entry in entries:
+            connector_names.append(entry.alias)
+            connector_auth_action[entry.alias] = entry.auth_action
+            alias_to_id[entry.alias] = entry.connector_id
+            if entry.diagnostic is not None:
+                connector_errors[entry.alias] = entry.diagnostic
+            if not entry.ready:
+                connector_connected[entry.alias] = False
+                continue
+            tools = self._build_tools_for_connector(
+                connector_id=entry.connector_id,
+                alias=entry.alias,
+                name=entry.display_name,
+                raw_tools=[
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "inputSchema": tool.input_schema,
+                    }
+                    for tool in entry.tools
+                ],
+            )
+            cache[entry.connector_id] = tools
+            connector_connected[entry.alias] = bool(tools)
+
+        self._connector_names = connector_names
+        self._connector_connected = connector_connected
+        self._connector_auth_action = connector_auth_action
+        self._connector_errors = connector_errors
+        self._alias_to_id = alias_to_id
+        self._cache = cache
 
     def get_tools(self, *, force_refresh: bool = False) -> dict[str, type[BaseTool]]:
         """Return proxy tool classes for all connectors, using cache when possible."""
@@ -496,6 +577,8 @@ class ConnectorRegistry:
     async def _discover_all(
         self, *, force_refresh: bool = False
     ) -> dict[str, type[BaseTool]]:
+        if self._host_managed:
+            return self._all_cached_tools()
         async with self._discover_lock:
             # Re-check under lock — another coroutine may have finished
             # discovery while we waited.
@@ -577,6 +660,14 @@ class ConnectorRegistry:
 
             return all_tools
 
+    def _all_cached_tools(self) -> dict[str, type[BaseTool]]:
+        result: dict[str, type[BaseTool]] = {}
+        if self._cache is None:
+            return result
+        for tools in self._cache.values():
+            result.update(tools)
+        return result
+
     @property
     def connector_count(self) -> int:
         if self._cache is None:
@@ -585,6 +676,13 @@ class ConnectorRegistry:
 
     def get_connector_names(self) -> list[str]:
         return list(self._connector_names)
+
+    def get_catalog_tools(self, alias: str) -> tuple[ConnectorToolDefinition, ...]:
+        entries = self._host_catalog_entries
+        if entries is None:
+            return ()
+        entry = next((item for item in entries if item.alias == alias), None)
+        return entry.tools if entry is not None else ()
 
     def bootstrap_error(self) -> str | None:
         return self._bootstrap_error
@@ -612,6 +710,8 @@ class ConnectorRegistry:
         connector_id = self._alias_to_id.get(alias)
         if connector_id is None:
             return {}
+        if self._host_managed:
+            return dict((self._cache or {}).get(connector_id, {}))
 
         tools_map: dict[str, type[BaseTool]] | None = None
         fresh_auth_action: ConnectorAuthAction | None = None
@@ -715,6 +815,9 @@ class ConnectorRegistry:
             return None
 
     def clear(self) -> None:
+        if self._host_catalog_entries is not None:
+            self._accept_catalog(self._host_catalog_entries)
+            return
         self._cache = None
         self._connector_names = []
         self._connector_connected = {}

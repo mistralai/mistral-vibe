@@ -10,6 +10,7 @@ from vibe.app_server.events import (
     EventSequenceError,
     HistoryEntryAdded,
     HistoryEntryUpdated,
+    MCPAuthorizationRequiredEvent,
     ServerError,
     ServerWarning,
     SessionCompacted,
@@ -29,14 +30,19 @@ from vibe.app_server.models import (
     PublicError,
     PublicMessageEntry,
     PublicReasoningEntry,
+    PublicRetryCategory,
+    PublicRetryState,
     PublicSession,
     PublicSessionState,
+    PublicTurn,
+    PublicTurnStatus,
     ResourceContentBlock,
     TextContentBlock,
 )
 from vibe.app_server.protocol import (
     HistoryEntryAddedParams,
     JsonPatchOperation,
+    MCPAuthRequiredParams,
     Notification,
 )
 from vibe.core.tools.builtins.read_file import ReadFile, ReadFileArgs, ReadFileResult
@@ -108,6 +114,24 @@ def test_server_warning_and_error_notifications_are_typed(
     assert isinstance(error, PublicError)
 
 
+def test_mcp_authorization_required_notification_is_typed() -> None:
+    params = MCPAuthRequiredParams(
+        session_id="session-1",
+        name="oauth",
+        descriptor_revision="revision-2",
+        observed_connection_revision="connection-1",
+    )
+
+    event = parse_server_event(
+        Notification(
+            method="mcp_catalog/authRequired",
+            params=params.model_dump(mode="json", by_alias=True),
+        )
+    )
+
+    assert event == MCPAuthorizationRequiredEvent(params)
+
+
 class PrivateRuntimeEvent(BaseEvent):
     secret: str
 
@@ -148,6 +172,76 @@ def test_snapshot_reconciliation_replays_missing_stream_updates() -> None:
     assert apply_json_patch(
         entry.model_dump(mode="json", by_alias=True), update.patch
     ) == completed.model_dump(mode="json", by_alias=True)
+
+
+def test_live_snapshot_preserves_loaded_history_and_turn_prefixes() -> None:
+    history = [
+        PublicMessageEntry(
+            id=f"message-{index}",
+            session_id="session-1",
+            turn_id=f"turn-{index}",
+            role="assistant",
+            content=[TextContentBlock(text=str(index))],
+            generation_status=PublicEntryGenerationStatus.COMPLETED,
+            created_at=index + 1,
+            updated_at=index + 1,
+        )
+        for index in range(250)
+    ]
+    turns = [
+        PublicTurn(
+            id=f"turn-{index}",
+            session_id="session-1",
+            status=PublicTurnStatus.COMPLETED,
+            started_at=index + 1,
+            completed_at=index + 1,
+        )
+        for index in range(250)
+    ]
+    state = _projection().state.model_copy(
+        update={
+            "history": history,
+            "history_before_cursor": "before-loaded-history",
+            "turns": turns,
+        },
+        deep=True,
+    )
+    projection = ClientProjection(state)
+    retrying = PublicRetryState(
+        turn_id=turns[-1].id,
+        category=PublicRetryCategory.RATE_LIMITED,
+        detail="HTTP 429",
+    )
+    snapshot = state.model_copy(
+        update={
+            "event_id": 1,
+            "history": history[-200:],
+            "history_before_cursor": history[-200].id,
+            "turns": turns[-200:],
+            "retrying": retrying,
+        },
+        deep=True,
+    )
+
+    event = projection.consume(
+        Notification(
+            method="session/snapshot",
+            params={
+                "eventId": 1,
+                "sessionId": "session-1",
+                "emittedAt": 1,
+                "state": snapshot.model_dump(mode="json", by_alias=True),
+            },
+        )
+    )
+
+    assert isinstance(event, SessionSnapshot)
+    assert [entry.id for entry in projection.history] == [entry.id for entry in history]
+    assert projection.history_before_cursor == "before-loaded-history"
+    assert [turn.id for turn in projection.state.turns or []] == [
+        turn.id for turn in turns
+    ]
+    assert projection.state.retrying == retrying
 
 
 def _read_call() -> ToolCallEvent:
@@ -290,7 +384,9 @@ def test_preview_and_title_updates_reduce_to_snapshot_metadata() -> None:
         *projector.project(
             UserMessageEvent(content="First prompt", message_id="user-1")
         ),
-        *projector.project(SessionTitleUpdatedEvent(title="A useful title")),
+        *projector.project(
+            SessionTitleUpdatedEvent(title="A useful title", session_id="session-1")
+        ),
     ]
 
     for event_id, update in enumerate(updates, start=1):

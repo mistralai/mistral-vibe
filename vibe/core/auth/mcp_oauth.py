@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 import errno
 import time
 from typing import Final
@@ -122,6 +123,19 @@ class MCPOAuthCredentialCleanupFailed(MCPOAuthError):
         return (
             f"Failed to remove OAuth credentials for MCP server "
             f"{self.server_alias!r}: {self.reason}."
+        )
+
+
+class MCPOAuthCredentialRestoreFailed(MCPOAuthError):
+    def __init__(self, *, server_alias: str, reason: str) -> None:
+        self.server_alias = server_alias
+        self.reason = reason
+        super().__init__(self._fmt())
+
+    def _fmt(self) -> str:
+        return (
+            f"Failed to restore OAuth credentials for MCP server "
+            f"{self.server_alias!r} after an aborted removal: {self.reason}."
         )
 
 
@@ -262,6 +276,56 @@ class KeyringTokenStorage(TokenStorage):
 
     async def delete_client_info(self) -> None:
         await _kr_delete(_kr_username(self._alias, "client_info"))
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthCredentialBackup:
+    """Opaque process-local backup used only to roll back catalog removal."""
+
+    keyring_available: bool
+    tokens: str | None = field(repr=False)
+    client_info: str | None = field(repr=False)
+    fingerprint: str | None = field(repr=False)
+
+
+async def snapshot_oauth_credentials(alias: str) -> OAuthCredentialBackup:
+    try:
+        KeyringTokenStorage(alias=alias)
+    except MCPOAuthHeadlessError:
+        return OAuthCredentialBackup(
+            keyring_available=False, tokens=None, client_info=None, fingerprint=None
+        )
+    try:
+        return OAuthCredentialBackup(
+            keyring_available=True,
+            tokens=await _kr_get(_kr_username(alias, "tokens")),
+            client_info=await _kr_get(_kr_username(alias, "client_info")),
+            fingerprint=await _kr_get(_kr_username(alias, "fingerprint")),
+        )
+    except keyring.errors.KeyringError as exc:
+        raise MCPOAuthCredentialCleanupFailed(
+            server_alias=alias, reason=f"could not snapshot credentials: {exc}"
+        ) from exc
+
+
+async def restore_oauth_credentials(alias: str, backup: OAuthCredentialBackup) -> None:
+    if not backup.keyring_available:
+        return
+    try:
+        for kind, value in (
+            ("tokens", backup.tokens),
+            ("client_info", backup.client_info),
+            ("fingerprint", backup.fingerprint),
+        ):
+            username = _kr_username(alias, kind)
+            if value is None:
+                await _kr_delete(username)
+            else:
+                await _kr_set(username, value)
+    except keyring.errors.KeyringError as exc:
+        raise MCPOAuthCredentialRestoreFailed(
+            server_alias=alias, reason=str(exc)
+        ) from exc
 
 
 async def delete_oauth_credentials(alias: str) -> None:

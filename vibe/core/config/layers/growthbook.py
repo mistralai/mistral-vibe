@@ -8,12 +8,16 @@ from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.types import EMPTY_CONFIG_SNAPSHOT, LayerConfigSnapshot
 from vibe.core.experiments.active import ExperimentName
-from vibe.core.prompts import load_system_prompt
 
 type GrowthbookConfigMapper = Callable[[str], str | bool | None]
 
 
 def _map_system_prompt_variant(variant: str) -> str | None:
+    # Imported lazily: this runs only once GrowthBook variants have been fetched
+    # (post first paint), so pulling vibe.core.prompts (~15ms) at module import
+    # would needlessly weigh down the pre-paint config-stack import.
+    from vibe.core.prompts import load_system_prompt
+
     try:
         load_system_prompt(variant)
     except ValueError:
@@ -45,6 +49,27 @@ def _map_routed_model_config(variant: str) -> str | None:
     return json.dumps(model_config)
 
 
+def _map_routed_extra_models(variant: str) -> str | None:
+    """Extract the extra-models list from the exposure experiment payload.
+
+    Accepts either a bare JSON array of model definitions or an object with a
+    ``models`` array. Returns a JSON-array string of model-definition objects,
+    or ``None`` when the payload carries no models.
+    """
+    try:
+        payload = json.loads(variant)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(payload, dict):
+        payload = payload.get("models")
+    if not isinstance(payload, list):
+        return None
+    models = [model for model in payload if isinstance(model, dict)]
+    if not models:
+        return None
+    return json.dumps(models)
+
+
 GROWTHBOOK_CONFIG_MAPPINGS: Final[
     dict[ExperimentName, tuple[tuple[str, GrowthbookConfigMapper], ...]]
 ] = {
@@ -52,6 +77,9 @@ GROWTHBOOK_CONFIG_MAPPINGS: Final[
     ExperimentName.CLI_MODEL_ROUTING: (
         ("routed_default_model", _map_default_routing_model),
         ("routed_model_config", _map_routed_model_config),
+    ),
+    ExperimentName.CLI_EXTRA_MODELS: (
+        ("routed_extra_models", _map_routed_extra_models),
     ),
     ExperimentName.MANAGED_SHELL_TOOLS: (
         (

@@ -10,6 +10,7 @@ from vibe.app_server._legacy_session_backend import LegacySessionBackend
 from vibe.app_server._projector import EventProjector
 from vibe.app_server._runtime import AgentRuntimeFactory, RootOpenRequest
 from vibe.app_server.client import AppServerClient
+from vibe.app_server.connector_catalog import ConnectorCatalogService
 from vibe.app_server.events import AppServerEvent, ClientProjection
 from vibe.app_server.models import (
     IdleSessionStatus,
@@ -96,6 +97,7 @@ def start_test_app_server(
     *,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
+    connector_catalog_service: ConnectorCatalogService | None = None,
 ) -> AppServerClient:
     client_transport, server_transport = memory_transport_pair()
     server = build_test_app_server(
@@ -103,6 +105,7 @@ def start_test_app_server(
         server_transport,
         account_gateway=account_gateway,
         identity_gateway=identity_gateway,
+        connector_catalog_service=connector_catalog_service,
     )
     return AppServerClient(client_transport, run_peer=server.serve)
 
@@ -113,6 +116,7 @@ def build_test_app_server(
     *,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
+    connector_catalog_service: ConnectorCatalogService | None = None,
 ) -> AppServer:
     runtime_factory = AgentRuntimeFactory()
 
@@ -132,6 +136,7 @@ def build_test_app_server(
         runtime_factory=runtime_factory,
         account_gateway=account_gateway,
         identity_gateway=identity_gateway,
+        connector_catalog_service=connector_catalog_service,
     )
 
 
@@ -146,12 +151,14 @@ async def create_test_app_server_session(
     *,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
+    connector_catalog_service: ConnectorCatalogService | None = None,
 ) -> AppServerSession:
     return await attach_test_app_server_session(
         start_test_app_server(
             agent_loop,
             account_gateway=account_gateway,
             identity_gateway=identity_gateway,
+            connector_catalog_service=connector_catalog_service,
         )
     )
 

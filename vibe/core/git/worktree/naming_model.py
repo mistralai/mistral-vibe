@@ -3,24 +3,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from vibe.core.config import ModelConfig
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.llm.backend.factory import create_backend
+from vibe.core.llm.utility_completion import run_utility_completion
 from vibe.core.prompts import UtilityPrompt
-from vibe.core.telemetry.build_metadata import build_request_metadata
-from vibe.core.types import Backend, LLMMessage, Role
 from vibe.observability.logging import logger
-from vibe.utils.api_keys import resolve_api_key
-from vibe.utils.http import get_user_agent
-
-_NAMING_MODEL = ModelConfig(
-    name="mistral-vibe-cli-fast",
-    provider="mistral",
-    alias="mistral-small",
-    input_price=0.1,
-    output_price=0.3,
-)
 
 # The caller has a deterministic name ready, so waiting is worth less than
 # starting. The backend deadline bounds one attempt and the outer timeout bounds
@@ -61,48 +48,18 @@ async def _complete(prompt: str, *, cwd: Path) -> str | None:
         harness_files=get_harness_files_manager().for_session(cwd),
         require_api_key=False,
     )
-    provider = next(
-        (
-            candidate
-            for candidate in orchestrator.config.providers
-            if candidate.name == _NAMING_MODEL.provider
-        ),
-        None,
-    )
-    # Logged because the fallback name is indistinguishable from a working one:
-    # without this the only symptom of a misconfigured VIBE_HOME is worse names.
-    if provider is None:
-        logger.debug(
-            "No %s provider; naming the worktree locally", _NAMING_MODEL.provider
-        )
-        return None
-    if provider.api_key_env_var and not resolve_api_key(provider.api_key_env_var):
-        logger.debug("%s unset; naming the worktree locally", provider.api_key_env_var)
-        return None
-
-    backend = create_backend(
-        provider=provider,
-        timeout=_REQUEST_TIMEOUT_SECONDS,
+    content = await run_utility_completion(
+        config=orchestrator.config,
+        system_prompt=UtilityPrompt.WORKTREE_NAME.read(),
+        user_content=prompt,
+        max_tokens=_MAX_TOKENS,
+        request_timeout_seconds=_REQUEST_TIMEOUT_SECONDS,
         # A retry cannot fit inside the budget, and the fallback name is already
         # good enough to not be worth spending one on.
-        retry_max_elapsed_time=0,
+        retry_budget_seconds=0,
+        # Naming runs on the session-start path with a deterministic name ready;
+        # a keyless provider should fall back at once instead of burning the
+        # budget on setup that can only fail.
+        skip_if_no_key=True,
     )
-    async with backend:
-        result = await backend.complete(
-            model=_NAMING_MODEL,
-            messages=[
-                LLMMessage(
-                    role=Role.system, content=UtilityPrompt.WORKTREE_NAME.read()
-                ),
-                LLMMessage(role=Role.user, content=prompt),
-            ],
-            temperature=0.0,
-            tools=None,
-            tool_choice=None,
-            max_tokens=_MAX_TOKENS,
-            extra_headers={"user-agent": get_user_agent(Backend.MISTRAL)},
-            metadata=build_request_metadata(
-                launch_context=None, session_id=None, call_type="secondary_call"
-            ).model_dump(exclude_none=True),
-        )
-    return result.message.content or None
+    return content or None

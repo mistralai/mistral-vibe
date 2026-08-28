@@ -213,8 +213,8 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
             history=runtime.history.base,
             current_history=current_history,
             callbacks=callbacks,
-            active_turn=active_turn,
-            completed_turns=completed_turns,
+            turns=[*completed_turns, active_turn],
+            retrying=None,
             history_limit=history_limit,
         )
         state = state.model_copy(
@@ -236,10 +236,26 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
         include_history: bool = True,
         include_turns: bool = True,
     ) -> PublicSessionState:
-        runtime = self._require_child(session_id)
+        return self._public_state(
+            self._require_child(session_id),
+            history_limit,
+            turns_limit=turns_limit,
+            include_history=include_history,
+            include_turns=include_turns,
+        )
+
+    def _public_state(
+        self,
+        runtime: SessionRuntime,
+        history_limit: int,
+        *,
+        turns_limit: int | None = None,
+        include_history: bool = True,
+        include_turns: bool = True,
+    ) -> PublicSessionState:
         callbacks = [
             entry
-            for entry in self.history(session_id)
+            for entry in runtime.history.all(runtime.turns.history)
             if isinstance(entry, PublicCallbackEntry)
         ]
         state = build_public_state(
@@ -247,14 +263,16 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
             history=runtime.history.base,
             current_history=runtime.turns.history,
             callbacks=callbacks,
-            active_turn=runtime.turns.active_turn,
-            completed_turns=runtime.turns.completed_turns,
+            turns=runtime.turns.turns,
+            retrying=runtime.turns.retrying,
             history_limit=history_limit,
             turns_limit=turns_limit,
             include_history=include_history,
             include_turns=include_turns,
         )
-        return state.model_copy(update={"event_id": self._event_watermark(session_id)})
+        return state.model_copy(
+            update={"event_id": self._event_watermark(runtime.agent_loop.session_id)}
+        )
 
     def history(self, session_id: str) -> list[PublicHistoryEntry]:
         runtime = self._require_child(session_id)
@@ -377,19 +395,27 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
         event_sink: Callable[[BaseEvent], Awaitable[None]] | None = None,
     ) -> SessionRuntime:
         execution = SessionExecution()
+        history = SessionHistory(base_history or [])
+        runtime: SessionRuntime | None = None
+
+        def snapshot_state() -> PublicSessionState:
+            if runtime is None:
+                raise RuntimeError("Child session runtime is not bound")
+            return self._public_state(runtime, 200)
+
         turns = TurnController(
             child,
             self._notify_child,
             self._deliver_callback,
             execution,
             self,
-            self._tool_io,
-            event_sink,
-            self,
+            snapshot_state=snapshot_state,
+            tool_io=self._tool_io,
+            event_sink=event_sink,
+            session_coordinator=self,
         )
-        return SessionRuntime(
-            child, turns, execution, SessionHistory(base_history or [])
-        )
+        runtime = SessionRuntime(child, turns, execution, history)
+        return runtime
 
     def _runtime(self, session_id: str | None) -> SessionRuntime:
         if session_id is None:

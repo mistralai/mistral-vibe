@@ -61,9 +61,9 @@ def test_finds_files_when_pattern_matches_directory_name(file_tree: Path) -> Non
         "@vibe/acp/",
         "@vibe/acp/agent.py",
         "@vibe/acp/entrypoint.py",
-        "@vibe/cli/autocompletion/completers.py",
         "@tests/autocompletion/",
         "@tests/autocompletion/test_fuzzy.py",
         "@vibe/cli/autocompletion/",
+        "@vibe/cli/autocompletion/completers.py",
         "@vibe/cli/autocompletion/fuzzy.py",
     ]

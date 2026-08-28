@@ -6,12 +6,21 @@ from pydantic import ValidationError
 import pytest
 
 from vibe.app_server._model import validate_wire
+from vibe.app_server.models import (
+    IdleSessionStatus,
+    PublicRetryCategory,
+    PublicRetryState,
+    PublicSession,
+    PublicSessionState,
+)
 from vibe.app_server.protocol import (
+    SERVER_METHODS,
     AgentConfig,
     CallbackResult,
     CallbackResultError,
     CallbackResultResponse,
     EventWatermarkResponse,
+    InitializeParams,
     PageRequest,
     SessionContinueResponse,
     SessionForkResponse,
@@ -25,6 +34,12 @@ from vibe.app_server.protocol import (
     TurnStartResponse,
     TurnSteerResponse,
 )
+
+
+def test_public_protocol_has_no_session_mcp_methods() -> None:
+    assert not [
+        method for method in SERVER_METHODS if method.startswith("session/mcp/")
+    ]
 
 
 def test_wire_models_serialize_camel_case_and_reject_snake_case_wire_keys() -> None:
@@ -41,6 +56,30 @@ def test_wire_models_serialize_camel_case_and_reject_snake_case_wire_keys() -> N
 
     with pytest.raises(ValidationError):
         validate_wire(SessionHistoryListParams, {"session_id": "session-1"})
+
+
+def test_public_session_state_carries_optional_retry_state() -> None:
+    session = PublicSession(
+        id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
+    )
+
+    idle = PublicSessionState(event_id=0, session=session)
+    retrying = PublicSessionState(
+        event_id=1,
+        session=session,
+        retrying=PublicRetryState(
+            turn_id="turn-1",
+            category=PublicRetryCategory.RATE_LIMITED,
+            detail="HTTP 429",
+        ),
+    )
+
+    assert idle.model_dump(mode="json")["retrying"] is None
+    assert retrying.model_dump(mode="json")["retrying"] == {
+        "turnId": "turn-1",
+        "category": "rate_limited",
+        "detail": "HTTP 429",
+    }
 
 
 def test_agent_config_carries_app_server_and_vibe_launch_fields() -> None:
@@ -100,6 +139,24 @@ def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
         "idempotencyKey": None,
         "kind": "normal",
     }
+
+
+def test_initialize_accepts_the_desktop_entrypoint_off_the_wire() -> None:
+    """Vibe Desktop identifies itself here; the value drives analytics attribution."""
+    params = validate_wire(
+        InitializeParams,
+        {
+            "clientInfo": {
+                "name": "vibe_desktop",
+                "title": "Vibe Desktop",
+                "version": "1.2.3",
+                "entrypoint": "desktop",
+            }
+        },
+    )
+
+    assert params.client_info.entrypoint == "desktop"
+    assert params.client_info.name == "vibe_desktop"
 
 
 def test_page_request_uses_canonical_pagination_shape() -> None:

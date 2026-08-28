@@ -33,9 +33,10 @@ Recoverable unfinished work and invalid source data produce typed failures;
 neither case changes the selected backend.
 
 Import creates an independent target representation and records immutable
-source provenance. It never restores the other backend's checkpoint, treats a
-public projection as execution state, deletes the source, or automatically
-merges later divergence.
+source provenance. A Legacy-to-Unified import mints a new target session
+identity. Import never restores the other backend's checkpoint, treats a public
+projection as execution state, deletes the source, or automatically merges
+later divergence.
 
 `SessionBackend` represents one bound live session. It owns public reads,
 atomic event subscriptions, typed runtime configuration mutations, turn

@@ -225,6 +225,13 @@ def _run_interactive_mode(
     )
     from vibe.cli.textual_ui.app import StartupOptions, run_textual_ui
 
+    # --worktree runs in a checkout Vibe just made from the repo the user
+    # launched from, and --trust is the user saying so outright. Both grant the
+    # workspace session trust when the session is built, so prompting first
+    # would ask about a decision already taken - and for --worktree it would
+    # ask again for every new worktree, which is one per session.
+    trust_workspace = bool(args.trust or args.worktree)
+
     harness = LocalHarness(
         LocalHarnessOptions(
             experimental_harness=args.experimental_harness,
@@ -247,7 +254,7 @@ def _run_interactive_mode(
                 auto_approve=args.auto_approve,
                 enabled_tools=args.enabled_tools,
                 disabled_tools=list(args.disabled_tools or ()),
-                trust_workspace=bool(args.trust or args.worktree),
+                trust_workspace=trust_workspace,
             ),
             session=_session_intent(args, allow_picker=True),
         )
@@ -264,7 +271,7 @@ def _run_interactive_mode(
                 is_resuming_session=(
                     args.continue_session or isinstance(args.resume, str)
                 ),
-                prompt_for_workspace_trust=True,
+                prompt_for_workspace_trust=not trust_workspace,
                 resume_session_id=(
                     args.resume if isinstance(args.resume, str) else None
                 ),

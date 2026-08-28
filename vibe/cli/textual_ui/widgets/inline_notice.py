@@ -20,12 +20,22 @@ class InlineNotice(NonSelectableStatic):
         self.display = False
         self._hide_timer: Timer | None = None
 
-    def show(self, message: str, *, timeout: float = DEFAULT_NOTICE_TIMEOUT) -> None:
+    def show(
+        self, message: str, *, timeout: float | None = DEFAULT_NOTICE_TIMEOUT
+    ) -> None:
         self.update(message)
         self.display = True
         if self._hide_timer is not None:
             self._hide_timer.stop()
-        self._hide_timer = self.set_timer(timeout, self._hide)
+            self._hide_timer = None
+        if timeout is not None:
+            self._hide_timer = self.set_timer(timeout, self._hide)
+
+    def hide(self) -> None:
+        if self._hide_timer is not None:
+            self._hide_timer.stop()
+            self._hide_timer = None
+        self.display = False
 
     def _hide(self) -> None:
         self.display = False

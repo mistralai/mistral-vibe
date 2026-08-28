@@ -5,6 +5,7 @@ import contextlib
 from typing import TYPE_CHECKING
 
 from vibe.app_server.config import ConfigView
+from vibe.app_server.telemetry_port import ClientTelemetryEvent
 from vibe.cli.audio_recorder.audio_recorder_port import (
     AlreadyRecordingError,
     AudioBackendUnavailableError,
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from asyncio import Task
     from collections.abc import Callable
 
-    from vibe.cli.telemetry import ClientTelemetry
+    from vibe.app_server.telemetry_port import ClientTelemetry
     from vibe.cli.voice_manager.voice_manager_port import VoiceManagerListener
 
 TRANSCRIPTION_DRAIN_TIMEOUT = 10.0
@@ -258,20 +259,24 @@ class VoiceManager:
     def _on_audio_transcription_start(self) -> None:
         if not self._telemetry_client:
             return
-        self._telemetry_client.send_telemetry_event(
-            "vibe.audio.transcription.start",
-            {"recording_id": self._tracking.recording_id},
+        self._telemetry_client.log(
+            ClientTelemetryEvent(
+                name="vibe.audio.transcription.start",
+                properties={"recording_id": self._tracking.recording_id},
+            )
         )
 
     def _on_audio_transcription_cancel(self) -> None:
         if not self._telemetry_client:
             return
-        self._telemetry_client.send_telemetry_event(
-            "vibe.audio.transcription.cancel_recording",
-            {
-                "recording_id": self._tracking.recording_id,
-                "recording_duration_ms": self._tracking.elapsed_ms(),
-            },
+        self._telemetry_client.log(
+            ClientTelemetryEvent(
+                name="vibe.audio.transcription.cancel_recording",
+                properties={
+                    "recording_id": self._tracking.recording_id,
+                    "recording_duration_ms": self._tracking.elapsed_ms(),
+                },
+            )
         )
 
     def _on_audio_transcription_done(self) -> None:
@@ -283,27 +288,31 @@ class VoiceManager:
             if self._tracking.last_recording_duration_ms is not None
             else transcription_duration_ms
         )
-        self._telemetry_client.send_telemetry_event(
-            "vibe.audio.transcription.done",
-            {
-                "recording_id": self._tracking.recording_id,
-                "transcript_length": self._tracking.accumulated_transcript_length,
-                "transcription_duration_ms": transcription_duration_ms,
-                "recording_duration_ms": recording_duration_ms,
-            },
+        self._telemetry_client.log(
+            ClientTelemetryEvent(
+                name="vibe.audio.transcription.done",
+                properties={
+                    "recording_id": self._tracking.recording_id,
+                    "transcript_length": self._tracking.accumulated_transcript_length,
+                    "transcription_duration_ms": transcription_duration_ms,
+                    "recording_duration_ms": recording_duration_ms,
+                },
+            )
         )
 
     def _on_audio_transcription_error(self, error_message: str) -> None:
         if not self._telemetry_client:
             return
-        self._telemetry_client.send_telemetry_event(
-            "vibe.audio.transcription.error",
-            {
-                "recording_id": self._tracking.recording_id,
-                "error_message": error_message,
-                "transcription_duration_ms": self._tracking.elapsed_ms(),
-                "recording_duration_ms": self._tracking.last_recording_duration_ms,
-            },
+        self._telemetry_client.log(
+            ClientTelemetryEvent(
+                name="vibe.audio.transcription.error",
+                properties={
+                    "recording_id": self._tracking.recording_id,
+                    "error_message": error_message,
+                    "transcription_duration_ms": self._tracking.elapsed_ms(),
+                    "recording_duration_ms": self._tracking.last_recording_duration_ms,
+                },
+            )
         )
 
     def _notify_error(self, message: str) -> None:

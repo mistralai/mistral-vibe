@@ -68,6 +68,29 @@ def wait_for_request_count(
     )
 
 
+def wait_for_request_count_while_draining_child_output(
+    child: pexpect.spawn,
+    captured: io.StringIO,
+    request_count_getter: Callable[[], int],
+    *,
+    expected_count: int,
+    timeout: float,
+) -> None:
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        if request_count_getter() >= expected_count:
+            return
+        try:
+            child.expect(r"\S", timeout=0.05)
+        except pexpect.TIMEOUT:
+            pass
+    rendered_tail = strip_ansi(captured.getvalue())[-1200:]
+    raise AssertionError(
+        f"Timed out waiting for {expected_count} backend request(s).\n\n"
+        f"Rendered tail:\n{rendered_tail}"
+    )
+
+
 def wait_for_main_screen(child: pexpect.spawn, timeout: float = 20.0) -> None:
     child.expect(ansi_tolerant_pattern("Mistral Vibe v"), timeout=timeout)
 

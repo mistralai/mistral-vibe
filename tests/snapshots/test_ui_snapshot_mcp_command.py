@@ -5,6 +5,7 @@ from textual.pilot import Pilot
 from tests.conftest import build_test_agent_loop
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
 from tests.snapshots.snap_compare import SnapCompare
+from tests.stubs.fake_connector_catalog import FakeConnectorCatalogService
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistryWithBrokenServer
 from vibe.core.agent_loop import AgentLoop
@@ -192,6 +193,7 @@ def test_snapshot_mcp_escape_closes(snap_compare: SnapCompare) -> None:
 class SnapshotTestAppWithConnectors(BaseSnapshotTestApp):
     def __init__(self) -> None:
         config = default_config(
+            enable_connectors=True,
             mcp_servers=[MCPStdio(name="filesystem", transport="stdio", command="npx")],
             # Explicitly enable all fake connectors so they appear enabled in snapshots
             connectors=[
@@ -200,12 +202,16 @@ class SnapshotTestAppWithConnectors(BaseSnapshotTestApp):
             ],
         )
         registry = FakeConnectorRegistry(connectors=_FAKE_CONNECTORS)
-        super().__init__(agent_loop=_build_connector_agent_loop(config, registry))
+        super().__init__(
+            agent_loop=_build_connector_agent_loop(config, registry),
+            connector_catalog_service=FakeConnectorCatalogService(registry),
+        )
 
 
 class SnapshotTestAppConnectorsOnly(BaseSnapshotTestApp):
     def __init__(self) -> None:
         config = default_config(
+            enable_connectors=True,
             mcp_servers=[],
             # Explicitly enable all fake connectors so they appear enabled in snapshots
             connectors=[
@@ -214,12 +220,15 @@ class SnapshotTestAppConnectorsOnly(BaseSnapshotTestApp):
             ],
         )
         registry = FakeConnectorRegistry(connectors=_FAKE_CONNECTORS)
-        super().__init__(agent_loop=_build_connector_agent_loop(config, registry))
+        super().__init__(
+            agent_loop=_build_connector_agent_loop(config, registry),
+            connector_catalog_service=FakeConnectorCatalogService(registry),
+        )
 
 
 class SnapshotTestAppConnectorBootstrapError(BaseSnapshotTestApp):
     def __init__(self) -> None:
-        config = default_config(mcp_servers=[])
+        config = default_config(enable_connectors=True, mcp_servers=[])
         registry = FakeConnectorRegistry(
             bootstrap_error=(
                 "Failed to load workspace connectors (HTTP 502).\n"
@@ -228,24 +237,33 @@ class SnapshotTestAppConnectorBootstrapError(BaseSnapshotTestApp):
                 "retry with `/reload` in a few minutes."
             )
         )
-        super().__init__(agent_loop=_build_connector_agent_loop(config, registry))
+        super().__init__(
+            agent_loop=_build_connector_agent_loop(config, registry),
+            connector_catalog_service=FakeConnectorCatalogService(registry),
+        )
 
 
 class SnapshotTestAppConnectorPerConnectorError(BaseSnapshotTestApp):
     def __init__(self) -> None:
         config = default_config(
-            mcp_servers=[], connectors=[ConnectorConfig(name="slack", disabled=False)]
+            enable_connectors=True,
+            mcp_servers=[],
+            connectors=[ConnectorConfig(name="slack", disabled=False)],
         )
         registry = FakeConnectorRegistry(
             connectors={"slack": []},
             connector_errors={"slack": "Slack OAuth token expired (HTTP 400)"},
         )
-        super().__init__(agent_loop=_build_connector_agent_loop(config, registry))
+        super().__init__(
+            agent_loop=_build_connector_agent_loop(config, registry),
+            connector_catalog_service=FakeConnectorCatalogService(registry),
+        )
 
 
 class SnapshotTestAppConnectorsMixedState(BaseSnapshotTestApp):
     def __init__(self) -> None:
         config = default_config(
+            enable_connectors=True,
             mcp_servers=[],
             # Explicitly enable connectors that should appear connected in snapshots
             # alpha is connected, beta and zeta are disconnected
@@ -259,7 +277,10 @@ class SnapshotTestAppConnectorsMixedState(BaseSnapshotTestApp):
             connectors=_FAKE_CONNECTORS_MIXED_CONNECTION,
             auth_actions=_FAKE_CONNECTOR_AUTH_ACTIONS,
         )
-        super().__init__(agent_loop=_build_connector_agent_loop(config, registry))
+        super().__init__(
+            agent_loop=_build_connector_agent_loop(config, registry),
+            connector_catalog_service=FakeConnectorCatalogService(registry),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +292,19 @@ def test_snapshot_mcp_with_connectors_overview(snap_compare: SnapCompare) -> Non
 
     async def run_before(pilot: Pilot) -> None:
         await _run_mcp_command(pilot, "/mcp")
+
+    assert snap_compare(
+        "test_ui_snapshot_mcp_command.py:SnapshotTestAppWithConnectors",
+        terminal_size=(120, 36),
+        run_before=run_before,
+    )
+
+
+def test_snapshot_connectors_fuzzy_search(snap_compare: SnapCompare) -> None:
+    async def run_before(pilot: Pilot) -> None:
+        await _run_mcp_command(pilot, "/connectors")
+        await pilot.press("up", "s", "l")
+        await pilot.pause(0.1)
 
     assert snap_compare(
         "test_ui_snapshot_mcp_command.py:SnapshotTestAppWithConnectors",

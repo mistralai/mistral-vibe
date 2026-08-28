@@ -95,12 +95,12 @@ class TestCommandRegistry:
         assert registry.parse_command("/teleport") is None
 
     def test_teleport_command_registration_uses_resolved_context(self) -> None:
-        registry = CommandRegistry(vibe_code_enabled=True)
+        registry = CommandRegistry(context=CommandContext(vibe_code_enabled=True))
         assert registry.get_command_name("/teleport") == "teleport"
         assert registry.has_command("teleport")
 
     def test_teleport_command_registration_uses_latest_context(self) -> None:
-        registry = CommandRegistry(vibe_code_enabled=True)
+        registry = CommandRegistry(context=CommandContext(vibe_code_enabled=True))
         assert registry.get_command_name("/teleport") == "teleport"
 
         registry.refresh(CommandContext(vibe_code_enabled=False))
@@ -110,12 +110,14 @@ class TestCommandRegistry:
         registry = CommandRegistry()
         assert "/teleport" not in registry.get_help_text()
 
-        eligible_registry = CommandRegistry(vibe_code_enabled=True)
+        eligible_registry = CommandRegistry(
+            context=CommandContext(vibe_code_enabled=True)
+        )
         assert eligible_registry.get("teleport") is not None
         assert "/teleport" in eligible_registry.get_help_text()
 
     def test_vibe_code_project_command_registered_when_vibe_code_enabled(self) -> None:
-        registry = CommandRegistry(vibe_code_enabled=True)
+        registry = CommandRegistry(context=CommandContext(vibe_code_enabled=True))
 
         assert registry.get_command_name("/remote-project") == "remote-project"
         result = registry.parse_command("/remote-project")

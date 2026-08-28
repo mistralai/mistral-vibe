@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Sequence
+from contextlib import ExitStack
+from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 import hashlib
@@ -60,8 +63,14 @@ from vibe.app_server.protocol import (
     SessionListResponse,
     SessionReadParams,
     SessionReadResponse,
+    SessionRelocateParams,
+    SessionRelocateResponse,
     SessionTitleUpdateParams,
     SessionTitleUpdateResponse,
+    WorkspaceGitBranchChanges,
+    WorkspaceGitCheckout,
+    WorkspaceGitCheckoutsParams,
+    WorkspaceGitCheckoutsResponse,
     WorkspaceLinkedWorktree,
     WorkspaceTrustDecisionParams,
     WorkspaceTrustStatusParams,
@@ -80,7 +89,9 @@ from vibe.core.git.errors import (
     GitRepositoryNotFoundError,
     GitUnavailableError,
 )
+from vibe.core.git.repo import GitRepo
 from vibe.core.git.worktree import (
+    LinkedWorktree,
     ManagedWorktree,
     WorktreeReleaseOutcome,
     WorktreeRepository,
@@ -93,6 +104,7 @@ from vibe.core.session.resume_sessions import (
 )
 from vibe.core.session.saved_sessions import (
     delete_saved_session,
+    relocate_saved_session,
     update_saved_session_title,
 )
 from vibe.core.session.session_loader import SessionLoader
@@ -117,12 +129,17 @@ _HOST_METHODS = frozenset({
     "session/history/list",
     "session/list",
     "session/read",
+    # Only reached with no session attached. A live one is routed to the agent
+    # loop, which moves the workspace it is holding; here there is nothing
+    # holding it, so the move is the record and nothing else.
+    "session/relocate",
     "session/rename",
     "workspace/trust/decision",
     "workspace/trust/untrustedConfig",
     "workspace/trust/status",
-    "workspace/worktrees/list",
-    "workspace/worktrees/remove",
+    "workspace/git/checkouts",
+    "workspace/git/worktrees/list",
+    "workspace/git/worktrees/remove",
 })
 
 
@@ -170,6 +187,11 @@ class HostRequestHandler:
                 params = validate_wire(SessionReadParams, raw_params)
                 config = await self._load_config(None)
                 response = await asyncio.to_thread(self._read_session, params, config)
+            case "session/relocate":
+                response = await self._relocate_session(
+                    validate_wire(SessionRelocateParams, raw_params),
+                    await self._load_config(None),
+                )
             case "session/delete":
                 params = validate_wire(SessionDeleteParams, raw_params)
                 config = await self._load_config(None)
@@ -343,12 +365,21 @@ class HostRequestHandler:
                     self._cwd(params.cwd),
                     self._harness_files.trust_store,
                 )
-            case "workspace/worktrees/list":
+            case "workspace/git/worktrees/list":
                 params = validate_wire(WorkspaceWorktreeListParams, raw_params)
                 response = await asyncio.to_thread(
-                    worktree_list_response, self._cwd(params.cwd)
+                    worktree_list_response,
+                    self._cwd(params.cwd),
+                    params.include_details,
                 )
-            case "workspace/worktrees/remove":
+            case "workspace/git/checkouts":
+                checkouts = validate_wire(WorkspaceGitCheckoutsParams, raw_params)
+                response = await asyncio.to_thread(
+                    git_checkouts_response,
+                    checkouts.repo_local_paths,
+                    Path(checkouts.session_cwd) if checkouts.session_cwd else None,
+                )
+            case "workspace/git/worktrees/remove":
                 params = validate_wire(WorkspaceWorktreeRemoveParams, raw_params)
                 response = await asyncio.to_thread(
                     worktree_remove_response, self._cwd(params.cwd)
@@ -409,6 +440,48 @@ class HostRequestHandler:
         history = project_message_history(params.session_id, messages, metadata)
         limit = params.history_limit
         return SessionHistoryGetResponse(history=history[-limit:])
+
+    async def _relocate_session(
+        self, params: SessionRelocateParams, config: VibeConfigSchema
+    ) -> SessionRelocateResponse:
+        """Move a session no agent is holding.
+
+        The live path re-roots trust, harness files and the config layer around
+        a running loop. None of that exists here, and none of it has to: those
+        are derived from the record when the session is next opened. So the
+        move is the record, and the answer is the session read back from it.
+        """
+        _, metadata = await asyncio.to_thread(
+            self._load_session, params.session_id, config
+        )
+        current = (metadata.environment or {}).get("working_directory")
+        if not current:
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS,
+                f"Session has no working directory: {params.session_id}",
+            )
+
+        target = Path(params.cwd).expanduser().resolve()
+        if not target.is_dir():
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS, f"Not a directory: {target}"
+            )
+        # The same boundary the live move keeps: a session may only reach the
+        # counterparts of where it already sits, so a move never grants a tree
+        # the session never occupied.
+        if not await asyncio.to_thread(_is_counterpart, Path(current), target):
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS,
+                f"Not a worktree of this session's repository: {target}",
+            )
+
+        await relocate_saved_session(params.session_id, target, config.session_logging)
+        # Read back through the same path `session/read` uses, so the state a
+        # move answers with is the state a read of the moved session gives.
+        read = await asyncio.to_thread(
+            self._read_session, SessionReadParams(session_id=params.session_id), config
+        )
+        return SessionRelocateResponse(state=read.state)
 
     def _load_session(
         self, session_id: str, config: VibeConfigSchema
@@ -557,10 +630,17 @@ def _time_ms(value: str) -> int:
         return now_ms()
 
 
-def worktree_list_response(cwd: Path) -> WorkspaceWorktreeListResponse:
+def worktree_list_response(
+    cwd: Path, include_details: bool = False
+) -> WorkspaceWorktreeListResponse:
+    repository_cwd: Path | None = None
     try:
         with WorktreeRepository.open(cwd) as repository:
             worktrees = repository.linked()
+            # Not gated behind the details flag: it is two stat calls on a
+            # repository that is already open, where the details cost a merge
+            # base per branch and a second repository object.
+            repository_cwd = repository.repository_counterpart
     except GitRepositoryNotFoundError:
         logger.debug("Skipping worktree listing for non-git path=%s", cwd)
         worktrees = ()
@@ -570,7 +650,13 @@ def worktree_list_response(cwd: Path) -> WorkspaceWorktreeListResponse:
         logger.debug("Skipping worktree listing without git cwd=%s", cwd)
         worktrees = ()
 
+    details = (
+        _worktree_details(cwd, worktrees) if include_details and worktrees else None
+    )
+    changes = details.changes if details else {}
     return WorkspaceWorktreeListResponse(
+        repository_branch=details.repository_branch if details else None,
+        repository_cwd=str(repository_cwd) if repository_cwd is not None else None,
         worktrees=[
             WorkspaceLinkedWorktree(
                 name=worktree.name,
@@ -578,10 +664,55 @@ def worktree_list_response(cwd: Path) -> WorkspaceWorktreeListResponse:
                 cwd=str(worktree.path),
                 root=str(worktree.root),
                 repo_root=str(worktree.repo_root),
+                branch_changes=changes.get(worktree.branch),
             )
             for worktree in worktrees
-        ]
+        ],
     )
+
+
+@dataclass(frozen=True)
+class _WorktreeDetails:
+    repository_branch: str | None
+    changes: dict[str, WorkspaceGitBranchChanges | None]
+
+
+def _worktree_details(
+    cwd: Path, worktrees: Sequence[LinkedWorktree]
+) -> _WorktreeDetails:
+    """What the listing reports only when a caller renders it.
+
+    The counts come from one checkout rather than one per worktree: every
+    worktree is a ref in the same object database, and each repository object
+    holds its cat-file children until it is closed.
+
+    The main checkout is opened separately, because it is the one working tree
+    this listing never names and asking *it* is the only way to learn which
+    branch it is on.
+    """
+    # `GitRepo.open` raises where the old soft opener answered None; a path that
+    # is not a checkout has no details to report either way.
+    try:
+        checkout = GitRepo.open(cwd)
+    except GitError:
+        return _WorktreeDetails(repository_branch=None, changes={})
+    with checkout:
+        changes = {
+            worktree.branch: (
+                WorkspaceGitBranchChanges(
+                    additions=counted.additions, deletions=counted.deletions
+                )
+                if (counted := checkout.changes_on(worktree.branch)) is not None
+                else None
+            )
+            for worktree in worktrees
+        }
+    try:
+        repository = GitRepo.open(worktrees[0].repo_root)
+    except GitError:
+        return _WorktreeDetails(repository_branch=None, changes=changes)
+    with repository:
+        return _WorktreeDetails(repository_branch=repository.branch(), changes=changes)
 
 
 # The wire vocabulary is spelled out in protocol.py so the app-server clients
@@ -614,3 +745,203 @@ def worktree_remove_response(cwd: Path) -> WorkspaceWorktreeRemoveResponse:
         branch_deleted=release.branch_deleted,
         reasons=list(release.reasons),
     )
+
+
+def _contains(parent: Path, descendant: Path) -> bool:
+    """Whether *descendant* is *parent* or sits underneath it."""
+    return parent == descendant or parent in descendant.parents
+
+
+# The deepest wins, so a worktree nested inside another is not lost to its
+# container.
+def _deepest_containing(
+    checkouts: Sequence[tuple[Path, str | None]], probe: Path
+) -> tuple[Path, str | None] | None:
+    matches = [entry for entry in checkouts if _contains(entry[0], probe)]
+    return max(matches, key=lambda entry: len(str(entry[0])), default=None)
+
+
+def _repository_holding(
+    roots_by_repo: dict[str, tuple[Path, ...]], session_cwd: Path
+) -> str | None:
+    """Which linked repository the session is working in, if any of them is.
+
+    A managed worktree lives outside the repository it belongs to, so a
+    repository holds the session when its own directory contains the cwd *or*
+    one of its worktrees does. The deepest match wins, so a repository linked
+    inside another takes the session from its ancestor rather than both
+    claiming it. That is what makes this one decision across every repository
+    rather than a question each can answer alone.
+
+    Containment is a question about paths, so a repository competes here even
+    when git could not be read from it and its worktrees are unknown. Skipping
+    it would hand the session to a shallower ancestor and report that
+    ancestor's branch for a session that is not in it.
+    """
+    holder: str | None = None
+    depth = -1
+    for repo_local_path, roots in roots_by_repo.items():
+        for root in (Path(repo_local_path).resolve(), *roots):
+            if not _contains(root, session_cwd) or len(str(root)) <= depth:
+                continue
+            holder = repo_local_path
+            depth = len(str(root))
+    return holder
+
+
+def _checkout_for_repo(
+    repo_local_path: str,
+    repository: WorktreeRepository,
+    linked: Sequence[LinkedWorktree],
+    checkouts: Sequence[tuple[Path, str | None]],
+    session_cwd: Path | None,
+) -> WorkspaceGitCheckout:
+    probe = (session_cwd or Path(repo_local_path)).resolve()
+    status = repository.status()
+    # Where the session actually is, across every checkout git reports. The
+    # listing below keeps only the managed ones, so asking it alone would name
+    # the repository's own branch for a session sitting in a worktree that is
+    # detached, prunable, or fails validation.
+    holding = _deepest_containing(checkouts, probe)
+    # The listing reports linked worktrees only, so a session in the
+    # repository's own checkout matches nothing here. It is still on a branch,
+    # which is why `worktree` and `branch` are separate fields.
+    match = next(
+        (worktree for worktree in linked if _contains(worktree.root, probe)), None
+    )
+    # Per-checkout facts come from the checkout the session is in; the rest are
+    # the repository's and read the same from any of them.
+    return WorkspaceGitCheckout(
+        repo_local_path=repo_local_path,
+        ok=True,
+        is_primary=session_cwd is not None,
+        repo_url=status.repo_url,
+        root=str(holding[0] if holding is not None else status.root),
+        worktree=match.name if match is not None else None,
+        branch=holding[1] if holding is not None else status.branch,
+        base_branch=status.base_branch,
+    )
+
+
+def _unreadable_checkout(
+    repo_local_path: str, reason: str, *, is_primary: bool
+) -> WorkspaceGitCheckout:
+    # No path in the message: packaged Desktop forwards warn logs to Sentry as
+    # breadcrumbs and its scrubber does not redact paths. The response carries
+    # the reason, which reaches only this session's own renderer.
+    logger.debug("Failed to read the git checkout of a linked repository")
+    return WorkspaceGitCheckout(
+        repo_local_path=repo_local_path, ok=False, is_primary=is_primary, message=reason
+    )
+
+
+def git_checkouts_response(
+    repo_local_paths: Sequence[str], session_cwd: Path | None
+) -> WorkspaceGitCheckoutsResponse:
+    """Every repository a project links, read as git.
+
+    Worktrees for all of them first, because whether a repository holds the
+    session cannot be decided from any one of them alone. Then each is read for
+    status, and only the holder is probed at the session's directory rather
+    than at its own root.
+
+    The repositories stay open across both passes, which is the point: the
+    listing and the status answer about the same checkout, and each open leaves
+    ``git cat-file --batch`` children holding handles into .git until it is
+    closed. Opening once per repository rather than once per question is what
+    this route exists to do.
+    """
+    with ExitStack() as stack:
+        opened: dict[str, WorktreeRepository] = {}
+        linked_by_repo: dict[str, tuple[LinkedWorktree, ...]] = {}
+        checkouts_by_repo: dict[str, tuple[tuple[Path, str | None], ...]] = {}
+        unreadable: dict[str, str] = {}
+        absent: set[str] = set()
+        for repo_local_path in repo_local_paths:
+            try:
+                repository = stack.enter_context(
+                    WorktreeRepository.open(Path(repo_local_path))
+                )
+                linked_by_repo[repo_local_path] = repository.linked()
+                checkouts_by_repo[repo_local_path] = repository.checkouts()
+                opened[repo_local_path] = repository
+            except GitRepositoryNotFoundError:
+                # Not a checkout at all, which is not a failure to report: a
+                # project may link a directory git knows nothing about, and
+                # saying so per repository would put a permanent error in the
+                # header. Left out of the answer entirely.
+                absent.add(repo_local_path)
+            except GitError as exc:
+                unreadable[repo_local_path] = str(exc)
+
+        home = (
+            _repository_holding(
+                {
+                    # Every checkout, not the managed subset: a session sitting
+                    # in a detached or prunable worktree is still in this
+                    # repository, and reading only `linked()` would leave the
+                    # repository looking as though it held no session at all.
+                    repo_local_path: tuple(
+                        root for root, _ in checkouts_by_repo.get(repo_local_path, ())
+                    )
+                    for repo_local_path in repo_local_paths
+                    # A path git knows nothing about is left out of the answer
+                    # entirely, so letting it win here would mark nothing
+                    # primary and take the header from the repository that
+                    # actually holds the session. Unreadable ones stay: they
+                    # get an entry, and it can carry the mark.
+                    if repo_local_path not in absent
+                },
+                session_cwd.resolve(),
+            )
+            if session_cwd is not None
+            else None
+        )
+
+        checkouts: list[WorkspaceGitCheckout] = []
+        for repo_local_path in repo_local_paths:
+            if repo_local_path in absent:
+                continue
+            is_primary = repo_local_path == home
+            if (reason := unreadable.get(repo_local_path)) is not None:
+                checkouts.append(
+                    _unreadable_checkout(repo_local_path, reason, is_primary=is_primary)
+                )
+                continue
+            try:
+                checkouts.append(
+                    _checkout_for_repo(
+                        repo_local_path,
+                        opened[repo_local_path],
+                        linked_by_repo[repo_local_path],
+                        checkouts_by_repo[repo_local_path],
+                        session_cwd if is_primary else None,
+                    )
+                )
+            except GitRepositoryNotFoundError:
+                continue
+            except GitError as exc:
+                checkouts.append(
+                    _unreadable_checkout(
+                        repo_local_path, str(exc), is_primary=is_primary
+                    )
+                )
+        return WorkspaceGitCheckoutsResponse(checkouts=checkouts)
+
+
+def _is_counterpart(cwd: Path, target: Path) -> bool:
+    """Whether *target* is where a session at *cwd* sits, in another checkout.
+
+    The detached mirror of ``AgentLoop._is_derived_destination``: the same
+    narrowing, so a session cannot reach a tree it never occupied whether or
+    not an agent happens to be holding it. Git refusing to answer is a no,
+    since a destination that cannot be shown to be a counterpart is not one.
+    """
+    try:
+        with WorktreeRepository.open(cwd) as repository:
+            counterparts = {worktree.path.resolve() for worktree in repository.linked()}
+            if (in_repository := repository.repository_counterpart) is not None:
+                counterparts.add(in_repository)
+    except GitError:
+        return False
+    return target in counterparts

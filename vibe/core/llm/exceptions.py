@@ -236,7 +236,7 @@ class BackendErrorBuilder:
         *,
         provider: str,
         endpoint: str,
-        error: httpx.RequestError,
+        error: httpx.RequestError | httpx.StreamError,
         model: str,
         messages: Sequence[LLMMessage],
         temperature: float,

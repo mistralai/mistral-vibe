@@ -15,6 +15,7 @@ from vibe.app_server.models import (
     PublicCallbackEntry,
     PublicHistoryEntry,
     PublicHistoryPage,
+    PublicRetryState,
     PublicSession,
     PublicSessionState,
     PublicTurn,
@@ -32,8 +33,8 @@ def build_public_state(
     history: list[PublicHistoryEntry],
     current_history: list[PublicHistoryEntry],
     callbacks: list[PublicCallbackEntry],
-    active_turn: PublicTurn | None,
-    completed_turns: list[PublicTurn],
+    turns: list[PublicTurn],
+    retrying: PublicRetryState | None,
     history_limit: int,
     turns_limit: int | None = None,
     include_history: bool = True,
@@ -43,6 +44,11 @@ def build_public_state(
     open_callbacks = [
         callback for callback in callbacks if callback.state.status == "open"
     ]
+    active_turn = (
+        turns[-1]
+        if turns and turns[-1].status is PublicTurnStatus.IN_PROGRESS
+        else None
+    )
     if active_turn is None:
         status = IdleSessionStatus()
     elif open_callbacks:
@@ -88,14 +94,9 @@ def build_public_state(
             if include_history and len(all_history) > history_limit
             else None
         ),
-        turns=(
-            [*completed_turns, *([active_turn] if active_turn is not None else [])][
-                -(turns_limit or history_limit) :
-            ]
-            if include_turns
-            else None
-        ),
+        turns=(turns[-(turns_limit or history_limit) :] if include_turns else None),
         active_callbacks=open_callbacks,
+        retrying=retrying,
     )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
@@ -13,6 +14,7 @@ from textual.widgets import Static
 from vibe.cli.commands import CommandRegistry
 from vibe.cli.history_manager import HistoryManager
 from vibe.cli.input_modes import InputMode
+from vibe.cli.textual_ui.queue_kinds import QueuedItemKind
 from vibe.cli.textual_ui.recording.recording_indicator import RecordingIndicator
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
@@ -23,6 +25,13 @@ from vibe.cli.voice_manager.voice_manager_port import (
     VoiceManagerPort,
 )
 from vibe.observability.logging import logger
+
+# Queue item kinds that can be edited in-place. Others (e.g. payload-bearing
+# commands on a sibling branch) can only be deleted.
+_EDITABLE_QUEUE_KINDS: frozenset[QueuedItemKind] = frozenset({
+    QueuedItemKind.PROMPT,
+    QueuedItemKind.BASH,
+})
 
 
 class _PromptSpinner(SpinnerMixin, Static):
@@ -44,20 +53,52 @@ class ChatInputBody(VoiceManagerListener, Widget):
             self.value = value
             super().__init__()
 
+    class QueueEditSubmitted(Message):
+        def __init__(self, value: str, kind: QueuedItemKind) -> None:
+            self.value = value
+            self.kind = kind
+            super().__init__()
+
+    class QueueEditConsumed(Message):
+        """Posted when the user submits an edit but the item was already consumed."""
+
+        def __init__(self, value: str, kind: QueuedItemKind) -> None:
+            self.value = value
+            self.kind = kind
+            super().__init__()
+
+    class QueueRemoveRequested(Message):
+        pass
+
+    class QueueSelectionScroll(Message):
+        def __init__(self, queue_index: int) -> None:
+            self.queue_index = queue_index
+            super().__init__()
+
+    class QueueModeExited(Message):
+        """Posted when queue selection/edit mode is fully exited."""
+
     class CompletionResetRequested(Message):
         pass
 
     class InlineNoticeRequested(Message):
-        def __init__(self, message: str, *, timeout: float = 4.0) -> None:
+        def __init__(self, message: str, *, timeout: float | None = 4.0) -> None:
             self.message = message
             self.timeout = timeout
             super().__init__()
+
+    class InlineNoticeCleared(Message):
+        pass
 
     def __init__(
         self,
         command_registry: CommandRegistry,
         history_file: Path | None = None,
         voice_manager: VoiceManagerPort | None = None,
+        queue_edit_active_getter: Callable[[], bool] | None = None,
+        queue_items_getter: Callable[[], list[tuple[int, QueuedItemKind, str]]]
+        | None = None,
+        queue_selected_index_getter: Callable[[], int | None] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -67,6 +108,18 @@ class ChatInputBody(VoiceManagerListener, Widget):
         self._switching_mode = False
         self._voice_manager = voice_manager
         self._recording_indicator: RecordingIndicator | None = None
+        self._queue_edit_active_getter = queue_edit_active_getter
+        self._queue_items_getter = queue_items_getter
+        self._queue_selected_index_getter = queue_selected_index_getter
+        # (queue_index, kind, content), newest-first (reversed from queue order).
+        self._queue_items: list[tuple[int, QueuedItemKind, str]] = []
+        self._queue_cursor: int = -1
+        self._queue_original_text: str = ""
+        self._queue_in_edit_mode: bool = False
+        self._queue_edit_consumed: bool = False
+        # Kind of the item being edited, captured at edit-enter time so it
+        # survives the drain consuming the item (the cache then goes stale).
+        self._queue_edit_kind: QueuedItemKind | None = None
 
         if history_file:
             self.history = HistoryManager(history_file)
@@ -154,7 +207,16 @@ class ChatInputBody(VoiceManagerListener, Widget):
     def on_chat_text_area_history_previous(
         self, _event: ChatTextArea.HistoryPrevious
     ) -> None:
-        if not self.history or not self.input_widget:
+        if not self.input_widget:
+            return
+
+        if self._queue_cursor >= 0:
+            return
+
+        if self._try_enter_queue_selection():
+            return
+
+        if not self.history:
             return
 
         if not self.history.is_navigating():
@@ -166,7 +228,13 @@ class ChatInputBody(VoiceManagerListener, Widget):
             self._load_history_entry(previous)
 
     def on_chat_text_area_history_next(self, _event: ChatTextArea.HistoryNext) -> None:
-        if not self.history or not self.input_widget:
+        if not self.input_widget:
+            return
+
+        if self._queue_cursor >= 0:
+            return
+
+        if not self.history:
             return
 
         next_entry = self.history.get_next()
@@ -183,6 +251,260 @@ class ChatInputBody(VoiceManagerListener, Widget):
             self.input_widget._cursor_pos_after_load = None
             self.input_widget._cursor_moved_since_load = False
 
+    # -- queue selection + edit state machine -----------------------------
+
+    def _is_queue_edit_available(self) -> bool:
+        return (
+            self._queue_edit_active_getter is not None
+            and self._queue_edit_active_getter()
+        )
+
+    def _lock_input_for_selection(self) -> None:
+        if not self.input_widget:
+            return
+        self.input_widget.read_only = True
+        self.input_widget.cursor_blink = False
+        self.input_widget.show_cursor = False
+
+    def _unlock_input_for_edit(self) -> None:
+        if not self.input_widget:
+            return
+        self.input_widget.read_only = False
+        self.input_widget.cursor_blink = True
+        self.input_widget.show_cursor = True
+
+    def _resnapshot_queue_items(self) -> list[tuple[int, QueuedItemKind, str]]:
+        """Re-read the live queue (newest-first) so cached indices stay valid
+        after the queue mutates (delete, or drain consuming an item).
+        """
+        if self._queue_items_getter is None:
+            return []
+        return list(reversed(self._queue_items_getter()))
+
+    @property
+    def in_queue_mode(self) -> bool:
+        """Whether queue selection or edit mode is currently active."""
+        return self._queue_cursor >= 0
+
+    def _resync_selection(self) -> bool:
+        """Reconcile the cached cursor with the live queue after a possible drain.
+
+        The drain is FIFO and removes the oldest item first, so a highlighted
+        item that is still alive shifts to a lower absolute index. We track it
+        by widget identity (via ``queue_selected_index_getter``) rather than by
+        cached index, which would misread a shift as consumption.
+
+        Returns False (and exits selection mode) if the queue is now empty.
+        """
+        if self._queue_cursor < 0:
+            return True
+        live_index = (
+            self._queue_selected_index_getter()
+            if self._queue_selected_index_getter is not None
+            else None
+        )
+        self._queue_items = self._resnapshot_queue_items()
+        if not self._queue_items:
+            self._exit_queue_mode()
+            return False
+        if live_index is None:
+            # Highlighted item was consumed: stay on the same relative position
+            # (newest-first), clamped — that now points to the next item. Re-post
+            # the scroll so the app re-syncs ``_queue_selected_widget`` to the
+            # new item; without it a following Enter/Backspace resolves to the
+            # removed widget (edit → stray copy-on-write, delete → no-op).
+            self._queue_cursor = min(self._queue_cursor, len(self._queue_items) - 1)
+            self._post_scroll()
+            return True
+        for pos, (qi, _, _) in enumerate(self._queue_items):
+            if qi == live_index:
+                self._queue_cursor = pos
+                return True
+        self._queue_cursor = min(self._queue_cursor, len(self._queue_items) - 1)
+        return True
+
+    def _drop_selected_from_cache(self) -> None:
+        """Synchronously remove the highlighted item from the local cache and
+        re-number the newer items whose absolute queue index shifted down.
+
+        The app removes the item asynchronously (posted message), so a plain
+        re-snapshot here would still see it; mutating the cache keeps indices
+        consistent until the app catches up.
+        """
+        c = self._queue_cursor
+        if c < 0 or c >= len(self._queue_items):
+            return
+        del self._queue_items[c]
+        # Newer items (positions 0..c-1 in the newest-first list) had a higher
+        # absolute index than the removed one and shift down by 1.
+        for pos in range(c):
+            qi, kind, content = self._queue_items[pos]
+            self._queue_items[pos] = (qi - 1, kind, content)
+
+    def _try_enter_queue_selection(self) -> bool:
+        if not self.input_widget or not self._is_queue_edit_available():
+            return False
+        if self._queue_items_getter is None:
+            return False
+
+        self._queue_items = self._resnapshot_queue_items()
+        if not self._queue_items:
+            return False
+
+        self._queue_cursor = 0
+        self._queue_original_text = self.input_widget.text
+        self._queue_in_edit_mode = False
+        self._queue_edit_consumed = False
+        self.input_widget._queue_selection_active = True
+        self._lock_input_for_selection()
+        self._post_scroll()
+        self.post_message(
+            self.InlineNoticeRequested(
+                "Up/Down: select  ·  Enter: edit  ·  Backspace/Delete: remove  ·  Esc: exit",
+                timeout=3.0,
+            )
+        )
+        return True
+
+    def on_chat_text_area_queue_selection_previous(
+        self, _event: ChatTextArea.QueueSelectionPrevious
+    ) -> None:
+        if self._queue_cursor < 0 or self._queue_in_edit_mode:
+            return
+        if not self._resync_selection():
+            return
+        if self._queue_cursor < len(self._queue_items) - 1:
+            self._queue_cursor += 1
+            self._post_scroll()
+
+    def on_chat_text_area_queue_selection_next(
+        self, _event: ChatTextArea.QueueSelectionNext
+    ) -> None:
+        if self._queue_cursor < 0 or self._queue_in_edit_mode:
+            return
+        if not self._resync_selection():
+            return
+        if self._queue_cursor > 0:
+            self._queue_cursor -= 1
+            self._post_scroll()
+        else:
+            self._exit_queue_mode()
+
+    def on_chat_text_area_queue_selection_enter(
+        self, _event: ChatTextArea.QueueSelectionEnter
+    ) -> None:
+        if self._queue_cursor < 0 or self._queue_in_edit_mode or not self.input_widget:
+            return
+        if not self._resync_selection():
+            return
+        _, kind, content = self._queue_items[self._queue_cursor]
+        if kind not in _EDITABLE_QUEUE_KINDS:
+            self.post_message(
+                self.InlineNoticeRequested(
+                    "This command can only be deleted — Enter to edit is disabled",
+                    timeout=2.5,
+                )
+            )
+            return
+        self._queue_in_edit_mode = True
+        self._queue_edit_kind = kind
+        self.input_widget._queue_selection_active = False
+        self.input_widget._queue_edit_active = True
+        self._unlock_input_for_edit()
+        # Bash content is stored without the leading "!" — restore it so the
+        # edit happens in bash mode and copy-on-write preserves the kind.
+        load_text = f"!{content}" if kind == QueuedItemKind.BASH else content
+        self._load_history_entry(load_text)
+        self.post_message(
+            self.InlineNoticeRequested("Enter to save · Esc to discard", timeout=None)
+        )
+
+    def on_chat_text_area_queue_selection_remove(
+        self, _event: ChatTextArea.QueueSelectionRemove
+    ) -> None:
+        if self._queue_cursor < 0 or self._queue_in_edit_mode:
+            return
+        if not self._resync_selection():
+            return
+        self.post_message(self.QueueRemoveRequested())
+
+        # Synchronously drop the item from the local cache and re-number the
+        # newer items whose absolute index shifted down. A live re-snapshot
+        # here would still see the item (the app removes it asynchronously),
+        # and a bare ``del`` would leave the shifted indices stale (F1).
+        self._drop_selected_from_cache()
+        if not self._queue_items:
+            self._exit_queue_mode()
+            return
+
+        self._queue_cursor = max(0, self._queue_cursor - 1)
+        self._post_scroll()
+
+    def on_chat_text_area_queue_selection_exit(
+        self, _event: ChatTextArea.QueueSelectionExit
+    ) -> None:
+        if self._queue_cursor < 0:
+            return
+        self._exit_queue_mode()
+
+    def on_chat_text_area_queue_edit_cancelled(
+        self, _event: ChatTextArea.QueueEditCancelled
+    ) -> None:
+        if self._queue_cursor < 0 or not self._queue_in_edit_mode:
+            return
+        self._queue_in_edit_mode = False
+        self._queue_edit_consumed = False
+        self._queue_edit_kind = None
+        if self.input_widget:
+            self.input_widget._queue_edit_active = False
+            self.input_widget._queue_selection_active = True
+            self.input_widget.clear_text()
+            self._update_prompt()
+        self._lock_input_for_selection()
+        self._post_scroll()
+        self.post_message(self.InlineNoticeCleared())
+
+    def _exit_queue_mode(self) -> None:
+        was_in_edit = self._queue_in_edit_mode
+        self._queue_cursor = -1
+        self._queue_items = []
+        self._queue_in_edit_mode = False
+        self._queue_edit_consumed = False
+        self._queue_edit_kind = None
+        if self.input_widget:
+            self.input_widget._queue_selection_active = False
+            self.input_widget._queue_edit_active = False
+            self.input_widget.load_text(self._queue_original_text)
+            self._update_prompt()
+        if was_in_edit:
+            if self.input_widget:
+                self.input_widget.clear_text()
+                self._update_prompt()
+            self.post_message(self.InlineNoticeCleared())
+        self._queue_original_text = ""
+        if self.input_widget:
+            self._unlock_input_for_edit()
+        self.post_message(self.QueueModeExited())
+
+    def _post_scroll(self) -> None:
+        if self._queue_cursor < 0 or not self._queue_items:
+            return
+        queue_index = self._queue_items[self._queue_cursor][0]
+        self.post_message(self.QueueSelectionScroll(queue_index))
+
+    def _end_edit_mode_back_to_selection(self) -> None:
+        self._queue_in_edit_mode = False
+        self._queue_edit_consumed = False
+        if self.input_widget:
+            self.input_widget._queue_edit_active = False
+            self.input_widget._queue_selection_active = True
+            self.input_widget.clear_text()
+            self._update_prompt()
+        self._notify_completion_reset()
+        self._lock_input_for_selection()
+        self._post_scroll()
+        self.post_message(self.InlineNoticeCleared())
+
     def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         event.stop()
 
@@ -193,6 +515,45 @@ class ChatInputBody(VoiceManagerListener, Widget):
             return
 
         value = event.value.strip()
+        if value and self._queue_in_edit_mode:
+            kind = self._queue_edit_kind or QueuedItemKind.PROMPT
+            if self._queue_edit_consumed:
+                self.post_message(self.InlineNoticeCleared())
+                self._queue_items = self._resnapshot_queue_items()
+                if not self._queue_items:
+                    self._exit_queue_mode()
+                    self.input_widget.clear_text()
+                    self._update_prompt()
+                    self._notify_completion_reset()
+                    self.post_message(self.QueueEditConsumed(value, kind))
+                    return
+                if self._queue_cursor >= len(self._queue_items):
+                    self._queue_cursor = len(self._queue_items) - 1
+                self._end_edit_mode_back_to_selection()
+                self.post_message(self.QueueEditConsumed(value, kind))
+                return
+            # The drain may have consumed the item being edited while the user
+            # was typing. Detected by widget identity, since the cached index
+            # is unreliable once older items shift on FIFO consumption. Route
+            # to the copy-on-write flow: keep the edit, let the user re-Enter to
+            # submit as new or Escape to discard.
+            if (
+                self._queue_selected_index_getter is not None
+                and self._queue_selected_index_getter() is None
+            ):
+                self._queue_edit_consumed = True
+                self.post_message(
+                    self.InlineNoticeRequested(
+                        "This message was already processed — "
+                        "press Enter to submit as new, or Escape to discard.",
+                        timeout=8.0,
+                    )
+                )
+                return
+            self._end_edit_mode_back_to_selection()
+            self.post_message(self.QueueEditSubmitted(value, kind))
+            return
+
         if value:
             if self.history:
                 self.history.add(value)

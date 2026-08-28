@@ -174,7 +174,14 @@ async def test_session_archive_is_not_in_the_cli_contract() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method", ["plugin/info", "plugin/reload"])
-async def test_future_client_procedures_are_not_implemented(method: str) -> None:
+async def test_plugin_procedures_are_not_implemented_on_the_legacy_backend(
+    method: str,
+) -> None:
+    """Only a Unified session resolves plugins, so only it has a catalogue.
+
+    ``plugin/info`` is served by the Unified backend; the legacy backend has
+    nothing to project and says so rather than answering with an empty one.
+    """
     client, session = await _session_with_history()
     try:
         with pytest.raises(AppServerResponseError) as excinfo:

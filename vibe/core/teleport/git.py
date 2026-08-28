@@ -1,11 +1,18 @@
 from __future__ import annotations
 
-from configparser import NoOptionError, NoSectionError
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import tempfile
 
+# Re-exported so `teleport.git.GitHubRemoteInfo` keeps resolving. Reading a
+# GitHub remote is not a teleport concern, so it lives with the rest of git.
+from vibe.core.git.remote import (
+    GitHubRemoteInfo as GitHubRemoteInfo,
+    find_github_remote,
+    parse_github_url,
+    to_https_url,
+)
 from vibe.core.teleport.errors import (
     ServiceTeleportError,
     ServiceTeleportNotSupportedError,
@@ -15,18 +22,10 @@ from vibe.core.utils import AsyncExecutor
 try:
     from git import InvalidGitRepositoryError, NoSuchPathError, Repo
     from git.exc import GitCommandError
-    from giturlparse import parse as parse_git_url
 except ImportError as e:
     raise ServiceTeleportError(
         "Teleport requires git to be installed. Please install git and try again."
     ) from e
-
-
-@dataclass
-class GitHubRemoteInfo:
-    name: str
-    owner: str
-    repo: str
 
 
 @dataclass
@@ -180,31 +179,9 @@ class GitRepository:
                 ) from e
         return self._repo
 
-    def _find_github_remote(self, repo: Repo) -> GitHubRemoteInfo | None:
-        for remote in repo.remotes:
-            for url in self._remote_urls(remote):
-                if parsed := self._parse_github_url(url):
-                    owner, repo_name = parsed
-                    return GitHubRemoteInfo(
-                        name=remote.name, owner=owner, repo=repo_name
-                    )
-        return None
-
     @staticmethod
-    def _remote_urls(remote: object) -> list[str]:
-        urls: list[str] = []
-        config_reader = getattr(remote, "config_reader", None)
-        try:
-            raw_url = config_reader.get("url") if config_reader is not None else None
-        except (AttributeError, NoOptionError, NoSectionError, TypeError, ValueError):
-            raw_url = None
-        if isinstance(raw_url, str):
-            urls.append(raw_url)
-
-        for url in getattr(remote, "urls", ()):
-            if isinstance(url, str) and url not in urls:
-                urls.append(url)
-        return urls
+    def _find_github_remote(repo: Repo) -> GitHubRemoteInfo | None:
+        return find_github_remote(repo)
 
     async def _fetch(self, repo: Repo, remote: str) -> None:
         try:
@@ -280,14 +257,11 @@ class GitRepository:
 
     @staticmethod
     def _parse_github_url(url: str) -> tuple[str, str] | None:
-        p = parse_git_url(url)
-        if p.github and p.owner and p.repo:
-            return p.owner, p.repo
-        return None
+        return parse_github_url(url)
 
     @staticmethod
     def _to_https_url(owner: str, repo: str) -> str:
-        return f"https://github.com/{owner}/{repo}.git"
+        return to_https_url(owner, repo)
 
 
 def _remote_ref_branch_name(ref: str | None, remote: str) -> str | None:

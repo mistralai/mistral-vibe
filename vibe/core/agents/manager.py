@@ -58,6 +58,14 @@ class AgentManager:
         self.active_profile = profile
         self._install_profile(profile)
 
+    def rebind(self, harness_files: HarnessFilesManager) -> None:
+        """Rediscover agents from a different working directory.
+
+        The active profile is left installed. It was resolved before the move
+        and stays valid whether or not the destination also defines it.
+        """
+        self._registry.rediscover(harness_files)
+
     @property
     def _discovered(self) -> dict[str, AgentProfile]:
         return self._registry.discovered

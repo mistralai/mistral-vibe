@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from vibe.app_server._integration_resources import MCPResource, VibeCodeResource
+from vibe.app_server._integration_resources import (
+    MCPResource,
+    PluginCatalogChange,
+    PluginCatalogDiff,
+    PluginCatalogResource,
+    VibeCodeResource,
+)
 from vibe.app_server._runtime_resources import (
     AccountResource,
     AgentResource,
@@ -25,7 +31,7 @@ from vibe.app_server.connection import AppServerResourceConnection
 from vibe.app_server.events import AppServerEvent
 from vibe.app_server.protocol import Notification
 
-__all__ = ["AppServerResources"]
+__all__ = ["AppServerResources", "PluginCatalogChange", "PluginCatalogDiff"]
 
 
 class AppServerResources:
@@ -38,6 +44,7 @@ class AppServerResources:
         self.agents = AgentResource(connection, state)
         self.runtime = RuntimeResource(connection, state)
         self.mcp = MCPResource(connection, state)
+        self.plugins = PluginCatalogResource(connection, state)
         self.shell = ShellResource(connection, state)
         self.sessions = SessionResource(connection, state)
         self.review = ReviewResource(connection, state)

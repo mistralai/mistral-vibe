@@ -50,6 +50,13 @@ class ExperimentAssignment(BaseModel):
     experiment_name: str
     variation_name: str
     variation_id: int | None = None
+    # GrowthBook result payload for the assignment. `in_experiment` confirms a
+    # genuine exposure; `hash_attribute`/`hash_value` record the unit GrowthBook
+    # actually bucketed on (used to verify the randomization unit).
+    in_experiment: bool | None = None
+    hash_attribute: str | None = None
+    hash_value: str | None = None
+    feature_id: str | None = None
 
 
 class TelemetryBaseMetadata(BaseModel):
@@ -67,7 +74,18 @@ class TelemetryBaseMetadata(BaseModel):
     parent_session_id: str | None = None
     experiments: dict[str, str] | None = None
     experiment_assignments: list[ExperimentAssignment] | None = None
+    # DEPRECATED: prefer ``experiment_attributes`` (planName/planType). This is a
+    # display label from the account-panel path, set asynchronously and often
+    # absent on early events; it does not reliably reflect the GrowthBook
+    # bucketing plan. Kept for backward compatibility with existing consumers.
     user_plan: str | None = None
+    # The exact attribute snapshot sent to GrowthBook for bucketing (see
+    # ExperimentAttributes), gathered as one self-describing object rather than
+    # flattened. Emitted on the exposure event so warehouse analysis can segment
+    # on the same dimensions GrowthBook assigns on (e.g. planName, planType) and
+    # verify the randomization unit (userId). Keeps GrowthBook's own attribute
+    # names. Distinct from ``user_plan``, a display label from the account panel.
+    experiment_attributes: dict[str, Any] | None = None
 
 
 class TelemetryRequestMetadata(TelemetryBaseMetadata):

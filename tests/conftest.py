@@ -263,6 +263,16 @@ def _disable_feedback_bar(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _disable_auto_title_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Auto-title generation fires a background model call after turns; off by
+    # default so it never consumes mocked responses. Title tests re-patch this.
+    async def _noop(messages: Any, *, config: Any, previous_title: Any = None) -> None:
+        return None
+
+    monkeypatch.setattr("vibe.core.session.title_model.generate_session_title", _noop)
+
+
+@pytest.fixture(autouse=True)
 def _disable_input_grace_periods(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "vibe.cli.textual_ui.widgets.approval_app._INPUT_GRACE_PERIOD_S", 0

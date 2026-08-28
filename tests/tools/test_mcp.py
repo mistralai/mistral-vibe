@@ -549,16 +549,15 @@ class TestMCPRegistry:
         registry = MCPRegistry()
         srv = self._make_http_server("cached")
         remote = RemoteTool(name="tool_a", description="A tool")
-        proxy = create_mcp_http_proxy_tool_class(
-            url="http://localhost:8080", remote=remote, alias="cached"
-        )
+        with patch(
+            "vibe.core.tools.mcp.registry.list_tools_http", return_value=[remote]
+        ) as discover:
+            first = registry.get_tools([srv])
+            second = registry.get_tools([srv])
 
-        key = registry._server_key(srv)
-        registry._cache[key] = {proxy.get_name(): proxy}
-
-        tools = registry.get_tools([srv])
-        assert "cached_tool_a" in tools
-        assert tools["cached_tool_a"] is proxy
+        assert "cached_tool_a" in first
+        assert first["cached_tool_a"] is second["cached_tool_a"]
+        discover.assert_called_once()
 
     def test_get_tools_returns_empty_for_no_servers(self):
         registry = MCPRegistry()
@@ -613,10 +612,11 @@ class TestMCPRegistry:
         ok_srv = self._make_http_server("ok", url="http://ok:1")
         fail_srv = self._make_http_server("fail", url="http://fail:2")
 
-        proxy = create_mcp_http_proxy_tool_class(
-            url="http://ok:1", remote=RemoteTool(name="t"), alias="ok"
-        )
-        registry._cache[registry._server_key(ok_srv)] = {proxy.get_name(): proxy}
+        with patch(
+            "vibe.core.tools.mcp.registry.list_tools_http",
+            return_value=[RemoteTool(name="t")],
+        ):
+            registry.get_tools([ok_srv])
 
         assert registry.count_loaded([ok_srv, fail_srv]) == 1
         assert registry.count_loaded([ok_srv]) == 1
@@ -627,18 +627,33 @@ class TestMCPRegistry:
         registry = MCPRegistry()
         srv = self._make_http_server("stable")
         remote = RemoteTool(name="t1")
-        proxy = create_mcp_http_proxy_tool_class(
-            url="http://localhost:8080", remote=remote, alias="stable"
-        )
-
-        key = registry._server_key(srv)
-        registry._cache[key] = {proxy.get_name(): proxy}
-
-        first = registry.get_tools([srv])
-        second = registry.get_tools([srv])
+        with patch(
+            "vibe.core.tools.mcp.registry.list_tools_http", return_value=[remote]
+        ):
+            first = registry.get_tools([srv])
+            second = registry.get_tools([srv])
 
         assert first == second
         assert first["stable_t1"] is second["stable_t1"]
+
+    def test_failed_forced_refresh_cannot_fall_back_to_stale_cache(self):
+        registry = MCPRegistry()
+        server = self._make_http_server("stable")
+        discovery = AsyncMock(
+            side_effect=[
+                [RemoteTool(name="old")],
+                ConnectionError("temporarily unavailable"),
+                [RemoteTool(name="new")],
+            ]
+        )
+
+        with patch("vibe.core.tools.mcp.registry.list_tools_http", new=discovery):
+            assert set(registry.get_tools([server])) == {"stable_old"}
+            registry.invalidate(server.name)
+            assert registry.get_tools([server]) == {}
+            assert set(registry.get_tools([server])) == {"stable_new"}
+
+        assert discovery.call_count == 3
 
     def test_disjoint_server_lists_across_agents(self):
         registry = MCPRegistry()
@@ -646,18 +661,14 @@ class TestMCPRegistry:
         srv_x = self._make_http_server("x", url="http://x:1")
         srv_y = self._make_http_server("y", url="http://y:2")
 
-        proxy_x = create_mcp_http_proxy_tool_class(
-            url="http://x:1", remote=RemoteTool(name="tx"), alias="x"
-        )
-        proxy_y = create_mcp_http_proxy_tool_class(
-            url="http://y:2", remote=RemoteTool(name="ty"), alias="y"
-        )
+        async def discover(url: str, **_kwargs: object) -> list[RemoteTool]:
+            return [RemoteTool(name="tx" if url == "http://x:1" else "ty")]
 
-        registry._cache[registry._server_key(srv_x)] = {proxy_x.get_name(): proxy_x}
-        registry._cache[registry._server_key(srv_y)] = {proxy_y.get_name(): proxy_y}
-
-        agent_a_tools = registry.get_tools([srv_x])
-        agent_b_tools = registry.get_tools([srv_y])
+        with patch(
+            "vibe.core.tools.mcp.registry.list_tools_http", side_effect=discover
+        ):
+            agent_a_tools = registry.get_tools([srv_x])
+            agent_b_tools = registry.get_tools([srv_y])
 
         assert "x_tx" in agent_a_tools
         assert "y_ty" not in agent_a_tools
@@ -673,9 +684,8 @@ class TestMCPRegistry:
         with patch(
             "vibe.core.tools.mcp.registry.list_tools_http", return_value=[remote]
         ):
-            tools = await registry._discover_http(srv)
+            tools = await registry.get_tools_async([srv])
 
-        assert tools is not None
         assert len(tools) == 1
         name = next(iter(tools))
         assert name == "demo_hello"
@@ -689,9 +699,9 @@ class TestMCPRegistry:
             "vibe.core.tools.mcp.registry.list_tools_http",
             side_effect=ConnectionError("down"),
         ):
-            tools = await registry._discover_http(srv)
+            tools = await registry.get_tools_async([srv])
 
-        assert tools is None
+        assert tools == {}
         assert registry.pop_failed() == {"fail": "down"}
 
     @pytest.mark.asyncio
@@ -703,9 +713,8 @@ class TestMCPRegistry:
         with patch(
             "vibe.core.tools.mcp.registry.list_tools_stdio", return_value=[remote]
         ):
-            tools = await registry._discover_stdio(srv)
+            tools = await registry.get_tools_async([srv])
 
-        assert tools is not None
         assert len(tools) == 1
         name = next(iter(tools))
         assert name == "local_run"
@@ -737,9 +746,9 @@ class TestMCPRegistry:
         with patch(
             "vibe.core.tools.mcp.registry.list_tools_http", side_effect=wrapped_error
         ):
-            tools = await registry._discover_http(srv)
+            tools = await registry.get_tools_async([srv])
 
-        assert tools is None
+        assert tools == {}
         # After our change, this should extract the inner error message
         assert registry.pop_failed() == {"grouped": "connection refused"}
 
@@ -756,9 +765,9 @@ class TestMCPRegistry:
         with patch(
             "vibe.core.tools.mcp.registry.list_tools_http", side_effect=wrapped_error
         ):
-            tools = await registry._discover_http(srv)
+            tools = await registry.get_tools_async([srv])
 
-        assert tools is None
+        assert tools == {}
         # Should join multiple error messages with "; "
         assert registry.pop_failed() == {"multi": "connection refused; timed out"}
 
@@ -777,9 +786,9 @@ class TestMCPRegistry:
         with patch(
             "vibe.core.tools.mcp.registry.list_tools_http", side_effect=wrapped_error
         ):
-            tools = await registry._discover_http(srv)
+            tools = await registry.get_tools_async([srv])
 
-        assert tools is None
+        assert tools == {}
         assert registry.pop_failed() == {
             "nested": "connection refused; timed out; boom"
         }
@@ -809,22 +818,22 @@ class TestMCPRegistry:
         cached_srv = self._make_http_server("cached", url="http://c:1")
         new_srv = self._make_http_server("new", url="http://n:2")
 
-        cached_proxy = create_mcp_http_proxy_tool_class(
-            url="http://c:1", remote=RemoteTool(name="ct"), alias="cached"
-        )
-        registry._cache[registry._server_key(cached_srv)] = {
-            cached_proxy.get_name(): cached_proxy
-        }
+        with patch(
+            "vibe.core.tools.mcp.registry.list_tools_http",
+            return_value=[RemoteTool(name="ct")],
+        ):
+            registry.get_tools([cached_srv])
 
         new_remote = RemoteTool(name="nt")
         with patch(
             "vibe.core.tools.mcp.registry.list_tools_http", return_value=[new_remote]
-        ):
+        ) as discover:
             tools = registry.get_tools([cached_srv, new_srv])
 
         assert "cached_ct" in tools
         assert "new_nt" in tools
         assert len(registry._cache) == 2
+        discover.assert_called_once()
 
 
 class TestMCPStdioCwd:
@@ -911,7 +920,7 @@ class TestMCPStdioCwd:
         with patch(
             "vibe.core.tools.mcp.registry.list_tools_stdio", return_value=[remote]
         ) as mock_list:
-            await registry._discover_stdio(srv)
+            await registry.get_tools_async([srv])
 
         mock_list.assert_called_once_with(
             ["python", "-m", "srv"],
@@ -940,7 +949,7 @@ class TestMCPStdioCwd:
                 wraps=create_mcp_stdio_proxy_tool_class,
             ) as mock_create,
         ):
-            await registry._discover_stdio(srv)
+            await registry.get_tools_async([srv])
 
         _, kwargs = mock_create.call_args
         assert kwargs["cwd"] == "/tmp/myproject"

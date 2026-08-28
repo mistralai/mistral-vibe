@@ -23,6 +23,26 @@ class HookType(StrEnum):
     POST_TOOL = auto()
 
 
+class HookSource(StrEnum):
+    HOST = auto()
+    PROJECT = auto()
+    PROJECT_PLUGIN = auto()
+    GLOBAL = auto()
+    GLOBAL_PLUGIN = auto()
+    CLIENT = auto()
+
+
+class HookVisibility(StrEnum):
+    PUBLIC = auto()
+    PRIVATE = auto()
+
+
+class HookProtocol(StrEnum):
+    VIBE = auto()
+    CLAUDE_CODE = auto()
+    KIMI_CODE = auto()
+
+
 ToolStatus = Literal["success", "failure", "cancelled"]
 
 
@@ -70,6 +90,30 @@ class HookConfig(BaseModel):
         return self
 
 
+class RuntimeHookDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    config: HookConfig
+    source: HookSource
+    order: int = 0
+    cwd: Path | None = None
+    environment: dict[str, str] = Field(default_factory=dict)
+    visibility: HookVisibility = HookVisibility.PUBLIC
+    protocol: HookProtocol = HookProtocol.VIBE
+    plugin_name: str | None = None
+    declared_name: str | None = None
+    config_file: Path | None = None
+
+    @model_validator(mode="after")
+    def validate_plugin_source(self) -> Self:
+        is_plugin = self.source in {HookSource.PROJECT_PLUGIN, HookSource.GLOBAL_PLUGIN}
+        if is_plugin and self.plugin_name is None:
+            raise ValueError("plugin hook definitions require plugin_name")
+        if not is_plugin and self.plugin_name is not None:
+            raise ValueError("non-plugin hook definitions cannot set plugin_name")
+        return self
+
+
 class HookConfigIssue(BaseModel):
     file: Path
     message: str
@@ -78,6 +122,7 @@ class HookConfigIssue(BaseModel):
 class HookConfigResult(BaseModel):
     hooks: list[HookConfig]
     issues: list[HookConfigIssue]
+    runtime_hooks: list[RuntimeHookDefinition] = Field(default_factory=list)
 
 
 # --- Subprocess execution ---

@@ -59,6 +59,10 @@ from vibe.app_server.protocol import (
     SessionListResponse,
     SessionLogReadParams,
     SessionLogReadResponse,
+    SessionReadParams,
+    SessionReadResponse,
+    SessionRelocateParams,
+    SessionRelocateResponse,
     SessionResumeParams,
     SessionResumeResponse,
     SessionRewindParams,
@@ -256,22 +260,19 @@ class SessionResource:
     async def get_session_history(
         self, session_id: str, history_limit: int = 200
     ) -> list[PublicHistoryEntry]:
-        from vibe.app_server.protocol import (
-            SessionHistoryGetParams,
-            SessionHistoryGetResponse,
-        )
-
         client = await self._connection.connect()
         response = validate_wire(
-            SessionHistoryGetResponse,
+            SessionReadResponse,
             await client.request(
-                "session/history/get",
-                SessionHistoryGetParams(
-                    session_id=session_id, history_limit=history_limit
+                "session/read",
+                SessionReadParams(
+                    session_id=session_id,
+                    history=PageRequest(limit=history_limit),
+                    turns=None,
                 ),
             ),
         )
-        return response.history
+        return response.state.history or []
 
     async def update_settings(
         self, *, max_turns: int | None = None, max_tokens: int | None = None
@@ -427,6 +428,18 @@ class SessionResource:
         self._state.projection.replace_state(response.state)
         self._state.session_log = response.session_log
         self._connection.mark_session_attached()
+        return response
+
+    async def relocate(self, cwd: str) -> SessionRelocateResponse:
+        client = await self._connection.connect()
+        response = validate_wire(
+            SessionRelocateResponse,
+            await client.request(
+                "session/relocate",
+                SessionRelocateParams(session_id=self._state.session_id, cwd=cwd),
+            ),
+        )
+        self._state.projection.replace_state(response.state)
         return response
 
 

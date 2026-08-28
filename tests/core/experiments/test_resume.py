@@ -80,6 +80,44 @@ async def test_resume_round_trip_preserves_variant() -> None:
     assert stub.calls == []
 
 
+@pytest.mark.asyncio
+async def test_resume_round_trip_restores_experiment_attributes() -> None:
+    # Regression: hydrate() must restore the GrowthBook bucketing snapshot
+    # (planName/planType/...) alongside the eval response. Without it every
+    # telemetry event on a resumed session would miss experiment_attributes.
+    response = _response_forcing("explore")
+    fresh = ExperimentManager(client=_StubClient(response))
+    attributes = ExperimentAttributes(
+        userId="user-1",
+        entrypoint="cli",
+        agent_version="0",
+        os="darwin",
+        planType="mistral_code",
+        planName="E",
+    )
+    await fresh.initialize(attributes)
+
+    persisted_state = fresh.export_state()
+    assert persisted_state is not None
+
+    resumed = ExperimentManager(client=_StubClient(None))
+    resumed.hydrate(persisted_state, attributes=fresh.attributes())
+
+    attrs = resumed.attributes()
+    assert attrs is not None
+    assert attrs.planType == "mistral_code"
+    assert attrs.planName == "E"
+
+
+def test_hydrate_without_attributes_leaves_snapshot_none() -> None:
+    # Old sessions persisted before the attributes field existed hydrate
+    # without it; attributes() must stay None rather than raise.
+    response = _response_forcing("explore")
+    manager = ExperimentManager(client=_StubClient(None))
+    manager.hydrate(response)
+    assert manager.attributes() is None
+
+
 def test_resume_old_session_without_experiments_field_falls_back_to_defaults(
     tmp_path: Path,
 ) -> None:

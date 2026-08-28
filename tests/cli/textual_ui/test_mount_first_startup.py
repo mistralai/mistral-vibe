@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from tests.conftest import build_test_vibe_app
+from tests.stubs.app_config import build_test_app_config
 from vibe.app_server import AppServerSession
+from vibe.app_server.events import StatsUpdated
+from vibe.app_server.models import AgentStatsSnapshot
+from vibe.app_server.protocol import ConfigReadResponse, StatsUpdatedParams
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputBody, ChatInputContainer
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress
@@ -30,6 +34,60 @@ async def test_compose_yields_main_ui_when_no_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cold_mount_applies_configured_theme_not_fallback() -> None:
+    # Cold mount-first path must apply the theme from the pre-read config so the
+    # UI does not flash the fallback theme before the session opens.
+    async def _blocking_starter() -> AppServerSession:
+        await asyncio.Event().wait()
+        raise RuntimeError("unreachable")
+
+    config = build_test_app_config().model_copy(update={"theme": "gruvbox"})
+    app = build_test_vibe_app(app_server=_blocking_starter)
+    app._mount_first = True
+    app._initial_config_response = ConfigReadResponse(config=config)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.1)
+        assert app._app_server is None
+        assert app.theme == "gruvbox"
+
+
+@pytest.mark.asyncio
+async def test_input_during_cold_bootstrap_waits_for_session() -> None:
+    release = asyncio.Event()
+    app = build_test_vibe_app()
+    app._mount_first = True
+    original_starter = app._start_app_server
+    assert original_starter is not None
+
+    async def _latched_starter() -> AppServerSession:
+        await release.wait()
+        return await original_starter()
+
+    app._start_app_server = _latched_starter
+    handle_command = AsyncMock()
+    with patch.object(app, "_handle_command", handle_command):
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.1)
+            assert app._app_server is None
+
+            await pilot.press("/")
+            await pilot.press("shift+tab", "ctrl+backslash")
+            await pilot.click(Banner)
+            dispatch = asyncio.create_task(app._dispatch_idle_input("/mcp"))
+            await pilot.pause(0.1)
+
+            handle_command.assert_not_awaited()
+            assert app._app_server is None
+            assert not dispatch.done()
+
+            release.set()
+            await pilot.pause(0.3)
+            await dispatch
+
+        handle_command.assert_awaited_once_with("/mcp")
+
+
+@pytest.mark.asyncio
 async def test_registry_swapped_after_session_ready() -> None:
     app = build_test_vibe_app()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -42,6 +100,31 @@ async def test_registry_swapped_after_session_ready() -> None:
         assert banner.state.active_model != ""
         context_progress = app.query_one(ContextProgress)
         assert context_progress.tokens.max_tokens > 0
+
+
+@pytest.mark.asyncio
+async def test_stats_update_keeps_context_progress_visible() -> None:
+    app = build_test_vibe_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.2)
+
+        app._update_context_progress(
+            StatsUpdated(
+                StatsUpdatedParams(
+                    event_id=1,
+                    session_id="session-1",
+                    emitted_at=0,
+                    stats=AgentStatsSnapshot(context_tokens=12_500),
+                    context_window=200_000,
+                )
+            )
+        )
+        await pilot.pause()
+
+        context_progress = app.query_one(ContextProgress)
+        assert context_progress.tokens.max_tokens == 200_000
+        assert context_progress.tokens.current_tokens == 12_500
+        assert str(context_progress.render()) == "12k/200k tokens (6%)"
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,7 @@ async def test_reads_env_vars() -> None:
         "VIBE_UNKNOWN_VAR": "ignored",
         "VIBE_SESSION_LOGGING__ENABLED": "false",
         "VIBE_SESSION_LOGGING__SESSION_PREFIX": "mysession",
+        "VIBE_SESSION_LOGGING__GENERATE_TITLES": "false",
         "VIBE_API_TIMEOUT": ".12",
     }
     with patch.dict(os.environ, env, clear=True):
@@ -29,7 +30,11 @@ async def test_reads_env_vars() -> None:
         "active_model": "mistral-large",
         "disable_welcome_banner_animation": True,
         "enable_telemetry": False,
-        "session_logging": {"enabled": False, "session_prefix": "mysession"},
+        "session_logging": {
+            "enabled": False,
+            "session_prefix": "mysession",
+            "generate_titles": False,
+        },
         "api_timeout": 0.12,
     }
 

@@ -100,6 +100,29 @@ version if one exists, and exit. Initial install: `uv tool install mistral-vibe`
 - `vibe --resume [SESSION_ID]`: specific session; without an id, opens a picker.
 - In-session: `/resume` (alias `/continue`).
 
+#### Session titles
+
+Each session has a `title` stored in `meta.json` (with `title_source`: `auto` or
+`manual`). A session stays untitled until a background LLM call generates a
+concise descriptive title (the `--resume` list shows a message preview until
+then). Automatic generation runs only for the interactive CLI; other clients
+(ACP, app server, programmatic) keep their own session management and fall back
+to the message preview. Title generation runs on the session's active
+model/provider — it substitutes a small fast Mistral model only when the active
+provider is already Mistral and the allowlist permits it, so titles never reach a
+new destination. The first title waits for the opening turn to finish (or a few
+model steps) so it isn't generated off a thin tool-call preamble. On that cheap
+fast model it also refreshes periodically and
+after each compaction; when it falls back to the (possibly expensive) active
+model it stays bounded — one title at the start plus one after a compaction, a
+couple at most — so a large model isn't re-invoked every few turns. The refresh
+keeps the opening intent and the latest exchange in view and feeds the previous
+title back so it refines rather than restarts. `/rename <title>` sets a `manual`
+title that auto-generation never overwrites. Set `session_logging.generate_titles
+= false` to turn automatic titles off (the `--resume` list and tab then use the
+message preview). The current title also drives the terminal tab/window title
+(OSC), updated on rename, auto-title changes, and resume; it never blocks a turn.
+
 #### Session storage & folder scoping
 
 Local sessions are written under `~/.vibe/logs/session/` (override with
@@ -433,6 +456,12 @@ Mistral connectors are auto-discovered when the active provider is Mistral
 and the API key env var is set. Toggle the master switch or hide individual
 connectors / tools:
 
+The legacy backend keeps a discovered connector disabled until it has an
+explicit `[[connectors]]` entry. The Unified backend selected with
+`--experimental-harness` enables ready connectors by default in memory. It
+does not write that default to TOML, and the master switch plus explicit
+connector, tool, allowlist, and denylist settings always take precedence.
+
 ```toml
 enable_connectors = true          # Master switch (default: true)
 
@@ -452,6 +481,7 @@ disabled_tools = ["delete_issue"] # Hide selected tools only
 enabled = true
 save_dir = ""                     # Defaults to ~/.vibe/logs/session
 session_prefix = "session"
+generate_titles = true            # Background LLM session titles; false uses the message preview
 ```
 
 ### Browser Sign-In
@@ -672,7 +702,7 @@ vibe --workdir DIR                  # Change working directory
 vibe --worktree NAME                # Create/reuse a git worktree under $VIBE_HOME/worktrees on branch NAME and run inside it. Auto-cleanup only for worktrees Vibe created this run and only after a session started; reused worktrees and attached (pre-existing) branches are kept unless confirmed. -p sessions keep worktrees. Ignored with --setup/--check-upgrade.
 vibe --worktree                     # Same, but Vibe picks an unused name from the prompt (a random slug when there is no prompt) on a vibe/<name> branch, and never reuses an existing worktree. The prompt must precede the flag or follow a `--`, since --worktree otherwise reads it as NAME.
 vibe --add-dir DIR                  # Extra working dir loaded for context (repeatable). Implicitly trusted.
-vibe --trust                        # Trust cwd for this invocation only (not persisted)
+vibe --trust                        # Trust cwd for this invocation only (not persisted). Skips the trust prompt.
 vibe -c / --continue                # Continue most recent session in this terminal (TTY-scoped, falls back to latest in cwd)
 vibe --resume [SESSION_ID]          # Resume a specific session
 vibe -v / --version                 # Show version
@@ -728,7 +758,11 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
   DEBUG, INFO, WARNING, ERROR, CRITICAL.
 - `/debug` - Toggle debug console
 - `/compact` - Compact model context by summarizing. The session ID and visible
-  conversation stay intact.
+  conversation stay intact; the auto title is refreshed to reflect the
+  compacted conversation (unless renamed manually).
+- `/rename <title>` - Set a manual session title. Persists to `meta.json`
+  (`title_source=manual`), updates the terminal tab title, and is never
+  overwritten by automatic title generation.
 - `/retry [additional instructions]` - Continue a model response interrupted by
   a backend error without repeating text already shown. Optional instructions
   are passed to the model for the continuation. Relevant error messages also
@@ -736,8 +770,10 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/status` - Display agent statistics
 - `/whoami` - Display the Mistral signed-in user, workspace, and plan
 - `/voice` - Configure voice settings
-- `/mcp` - Display MCP servers and connector status; pass a server or connector
-  name to list its tools or open its auth panel when authentication is required
+- `/mcp` (or `/connectors`) - Display MCP servers and connector status. The
+  browser opens on the first item; press Up or Left to move into the fuzzy-search
+  bar, and Up again to wrap to the last item. Pass a server or connector name to
+  list its tools or open its auth panel when authentication is required
 - `/mcp add <url>` - Add a hosted OAuth MCP server. Supports `--name <alias>`,
   repeatable `--scope <scope>`, `--transport <http|streamable-http>`, and
   `--no-login`. Starts OAuth login by default. OAuth-only; use
@@ -845,6 +881,15 @@ Commands not on the side-channel allowlist (e.g. `/clear`, `/compact`,
 `/remote-project`, `/retry`) are enqueued on the main queue and execute
 when the session is idle.
 
+While the queue is non-empty and the agent is busy, pressing **Up**
+enters queue selection mode: the last queued item is highlighted and
+the input is locked (no cursor, no typing). **Up/Down** navigate
+between queued items, **Enter** loads the selected item into the input
+for editing (press Enter again to update it in-place), **Backspace**
+or **Delete** removes the selected item and moves selection to the
+next, and **Esc** exits selection mode and restores the original
+input text.
+
 ## Skills System
 
 Skills are specialized instruction sets the model can load on demand.
@@ -933,6 +978,10 @@ entry; the search excludes the user's home directory and the filesystem
 root, and falls back to the cwd if no qualifying ancestor is found.
 Programmatic mode (`-p`/`--prompt`) never prompts: the folder is untrusted.
 Use `--trust` to trust cwd for the current invocation only (not persisted).
+`--trust` and `--worktree` both skip the prompt: they grant the workspace trust
+for the session, so there is no decision left to ask about. Without this a
+`--worktree` run would prompt on every launch, since each worktree is a
+directory the trust database has never seen.
 
 ## Sensitive Files — DO NOT READ OR EDIT
 

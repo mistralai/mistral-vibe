@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable
-from typing import Any
 
 from mistralai.client import Mistral
 from mistralai.client.models import SpeechOutputFormat
 
 from vibe.app_server.config import AudioProviderView, TTSModelConfigView
+from vibe.cli.audio_request_metadata import RequestMetadataGetter
 from vibe.cli.tts.tts_client_port import TTSResult
 from vibe.utils.api_keys import resolve_api_key
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context, get_user_agent
@@ -18,7 +17,7 @@ class MistralTTSClient:
         self,
         provider: AudioProviderView,
         model: TTSModelConfigView,
-        metadata_getter: Callable[[], dict[str, Any]] | None = None,
+        metadata_getter: RequestMetadataGetter | None = None,
     ) -> None:
         self._api_key = resolve_api_key(provider.api_key_env_var) or ""
         self._server_url = provider.api_base

@@ -19,6 +19,15 @@ class _HooksTomlRoot(BaseModel):
     hooks: list[Any] = Field(default_factory=list)
 
 
+class _StrictHooksTomlRoot(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    hooks: list[Any] = Field(default_factory=list)
+
+
+class _StrictHookConfig(HookConfig):
+    model_config = ConfigDict(extra="forbid")
+
+
 def _format_validation_error(
     err: ValidationError, *, root_label: str = "config"
 ) -> str:
@@ -37,7 +46,7 @@ def _hook_entry_label(entry: Any, index: int) -> str:
     return f"hooks[{index}]"
 
 
-def _load_hooks_file(path: Path) -> HookConfigResult:
+def load_hooks_file(path: Path, *, strict: bool = False) -> HookConfigResult:
     hooks: list[HookConfig] = []
     issues: list[HookConfigIssue] = []
 
@@ -52,7 +61,11 @@ def _load_hooks_file(path: Path) -> HookConfigResult:
         return HookConfigResult(hooks=hooks, issues=issues)
 
     try:
-        root = _HooksTomlRoot.model_validate(data)
+        root = (
+            _StrictHooksTomlRoot.model_validate(data)
+            if strict
+            else _HooksTomlRoot.model_validate(data)
+        )
     except ValidationError as e:
         issues.append(
             HookConfigIssue(
@@ -63,7 +76,8 @@ def _load_hooks_file(path: Path) -> HookConfigResult:
 
     for i, entry in enumerate(root.hooks):
         try:
-            hooks.append(HookConfig.model_validate(entry))
+            hook_model = _StrictHookConfig if strict else HookConfig
+            hooks.append(hook_model.model_validate(entry))
         except ValidationError as e:
             label = _hook_entry_label(entry, i)
             issues.append(
@@ -85,7 +99,7 @@ def load_hooks_from_fs(
     mgr = harness_files or get_harness_files_manager()
 
     for path in mgr.hook_files:
-        result = _load_hooks_file(path)
+        result = load_hooks_file(path)
         all_issues.extend(result.issues)
         for hook in result.hooks:
             if hook.name in seen_names:

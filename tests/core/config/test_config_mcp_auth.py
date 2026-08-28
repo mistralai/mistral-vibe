@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
 import pytest
@@ -276,9 +276,37 @@ def test_oauth_scopes_empty_list_allowed() -> None:
     assert auth.scopes == []
 
 
+@pytest.mark.parametrize(("cls", "transport"), HTTP_TRANSPORTS)
+def test_registry_sync_preserves_resolved_oauth_state_without_guessing(
+    cls: type[MCPHttp | MCPStreamableHttp], transport: str
+) -> None:
+    oauth = cls.model_validate({
+        "name": "linear",
+        "transport": transport,
+        "url": "https://mcp.linear.app/mcp",
+        "auth": {"type": "oauth", "scopes": ["read"]},
+    })
+    registry = MCPRegistry()
+
+    registry.sync_active_servers([oauth])
+
+    assert registry.needs_auth == set()
+
+    registry.mark_needs_auth("linear")
+    registry.sync_active_servers([oauth])
+
+    assert registry.needs_auth == {"linear"}
+
+    static = oauth.model_copy(update={"auth": MCPStaticAuth()})
+    registry.sync_active_servers([static])
+
+    assert registry.needs_auth == set()
+    assert registry.status()["linear"] == AuthStatus.STATIC
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("cls", "transport"), HTTP_TRANSPORTS)
-async def test_registry_marks_oauth_servers_without_tokens_as_needing_auth(
+async def test_unconfigured_registry_marks_oauth_servers_as_needing_auth(
     cls: type[MCPHttp | MCPStreamableHttp], transport: str
 ) -> None:
     srv = cls.model_validate({
@@ -288,23 +316,15 @@ async def test_registry_marks_oauth_servers_without_tokens_as_needing_auth(
         "auth": {"type": "oauth", "scopes": ["read"]},
     })
     registry = MCPRegistry()
-    storage = MagicMock()
-    storage.get_tokens = AsyncMock(return_value=None)
-    storage.delete_tokens = AsyncMock()
-    storage.delete_client_info = AsyncMock()
 
-    with (
-        patch("vibe.core.tools.mcp.registry.KeyringTokenStorage", return_value=storage),
-        patch(
-            "vibe.core.tools.mcp.registry.Fingerprint.load",
-            new=AsyncMock(return_value=None),
-        ),
-        patch("vibe.core.tools.mcp.registry.Fingerprint.delete", new=AsyncMock()),
-    ):
+    with patch(
+        "vibe.core.tools.mcp.registry.list_tools_http", new=AsyncMock()
+    ) as discover:
         first = await registry.get_tools_async([srv])
         second = await registry.get_tools_async([srv])
 
     assert first == {}
     assert second == {}
+    discover.assert_not_awaited()
     assert registry.needs_auth == {"linear"}
     assert registry.status()["linear"] == AuthStatus.NEEDS_AUTH

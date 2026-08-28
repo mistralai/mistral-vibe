@@ -9,6 +9,7 @@ Tests cover:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from http import HTTPStatus
 import json
 
@@ -43,6 +44,7 @@ from vibe.core.types import (
     Role,
     ToolCall,
 )
+from vibe.core.utils import RetryCategory, RetryReason
 
 
 @pytest.fixture
@@ -75,6 +77,22 @@ def _make_model() -> ModelConfig:
 
 def _make_backend(base_url: Url = OPENAI_BASE_URL) -> GenericBackend:
     return GenericBackend(provider=_make_provider(base_url))
+
+
+class TrackingAsyncStream(httpx.AsyncByteStream):
+    def __init__(self, chunks: list[bytes], error: Exception | None = None) -> None:
+        self.chunks = chunks
+        self.error = error
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            yield chunk
+        if self.error is not None:
+            raise self.error
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 def _prepare(adapter, provider, messages, **kwargs):
@@ -1255,6 +1273,15 @@ class TestParseStreamingEvents:
         assert chunk.message.content == ""
         assert chunk.usage.prompt_tokens == 0
 
+    def test_response_object_accepts_null_error(self, adapter, provider):
+        chunk = adapter.parse_response(
+            {"type": "response.created", "response": {"id": "resp_123", "error": None}},
+            provider,
+        )
+
+        assert chunk.message.content == ""
+        assert chunk.usage.prompt_tokens == 0
+
     @pytest.mark.parametrize(
         ("error_type", "expected_status"),
         [
@@ -1282,6 +1309,35 @@ class TestParseStreamingEvents:
         assert exc_info.value.error_type == error_type
         assert exc_info.value.message == "backend failed"
         assert exc_info.value.status == expected_status
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {
+                "type": "error",
+                "code": "rate_limit_exceeded",
+                "message": "backend failed",
+            },
+            {
+                "type": "response.failed",
+                "response": {
+                    "error": {
+                        "code": "rate_limit_exceeded",
+                        "message": "backend failed",
+                    }
+                },
+            },
+        ],
+    )
+    def test_provider_error_shapes_raise_structured_stream_error(
+        self, adapter, provider, data
+    ):
+        with pytest.raises(OpenAIResponsesStreamError) as exc_info:
+            adapter.parse_response(data, provider)
+
+        assert exc_info.value.error_type == "rate_limit_exceeded"
+        assert exc_info.value.message == "backend failed"
+        assert exc_info.value.status == HTTPStatus.TOO_MANY_REQUESTS
 
     def test_invalid_error_payload_schema_raises(self, adapter, provider):
         with pytest.raises(ValidationError):
@@ -1363,19 +1419,172 @@ class TestGenericBackendIntegration:
                 _assert_chunk_matches(result, expected_result)
 
     @pytest.mark.asyncio
-    async def test_streaming_rate_limit_event_surfaces_without_transport_retry(self):
+    async def test_streaming_rate_limit_event_retries_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        async def _no_sleep(_: float) -> None:
+            pass
+
+        monkeypatch.setattr("vibe.core.utils.retry.asyncio.sleep", _no_sleep)
+        retry_reasons: list[RetryReason] = []
+
+        async def record_retry(reason: RetryReason) -> None:
+            retry_reasons.append(reason)
+
+        error_response = httpx.Response(
+            status_code=200,
+            stream=httpx.ByteStream(
+                b'data: {"type":"response.created","response":{"id":"resp_failed"}}\n\n'
+                b'data: {"type":"response.in_progress","response":{"id":"resp_failed"}}\n\n'
+                b'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","phase":"final_answer"}}\n\n'
+                b'data: {"type":"response.content_part.added","output_index":0}\n\n'
+                b'data: {"type":"response.output_text.delta","output_index":0,"delta":""}\n\n'
+                b'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":""}\n\n'
+                b'data: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit exceeded"}\n\n'
+            ),
+            headers={"Content-Type": "text/event-stream"},
+        )
+        success_response = httpx.Response(
+            status_code=200,
+            stream=httpx.ByteStream(
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
+                b'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hi"}\n\n'
+                b'data: {"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"hi"}],"role":"assistant"}],"usage":{"input_tokens":10,"output_tokens":5}}}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+            headers={"Content-Type": "text/event-stream"},
+        )
+        base_url = OPENAI_BASE_URL
+        with respx.mock(base_url=base_url) as mock_api:
+            route = mock_api.post(OPENAI_RESPONSES_PATH).mock(
+                side_effect=[error_response, success_response]
+            )
+            backend = GenericBackend(
+                provider=_make_provider(base_url), on_retry=record_retry
+            )
+            messages = [LLMMessage(role=Role.user, content="Just say hi")]
+
+            results: list[LLMChunk] = []
+            async for result in backend.complete_streaming(
+                model=_make_model(),
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            ):
+                results.append(result)
+
+        assert route.call_count == 2
+        assert retry_reasons == [RetryReason(RetryCategory.RATE_LIMITED, "HTTP 429")]
+        assert "".join(result.message.content or "" for result in results) == "hi"
+
+    @pytest.mark.asyncio
+    async def test_transport_retry_resets_parser_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        async def _no_sleep(_: float) -> None:
+            pass
+
+        monkeypatch.setattr("vibe.core.utils.retry.asyncio.sleep", _no_sleep)
+        failed_stream = TrackingAsyncStream(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_failed"}}\n\n'
+                b'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","phase":"commentary"}}\n\n'
+            ],
+            httpx.ReadError("stream reset"),
+        )
+        success_response = httpx.Response(
+            status_code=200,
+            stream=httpx.ByteStream(
+                b'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"answer"}\n\n'
+                b'data: {"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"answer"}],"role":"assistant"}],"usage":{"input_tokens":10,"output_tokens":5}}}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+        with respx.mock(base_url=OPENAI_BASE_URL) as mock_api:
+            route = mock_api.post(OPENAI_RESPONSES_PATH).mock(
+                side_effect=[
+                    httpx.Response(
+                        status_code=200,
+                        stream=failed_stream,
+                        headers={"Content-Type": "text/event-stream"},
+                    ),
+                    success_response,
+                ]
+            )
+            backend = _make_backend()
+            results = [
+                result
+                async for result in backend.complete_streaming(
+                    model=_make_model(),
+                    messages=[LLMMessage(role=Role.user, content="hi")],
+                )
+            ]
+
+        assert route.call_count == 2
+        assert failed_stream.closed is True
+        assert "".join(result.message.content or "" for result in results) == "answer"
+        assert (
+            "".join(result.message.reasoning_content or "" for result in results) == ""
+        )
+
+    @pytest.mark.asyncio
+    async def test_stream_close_closes_http_response(self):
+        response_stream = TrackingAsyncStream([
+            b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
+            b'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hi"}\n\n'
+            b'data: {"type":"response.completed","response":{"id":"resp_1","output":[]}}\n\n'
+        ])
+        with respx.mock(base_url=OPENAI_BASE_URL) as mock_api:
+            mock_api.post(OPENAI_RESPONSES_PATH).mock(
+                return_value=httpx.Response(
+                    status_code=200,
+                    stream=response_stream,
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            )
+            stream = _make_backend().complete_streaming(
+                model=_make_model(), messages=[LLMMessage(role=Role.user, content="hi")]
+            )
+            await anext(stream)
+            await stream.aclose()
+
+        assert response_stream.closed is True
+
+    @pytest.mark.asyncio
+    async def test_streaming_rate_limit_event_exhausts_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Budget-bounded retry retries for as long as the budget allows, then
+        # re-raises. Drive a fake clock so a small budget elapses deterministically
+        # instead of relying on real wall-clock time.
+        now = [0.0]
+        monkeypatch.setattr("vibe.core.utils.retry.time.monotonic", lambda: now[0])
+
+        async def _advance(seconds: float) -> None:
+            now[0] += seconds
+
+        monkeypatch.setattr("vibe.core.utils.retry.asyncio.sleep", _advance)
+
         base_url = OPENAI_BASE_URL
         with respx.mock(base_url=base_url) as mock_api:
             route = mock_api.post(OPENAI_RESPONSES_PATH).mock(
                 return_value=httpx.Response(
                     status_code=200,
                     stream=httpx.ByteStream(
-                        b'data: {"type":"error","error":{"type":"too_many_requests","message":"Rate limit exceeded"}}\n\n'
+                        b'data: {"type":"response.created","response":{"id":"resp_failed"}}\n\n'
+                        b'data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded"}}}\n\n'
                     ),
                     headers={"Content-Type": "text/event-stream"},
                 )
             )
-            backend = _make_backend(base_url)
+            backend = GenericBackend(
+                provider=_make_provider(base_url), retry_max_elapsed_time=1.0
+            )
             messages = [LLMMessage(role=Role.user, content="Just say hi")]
 
             with pytest.raises(BackendError) as exc_info:
@@ -1392,9 +1601,45 @@ class TestGenericBackendIntegration:
 
         error = exc_info.value
         assert error.status == HTTPStatus.TOO_MANY_REQUESTS
-        assert error.reason == "too_many_requests"
+        assert error.reason == "rate_limit_exceeded"
         assert error.parsed_error == "Rate limit exceeded"
+        # Retried at least once, then stopped once the 1s budget elapsed.
+        assert route.call_count > 1
+        assert now[0] >= 1.0
+
+    @pytest.mark.asyncio
+    async def test_streaming_rate_limit_after_output_is_not_retried(self):
+        base_url = OPENAI_BASE_URL
+        with respx.mock(base_url=base_url) as mock_api:
+            route = mock_api.post(OPENAI_RESPONSES_PATH).mock(
+                return_value=httpx.Response(
+                    status_code=200,
+                    stream=httpx.ByteStream(
+                        b'data: {"type":"response.created","response":{"id":"resp_failed"}}\n\n'
+                        b'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"partial"}\n\n'
+                        b'data: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit exceeded"}\n\n'
+                    ),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            )
+            backend = _make_backend(base_url)
+            messages = [LLMMessage(role=Role.user, content="Just say hi")]
+            results: list[LLMChunk] = []
+
+            with pytest.raises(BackendError):
+                async for result in backend.complete_streaming(
+                    model=_make_model(),
+                    messages=messages,
+                    temperature=0.2,
+                    tools=None,
+                    max_tokens=None,
+                    tool_choice=None,
+                    extra_headers=None,
+                ):
+                    results.append(result)
+
         assert route.call_count == 1
+        assert "".join(result.message.content or "" for result in results) == "partial"
 
     @pytest.mark.asyncio
     async def test_streaming_payload_includes_stream_flag(self):

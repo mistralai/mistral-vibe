@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
-from textual.widgets import OptionList
+import pytest
+from textual.app import App, ComposeResult
+from textual.widgets import Input, OptionList
 from textual.worker import Worker
 
 from vibe.app_server.models import (
@@ -16,11 +18,14 @@ from vibe.cli.textual_ui.widgets.mcp_app import (
     _LIST_VIEW_HELP_AUTH,
     _LIST_VIEW_HELP_TOOLS,
     MCPApp,
+    MCPOptionList,
+    _filter_sources,
     _sort_sources_for_menu,
     _source_from_option_id,
     _source_option_id,
     _tool_count_text,
 )
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
 
 def _source(
@@ -43,6 +48,15 @@ def _source(
 
 def _state(*sources: MCPSourceSummary) -> MCPState:
     return MCPState(sources=list(sources))
+
+
+class MCPAppHarness(App[None]):
+    def __init__(self, state: MCPState) -> None:
+        super().__init__()
+        self._state = state
+
+    def compose(self) -> ComposeResult:
+        yield MCPApp(self._state)
 
 
 def test_initial_source_is_normalized() -> None:
@@ -92,6 +106,109 @@ def test_source_sorting_puts_nonempty_sources_first_and_sorts_each_group() -> No
         "Alpha Empty",
         "Zulu Empty",
     ]
+
+
+def test_filter_sources_fuzzy_matches_and_ranks_names() -> None:
+    sources = [
+        _source("Slack", kind=MCPSourceKind.CONNECTOR),
+        _source("Google Drive", kind=MCPSourceKind.CONNECTOR),
+        _source("GitHub", kind=MCPSourceKind.CONNECTOR),
+    ]
+
+    assert [source.name for source in _filter_sources(sources, "gd")] == [
+        "Google Drive"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_overview_starts_on_first_source_and_search_wraps_like_a_row() -> None:
+    app = MCPAppHarness(
+        _state(
+            _source("gmail", kind=MCPSourceKind.CONNECTOR),
+            _source("slack", kind=MCPSourceKind.CONNECTOR),
+        )
+    )
+
+    async with app.run_test() as pilot:
+        option_list = app.query_one(MCPOptionList)
+        search = app.query_one("#mcp-search", Input)
+        search_icon = app.query_one("#mcp-search-icon", NoMarkupStatic)
+
+        assert search_icon.content == "🔍"
+        assert search.placeholder == "Search servers and connectors (← to focus)"
+        assert app.screen.focused is option_list
+        assert option_list.get_option_at_index(option_list.highlighted or 0).id == (
+            "connector:gmail"
+        )
+
+        await pilot.press("up")
+        assert app.screen.focused is search
+
+        await pilot.press("up")
+        assert app.screen.focused is option_list
+        assert option_list.get_option_at_index(option_list.highlighted or 0).id == (
+            "connector:slack"
+        )
+
+        option_list.scroll_to = MagicMock(wraps=option_list.scroll_to)
+        await pilot.press("left")
+        assert app.screen.focused is search
+        option_list.scroll_to.assert_any_call(
+            y=0, animate=False, force=True, immediate=True
+        )
+
+        await pilot.press("down")
+        assert app.screen.focused is option_list
+        assert option_list.get_option_at_index(option_list.highlighted or 0).id == (
+            "connector:gmail"
+        )
+
+        await pilot.press("up", "up")
+        assert app.screen.focused is option_list
+        assert option_list.get_option_at_index(option_list.highlighted or 0).id == (
+            "connector:slack"
+        )
+
+        await pilot.press("down")
+        assert app.screen.focused is search
+
+        await pilot.press("down")
+        assert app.screen.focused is option_list
+        assert option_list.get_option_at_index(option_list.highlighted or 0).id == (
+            "connector:gmail"
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_fuzzy_filters_sources_without_taking_initial_focus() -> None:
+    app = MCPAppHarness(
+        _state(
+            _source("Google Drive", kind=MCPSourceKind.CONNECTOR),
+            _source("GitHub", kind=MCPSourceKind.CONNECTOR),
+            _source("Slack", kind=MCPSourceKind.CONNECTOR),
+        )
+    )
+
+    async with app.run_test() as pilot:
+        option_list = app.query_one(MCPOptionList)
+        await pilot.press("up", "g", "d")
+
+        source_ids = [
+            option.id
+            for option in option_list.options
+            if option.id is not None and option.id.startswith("connector:")
+        ]
+        assert app.screen.focused is app.query_one("#mcp-search", Input)
+        assert source_ids == ["connector:Google Drive"]
+
+        await pilot.press("down")
+        option_list.scroll_to = MagicMock(wraps=option_list.scroll_to)
+        await pilot.press("up")
+
+        assert app.screen.focused is app.query_one("#mcp-search", Input)
+        option_list.scroll_to.assert_any_call(
+            y=0, animate=False, force=True, immediate=True
+        )
 
 
 def test_list_view_sorts_server_and_connector_groups_by_discovered_tools() -> None:
@@ -307,7 +424,11 @@ def test_refresh_index_replaces_state_from_resource() -> None:
 
 def test_start_refresh_dispatches_one_worker() -> None:
     app = MCPApp(_state(), refresh_callback=AsyncMock(return_value="Refreshed"))
-    app.run_worker = MagicMock()
+
+    def close_worker(coroutine, **_kwargs: object) -> None:
+        coroutine.close()
+
+    app.run_worker = MagicMock(side_effect=close_worker)
 
     app._start_refresh()
     app._start_refresh()

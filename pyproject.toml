@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.24.3"
+version = "2.24.5"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -99,6 +99,7 @@ dependencies = [
     "pyyaml==6.0.3",
     "referencing==0.37.0",
     "requests==2.34.2",
+    "rfc8785==0.1.4",
     "rich==15.0.0",
     "rpds-py==0.30.0",
     "secretstorage==3.5.0 ; sys_platform == 'linux'",
@@ -267,7 +268,7 @@ max-nested-blocks = 5
 ignore_decorators = ["@*"]
 
 [tool.pytest.ini_options]
-addopts = "-vvvv -q -n auto --durations=10 --import-mode=importlib --maxschedchunk=1"
+addopts = "-p pytest_vibe -vvvv -q -n auto --durations=10 --import-mode=importlib --maxschedchunk=1"
 timeout = 10
 markers = [
     "unified_supported: backend contract behavior implemented by the Unified Harness",

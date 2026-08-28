@@ -4,6 +4,7 @@ from vibe.core.paths import AGENTS_HOME, VIBE_HOME, GlobalPath
 
 GLOBAL_TOOLS_DIR = GlobalPath(lambda: VIBE_HOME.path / "tools")
 GLOBAL_SKILLS_DIR = GlobalPath(lambda: VIBE_HOME.path / "skills")
+GLOBAL_PLUGINS_DIR = GlobalPath(lambda: VIBE_HOME.path / "plugins")
 GLOBAL_REGISTRY_SKILLS_CACHE_DIR = GlobalPath(
     lambda: VIBE_HOME.path / "skills-registry-cache"
 )

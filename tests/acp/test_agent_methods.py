@@ -20,7 +20,7 @@ from tests.stubs.fake_client import FakeClient
 from vibe.acp.agent import SessionStarter, VibeAcpAgent
 from vibe.acp.exceptions import InvalidRequestError
 from vibe.app_server.local import LocalHarnessOptions
-from vibe.app_server.models import PublicMessageEntry
+from vibe.app_server.models import IdleSessionStatus, PublicMessageEntry, PublicSession
 from vibe.app_server.protocol import (
     AppServerResponseError,
     ProtocolError,
@@ -406,3 +406,42 @@ async def test_title_and_session_listing_cross_the_app_server_boundary(
         if isinstance(notification.update, SessionInfoUpdate)
     ]
     assert updates[-1].title == "Reviewed"
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_falls_back_to_preview_when_no_title(
+    acp_agent_loop: VibeAcpAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An LLM title is only generated after a few turns; until then the ACP list
+    # must surface the first-message preview so entries stay identifiable.
+    items = [
+        PublicSession(
+            id="untitled-session",
+            title=None,
+            preview="MARKER-ONE first message",
+            status=IdleSessionStatus(),
+            created_at=0,
+            updated_at=0,
+            cwd=str(Path.cwd()),
+        ),
+        PublicSession(
+            id="titled-session",
+            title="Generated title",
+            preview="MARKER-TWO first message",
+            status=IdleSessionStatus(),
+            created_at=0,
+            updated_at=0,
+            cwd=str(Path.cwd()),
+        ),
+    ]
+    resources = Mock()
+    resources.list_sessions = AsyncMock(return_value=items)
+    monkeypatch.setattr(
+        acp_agent_loop, "_host_resources", AsyncMock(return_value=resources)
+    )
+
+    listed = await acp_agent_loop.list_sessions(cwd=str(Path.cwd()))
+
+    titles = {session.session_id: session.title for session in listed.sessions}
+    assert titles["untitled-session"] == "MARKER-ONE first message"
+    assert titles["titled-session"] == "Generated title"

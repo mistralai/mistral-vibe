@@ -668,11 +668,11 @@ def _find_telemetry_calls(
     mock: MagicMock, event_name: str
 ) -> list[dict[str, str | int | float | None]]:
     """Return the properties dicts for all calls matching a given event name."""
-    results: list[dict[str, str | int | float | None]] = []
-    for call in mock.send_telemetry_event.call_args_list:
-        if call[0][0] == event_name:
-            results.append(call[0][1])
-    return results
+    return [
+        dict(call.args[0].properties)
+        for call in mock.log.call_args_list
+        if call.args[0].name == event_name
+    ]
 
 
 class TestTelemetryTracking:

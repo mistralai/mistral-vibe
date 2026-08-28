@@ -11,7 +11,7 @@ from vibe.app_server.events import (
     AppServerEvent,
     HistoryEntryAdded,
     HistoryEntryUpdated,
-    TurnRetrying,
+    SessionSnapshot,
 )
 from vibe.app_server.models import (
     AgentChangedNoticeDetail,
@@ -41,7 +41,6 @@ from vibe.app_server.models import (
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.loading import (
     DEFAULT_LOADING_STATUS,
-    RETRYING_LOADING_STATUS,
     THINKING_LOADING_STATUS,
 )
 from vibe.cli.textual_ui.widgets.messages import (
@@ -86,12 +85,14 @@ class EventHandler:
         on_profile_changed: Callable[[], None] | None = None,
         get_show_thinking: Callable[[], bool] | None = None,
         on_context_cleared: Callable[[Path | None], Awaitable[None]] | None = None,
+        on_session_title_changed: Callable[[str], None] | None = None,
     ) -> None:
         self.mount_callback = mount_callback
         self.get_tools_collapsed = get_tools_collapsed
         self.on_profile_changed = on_profile_changed
         self.get_show_thinking = get_show_thinking or (lambda: True)
         self.on_context_cleared = on_context_cleared
+        self.on_session_title_changed = on_session_title_changed
         self.tool_calls: dict[str, ToolCallMessage] = {}
         self.current_compact: CompactMessage | None = None
         self.current_streaming_message: AssistantMessage | None = None
@@ -135,8 +136,8 @@ class EventHandler:
                 return await self._handle_entry_added(entry, loading_widget)
             case HistoryEntryUpdated() as update:
                 await self._handle_entry_updated(update, loading_widget)
-            case TurnRetrying() if loading_widget is not None:
-                loading_widget.set_status(RETRYING_LOADING_STATUS)
+            case SessionSnapshot(state=state) if loading_widget is not None:
+                loading_widget.set_retrying(state.retrying is not None)
             case _:
                 pass
         return None
@@ -338,8 +339,9 @@ class EventHandler:
             case ScheduledLoopFiredNoticeDetail():
                 await self.finalize_streaming()
                 await self.mount_callback(UserCommandMessage(entry.message))
-            case SessionTitleUpdatedNoticeDetail():
-                pass
+            case SessionTitleUpdatedNoticeDetail(title=title):
+                if self.on_session_title_changed is not None:
+                    self.on_session_title_changed(title)
 
     async def _handle_hook_notice(
         self, detail: HookNoticeDetail, loading_widget: LoadingWidget | None

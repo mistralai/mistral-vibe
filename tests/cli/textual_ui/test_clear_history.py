@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -98,3 +98,19 @@ async def test_clear_history_does_not_dispatch_when_clear_fails(
         await vibe_app._clear_history("fix the tests")
 
         vibe_app._handle_user_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_clear_history_resets_terminal_title(vibe_app: VibeApp) -> None:
+    async with vibe_app.run_test():
+        # The fresh session carries no title, so the tab must reset.
+        _set_session_log(vibe_app, enabled=True, persisted=True)
+        vibe_app.app_server.clear_history = AsyncMock()
+        vibe_app._reset_message_widgets = AsyncMock()
+        vibe_app._mount_and_scroll = AsyncMock()
+        vibe_app._handle_user_message = AsyncMock()
+        vibe_app._terminal_notifier.set_default_title = MagicMock()
+
+        await vibe_app._clear_history()
+
+        vibe_app._terminal_notifier.set_default_title.assert_called_once_with("")

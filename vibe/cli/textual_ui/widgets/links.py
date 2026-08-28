@@ -19,9 +19,28 @@ _SAFE_SCHEMES = {"http", "https"}
 _URL_HIGHLIGHTER = ReprHighlighter()
 _URL_STYLE = "repr.url"
 
+# Codepoints below this (C0 controls) and DEL are illegal in a URL.
+_FIRST_PRINTABLE_CODEPOINT = 0x20
+_DELETE_CHAR = "\x7f"
+
 
 def _is_safe_url(url: str) -> bool:
     return urlsplit(url).scheme.lower() in _SAFE_SCHEMES
+
+
+def normalize_url(url: str) -> str:
+    """Percent-encode URL-illegal characters (backslash, control chars) that can
+    slip in from model output and break the platform browser opener.
+    """
+    out: list[str] = []
+    for ch in url:
+        if ch == "\\":
+            out.append("%5C")
+        elif ord(ch) < _FIRST_PRINTABLE_CODEPOINT or ch == _DELETE_CHAR:
+            out.append(f"%{ord(ch):02X}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _click_style(url: str) -> Style:

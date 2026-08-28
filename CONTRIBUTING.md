@@ -129,6 +129,14 @@ Run all tests:
 uv run pytest
 ```
 
+By default, pytest uses `max(1, ceil(available CPUs / 2) - 1)` workers to leave
+resources available for the rest of the machine. Set
+`PYTEST_XDIST_AUTO_NUM_WORKERS` to a positive integer to override that limit:
+
+```bash
+PYTEST_XDIST_AUTO_NUM_WORKERS=4 uv run pytest
+```
+
 Run tests with verbose output:
 
 ```bash

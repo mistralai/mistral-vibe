@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -218,6 +219,37 @@ async def _collect_from(
     async for event in client.transcribe(audio_stream):
         events.append(event)
     return events
+
+
+class TestRequestMetadata:
+    @pytest.mark.asyncio
+    async def test_serializes_metadata_in_request_header(self) -> None:
+        captured_headers: dict[str, str] = {}
+
+        async def _fake_stream(**kwargs: object) -> AsyncIterator[object]:
+            headers = kwargs["http_headers"]
+            assert isinstance(headers, dict)
+            captured_headers.update(headers)
+            yield _make_sdk_done("")
+
+        mock_client = MagicMock()
+        mock_client.audio.realtime.transcribe_stream = _fake_stream
+        client = MistralTranscribeClient(
+            _make_provider(),
+            _make_model(),
+            metadata_getter=lambda: {
+                "session_id": "session-1",
+                "call_type": "secondary_call",
+            },
+        )
+        client._client = mock_client
+
+        await _collect(client)
+
+        assert json.loads(captured_headers["x-metadata"]) == {
+            "session_id": "session-1",
+            "call_type": "secondary_call",
+        }
 
 
 class TestConnectionCloseRace:

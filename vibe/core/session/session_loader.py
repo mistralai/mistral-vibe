@@ -20,6 +20,18 @@ if TYPE_CHECKING:
 
 __all__ = ["MESSAGES_FILENAME", "METADATA_FILENAME", "SessionInfo", "SessionLoader"]
 
+# Upper bound for a first-message preview used as a fallback session label.
+_PREVIEW_MAX_CHARS = 200
+
+
+def _preview_snippet(text: str) -> str:
+    # Cap length: the fallback label lands in the resume picker and ACP session
+    # lists, which a long first-message paste would otherwise blow up. Newlines
+    # are already collapsed by _clean_text.
+    if len(text) > _PREVIEW_MAX_CHARS:
+        return text[:_PREVIEW_MAX_CHARS].rstrip() + "…"
+    return text
+
 
 class SessionLoader:
     @staticmethod
@@ -48,6 +60,21 @@ class SessionLoader:
             return False
 
     @staticmethod
+    def _session_reaches(metadata: dict[str, Any], working_directory: Path) -> bool:
+        """Whether this session should be offered from *working_directory*.
+
+        The environment entry follows a move and ``origin_directory`` does not,
+        so a session that has moved is findable both where it began and where
+        it now sits. Sessions written before the origin was recorded carry only
+        the environment entry, which is where they started and stayed.
+        """
+        current = (metadata.get("environment") or {}).get("working_directory")
+        return any(
+            SessionLoader._same_working_directory(stored, working_directory)
+            for stored in (metadata.get("origin_directory"), current)
+        )
+
+    @staticmethod
     def _read_validated_session(
         session_dir: Path, working_directory: Path | None = None
     ) -> dict[str, Any] | None:
@@ -61,14 +88,10 @@ class SessionLoader:
             metadata = json.loads(read_safe(metadata_path).text)
             if not isinstance(metadata, dict):
                 return None
-            if working_directory is not None:
-                session_working_directory = (metadata.get("environment") or {}).get(
-                    "working_directory"
-                )
-                if not SessionLoader._same_working_directory(
-                    session_working_directory, working_directory
-                ):
-                    return None
+            if working_directory is not None and not SessionLoader._session_reaches(
+                metadata, working_directory
+            ):
+                return None
 
             messages = SessionLoader._parse_message_lines(read_safe(messages_path).text)
         except (OSError, json.JSONDecodeError):
@@ -288,7 +311,9 @@ class SessionLoader:
     def get_first_user_message(session_id: str, config: SessionLoggingConfig) -> str:
         """Get the first user message from a session for preview.
         Streams the transcript and stops at the first user message; never
-        parses the whole conversation or runs Pydantic validation.
+        parses the whole conversation or runs Pydantic validation. The result is
+        length-capped so an untitled session's fallback label (resume picker, ACP
+        session list) can't be blown up by a long first-message paste.
         """
         session_path = SessionLoader._latest_matching_session_dir(session_id, config)
         if not session_path:
@@ -310,6 +335,6 @@ class SessionLoader:
                 continue
             text = SessionLoader._extract_text_from_content(message.get("content"))
             if text:
-                return text
+                return _preview_snippet(text)
 
         return "(no user messages)"

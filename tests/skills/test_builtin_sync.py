@@ -36,6 +36,20 @@ class TestBuiltinSkills:
             in BUILTIN_SKILLS["vibe"].prompt
         )
 
+    # Unskip with the Plugins section: it is withheld from this release, so the
+    # skill documents no install directory and its description names no plugin.
+    @pytest.mark.skip(reason="Plugins are withheld from the vibe skill")
+    def test_vibe_skill_documents_plugin_install_directories(self) -> None:
+        prompt = BUILTIN_SKILLS["vibe"].prompt
+
+        assert "~/.vibe/plugins/<name>/" in prompt
+        assert "<root>/.vibe/plugins/<name>/" in prompt
+        assert "plugin.json" in prompt
+
+    @pytest.mark.skip(reason="Plugins are withheld from the vibe skill")
+    def test_vibe_skill_description_covers_plugin_requests(self) -> None:
+        assert "plugin" in BUILTIN_SKILLS["vibe"].description
+
     def test_discovers_builtin_skills(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("vibe.core.skills.manager.BUILTIN_SKILLS", BUILTIN_SKILLS)
         config = build_test_vibe_config()

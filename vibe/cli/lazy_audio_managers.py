@@ -19,7 +19,8 @@ from vibe.observability.logging import logger
 from vibe.utils.audio import RecordingMode
 
 if TYPE_CHECKING:
-    from vibe.cli.telemetry import ClientTelemetry
+    from vibe.app_server.telemetry_port import ClientTelemetry
+    from vibe.cli.audio_request_metadata import RequestMetadataGetter
 
 
 def check_audio_available() -> str | None:
@@ -188,11 +189,15 @@ class LazyNarratorManager:
 
 
 def create_default_voice_manager(
-    config_getter: Callable[[], ConfigView], telemetry_client: ClientTelemetry | None
+    config_getter: Callable[[], ConfigView],
+    telemetry_client: ClientTelemetry | None,
+    request_metadata_getter: RequestMetadataGetter | None,
 ) -> VoiceManagerPort:
     return LazyVoiceManager(
         config_getter,
-        lambda: _create_real_voice_manager(config_getter, telemetry_client),
+        lambda: _create_real_voice_manager(
+            config_getter, telemetry_client, request_metadata_getter
+        ),
     )
 
 
@@ -200,17 +205,20 @@ def create_default_narrator_manager(
     config_getter: Callable[[], ConfigView],
     summary_generator: TurnSummaryGenerator,
     telemetry_client: ClientTelemetry | None,
+    request_metadata_getter: RequestMetadataGetter | None,
 ) -> NarratorManagerPort:
     return LazyNarratorManager(
         config_getter,
         lambda: _create_real_narrator_manager(
-            config_getter, summary_generator, telemetry_client
+            config_getter, summary_generator, telemetry_client, request_metadata_getter
         ),
     )
 
 
 def _create_real_voice_manager(
-    config_getter: Callable[[], ConfigView], telemetry_client: ClientTelemetry | None
+    config_getter: Callable[[], ConfigView],
+    telemetry_client: ClientTelemetry | None,
+    request_metadata_getter: RequestMetadataGetter | None,
 ) -> VoiceManagerPort:
     from vibe.cli.audio_recorder.audio_recorder import AudioRecorder
     from vibe.cli.transcribe.factory import make_transcribe_client
@@ -221,13 +229,7 @@ def _create_real_voice_manager(
         model = config.transcription.model
         provider = config.transcription.provider
         transcribe_client = make_transcribe_client(
-            provider,
-            model,
-            metadata_getter=(
-                None
-                if telemetry_client is None
-                else telemetry_client.build_request_metadata
-            ),
+            provider, model, metadata_getter=request_metadata_getter
         )
     except KeyError as exc:
         logger.error(
@@ -248,6 +250,7 @@ def _create_real_narrator_manager(
     config_getter: Callable[[], ConfigView],
     summary_generator: TurnSummaryGenerator,
     telemetry_client: ClientTelemetry | None,
+    request_metadata_getter: RequestMetadataGetter | None,
 ) -> NarratorManagerPort:
     from vibe.cli.audio_player.audio_player import AudioPlayer
     from vibe.cli.narrator_manager.narrator_manager import NarratorManager
@@ -257,4 +260,5 @@ def _create_real_narrator_manager(
         audio_player=AudioPlayer(),
         summary_generator=summary_generator,
         telemetry_client=telemetry_client,
+        request_metadata_getter=request_metadata_getter,
     )

@@ -252,7 +252,11 @@ class TestCloseAndRefresh:
     @pytest.mark.asyncio
     async def test_action_refresh_dispatches_worker(self) -> None:
         app = _make_app()
-        app.run_worker = MagicMock()
+
+        def close_worker(coroutine, **_kwargs: object) -> None:
+            coroutine.close()
+
+        app.run_worker = MagicMock(side_effect=close_worker)
         app.query_one = MagicMock()
 
         await app.action_refresh()

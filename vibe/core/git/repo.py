@@ -18,6 +18,7 @@ from vibe.core.git.errors import (
     GitRepositoryNotFoundError,
     GitUnavailableError,
 )
+from vibe.core.git.remote import find_remote_url
 
 _GIT_USAGE_ERROR_STATUS = 129
 _DEFAULT_REMOTE = "origin"
@@ -29,6 +30,30 @@ _FETCH_TIMEOUT_SECONDS = 10
 # notices. Failing is the right answer for a refresh the caller treats as
 # optional.
 _NON_INTERACTIVE_GIT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+# Ordered by how likely each is to be the trunk of a repository that never set
+# origin/HEAD.
+CONVENTIONAL_BASE_BRANCHES = ("main", "master", "develop")
+_NUMSTAT_FIELDS = 3
+
+
+@dataclass(frozen=True)
+class BranchChanges:
+    """Lines this branch has added and removed against its base."""
+
+    additions: int
+    deletions: int
+
+
+@dataclass(frozen=True)
+class GitStatus:
+    worktree_name: str
+    root: Path
+    branch: str | None
+    base_branch: str | None
+    # None when the checkout has no remote at all. Names the same repository the
+    # project's own list names, so a caller holding both can tell they are one
+    # thing.
+    repo_url: str | None
 
 
 @dataclass(frozen=True)
@@ -97,9 +122,165 @@ class GitRepo:
     def close(self) -> None:
         self._repo.close()
 
+    # GitPython keeps `git cat-file --batch` children alive holding handles into
+    # .git until the repository is closed, and this is read on every session
+    # listing: a caller that forgets leaks a set per refresh rather than once.
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
     @property
     def working_dir(self) -> Path:
         return Path(self._repo.working_dir)
+
+    def status(self) -> GitStatus:
+        """This repository's own checkout, as the interface names it.
+
+        Read off the open this object already holds. It describes the checkout
+        the repository was opened at and no other: the facts that differ per
+        worktree come from the worktree listing, which is read off the same
+        open, and the rest -- the base branch, the remote -- are the
+        repository's and the same whichever of its checkouts you ask from.
+        """
+        # A bare repository has no working tree, so there is no checkout to
+        # describe. Refused rather than reported empty, because the caller that
+        # opened it still has to close it either way, and this runs on every
+        # session listing: a `None` that hid the open would leak a set of
+        # cat-file handles per refresh.
+        if self._repo.working_tree_dir is None:
+            raise GitRepositoryNotFoundError(
+                "A bare repository has no checkout to report on."
+            )
+        root = self.working_dir.resolve()
+        return GitStatus(
+            worktree_name=root.name,
+            root=root,
+            branch=self.branch(),
+            base_branch=self.base_branch(),
+            repo_url=find_remote_url(self._repo),
+        )
+
+    def branch_changes(self) -> BranchChanges | None:
+        """Committed lines added and removed on this branch, against its base.
+
+        Measured from the merge base rather than the base tip, so commits that
+        landed on the base after this branch started are not counted here as
+        deletions. Codex settled on the same definition for its status line,
+        and the reasoning holds: a number that describes a branch should not
+        move while someone edits.
+
+        Uncommitted work is deliberately absent. Folding it in would make the
+        figure change on every keystroke, and counting it separately costs a
+        ``git status`` that dominates the whole probe. An agent that has not
+        committed therefore reads as having changed nothing, which is a known
+        cost of matching Codex here rather than an oversight.
+        """
+        return self.changes_on("HEAD")
+
+    def changes_on(self, ref: str) -> BranchChanges | None:
+        """:meth:`branch_changes` for a branch this checkout is not on.
+
+        Every worktree of a repository is a ref in the same object database, so
+        one checkout can measure them all. That is the point: a picker listing
+        five worktrees would otherwise open five GitPython repositories, each
+        holding the ``cat-file`` handles this class exists to close once.
+        """
+        base_ref = self._base_ref()
+        if base_ref is None:
+            return None
+        git = _git_python()
+        try:
+            merge_base = self._repo.git.merge_base(ref, base_ref).strip()
+            if not merge_base:
+                return None
+            numstat = self._repo.git.diff("--numstat", f"{merge_base}..{ref}")
+        except git.git_command_error:
+            # An unborn HEAD, a ref that is gone, or a base that shares no
+            # history with it. All are "nothing to compare" rather than a
+            # failure worth surfacing.
+            return None
+        return _sum_numstat(numstat)
+
+    def _base_ref(self) -> str | None:
+        """The ref to measure against, preferring the remote-tracking one.
+
+        A local branch of the same name can sit behind what the remote has, and
+        measuring against it would credit this branch with commits it merely
+        has not pulled.
+        """
+        base = self.base_branch()
+        if base is None:
+            return None
+        return next(
+            (
+                ref
+                for ref in (f"refs/remotes/origin/{base}", f"refs/heads/{base}")
+                if self._has_ref(ref)
+            ),
+            None,
+        )
+
+    def branch(self) -> str | None:
+        try:
+            return self._repo.active_branch.name
+        except TypeError:
+            # Detached HEAD is checked out at a commit and has no branch name.
+            return None
+
+    def base_branch(self) -> str | None:
+        """Best-effort guess at the branch this work will merge back into.
+
+        Deliberately avoids `git remote show origin`, which hits the network.
+        """
+        return (
+            self._origin_head_branch()
+            or self._configured_default_branch()
+            or self._conventional_default_branch()
+        )
+
+    def _origin_head_branch(self) -> str | None:
+        git = _git_python()
+        try:
+            ref = self._repo.git.symbolic_ref("--short", "refs/remotes/origin/HEAD")
+        except git.git_command_error:
+            # Unset on clones made with --no-checkout or a bare --mirror origin.
+            return None
+        return ref.strip().removeprefix("origin/") or None
+
+    def _configured_default_branch(self) -> str | None:
+        configured = self._repo.config_reader().get_value("init", "defaultBranch", "")
+        branch = str(configured).strip()
+        if not branch or not self._has_branch(branch):
+            return None
+        return branch
+
+    def _conventional_default_branch(self) -> str | None:
+        return next(
+            (
+                branch
+                for branch in CONVENTIONAL_BASE_BRANCHES
+                if self._has_branch(branch)
+            ),
+            None,
+        )
+
+    def _has_branch(self, branch: str) -> bool:
+        return any(
+            self._has_ref(ref)
+            for ref in (f"refs/remotes/origin/{branch}", f"refs/heads/{branch}")
+        )
+
+    def _has_ref(self, ref: str) -> bool:
+        git = _git_python()
+        try:
+            self._repo.git.show_ref("--verify", "--quiet", ref)
+        except git.git_command_error:
+            # Any failure here means the ref could not be confirmed, which for a
+            # best-effort base-branch guess is the same as it not being there.
+            return False
+        return True
 
     def head_commit(self) -> str:
         return self._repo.head.commit.hexsha
@@ -308,3 +489,23 @@ def _parse_worktree_records(
     if current is not None:
         records.append(current)
     return tuple(records)
+
+
+def _sum_numstat(numstat: str) -> BranchChanges:
+    """Total one ``git diff --numstat`` block.
+
+    Binary files report their counts as ``-`` and contribute nothing, since
+    there are no lines to add up.
+    """
+    additions = 0
+    deletions = 0
+    for line in numstat.splitlines():
+        fields = line.split("\t")
+        if len(fields) < _NUMSTAT_FIELDS:
+            continue
+        added, removed = fields[0], fields[1]
+        if added.isdigit():
+            additions += int(added)
+        if removed.isdigit():
+            deletions += int(removed)
+    return BranchChanges(additions=additions, deletions=deletions)

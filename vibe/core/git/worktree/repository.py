@@ -10,7 +10,7 @@ import os
 from pathlib import Path, PureWindowsPath
 
 from vibe.core.git.errors import GitError
-from vibe.core.git.repo import GitRepo, RepoPaths, _git_python
+from vibe.core.git.repo import GitRepo, GitStatus, RepoPaths, _git_python
 from vibe.core.git.worktree.naming import (
     worktree_name_from_text,
     worktree_name_with_suffix,
@@ -208,6 +208,24 @@ class WorktreeRepository:
         return self._paths.repo_root
 
     @property
+    def repository_counterpart(self) -> Path | None:
+        """Where the base sits when mapped onto the main checkout.
+
+        ``linked()`` reports this same mapping for each worktree, preserving the
+        subdirectory the caller opened at. The main checkout has no entry there,
+        so a caller comparing against both needs this to complete the set.
+
+        None when there is no usable counterpart. It goes through the checks
+        ``linked()`` applies rather than resolving the path directly, so a
+        symlink that leaves the checkout is refused instead of being reported
+        as a position inside it.
+        """
+        try:
+            return _target_cwd(self._paths.repo_root, self._relative_base)
+        except WorktreeError:
+            return None
+
+    @property
     def bucket(self) -> str:
         paths = self._paths
         return managed_bucket_name(paths.repo_root, paths.common_git_dir)
@@ -283,6 +301,36 @@ class WorktreeRepository:
         )
         claim.write(record)
         return self._create(claim, record, target, branch_created=True)
+
+    def status(self) -> GitStatus:
+        """This repository's own checkout, off the open this object holds.
+
+        The listing and the status answer about the same repository, and
+        opening it is what costs: each open leaves ``git cat-file --batch``
+        children holding handles into .git until it is closed. Read together
+        they cost one open instead of two.
+        """
+        return self._git.status()
+
+    def checkouts(self) -> tuple[tuple[Path, str | None], ...]:
+        """Every checkout git reports for this repository, and its branch.
+
+        Wider than ``linked()``, which keeps only the managed worktrees a
+        session may be moved into. A session can be *sitting* in one that is
+        detached, prunable, or fails validation, and such a checkout is absent
+        from that listing: asked from it alone, the repository looks as though
+        it does not hold the session at all, and the branch reported for it is
+        the main checkout's rather than the one the session is on.
+
+        Branch is None for a detached checkout, which is a real answer here
+        rather than a missing one.
+
+        Read off the same open as ``linked()``, so a caller needing both pays
+        for one repository rather than two.
+        """
+        return tuple(
+            (record.root.resolve(), record.branch) for record in self._git.records()
+        )
 
     def linked(self) -> tuple[LinkedWorktree, ...]:
         paths = self._paths
@@ -765,6 +813,17 @@ def _target_cwd(target: Path, relative_base: Path) -> Path:
         raise WorktreeError(
             f"Worktree path {target_cwd} resolves outside worktree {root}."
         ) from e
+    # Landing inside the worktree is not enough. `root` is already resolved, so
+    # anything the join still moves is a link below it, and one pointing at a
+    # sibling satisfies the check above while naming a directory nobody asked
+    # for. That directory becomes the session's position, its write root and a
+    # trust grant, so the redirect is refused rather than followed. Committing
+    # the link would otherwise make this the branch's choice, not the user's.
+    if resolved_cwd != target_cwd:
+        raise WorktreeError(
+            f"Worktree path {target_cwd} is reached through a symbolic link to "
+            f"{resolved_cwd}."
+        )
     current = resolved_cwd
     while current != root:
         git_marker = current / ".git"

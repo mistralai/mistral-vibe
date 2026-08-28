@@ -176,6 +176,27 @@ class TestSkillInfo:
         assert info.skill_dir is not None
         assert info.skill_dir.is_absolute()
 
+    def test_from_metadata_keeps_skill_dir_for_nix_store_symlink(
+        self, tmp_path: Path
+    ) -> None:
+        nix_store = tmp_path / "nix" / "store"
+        nix_store.mkdir(parents=True)
+        (nix_store / "abc123-hm_SKILL.md").write_text(
+            "---\nname: linked\ndescription: d\n---\nbody", encoding="utf-8"
+        )
+
+        skill_dir = tmp_path / "skills" / "linked"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").symlink_to(nix_store / "abc123-hm_SKILL.md")
+
+        meta = SkillMetadata(name="linked", description="d")
+        info = SkillInfo.from_metadata(meta, skill_dir / "SKILL.md", prompt="body")
+
+        assert info.skill_dir == skill_dir.resolve()
+        assert info.skill_path is not None
+        assert info.skill_path.name == "SKILL.md"
+        assert info.skill_path.parent.resolve() == skill_dir.resolve()
+
     def test_inherits_all_metadata_fields(self, tmp_path: Path) -> None:
         skill_path = tmp_path / "test-skill" / "SKILL.md"
         skill_path.parent.mkdir()

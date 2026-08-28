@@ -18,6 +18,7 @@ from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.experiments.active import ExperimentName
 from vibe.core.experiments.models import EvalResponse
 from vibe.core.session.session_lease import SessionBusyError, SessionLease
+from vibe.core.tools.mcp import MCPRegistry
 
 
 async def _real_orchestrator() -> ConfigOrchestrator[VibeConfigSchema]:
@@ -124,6 +125,35 @@ async def test_derived_runtime_holds_the_shared_session_lease(
         await agent.aclose()
 
     SessionLease(tmp_path, derived.session_id).acquire().release()
+
+
+@pytest.mark.parametrize("derived_kind", ["fork", "child"])
+@pytest.mark.asyncio
+async def test_derived_runtime_clones_preconfigured_mcp_registry_before_init(
+    derived_kind: str, tmp_path: Path
+) -> None:
+    registry = MCPRegistry(descriptor_cache_root=tmp_path / "descriptors")
+    agent = AgentLoop(
+        FakeConfigOrchestrator(build_test_vibe_config()),
+        agent_name=BuiltinAgentName.ASK,
+        backend=FakeBackend(),
+        mcp_registry=registry,
+    )
+    factory = AgentRuntimeFactory()
+
+    derived = (
+        await factory.fork(agent, None)
+        if derived_kind == "fork"
+        else await factory.create_child(agent, "explore")
+    )
+
+    try:
+        assert derived.mcp_registry is not None
+        assert derived.mcp_registry is not registry
+        assert derived.mcp_registry._descriptor_cache_root == tmp_path / "descriptors"
+    finally:
+        await derived.aclose()
+        await agent.aclose()
 
 
 @pytest.mark.asyncio

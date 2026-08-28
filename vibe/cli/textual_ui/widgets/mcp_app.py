@@ -4,12 +4,13 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import ClassVar
 
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Container, Vertical
-from textual.events import DescendantBlur
+from textual.containers import Container, Horizontal, Vertical
+from textual.events import DescendantBlur, DescendantFocus
 from textual.message import Message
-from textual.widgets import OptionList
+from textual.widgets import Input, OptionList
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker
 
@@ -19,9 +20,11 @@ from vibe.app_server.models import (
     MCPSourceSummary,
     MCPState,
 )
+from vibe.cli.autocompletion.fuzzy import fuzzy_match
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
 
 _LIST_VIEW_HELP_TOOLS = (
     f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Show tools  "
@@ -40,6 +43,49 @@ _DETAIL_VIEW_HELP_NO_TOOLS = (
     f"{shortcut('Esc')} Close"
 )
 _BACKGROUND_REFRESH_INTERVAL_SECONDS = 60.0
+
+
+class MCPOptionList(NavigableOptionList):
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("left", "focus_search", "Search", show=False)
+    ]
+
+    def __init__(
+        self, *, focus_search: Callable[[], None], id: str | None = None
+    ) -> None:
+        super().__init__(id=id)
+        self._focus_search = focus_search
+
+    def action_cursor_up(self) -> None:
+        if self.highlighted == self._first_selectable_index():
+            self._focus_search()
+            return
+        super().action_cursor_up()
+
+    def action_cursor_down(self) -> None:
+        if self.highlighted == self._last_selectable_index():
+            self._focus_search()
+            return
+        super().action_cursor_down()
+
+    def action_focus_search(self) -> None:
+        self._focus_search()
+
+    def _first_selectable_index(self) -> int | None:
+        return next(
+            (index for index, option in enumerate(self.options) if not option.disabled),
+            None,
+        )
+
+    def _last_selectable_index(self) -> int | None:
+        return next(
+            (
+                index
+                for index in range(len(self.options) - 1, -1, -1)
+                if not self.options[index].disabled
+            ),
+            None,
+        )
 
 
 class MCPApp(Container):
@@ -92,12 +138,19 @@ class MCPApp(Container):
         self._viewing_kind: MCPSourceKind | None = None
         self._refresh_callback = refresh_callback
         self._refreshing = False
+        self._query = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="mcp-content"):
             yield NoMarkupStatic("", id="mcp-title", classes="settings-title")
-            yield NoMarkupStatic("")
-            yield NavigableOptionList(id="mcp-options")
+            with Horizontal(id="mcp-search-row"):
+                yield NoMarkupStatic("🔍", id="mcp-search-icon")
+                yield VscodeCompatInput(
+                    placeholder="Search servers and connectors (← to focus)",
+                    id="mcp-search",
+                    compact=True,
+                )
+            yield MCPOptionList(focus_search=self._focus_search, id="mcp-options")
             yield NoMarkupStatic("", id="mcp-help", classes="settings-help")
 
     def on_mount(self) -> None:
@@ -113,7 +166,37 @@ class MCPApp(Container):
         self._rebuild_preserving_scroll()
 
     def on_descendant_blur(self, _event: DescendantBlur) -> None:
+        if self.screen.focused in {self.query_one(Input), self.query_one(OptionList)}:
+            return
         self.query_one(OptionList).focus()
+
+    def on_descendant_focus(self, event: DescendantFocus) -> None:
+        search = self.query_one(Input)
+        if event.control is not search:
+            return
+        self.query_one(OptionList).scroll_to(
+            y=0, animate=False, force=True, immediate=True
+        )
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "mcp-search":
+            return
+        self._query = event.value
+        if self._viewing_name is None:
+            self._refresh_view(None)
+
+    def on_key(self, event: events.Key) -> None:
+        if self.screen.focused is not self.query_one(Input):
+            return
+        match event.key:
+            case "up":
+                self._focus_list(last=True)
+            case "down":
+                self._focus_list(last=False)
+            case _:
+                return
+        event.prevent_default()
+        event.stop()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         target = _source_from_option_id(event.option.id or "")
@@ -240,10 +323,13 @@ class MCPApp(Container):
     def _show_list_view(self, option_list: OptionList) -> None:
         self._viewing_name = None
         self._viewing_kind = None
-        servers = _sort_sources_for_menu(self._sources(MCPSourceKind.SERVER))
-        connectors = _sort_sources_for_menu(self._sources(MCPSourceKind.CONNECTOR))
+        self.query_one("#mcp-search-row", Horizontal).display = True
+        all_servers = self._sources(MCPSourceKind.SERVER)
+        all_connectors = self._sources(MCPSourceKind.CONNECTOR)
+        servers = _filter_sources(all_servers, self._query)
+        connectors = _filter_sources(all_connectors, self._query)
         self.query_one("#mcp-title", NoMarkupStatic).update(
-            "MCP Servers & Connectors" if connectors else "MCP Servers"
+            "MCP Servers & Connectors" if all_connectors else "MCP Servers"
         )
         self._set_help_text(_LIST_VIEW_HELP_TOOLS)
         if servers:
@@ -254,8 +340,14 @@ class MCPApp(Container):
             self._add_source_group(option_list, "Workspace Connectors", connectors)
         if not servers and not connectors:
             option_list.add_option(
-                Option("No MCP servers or connectors configured", disabled=True)
+                Option(
+                    "No matching MCP servers or connectors"
+                    if self._query.strip()
+                    else "No MCP servers or connectors configured",
+                    disabled=True,
+                )
             )
+            option_list.highlighted = None
             return
         option_list.highlighted = next(
             (
@@ -302,6 +394,7 @@ class MCPApp(Container):
     ) -> None:
         self._viewing_name = source.name
         self._viewing_kind = source.kind
+        self.query_one("#mcp-search-row", Horizontal).display = False
         prefix = "Connector" if source.kind is MCPSourceKind.CONNECTOR else "MCP Server"
         self.query_one("#mcp-title", NoMarkupStatic).update(f"{prefix}: {source.name}")
         if source.error:
@@ -392,6 +485,22 @@ class MCPApp(Container):
     def _set_help_text(self, text: str) -> None:
         self.query_one("#mcp-help", NoMarkupStatic).update(shortcut_hint(text))
 
+    def _focus_search(self) -> None:
+        if self._viewing_name is None:
+            self.query_one(Input).focus()
+
+    def _focus_list(self, *, last: bool) -> None:
+        option_list = self.query_one(MCPOptionList)
+        selectable = [
+            index
+            for index, option in enumerate(option_list.options)
+            if not option.disabled
+        ]
+        if not selectable:
+            return
+        option_list.highlighted = selectable[-1] if last else selectable[0]
+        option_list.focus()
+
 
 def _source_option_id(name: str, kind: MCPSourceKind) -> str:
     return f"{kind.value}:{name}"
@@ -447,3 +556,19 @@ def _sort_sources_for_menu(
         sources,
         key=lambda source: (not source.tools, source.name.casefold(), source.name),
     )
+
+
+def _filter_sources(
+    sources: Sequence[MCPSourceSummary], query: str
+) -> list[MCPSourceSummary]:
+    ordered = _sort_sources_for_menu(sources)
+    needle = query.strip()
+    if not needle:
+        return ordered
+    scored = [
+        (match.score, index, source)
+        for index, source in enumerate(ordered)
+        if (match := fuzzy_match(needle, source.name)).matched
+    ]
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [source for _, _, source in scored]

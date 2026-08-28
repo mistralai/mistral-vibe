@@ -17,6 +17,7 @@ from vibe.cli.autocompletion.inline_skill_completion import (
 from vibe.cli.autocompletion.path_completion import PathCompletionController
 from vibe.cli.autocompletion.slash_command import SlashCommandController
 from vibe.cli.commands import CommandRegistry
+from vibe.cli.textual_ui.queue_kinds import QueuedItemKind
 from vibe.cli.textual_ui.widgets.chat_input.body import ChatInputBody
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
@@ -40,6 +41,29 @@ class ChatInputContainer(Vertical):
             self.value = value
             super().__init__()
 
+    class QueueEditSubmitted(Message):
+        def __init__(self, value: str, kind: QueuedItemKind) -> None:
+            self.value = value
+            self.kind = kind
+            super().__init__()
+
+    class QueueEditConsumed(Message):
+        def __init__(self, value: str, kind: QueuedItemKind) -> None:
+            self.value = value
+            self.kind = kind
+            super().__init__()
+
+    class QueueRemoveRequested(Message):
+        pass
+
+    class QueueSelectionScroll(Message):
+        def __init__(self, queue_index: int) -> None:
+            self.queue_index = queue_index
+            super().__init__()
+
+    class QueueModeExited(Message):
+        pass
+
     def __init__(
         self,
         command_registry: CommandRegistry,
@@ -49,6 +73,10 @@ class ChatInputContainer(Vertical):
         skill_entries_getter: Callable[[], list[tuple[str, str]]] | None = None,
         file_watcher_for_autocomplete_getter: Callable[[], bool] | None = None,
         voice_manager: VoiceManagerPort | None = None,
+        queue_edit_active_getter: Callable[[], bool] | None = None,
+        queue_items_getter: Callable[[], list[tuple[int, QueuedItemKind, str]]]
+        | None = None,
+        queue_selected_index_getter: Callable[[], int | None] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -61,6 +89,9 @@ class ChatInputContainer(Vertical):
             file_watcher_for_autocomplete_getter
         )
         self._voice_manager = voice_manager
+        self._queue_edit_active_getter = queue_edit_active_getter
+        self._queue_items_getter = queue_items_getter
+        self._queue_selected_index_getter = queue_selected_index_getter
         self._custom_border_label: str | None = None
 
         self._completion_manager = MultiCompletionManager([
@@ -103,6 +134,9 @@ class ChatInputContainer(Vertical):
                 command_registry=self._command_registry,
                 id="input-body",
                 voice_manager=self._voice_manager,
+                queue_edit_active_getter=self._queue_edit_active_getter,
+                queue_items_getter=self._queue_items_getter,
+                queue_selected_index_getter=self._queue_selected_index_getter,
             )
 
             yield self._body
@@ -221,6 +255,35 @@ class ChatInputContainer(Vertical):
     def on_chat_input_body_submitted(self, event: ChatInputBody.Submitted) -> None:
         event.stop()
         self.post_message(self.Submitted(event.value))
+
+    def on_chat_input_body_queue_edit_submitted(
+        self, event: ChatInputBody.QueueEditSubmitted
+    ) -> None:
+        event.stop()
+        self.post_message(self.QueueEditSubmitted(event.value, event.kind))
+
+    def on_chat_input_body_queue_edit_consumed(
+        self, event: ChatInputBody.QueueEditConsumed
+    ) -> None:
+        event.stop()
+        self.post_message(self.QueueEditConsumed(event.value, event.kind))
+
+    def on_chat_input_body_queue_remove_requested(
+        self, event: ChatInputBody.QueueRemoveRequested
+    ) -> None:
+        event.stop()
+        self.post_message(self.QueueRemoveRequested())
+
+    def on_chat_input_body_queue_selection_scroll(
+        self, event: ChatInputBody.QueueSelectionScroll
+    ) -> None:
+        event.stop()
+        self.post_message(self.QueueSelectionScroll(event.queue_index))
+
+    def on_chat_input_body_queue_mode_exited(
+        self, _event: ChatInputBody.QueueModeExited
+    ) -> None:
+        self.post_message(self.QueueModeExited())
 
     @property
     def switching_mode(self) -> bool:

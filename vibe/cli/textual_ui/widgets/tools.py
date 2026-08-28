@@ -434,29 +434,50 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             self.display = False
             return
 
+        output = (
+            self._state.output
+            if isinstance(self._state, CompletedEffectState)
+            else None
+        )
+        # A hook that replaces a tool result leaves no structured output; the model-facing
+        # text lives in output_text. Fall back to it so the replacement (e.g. a deny
+        # reason) is still visible when unfolded.
+        fallback_text = (
+            clean_output(self._state.output_text).strip()
+            if output is None and isinstance(self._state, CompletedEffectState)
+            else ""
+        )
+
         def build_result_body() -> Widget:
-            widget = get_result_widget(
-                self._entry.detail,
-                self._state.output
-                if isinstance(self._state, CompletedEffectState)
-                else None,
-                success=display.success,
-                message=display.message,
-                warnings=display.warnings,
-            )
-            self._result_widget = widget
+            if output is None and fallback_text:
+                widget: Widget = NoMarkupStatic(
+                    fallback_text, classes="tool-result-detail"
+                )
+            else:
+                widget = get_result_widget(
+                    self._entry.detail,
+                    output,
+                    success=display.success,
+                    message=display.message,
+                    warnings=display.warnings,
+                )
+                self._result_widget = widget
             return Horizontal(
                 ExpandingBorder(classes="tool-result-border"),
                 Vertical(widget, classes="tool-result-content"),
                 classes="tool-result-container",
             )
 
+        # The header is inert only when there is genuinely nothing to unfold: no
+        # structured output, no fallback text, and no warnings.
+        has_body = not (output is None and not fallback_text and not display.warnings)
         section = HeaderCollapsibleSection(
             build_result_body,
             header_text=display.message,
             header_verb=display.verb,
             header_suffix=display.suffix,
             header_success=display.success,
+            collapsible=has_body,
         )
         await self.mount(section)
         if self._call_widget:

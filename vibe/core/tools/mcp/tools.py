@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator
 import contextlib
 from dataclasses import dataclass
 from datetime import timedelta
 import hashlib
+import inspect
 import os
 from pathlib import Path
 import threading
@@ -18,17 +18,19 @@ from mcp import ClientSession
 from mcp.client.auth import OAuthFlowError
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from vibe.core.auth.mcp_oauth import (
-    MCPOAuthInvalidGrant,
-    MCPOAuthTransientRefreshError,
-    unwrap_oauth_refresh_error,
-)
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
     BaseToolState,
     InvokeContext,
     ToolError,
+)
+from vibe.core.tools.mcp.authorization import (
+    MCPAuthorizationProvider,
+    MCPAuthorizationRef,
+    MCPAuthorizationRequired,
+    MCPAuthorizationRequiredSink,
+    MCPAuthorizationSnapshot,
 )
 from vibe.core.tools.mcp_sampling import MCPSamplingHandler
 from vibe.core.tools.remote import MCPTool, MCPToolResult, RemoteTool, _OpenArgs
@@ -78,9 +80,10 @@ async def _mcp_stderr_capture() -> AsyncGenerator[TextIO, None]:
 
 
 @dataclass(frozen=True)
-class MCPHttpOAuthRuntime:
-    lock: asyncio.Lock
-    failure_callback: Callable[[str], Awaitable[None]]
+class MCPHttpAuthorizationRuntime:
+    provider: MCPAuthorizationProvider
+    reference: MCPAuthorizationRef
+    required_sink: MCPAuthorizationRequiredSink | None = None
 
 
 class _MCPContentBlock(BaseModel):
@@ -197,7 +200,7 @@ def create_mcp_http_proxy_tool_class(
     server_hint: str | None = None,
     headers: dict[str, str] | None = None,
     auth: httpx.Auth | None = None,
-    oauth_runtime: MCPHttpOAuthRuntime | None = None,
+    authorization_runtime: MCPHttpAuthorizationRuntime | None = None,
     startup_timeout_sec: float | None = None,
     tool_timeout_sec: float | None = None,
     sampling_enabled: bool = True,
@@ -225,7 +228,9 @@ def create_mcp_http_proxy_tool_class(
         _input_schema: ClassVar[dict[str, Any]] = remote.input_schema
         _headers: ClassVar[dict[str, str]] = dict(headers or {})
         _auth: ClassVar[httpx.Auth | None] = auth
-        _oauth_runtime: ClassVar[MCPHttpOAuthRuntime | None] = oauth_runtime
+        _authorization_runtime: ClassVar[MCPHttpAuthorizationRuntime | None] = (
+            authorization_runtime
+        )
         _startup_timeout_sec: ClassVar[float | None] = startup_timeout_sec
         _tool_timeout_sec: ClassVar[float | None] = tool_timeout_sec
         _sampling_enabled: ClassVar[bool] = sampling_enabled
@@ -246,49 +251,83 @@ def create_mcp_http_proxy_tool_class(
                     ctx.sampling_callback if ctx and self._sampling_enabled else None
                 )
                 payload = args.model_dump(exclude_none=True)
-                if self._oauth_runtime is None:
+                if self._authorization_runtime is None:
                     yield await self._call_remote(payload, sampling_callback)
                     return
-                async with self._oauth_runtime.lock:
-                    result = await self._call_remote(payload, sampling_callback)
-                yield result
+                yield await self._call_authorized(payload, sampling_callback)
             except Exception as exc:
-                # auth-flow errors arrive wrapped in an ExceptionGroup; unwrap to react
-                match unwrap_oauth_refresh_error(exc):
-                    case MCPOAuthInvalidGrant():
-                        if self._oauth_runtime is not None:
-                            await self._oauth_runtime.failure_callback(
-                                self._server_name
-                            )
-                        raise ToolError(
-                            f"MCP server '{self._server_name}' lost authentication. "
-                            "Stop the current turn and ask the user to run "
-                            f"`/mcp login {self._server_name}` to re-authenticate."
-                        ) from exc
-                    case MCPOAuthTransientRefreshError():
-                        raise ToolError(
-                            f"MCP server '{self._server_name}' had a transient token "
-                            "refresh error. Stored credentials were kept; retry "
-                            "shortly."
-                        ) from exc
-                    case OAuthFlowError():
-                        raise ToolError(
-                            f"MCP server '{self._server_name}' needs re-authentication."
-                            " Stop the current turn and ask the user to run "
-                            f"`/mcp login {self._server_name}`."
-                        ) from exc
-                    case None:
-                        raise ToolError(f"MCP call failed: {exc}") from exc
+                if isinstance(exc, ToolError):
+                    raise
+                raise ToolError(f"MCP call failed: {exc}") from exc
+
+        @classmethod
+        async def _call_authorized(
+            cls, payload: dict[str, Any], sampling_callback: MCPSamplingHandler | None
+        ) -> MCPToolResult:
+            runtime = cls._authorization_runtime
+            if runtime is None:
+                return await cls._call_remote(payload, sampling_callback)
+            authorization = await runtime.provider.resolve(runtime.reference)
+            if isinstance(authorization, MCPAuthorizationRequired):
+                await _publish_authorization_required(runtime, authorization)
+                raise ToolError(
+                    f"MCP server '{cls._server_name}' needs re-authentication."
+                )
+            try:
+                return await cls._call_remote(
+                    payload, sampling_callback, headers=dict(authorization.headers)
+                )
+            except Exception as exc:
+                if not is_authorization_rejection(exc):
+                    raise
+                replacement = await runtime.provider.reject(
+                    runtime.reference,
+                    observed_connection_revision=authorization.connection_revision,
+                    reason="http_unauthorized",
+                )
+                if (
+                    isinstance(replacement, MCPAuthorizationSnapshot)
+                    and replacement.connection_revision
+                    != authorization.connection_revision
+                ):
+                    try:
+                        return await cls._call_remote(
+                            payload,
+                            sampling_callback,
+                            headers=dict(replacement.headers),
+                        )
+                    except Exception as retry_exc:
+                        if not is_authorization_rejection(retry_exc):
+                            raise
+                        replacement = await runtime.provider.reject(
+                            runtime.reference,
+                            observed_connection_revision=(
+                                replacement.connection_revision
+                            ),
+                            reason="http_unauthorized",
+                        )
+                required = authorization_required_result(
+                    replacement,
+                    observed_connection_revision=authorization.connection_revision,
+                )
+                await _publish_authorization_required(runtime, required)
+                raise ToolError(
+                    f"MCP server '{cls._server_name}' rejected authentication."
+                ) from exc
 
         @classmethod
         async def _call_remote(
-            cls, payload: dict[str, Any], sampling_callback: MCPSamplingHandler | None
+            cls,
+            payload: dict[str, Any],
+            sampling_callback: MCPSamplingHandler | None,
+            *,
+            headers: dict[str, str] | None = None,
         ) -> MCPToolResult:
             return await call_tool_http(
                 cls._mcp_url,
                 cls._remote_name,
                 payload,
-                headers=cls._headers,
+                headers=headers if headers is not None else cls._headers,
                 auth=cls._auth,
                 startup_timeout_sec=cls._startup_timeout_sec,
                 tool_timeout_sec=cls._tool_timeout_sec,
@@ -313,6 +352,38 @@ def create_mcp_http_proxy_tool_class(
 
     MCPHttpProxyTool.__name__ = f"MCP_{computed_alias}__{remote.name}"
     return MCPHttpProxyTool
+
+
+async def _publish_authorization_required(
+    runtime: MCPHttpAuthorizationRuntime, required: MCPAuthorizationRequired
+) -> None:
+    if runtime.required_sink is None:
+        return
+    result = runtime.required_sink(runtime.reference.server_name, required)
+    if inspect.isawaitable(result):
+        await result
+
+
+def authorization_required_result(
+    result: MCPAuthorizationSnapshot | MCPAuthorizationRequired,
+    *,
+    observed_connection_revision: str,
+) -> MCPAuthorizationRequired:
+    if isinstance(result, MCPAuthorizationRequired):
+        return result
+    return MCPAuthorizationRequired(
+        reason="rejected",
+        descriptor_revision=result.descriptor_revision,
+        observed_connection_revision=observed_connection_revision,
+    )
+
+
+def is_authorization_rejection(exc: BaseException) -> bool:
+    if isinstance(exc, BaseExceptionGroup):
+        return any(is_authorization_rejection(child) for child in exc.exceptions)
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == httpx.codes.UNAUTHORIZED
+    return isinstance(exc, OAuthFlowError)
 
 
 def build_stdio_params(

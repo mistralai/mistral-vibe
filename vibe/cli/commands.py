@@ -10,6 +10,10 @@ from vibe.cli.constants import CLIPBOARD_IMAGE_PASTE_SUPPORTED_SYSTEM
 @dataclass(frozen=True)
 class CommandContext:
     vibe_code_enabled: bool = False
+    # Whether the backend answered a plugin catalogue read. Only the Unified
+    # Harness resolves plugins, and without one there is nothing to list and
+    # nothing a reload could re-pin.
+    plugins_enabled: bool = False
 
 
 CommandAvailability = Callable[[CommandContext], bool]
@@ -34,13 +38,13 @@ class CommandRegistry:
     def __init__(
         self,
         excluded_commands: list[str] | None = None,
-        vibe_code_enabled: bool = False,
+        context: CommandContext | None = None,
     ) -> None:
         if excluded_commands is None:
             excluded_commands = []
         self._disabled_commands = set(excluded_commands)
         self._commands: dict[str, Command] = {}
-        self.refresh(CommandContext(vibe_code_enabled))
+        self.refresh(context)
 
     def _build_commands(self) -> dict[str, Command]:
         return {
@@ -179,6 +183,21 @@ class CommandRegistry:
                 ),
                 handler="_show_mcp",
             ),
+            # Withheld from this release: the handlers, the catalogue probe and
+            # the `PluginsApp` behind them all stay wired, only the two entry
+            # points are unregistered. Restore both entries to bring them back.
+            # "plugins": Command(
+            #     aliases=frozenset(["/plugins"]),
+            #     description="Display the plugins this session is running",
+            #     handler="_show_plugins",
+            #     is_available=lambda ctx: ctx.plugins_enabled,
+            # ),
+            # "reload-plugins": Command(
+            #     aliases=frozenset(["/reload-plugins"]),
+            #     description="Re-pin this session's plugins and report what changed",
+            #     handler="_reload_plugins",
+            #     is_available=lambda ctx: ctx.plugins_enabled,
+            # ),
             "voice": Command(
                 aliases=frozenset(["/voice"]),
                 description="Configure voice settings",

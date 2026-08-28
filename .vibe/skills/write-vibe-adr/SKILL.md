@@ -58,7 +58,8 @@ What we decided. Include concrete rules and current-vs-aspirational direction wh
 
 ## Rationale
 
-Why this decision exists. Name the ambiguity, pressure, or tradeoff.
+Why this decision exists. Name the tradeoff and any non-obvious consequences.
+Mention a rejected alternative only when it helps explain the decision.
 
 ## Agent Guidance
 
@@ -104,4 +105,5 @@ If the ADR is not registered in `AGENTS.md`, agents will not reliably discover i
 | Using vague trigger text | Name concrete code-change scenarios. |
 | Duplicating another ADR | Reference or update the existing ADR instead. |
 | Writing a human essay | Keep it short, directive, and agent-facing. |
+| Copying an implementation plan into the ADR | Keep only the durable rule and its consequences. |
 | Adding status fields | Vibe ADRs intentionally mix current and aspirational decisions without status. |

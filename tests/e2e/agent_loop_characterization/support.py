@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 import io
 import json
 from pathlib import Path
@@ -11,7 +10,10 @@ from typing import Any
 import pexpect
 import tomli_w
 
-from tests.e2e.common import strip_ansi, wait_for_rendered_text
+from tests.e2e.common import (
+    wait_for_rendered_text,
+    wait_for_request_count_while_draining_child_output as wait_for_request_count_while_draining_child_output,
+)
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
 APPROVAL_INPUT_GRACE_PERIOD_S = 0.65
@@ -133,29 +135,6 @@ def assert_message_content_present(
     assert any(
         message.get("role") == role and expected in str(message.get("content", ""))
         for message in _messages(payload)
-    )
-
-
-def wait_for_request_count_while_draining_child_output(
-    child: pexpect.spawn,
-    captured: io.StringIO,
-    request_count_getter: Callable[[], int],
-    *,
-    expected_count: int,
-    timeout: float,
-) -> None:
-    start = time.monotonic()
-    while time.monotonic() - start < timeout:
-        if request_count_getter() >= expected_count:
-            return
-        try:
-            child.expect(r"\S", timeout=0.05)
-        except pexpect.TIMEOUT:
-            pass
-    rendered_tail = strip_ansi(captured.getvalue())[-1200:]
-    raise AssertionError(
-        f"Timed out waiting for {expected_count} backend request(s).\n\n"
-        f"Rendered tail:\n{rendered_tail}"
     )
 
 

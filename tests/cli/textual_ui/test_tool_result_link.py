@@ -17,6 +17,7 @@ from vibe.cli.textual_ui.widgets.links import (
     LinkStatic,
     link_content,
     linkify_urls_in_text,
+    normalize_url,
 )
 from vibe.cli.textual_ui.widgets.tool_widgets import WebSearchResultWidget
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage
@@ -78,6 +79,17 @@ def test_link_content_handles_previously_unsafe_urls() -> None:
         content = link_content(url, url)
         assert content.plain == url  # literal text, never re-parsed as markup
         assert len(_click_actions(content)) == 1
+
+
+def test_normalize_url_encodes_backslash_but_keeps_valid_url() -> None:
+    # A literal backslash is illegal in a URL and breaks the macOS webbrowser
+    # opener (unterminated AppleScript string), so it must be percent-encoded.
+    # A URL that already uses %5C must be left untouched (no over-encoding).
+    assert normalize_url("https://a.co/\\") == "https://a.co/%5C"
+    assert (
+        normalize_url("https://grafana/explore?panes=%7B%5C%22a%5C%22%7D")
+        == "https://grafana/explore?panes=%7B%5C%22a%5C%22%7D"
+    )
 
 
 class _Harness(App):

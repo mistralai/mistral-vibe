@@ -24,6 +24,9 @@ MESSAGES_FILENAME = "messages.jsonl"
 class SessionInfo(TypedDict):
     session_id: str
     cwd: str
+    # Where the session started, when that differs from where it sits now.
+    # The listing has to offer a moved session from both, so one cannot do.
+    origin_directory: str | None
     parent_session_id: str | None
     title: str | None
     start_time: str | None
@@ -75,9 +78,14 @@ def _build_info(
         except (ValueError, OSError):
             start_time = None
 
+    origin_directory = metadata.get("origin_directory")
+
     return {
         "session_id": session_id,
         "cwd": session_cwd,
+        "origin_directory": (
+            origin_directory if isinstance(origin_directory, str) else None
+        ),
         "parent_session_id": metadata.get("parent_session_id"),
         "title": metadata.get("title"),
         "start_time": start_time,
@@ -95,9 +103,13 @@ def _entry_from_payload(payload: Any) -> _Entry | None:
     if not isinstance(mtime_ns, int) or not isinstance(session_id, str):
         return None
     cwd = payload.get("cwd")
+    origin_directory = payload.get("origin_directory")
     info: SessionInfo = {
         "session_id": session_id,
         "cwd": cwd if isinstance(cwd, str) else "",
+        "origin_directory": (
+            origin_directory if isinstance(origin_directory, str) else None
+        ),
         "parent_session_id": payload.get("parent_session_id"),
         "title": payload.get("title"),
         "start_time": payload.get("start_time"),
@@ -137,6 +149,7 @@ class SessionIndex:
                 SessionInfo(
                     session_id=entry.info["session_id"],
                     cwd=entry.info["cwd"],
+                    origin_directory=entry.info["origin_directory"],
                     parent_session_id=entry.info["parent_session_id"],
                     title=entry.info["title"],
                     start_time=entry.info["start_time"],
@@ -147,7 +160,12 @@ class SessionIndex:
             ]
         if cwd is None:
             return result
-        return [info for info in result if info["cwd"] == cwd]
+        # Either directory, matching SessionLoader._session_reaches.
+        # Filtering on the current one alone would drop a moved session
+        # from the listing at the directory the user started it in.
+        return [
+            info for info in result if cwd in {info["cwd"], info["origin_directory"]}
+        ]
 
     def _reconcile(self) -> None:
         """Sync the in-memory cache with the session dirs via cheap stat checks."""

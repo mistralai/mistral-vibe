@@ -16,11 +16,7 @@ from tests.stubs.fake_tool import FakeTool, FakeToolArgs
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import SessionLoggingConfig
 from vibe.core.hooks._handler import HookOutputError, _parse_structured_response
-from vibe.core.hooks.config import (
-    HookConfigResult,
-    _load_hooks_file,
-    load_hooks_from_fs,
-)
+from vibe.core.hooks.config import HookConfigResult, load_hooks_file, load_hooks_from_fs
 from vibe.core.hooks.executor import HookExecutor
 from vibe.core.hooks.manager import HooksManager
 from vibe.core.hooks.models import (
@@ -317,7 +313,7 @@ class TestConfigLoading:
         assert result.hooks == []
 
     def test_nonexistent_file_returns_empty(self, tmp_path: Path) -> None:
-        result = _load_hooks_file(tmp_path / "missing.toml")
+        result = load_hooks_file(tmp_path / "missing.toml")
         assert result.hooks == []
         assert result.issues == []
 

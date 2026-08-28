@@ -65,6 +65,9 @@ class SessionLoggingConfig(BaseSettings):
     save_dir: str = ""
     session_prefix: str = "session"
     enabled: bool = True
+    # Background LLM-generated session titles (shown in --resume and the
+    # terminal tab). Off falls back to the first-message preview.
+    generate_titles: bool = True
 
     @field_validator("save_dir", mode="before")
     @classmethod

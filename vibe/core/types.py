@@ -190,11 +190,21 @@ class SessionMetadata(BaseModel):
     git_commit: str | None
     git_branch: str | None
     environment: dict[str, str | None]
+    # Where the session began. ``environment.working_directory`` follows it as
+    # it moves, so between them the record names both the directory the user
+    # started in and the one the session is working in. Neither on its own can
+    # do that, which is the whole reason this field exists.
+    origin_directory: str | None = None
     username: str
     child_sessions: list[ChildSessionLink] = Field(default_factory=list)
     loops: list[ScheduledLoop] = Field(default_factory=list)
     title: str | None = None
     title_source: Literal["auto", "manual"] = "auto"
+    # The sticky GrowthBook variant assignment, persisted so a resumed session
+    # keeps its buckets. NOTE: plan/org attributes and user_plan are user-scoped,
+    # not session-scoped, so they are deliberately NOT persisted here — they are
+    # re-resolved from the user-scoped whoami/identity cache on every session, so
+    # resuming never reports a stale plan.
     experiments: EvalResponse | None = None
     import_provenance: dict[str, JsonValue] | None = None
     created_worktree: WorktreeContext | None = None
@@ -625,6 +635,7 @@ class ContextClearedEvent(BaseEvent):
 
 class SessionTitleUpdatedEvent(BaseEvent):
     title: str
+    session_id: str
 
 
 type SwitchAgentCallback = Callable[[str], Awaitable[None]]

@@ -178,6 +178,44 @@ def _manager_with_routing(
     return manager
 
 
+def _extra_models_response(
+    payload: dict[str, Any] | list[Any], *, in_experiment: bool
+) -> EvalResponse:
+    return EvalResponse.model_validate({
+        "features": {
+            ExperimentName.CLI_EXTRA_MODELS.value: {
+                "defaultValue": {},
+                "rules": [
+                    {
+                        "force": payload,
+                        "tracks": [
+                            {
+                                "experiment": {
+                                    "key": ExperimentName.CLI_EXTRA_MODELS.value
+                                },
+                                "result": {
+                                    "key": "1",
+                                    "variationId": 1,
+                                    "value": payload,
+                                    "inExperiment": in_experiment,
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    })
+
+
+def _manager_with_extra_models(
+    payload: dict[str, Any] | list[Any], *, in_experiment: bool = True
+) -> ExperimentManager:
+    manager = ExperimentManager(client=_StubClient(None))
+    manager.hydrate(_extra_models_response(payload, in_experiment=in_experiment))
+    return manager
+
+
 def _manager_with_managed_shell_variant(variant: str) -> ExperimentManager:
     manager = ExperimentManager(client=_StubClient(None))
     manager.hydrate(_response_forcing_managed_shell(variant))
@@ -543,6 +581,72 @@ async def test_routing_experiment_honors_manual_selection_of_routed_model(
     assert config.active_model == _ROUTED_TEST_ALIAS
     assert _ROUTED_TEST_ALIAS in config.models
     assert config.get_active_model().alias == _ROUTED_TEST_ALIAS
+
+
+@pytest.mark.asyncio
+async def test_maps_extra_models_experiment_to_routed_extra_models() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants(
+        _manager_with_extra_models({
+            "models": [_ROUTING_MODEL_CONFIG]
+        }).config_variants()
+    )
+
+    data = await layer.load()
+
+    dumped = data.model_dump()
+    assert json.loads(dumped["routed_extra_models"]) == [_ROUTING_MODEL_CONFIG]
+    # Add-only: the exposure experiment never sets the routed default.
+    assert "routed_default_model" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_maps_extra_models_from_bare_list_payload() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants(
+        _manager_with_extra_models([_ROUTING_MODEL_CONFIG]).config_variants()
+    )
+
+    data = await layer.load()
+
+    assert json.loads(data.model_dump()["routed_extra_models"]) == [
+        _ROUTING_MODEL_CONFIG
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ignores_extra_models_payload_without_models() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants(_manager_with_extra_models({"other": "value"}).config_variants())
+
+    data = await layer.load()
+
+    assert data.model_dump() == {}
+
+
+@pytest.mark.asyncio
+async def test_extra_models_experiment_adds_to_dropdown_without_default(
+    config_dir: Path,
+) -> None:
+    (config_dir / "config.toml").write_text("", encoding="utf-8")
+    orchestrator = await build_default_orchestrator(require_api_key=False)
+    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
+    default_before = orchestrator.config.resolve_default_model_alias()
+    layer.set_variants(
+        _manager_with_extra_models({
+            "models": [_ROUTING_MODEL_CONFIG]
+        }).config_variants()
+    )
+
+    await orchestrator.reload()
+
+    config = orchestrator.config
+    assert config.active_model == ""  # unpinned
+    assert _ROUTED_TEST_ALIAS in config.models
+    assert _ROUTED_TEST_ALIAS in config.available_models()
+    # The default is untouched by the exposure experiment.
+    assert config.resolve_default_model_alias() == default_before
+    assert config.get_active_model().alias == default_before
 
 
 @pytest.mark.asyncio

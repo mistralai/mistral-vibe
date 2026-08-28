@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum, auto
+from functools import cache
 from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue, TypeAdapter
@@ -271,6 +272,12 @@ class PublicRetryCategory(StrEnum):
     UNKNOWN = auto()
 
 
+class PublicRetryState(ProtocolModel):
+    turn_id: str
+    category: PublicRetryCategory
+    detail: str
+
+
 class TurnErrorCode(StrEnum):
     RATE_LIMIT = auto()
     CONTEXT_TOO_LONG = auto()
@@ -484,12 +491,91 @@ class SkillSummary(ProtocolModel):
     description: str
     prompt: str
     user_invocable: bool = True
-    source: Literal["builtin", "local", "registry"] = "local"
+    source: Literal["builtin", "local", "registry", "plugin"] = "local"
 
 
 class ToolSummary(ProtocolModel):
     name: str
     is_custom: bool = False
+
+
+# The closed set the App Server contract declares. Vibe never emits "unknown";
+# it is here so a component kind Vibe does not model still round-trips.
+type PluginComponentKind = Literal[
+    "skill",
+    "knowledge",
+    "library",
+    "mcp_server",
+    "connector",
+    "hook",
+    "agent",
+    "subagent",
+    "tool",
+    "unknown",
+]
+
+
+class PluginComponent(ProtocolModel):
+    kind: PluginComponentKind
+    name: str
+    # Absolute, and joined against the plugin root at read time. The snapshot
+    # stores a portable reference; absolute paths never enter a digested
+    # artifact. A component with no file on disk has no source path.
+    source_path: str | None = None
+    config: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class PluginInfo(ProtocolModel):
+    workdir: str | None = None
+    components: list[PluginComponent] = Field(default_factory=list)
+    raw: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+# Mirrors of the closed sets Core declares, restated because a client reading a
+# response must not have to import the resolution stack that produced it.
+# `test_the_catalogue_mirrors_every_closed_set_core_declares` holds them equal.
+type PluginSourceFormat = Literal[
+    "agent_plugins_1_0", "claude_code", "codex", "kimi_code", "opencode"
+]
+type PluginRouteStatus = Literal["live", "stale", "unavailable"]
+type PluginScope = Literal["builtin", "global", "project"]
+
+
+# The Vibe-owned catalogue behind /plugins. It carries no component config, so
+# an MCP env value, a header value and a URL query have no route into it.
+class PluginCatalogComponent(ProtocolModel):
+    kind: PluginComponentKind
+    name: str
+    # Populated for tools alone, and only once a route has drifted: absent
+    # means live, the convention plugin/info already uses.
+    status: PluginRouteStatus | None = None
+
+
+class PluginCatalogEntry(ProtocolModel):
+    name: str
+    version: str | None = None
+    source_format: PluginSourceFormat
+    manifest_digest: str
+    # Everything below comes off the descriptor, which a pinned entry this
+    # resolve dropped does not have.
+    description: str = ""
+    author: str | None = None
+    scope: PluginScope | None = None
+    content_sha256: str | None = None
+    pinned_root: str | None = None
+    installed_root: str | None = None
+    components: list[PluginCatalogComponent] = Field(default_factory=list)
+    drifted: int = 0
+
+
+class PluginCatalogDropped(ProtocolModel):
+    file: str
+    message: str
+
+
+class PluginCatalogState(ProtocolModel):
+    plugins: list[PluginCatalogEntry] = Field(default_factory=list)
+    dropped: list[PluginCatalogDropped] = Field(default_factory=list)
 
 
 class ConnectorCounts(ProtocolModel):
@@ -813,11 +899,14 @@ PublicHistoryEntry = Annotated[
     Field(discriminator="type"),
 ]
 
-_PUBLIC_HISTORY_ENTRY_ADAPTER = TypeAdapter(PublicHistoryEntry)
+
+@cache
+def _public_history_entry_adapter() -> TypeAdapter[PublicHistoryEntry]:
+    return TypeAdapter(PublicHistoryEntry)
 
 
 def validate_history_entry(value: object) -> PublicHistoryEntry:
-    return _PUBLIC_HISTORY_ENTRY_ADAPTER.validate_python(
+    return _public_history_entry_adapter().validate_python(
         value, by_alias=True, by_name=False
     )
 
@@ -897,6 +986,7 @@ class PublicSessionState(ProtocolModel):
     history_before_cursor: str | None = None
     turns: list[PublicTurn] | None = None
     active_callbacks: list[PublicCallbackEntry] = Field(default_factory=list)
+    retrying: PublicRetryState | None = None
 
     @property
     def latest_turn(self) -> PublicTurn | None:

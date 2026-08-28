@@ -9,15 +9,24 @@ from tests.stubs.app_config import build_test_app_config
 from tests.stubs.fake_audio_player import FakeAudioPlayer
 from tests.stubs.fake_summary_generator import FakeSummaryGenerator
 from tests.stubs.fake_tts_client import FakeTTSClient
+from vibe.app_server.telemetry_port import ClientTelemetryEvent
 from vibe.cli.narrator_manager import NarratorManager, NarratorState
 from vibe.cli.tts.tts_client_port import TTSResult
 from vibe.cli.turn_summary import TurnSummaryResult
 
 
+class AnalyticsOnlyTelemetry:
+    def __init__(self) -> None:
+        self.events: list[ClientTelemetryEvent] = []
+
+    def log(self, event: ClientTelemetryEvent) -> None:
+        self.events.append(event)
+
+
 def _make_manager(
     *,
     narrator_enabled: bool = True,
-    telemetry_client: MagicMock | None = None,
+    telemetry_client: MagicMock | AnalyticsOnlyTelemetry | None = None,
     tts_client: FakeTTSClient | None = None,
 ) -> tuple[NarratorManager, FakeAudioPlayer]:
     config = build_test_app_config(narrator_enabled=narrator_enabled)
@@ -35,14 +44,30 @@ def _make_manager(
 
 
 def _find_telemetry_calls(mock: MagicMock, event_name: str) -> list[dict[str, object]]:
-    results: list[dict[str, object]] = []
-    for call in mock.send_telemetry_event.call_args_list:
-        if call[0][0] == event_name:
-            results.append(call[0][1])
-    return results
+    return [
+        dict(call.args[0].properties)
+        for call in mock.log.call_args_list
+        if call.args[0].name == event_name
+    ]
 
 
 class TestTelemetryTracking:
+    @pytest.mark.asyncio
+    async def test_analytics_does_not_supply_request_metadata(self) -> None:
+        telemetry = AnalyticsOnlyTelemetry()
+        manager, _ = _make_manager(telemetry_client=telemetry)
+        manager._turn_summary.start_turn("test")
+
+        manager.on_turn_end()
+
+        assert telemetry.events[0] == ClientTelemetryEvent(
+            name="vibe.read_aloud.requested",
+            properties={
+                "read_aloud_session_id": manager._tracking.session_id,
+                "trigger": "autoplay_next_message",
+            },
+        )
+
     @pytest.mark.asyncio
     async def test_requested_event_on_turn_end(self) -> None:
         mock_telemetry = MagicMock()

@@ -73,6 +73,7 @@ from vibe.core.config import (
     VibeConfigSchema,
 )
 from vibe.core.log_reader import PaginatedLogs
+from vibe.core.skills.models import SkillInfo
 from vibe.core.tools.connectors.connector_registry import ConnectorAuthAction
 from vibe.core.tools.connectors.counts import compute_connector_counts
 from vibe.core.tools.remote import AuthStatus, MCPTool
@@ -242,7 +243,7 @@ def project_agents(agent_loop: AgentLoop) -> tuple[AgentSummary, list[AgentSumma
     )
 
 
-def project_skills(agent_loop: AgentLoop) -> list[SkillSummary]:
+def project_skill_summaries(skills: Iterable[SkillInfo]) -> list[SkillSummary]:
     return [
         SkillSummary.model_validate({
             "name": skill.name,
@@ -251,8 +252,12 @@ def project_skills(agent_loop: AgentLoop) -> list[SkillSummary]:
             "user_invocable": skill.user_invocable,
             "source": skill.source.value,
         })
-        for skill in agent_loop.skill_manager.available_skills.values()
+        for skill in skills
     ]
+
+
+def project_skills(agent_loop: AgentLoop) -> list[SkillSummary]:
+    return project_skill_summaries(agent_loop.skill_manager.available_skills.values())
 
 
 def project_tools(agent_loop: AgentLoop) -> list[ToolSummary]:
@@ -389,16 +394,26 @@ def _project_mcp_connectors(
             if connector_registry is not None
             else None
         )
+        source_tools = {
+            tool.name: tool for tool in tools.get((MCPSourceKind.CONNECTOR, name), [])
+        }
+        if connector_registry is not None:
+            for descriptor in connector_registry.get_catalog_tools(name):
+                source_tools.setdefault(
+                    descriptor.name,
+                    MCPToolSummary(
+                        name=descriptor.name,
+                        description=descriptor.description or "",
+                        enabled=False,
+                    ),
+                )
         sources.append(
             MCPSourceSummary(
                 name=name,
                 kind=MCPSourceKind.CONNECTOR,
                 transport="connector",
                 status=status,
-                tools=sorted(
-                    tools.get((MCPSourceKind.CONNECTOR, name), []),
-                    key=lambda tool: tool.name,
-                ),
+                tools=sorted(source_tools.values(), key=lambda tool: tool.name),
                 error=error,
             )
         )

@@ -133,6 +133,10 @@ class MultiValueSchema(ConfigSchema):
     second: Annotated[str, WithReplaceMerge()] = "default-second"
 
 
+class ListSchema(ConfigSchema):
+    values: Annotated[list[str], WithReplaceMerge()] = Field(default_factory=list)
+
+
 class ToolsFragment(ConfigFragment):
     enabled_tools: Annotated[list[str], WithConcatMerge()] = Field(default_factory=list)
     disabled_tools: Annotated[list[str], WithConcatMerge()] = Field(
@@ -344,6 +348,135 @@ async def test_set_field_uses_default_layer_resolver() -> None:
 
     assert result == []
     assert orch.config.value == "updated-normalized"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_preflight_sees_merged_candidate_before_write() -> None:
+    writable = RawWritableLayer(name="user-toml", data={})
+    higher_priority = FakeLayer(name="environment", data={"value": "masked"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema,
+        layers=[writable, higher_priority],
+        default_layer_resolver=lambda: writable,
+    )
+    seen: list[str] = []
+
+    async def preflight(candidate: SimpleSchema) -> None:
+        seen.append(candidate.value)
+        assert writable._data == {}
+
+    result = await orch.set_field(
+        "/value", "persisted", reason="preflight candidate", preflight=preflight
+    )
+
+    assert result == []
+    assert seen == ["masked"]
+    assert writable._data == {"value": "persisted"}
+    assert orch.config.value == "masked"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_preflight_rejection_prevents_persistence() -> None:
+    class RejectedCandidate(Exception):
+        pass
+
+    layer = RawWritableLayer(name="user-toml", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+
+    async def reject(candidate: SimpleSchema) -> None:
+        assert candidate.value == "updated"
+        raise RejectedCandidate
+
+    with pytest.raises(RejectedCandidate):
+        await orch.set_field("/value", "updated", preflight=reject)
+
+    assert layer._data == {"value": "original"}
+    assert orch.config.value == "original"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_serializes_preflight_through_persistence() -> None:
+    layer = RawWritableLayer(name="user-toml", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first_preflight(candidate: SimpleSchema) -> None:
+        assert candidate.value == "first"
+        first_entered.set()
+        await release_first.wait()
+
+    async def second_preflight(candidate: SimpleSchema) -> None:
+        assert candidate.value == "second"
+        second_entered.set()
+
+    first = asyncio.create_task(
+        orch.set_field("/value", "first", preflight=first_preflight)
+    )
+    await asyncio.wait_for(first_entered.wait(), timeout=1)
+    second = asyncio.create_task(
+        orch.set_field("/value", "second", preflight=second_preflight)
+    )
+    await asyncio.sleep(0)
+    assert not second_entered.is_set()
+
+    release_first.set()
+    assert await first == []
+    assert await second == []
+    assert second_entered.is_set()
+    assert layer._data == {"value": "second"}
+    assert orch.config.value == "second"
+
+
+@pytest.mark.asyncio
+async def test_mutate_field_serializes_read_modify_write_with_preflight() -> None:
+    layer = RawWritableLayer(name="user-toml", data={"values": []})
+    orch = await ConfigOrchestrator.create(
+        schema=ListSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first_preflight(candidate: ListSchema) -> None:
+        assert candidate.values == ["first"]
+        first_entered.set()
+        await release_first.wait()
+
+    async def second_preflight(candidate: ListSchema) -> None:
+        assert candidate.values == ["first", "second"]
+        second_entered.set()
+
+    first = asyncio.create_task(
+        orch.mutate_field(
+            "/values",
+            lambda values: [*values, "first"],
+            default=[],
+            preflight=first_preflight,
+        )
+    )
+    await asyncio.wait_for(first_entered.wait(), timeout=1)
+    second = asyncio.create_task(
+        orch.mutate_field(
+            "/values",
+            lambda values: [*values, "second"],
+            default=[],
+            preflight=second_preflight,
+        )
+    )
+    await asyncio.sleep(0)
+    assert not second_entered.is_set()
+
+    release_first.set()
+    assert await first == []
+    assert await second == []
+    assert layer._data == {"values": ["first", "second"]}
+    assert orch.config.values == ["first", "second"]
 
 
 @pytest.mark.asyncio

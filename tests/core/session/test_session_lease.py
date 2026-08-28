@@ -20,6 +20,7 @@ def test_session_lease_is_exclusive_and_recoverable(tmp_path: Path) -> None:
     finally:
         first.release()
 
+    assert not first.path.exists()
     SessionLease(tmp_path, SESSION_ID).acquire().release()
 
 
@@ -35,11 +36,13 @@ def test_session_lease_accepts_a_safe_legacy_identity(tmp_path: Path) -> None:
     lease.release()
 
 
-def test_windows_locking_uses_a_nonblocking_one_byte_region(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(("blocking", "expected_mode"), [(False, 2), (True, 1)])
+def test_windows_locking_uses_a_one_byte_region(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, blocking: bool, expected_mode: int
 ) -> None:
     calls: list[tuple[int, int]] = []
     fake_msvcrt = SimpleNamespace(
+        LK_LOCK=1,
         LK_NBLCK=2,
         LK_UNLCK=0,
         locking=lambda _descriptor, mode, length: calls.append((mode, length)),
@@ -49,10 +52,10 @@ def test_windows_locking_uses_a_nonblocking_one_byte_region(
     path = tmp_path / "lease.lock"
 
     with path.open("w+b") as file:
-        lease_module._acquire_file_lock(file)
+        lease_module._acquire_file_lock(file, blocking=blocking)
         lease_module._release_file_lock(file)
 
-    assert calls == [(fake_msvcrt.LK_NBLCK, 1), (fake_msvcrt.LK_UNLCK, 1)]
+    assert calls == [(expected_mode, 1), (fake_msvcrt.LK_UNLCK, 1)]
 
 
 def test_session_lease_rejects_a_symlinked_active_namespace(tmp_path: Path) -> None:

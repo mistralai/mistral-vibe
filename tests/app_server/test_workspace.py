@@ -7,14 +7,16 @@ import pytest
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from vibe.app_server._workspace import (
     PromptPreparationError,
+    mentioned_file_content_blocks,
     prepare_prompt,
     read_untrusted_config_dirs,
 )
-from vibe.app_server.models import ImageAttachment
+from vibe.app_server.models import ImageAttachment, ResourceContentBlock
 from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.paths import TRUSTED_FOLDERS_FILE
 from vibe.core.trusted_folders import TrustedFoldersManager
 from vibe.core.types import Backend
+from vibe.user_content import UserTextResource
 from vibe.utils.images import MAX_IMAGE_BYTES, MAX_IMAGES_PER_MESSAGE
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
@@ -74,6 +76,54 @@ def test_prepare_prompt_never_embeds_mentioned_file_contents(
     assert prompt.display_text == message
     assert prompt.prompt_text == message
     assert marker not in prompt.model_dump_json()
+
+
+def test_mentioned_file_content_blocks_attach_text_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "notes.md").write_text("hello world", encoding="utf-8")
+
+    blocks = mentioned_file_content_blocks("read @notes.md", base_dir=tmp_path)
+
+    assert len(blocks) == 1
+    block = blocks[0]
+    assert isinstance(block, ResourceContentBlock)
+    assert isinstance(block.resource, UserTextResource)
+    assert block.resource.uri == (tmp_path / "notes.md").as_uri()
+    assert block.resource.text == "hello world"
+
+
+def test_mentioned_file_content_blocks_cap_text_resources(tmp_path: Path) -> None:
+    (tmp_path / "large.txt").write_text("x" * (60 * 1024), encoding="utf-8")
+
+    [block] = mentioned_file_content_blocks("read @large.txt", base_dir=tmp_path)
+
+    assert isinstance(block, ResourceContentBlock)
+    assert isinstance(block.resource, UserTextResource)
+    assert len(block.resource.text.encode("utf-8")) < 53 * 1024
+    assert "truncated" in block.resource.text
+
+
+def test_mentioned_file_content_blocks_reject_outside_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("nope", encoding="utf-8")
+
+    with pytest.raises(PromptPreparationError, match="outside the workspace"):
+        mentioned_file_content_blocks(f"read @{secret}", base_dir=workspace)
+
+
+def test_mentioned_file_content_blocks_reject_too_many_files(tmp_path: Path) -> None:
+    mentions = []
+    for index in range(9):
+        name = f"note-{index}.md"
+        (tmp_path / name).write_text(str(index), encoding="utf-8")
+        mentions.append(f"@{name}")
+
+    with pytest.raises(PromptPreparationError, match="Too many file mentions"):
+        mentioned_file_content_blocks(" ".join(mentions), base_dir=tmp_path)
 
 
 def test_prepare_prompt_rejects_too_many_images(

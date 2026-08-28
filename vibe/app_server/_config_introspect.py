@@ -25,6 +25,7 @@ HIDDEN_SETTINGS: frozenset[str] = frozenset({
     "managed_shell_tools_enabled",
     "routed_default_model",
     "routed_model_config",
+    "routed_extra_models",
     "tools",
 })
 
