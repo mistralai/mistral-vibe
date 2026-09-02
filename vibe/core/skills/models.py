@@ -42,8 +42,8 @@ class SkillMetadata(BaseModel):
         ...,
         min_length=1,
         max_length=64,
-        pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$",
-        description="Skill identifier. Lowercase letters, numbers, and hyphens only.",
+        pattern=r"^[a-z0-9]+([-.][a-z0-9]+)*$",
+        description="Skill identifier. Lowercase letters, numbers, hyphens, and dots.",
     )
     description: str = Field(
         ...,
