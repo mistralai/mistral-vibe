@@ -5,6 +5,7 @@ from vibe.app_server._integration_resources import (
     PluginCatalogChange,
     PluginCatalogDiff,
     PluginCatalogResource,
+    SkillsResource,
     VibeCodeResource,
 )
 from vibe.app_server._runtime_resources import (
@@ -45,6 +46,7 @@ class AppServerResources:
         self.runtime = RuntimeResource(connection, state)
         self.mcp = MCPResource(connection, state)
         self.plugins = PluginCatalogResource(connection, state)
+        self.skills = SkillsResource(connection, state)
         self.shell = ShellResource(connection, state)
         self.sessions = SessionResource(connection, state)
         self.review = ReviewResource(connection, state)

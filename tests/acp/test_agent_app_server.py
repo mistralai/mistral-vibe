@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 from pathlib import Path
 import socket
@@ -19,6 +20,7 @@ from acp.schema import (
     AgentThoughtChunk,
     AllowedOutcome,
     ClientCapabilities,
+    ConfigOptionUpdate,
     EnvVariable,
     FileSystemCapabilities,
     HttpHeader,
@@ -37,7 +39,9 @@ from tests.stubs.app_server import start_test_app_server
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.agent import RETRYING_EXT_METHOD, VibeAcpAgent
-from vibe.app_server.local import LocalHarnessOptions
+from vibe.acp.exceptions import UnauthenticatedError
+from vibe.app_server.events import SessionUpdated
+from vibe.app_server.local import LocalHarnessHost, LocalHarnessOptions
 from vibe.app_server.models import PublicError, PublicTurnStatus, TurnErrorCode
 from vibe.app_server.session import AppServerSession, AppServerTurnError
 from vibe.core.config import SessionLoggingConfig
@@ -126,6 +130,46 @@ async def test_cancelled_prompt_uses_interrupted_app_server_turn_status() -> Non
                 await asyncio.gather(prompt_task, return_exceptions=True)
     finally:
         await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_new_session_without_a_key_is_unauthenticated(
+    experimental_harness: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """*Prepare*: An ACP agent over a real backend, for a user with no key.
+    *Do*: Open a session.
+    *Assert*: ``UnauthenticatedError`` naming the provider.
+
+    The code is what an editor reads to offer a sign-in; the
+    ``ConfigurationError`` this used to be sends the user to edit
+    ``config.toml`` instead. Run over whichever backend
+    ``--experimental-harness`` selects: the two are indistinguishable here only
+    if the Unified one also answers ``UNAUTHORIZED`` with a provider.
+    """
+    # Prepare
+    monkeypatch.delenv("MISTRAL_API_KEY")
+    harness_host = LocalHarnessHost()
+
+    async def start_session(options: LocalHarnessOptions) -> AppServerSession:
+        return await harness_host.start(
+            replace(options, experimental_harness=experimental_harness)
+        )
+
+    agent = VibeAcpAgent(session_starter=start_session)
+    client = FakeClient()
+    agent.on_connect(client)
+    client.on_connect(agent)
+
+    try:
+        # Do
+        with pytest.raises(UnauthenticatedError) as exc_info:
+            await agent.new_session(cwd=str(tmp_path), mcp_servers=[])
+    finally:
+        await agent.close()
+        await harness_host.close()
+
+    # Assert
+    assert "mistral" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -345,6 +389,90 @@ async def test_retry_notification_reaches_the_wire_underscore_prefixed() -> None
     finally:
         agent_writer.close()
         peer_writer.close()
+
+
+@pytest.mark.asyncio
+async def test_autonomous_profile_change_re_pushes_config_options() -> None:
+    """An autonomous profile switch (e.g. exit_plan_mode) patches the
+    session's `agent` and arrives as a SessionUpdated AppServerEvent. The mode
+    is otherwise only carried on the load/new session response, so external
+    ACP clients would keep showing the stale mode. The agent must re-push
+    config options so the client's mode selector (and model/thinking) reflects
+    the new profile.
+
+    The client state's active agent is flipped before the SessionUpdated is
+    forwarded (see AppServerSession._handle_notification), so the re-pushed
+    config must read the *new* mode, not the stale one.
+    """
+    agent, client = _agent(FakeBackend([mock_llm_chunk(content="ok")]))
+    try:
+        created = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+        session = agent.sessions[created.session_id]
+        # Resolve two distinct primary agents the app server advertised.
+        agents = session.app_server.resources.agents.all
+        assert {a.name for a in agents} >= {"ask", "accept-edits"}
+        before = next(a for a in agents if a.name == "ask")
+        after = next(a for a in agents if a.name == "accept-edits")
+
+        previous_session = session.app_server.state.session.model_copy(
+            update={"agent": before}
+        )
+        current_session = session.app_server.state.session.model_copy(
+            update={"agent": after}
+        )
+        # Mimic _handle_notification flipping the active agent before the event
+        # is forwarded to ACP clients.
+        session.app_server._state.active_agent = after
+
+        client._session_updates.clear()
+        await agent._forward_event(
+            session,
+            SessionUpdated(
+                previous=previous_session, session=current_session, patch=[]
+            ),
+        )
+
+        config_updates = [
+            update
+            for update in (n.update for n in client._session_updates)
+            if isinstance(update, ConfigOptionUpdate)
+        ]
+        assert len(config_updates) == 1
+        mode_option = next(
+            option
+            for option in config_updates[0].config_options
+            if getattr(option, "category", None) == "mode"
+        )
+        assert mode_option.current_value == "accept-edits"
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_unchanged_agent_does_not_re_push_config_options() -> None:
+    """A SessionUpdated that did not change the agent (e.g. a title patch) must
+    not re-push config options — that would spam the client on every session
+    mutation.
+    """
+    agent, client = _agent(FakeBackend([mock_llm_chunk(content="ok")]))
+    try:
+        created = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+        session = agent.sessions[created.session_id]
+        current = session.app_server.state.session
+
+        client._session_updates.clear()
+        await agent._forward_event(
+            session, SessionUpdated(previous=current, session=current, patch=[])
+        )
+
+        config_updates = [
+            update
+            for update in (n.update for n in client._session_updates)
+            if isinstance(update, ConfigOptionUpdate)
+        ]
+        assert config_updates == []
+    finally:
+        await agent.close()
 
 
 def test_acp_runtime_adapter_has_no_direct_core_dependency() -> None:

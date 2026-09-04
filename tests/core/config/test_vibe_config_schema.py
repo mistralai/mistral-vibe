@@ -75,18 +75,28 @@ def test_duplicate_model_alias_last_wins() -> None:
     assert config.models["same"].name == "model-b"
 
 
-def test_unknown_active_model_falls_back_to_first(
+def test_unknown_active_model_falls_back_to_default(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level("WARNING"):
         config = VibeConfigSchema(active_model="does-not-exist")
 
-    fallback = next(iter(config.models))
-    assert config.active_model == fallback
-    assert config.get_active_model().alias == fallback
+    assert config.active_model == ""
+    assert config.get_active_model().alias == config.resolve_default_model_alias()
     assert (
         "Active model 'does-not-exist' is not in your configured models" in caplog.text
     )
+
+
+def test_unknown_active_model_uses_routed_default() -> None:
+    config = VibeConfigSchema.model_validate({
+        "active_model": "does-not-exist",
+        "routed_default_model": _ROUTED_TEST_ALIAS,
+        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
+    })
+
+    assert config.active_model == ""
+    assert config.get_active_model().alias == _ROUTED_TEST_ALIAS
 
 
 def test_active_model_defaults_to_unpinned_sentinel() -> None:
@@ -247,13 +257,13 @@ def test_gated_model_not_injected_without_routing() -> None:
 
 def test_routed_model_available_but_not_active_when_pinned_to_other() -> None:
     config = VibeConfigSchema.model_validate({
-        "active_model": "devstral-small",
+        "active_model": "local",
         "routed_default_model": _ROUTED_TEST_ALIAS,
         "routed_model_config": _ROUTED_TEST_MODEL_JSON,
     })
 
-    assert config.active_model == "devstral-small"
-    assert config.get_active_model().alias == "devstral-small"
+    assert config.active_model == "local"
+    assert config.get_active_model().alias == "local"
     assert _ROUTED_TEST_ALIAS in config.models
     assert config.resolve_default_model_alias() == _ROUTED_TEST_ALIAS
 
@@ -565,11 +575,16 @@ def test_compaction_model_provider_must_match_active() -> None:
         VibeConfigSchema(compaction_model=compaction, providers=providers)
 
 
-def test_check_api_key_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_api_key_readiness_is_separate_from_schema_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.setattr(keyring, "get_password", lambda service, username: None)
+
+    config = VibeConfigSchema()
+
     with pytest.raises(MissingAPIKeyError):
-        VibeConfigSchema()
+        config.require_active_provider_api_key()
 
 
 def test_theme_is_preserved_for_the_client_to_interpret() -> None:

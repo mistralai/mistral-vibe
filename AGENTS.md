@@ -23,8 +23,10 @@ When creating or editing an ADR, follow the `write-vibe-adr` skill and keep the 
 | App-server ownership, RPCs, lifecycle, projections, effects, callbacks, client tools, or delivery adapters | [0009 App Server Boundary](docs/adr/0009-app-server-boundary.md) |
 | Textual `Content` rendering, styled text, markup parsing, or theme variables in widgets | [0010 Textual Content Rendering](docs/adr/0010-textual-content-rendering.md) |
 | App-server session backend interfaces, adapters, or runtime ownership | [0011 App Server Session Backends](docs/adr/0011-unified-harness-backend.md) |
-| Slash commands running while busy, side-channel commands, `QueuedItemKind.COMMAND`, or config persistence deferral via main queue | [0012 Two-Phase Slash Command Execution](docs/adr/0012-two-phase-slash-command-execution.md) |
-| Queued-message selection/edit mode, copy-on-write consumed edits, or drain-race widget-identity tracking | [0013 Queue Selection and Edit Mode](docs/adr/0013-queue-edit-mode.md) |
+| Slash commands running while busy, side-channel commands, or idle-only settings persistence | [0012 Slash Commands While Busy](docs/adr/0012-two-phase-slash-command-execution.md) |
+| Queued-prompt selection/edit mode, copy-on-write consumed edits, or promotion-race widget-identity tracking | [0013 Queue Selection and Edit Mode](docs/adr/0013-queue-edit-mode.md) |
+| Parsing backend responses, connector/MCP bootstrap fields, or any client/backend wire-contract change that must tolerate self-hosted version skew | [0014 Backend Contract Compatibility](docs/adr/0014-backend-contract-compatibility.md) |
+| Outbound TLS connections, certificate roots, or `enable_system_trust_store` | [0015 Outbound TLS Trust Policy](docs/adr/0015-outbound-tls-trust-policy.md) |
 
 ## Commands
 

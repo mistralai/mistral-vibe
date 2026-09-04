@@ -18,6 +18,7 @@ from vibe.core.config import (
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
     DEFAULT_PROVIDERS,
     ConnectorConfig,
+    MissingAPIKeyError,
     ModelConfig,
     ProviderConfig,
     VibeConfigSchema,
@@ -281,6 +282,32 @@ class TestSystemTrustStoreConfig:
         finally:
             configure_ssl_context(enable_system_trust_store=False)
             build_ssl_context.cache_clear()
+
+    @pytest.mark.asyncio
+    async def test_build_configures_ssl_context_when_the_api_key_is_missing(
+        self,
+        config_dir: Path,
+        make_orchestrator: Callable[
+            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
+        ],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        config_file = config_dir / "config.toml"
+        with config_file.open("rb") as f:
+            data = tomllib.load(f)
+        data["enable_system_trust_store"] = True
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        with patch(
+            "vibe.core.config.default_orchestrator.configure_ssl_context"
+        ) as configure:
+            orchestrator = await make_orchestrator()
+
+        configure.assert_called_once_with(enable_system_trust_store=True)
+        with pytest.raises(MissingAPIKeyError):
+            orchestrator.config.require_active_provider_api_key()
 
 
 class TestModelThinkingFieldUpdate:
@@ -932,123 +959,6 @@ class TestMigrateMistralVibeCliLatestDefaults:
         assert result["models"][0]["supports_images"] is False
 
 
-class TestMigrateDevstralSmallThinking:
-    def test_forces_thinking_off_when_set_to_non_off(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        run_migration: Callable[[], None],
-    ) -> None:
-        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-        config_file = tmp_path / "config.toml"
-        data = {
-            "models": [
-                {
-                    "name": "devstral-small-latest",
-                    "provider": "mistral",
-                    "alias": "devstral-small",
-                    "thinking": "high",
-                }
-            ]
-        }
-        with config_file.open("wb") as f:
-            tomli_w.dump(data, f)
-
-        reset_harness_files_manager()
-        init_harness_files_manager("user")
-        run_migration()
-
-        with config_file.open("rb") as f:
-            result = tomllib.load(f)
-        assert result["models"][0]["thinking"] == "off"
-
-    def test_adds_thinking_off_when_missing(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        run_migration: Callable[[], None],
-    ) -> None:
-        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-        config_file = tmp_path / "config.toml"
-        data = {
-            "models": [
-                {
-                    "name": "devstral-small-latest",
-                    "provider": "mistral",
-                    "alias": "devstral-small",
-                }
-            ]
-        }
-        with config_file.open("wb") as f:
-            tomli_w.dump(data, f)
-
-        reset_harness_files_manager()
-        init_harness_files_manager("user")
-        run_migration()
-
-        with config_file.open("rb") as f:
-            result = tomllib.load(f)
-        assert result["models"][0]["thinking"] == "off"
-
-    def test_noop_when_already_off(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        run_migration: Callable[[], None],
-    ) -> None:
-        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-        config_file = tmp_path / "config.toml"
-        data = {
-            "models": [
-                {
-                    "name": "devstral-small-latest",
-                    "provider": "mistral",
-                    "alias": "devstral-small",
-                    "thinking": "off",
-                }
-            ]
-        }
-        with config_file.open("wb") as f:
-            tomli_w.dump(data, f)
-
-        reset_harness_files_manager()
-        init_harness_files_manager("user")
-        run_migration()
-
-        with config_file.open("rb") as f:
-            result = tomllib.load(f)
-        assert result["models"][0]["thinking"] == "off"
-
-    def test_does_not_touch_other_models(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        run_migration: Callable[[], None],
-    ) -> None:
-        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-        config_file = tmp_path / "config.toml"
-        data = {
-            "models": [
-                {
-                    "name": "mistral-vibe-cli-latest",
-                    "provider": "mistral",
-                    "alias": "mistral-medium-3.5",
-                    "thinking": "high",
-                }
-            ]
-        }
-        with config_file.open("wb") as f:
-            tomli_w.dump(data, f)
-
-        reset_harness_files_manager()
-        init_harness_files_manager("user")
-        run_migration()
-
-        with config_file.open("rb") as f:
-            result = tomllib.load(f)
-        assert result["models"][0]["thinking"] == "high"
-
-
 class TestAutoCompactThresholdFallback:
     def test_model_without_explicit_threshold_inherits_global(
         self, make_config: Callable[..., VibeConfigSchema]
@@ -1565,6 +1475,36 @@ class TestOnboardingContextResolution:
 
         assert context.provider.name == "mistral"
 
+    def test_from_config_falls_back_when_active_provider_is_missing(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        config = make_config(
+            models=[ModelConfig(name="orphan", provider="ghost", alias="orphan")],
+            active_model="orphan",
+        )
+
+        context = OnboardingContext.from_config(config)
+
+        assert context.provider.name == DEFAULT_PROVIDERS[0].name
+
+    def test_from_config_preserves_merged_urls_when_falling_back(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        config = make_config(
+            models=[ModelConfig(name="orphan", provider="ghost", alias="orphan")],
+            active_model="orphan",
+            vibe_base_url="https://merged-vibe.example.com",
+            console_base_url="https://merged-console.example.com",
+            theme="merged-theme",
+        )
+
+        context = OnboardingContext.from_config(config)
+
+        assert context.provider.name == DEFAULT_PROVIDERS[0].name
+        assert context.vibe_base_url == "https://merged-vibe.example.com"
+        assert context.console_base_url == "https://merged-console.example.com"
+        assert context.theme == "merged-theme"
+
 
 class TestCompactionModel:
     def test_get_compaction_model_returns_active_when_unset(
@@ -1624,15 +1564,14 @@ class TestCompactionModel:
 
 
 class TestActiveModelValidation:
-    def test_unknown_active_model_falls_back_to_first(
+    def test_unknown_active_model_falls_back_to_default(
         self, build_config: ConfigBuilder, caplog: pytest.LogCaptureFixture
     ) -> None:
         with caplog.at_level("WARNING"):
             cfg = build_config(active_model="does-not-exist")
 
-        first_alias = next(iter(cfg.models))
-        assert cfg.active_model == first_alias
-        assert cfg.get_active_model().alias == first_alias
+        assert cfg.active_model == ""
+        assert cfg.get_active_model().alias == cfg.resolve_default_model_alias()
         assert (
             "Active model 'does-not-exist' is not in your configured models"
             in caplog.text
@@ -1817,6 +1756,32 @@ class TestAddToolAllowlistPatterns:
         with (config_dir / "config.toml").open("rb") as f:
             result = tomllib.load(f)
         assert result["tools"]["bash"]["allowlist"] == ["ls"]
+
+    @pytest.mark.parametrize("shell", ["git_bash", "powershell"])
+    def test_strips_the_wildcard_for_every_shell(
+        self, shell: str, build_config: ConfigBuilder
+    ) -> None:
+        """Windows spells the shell ``git_bash`` or ``powershell``, and their
+        allowlists match by prefix just as bash's does: a stored ``ls *`` matches no
+        command at all, so a permanent approval would quietly never take.
+        """
+        cfg = build_config()
+
+        assert cfg.build_tool_allowlist_update(shell, ["ls *"]) == {
+            "tools": {shell: {"allowlist": ["ls"]}}
+        }
+
+    def test_keeps_the_wildcard_for_a_tool_that_is_not_a_shell(
+        self, build_config: ConfigBuilder
+    ) -> None:
+        """Only the shells append " *" to mean "any arguments" -- anywhere else a
+        trailing wildcard is part of the pattern itself.
+        """
+        cfg = build_config()
+
+        assert cfg.build_tool_allowlist_update("edit", ["src/lib *"]) == {
+            "tools": {"edit": {"allowlist": ["src/lib *"]}}
+        }
 
     @pytest.mark.asyncio
     async def test_merges_and_sorts_with_existing(

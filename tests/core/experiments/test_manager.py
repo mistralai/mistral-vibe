@@ -5,7 +5,11 @@ from typing import Any
 
 import pytest
 
-from vibe.core.experiments.active import DEFAULT_VARIANTS, ExperimentName
+from vibe.core.experiments.active import (
+    DEFAULT_VARIANTS,
+    ExperimentName,
+    ExperimentSurface,
+)
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import (
     ExperimentManager,
@@ -30,7 +34,11 @@ class _StubClient(RemoteEvalClient):
 
 def _attrs() -> ExperimentAttributes:
     return ExperimentAttributes(
-        userId="x", entrypoint="cli", agent_version="0", os="darwin"
+        userId="x",
+        entrypoint="cli",
+        harness=ExperimentSurface.LEGACY,
+        agent_version="0",
+        os="darwin",
     )
 
 
@@ -408,7 +416,11 @@ async def test_attributes_retains_snapshot_even_on_failed_eval() -> None:
 
 def test_experiment_attributes_default_custom_system_prompt_to_false() -> None:
     attrs = ExperimentAttributes(
-        userId="x", entrypoint="cli", agent_version="0", os="darwin"
+        userId="x",
+        entrypoint="cli",
+        harness=ExperimentSurface.LEGACY,
+        agent_version="0",
+        os="darwin",
     )
     assert attrs.custom_system_prompt is False
     assert attrs.model_dump(exclude_none=True)["custom_system_prompt"] is False
@@ -418,6 +430,7 @@ def test_experiment_attributes_serializes_custom_system_prompt() -> None:
     attrs = ExperimentAttributes(
         userId="x",
         entrypoint="cli",
+        harness=ExperimentSurface.LEGACY,
         agent_version="0",
         os="darwin",
         custom_system_prompt=True,

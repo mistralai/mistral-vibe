@@ -25,6 +25,36 @@ def apply_json_patch(
     return document
 
 
+def _model_operations(
+    source: dict[str, Any], raw_operation: dict[str, JsonValue]
+) -> list[JsonPatchOperation]:
+    """Validate a raw ``jsonpatch`` operation, expanding unsupported ops.
+
+    ``jsonpatch``'s diff builder can emit ``move`` and ``copy`` operations, which
+    carry a ``from`` pointer and are not part of the wire ``JsonPatchOperation``
+    op set. Expand them into the modeled ``add``/``remove`` equivalents before
+    validation so a relocated value never crashes the event stream.
+    """
+    match raw_operation.get("op"):
+        case "move":
+            from_path = str(raw_operation["from"])
+            value = cast(JsonValue, resolve_pointer(source, from_path))
+            return [
+                JsonPatchOperation(op="remove", path=from_path),
+                JsonPatchOperation(
+                    op="add", path=str(raw_operation["path"]), value=value
+                ),
+            ]
+        case "copy":
+            value = cast(JsonValue, resolve_pointer(source, str(raw_operation["from"])))
+            return [
+                JsonPatchOperation(
+                    op="add", path=str(raw_operation["path"]), value=value
+                )
+            ]
+    return [JsonPatchOperation.model_validate(raw_operation)]
+
+
 def make_json_patch(
     source: dict[str, Any],
     target: dict[str, Any],
@@ -33,22 +63,26 @@ def make_json_patch(
 ) -> list[JsonPatchOperation]:
     operations: list[JsonPatchOperation] = []
     for raw_operation in make_patch(source, target).patch:
-        operation = JsonPatchOperation.model_validate(raw_operation)
-        if operation.op != "replace" or operation.path not in append_paths:
-            operations.append(operation)
+        modeled = _model_operations(source, raw_operation)
+        if not (
+            len(modeled) == 1
+            and modeled[0].op == "replace"
+            and modeled[0].path in append_paths
+        ):
+            operations.extend(modeled)
             continue
-        previous = resolve_pointer(source, operation.path)
-        current = operation.value
+        previous = resolve_pointer(source, modeled[0].path)
+        current = modeled[0].value
         if not (
             isinstance(previous, str)
             and isinstance(current, str)
             and current.startswith(previous)
         ):
-            operations.append(operation)
+            operations.extend(modeled)
             continue
         operations.append(
             JsonPatchOperation(
-                op="append", path=operation.path, value=current[len(previous) :]
+                op="append", path=modeled[0].path, value=current[len(previous) :]
             )
         )
     return operations

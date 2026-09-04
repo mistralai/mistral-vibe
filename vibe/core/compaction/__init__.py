@@ -8,6 +8,7 @@ from vibe.core.compaction.context import (
     parse_previous_user_messages,
     render_compaction_context,
     render_teleport_summary_request,
+    reorder_for_tool_adjacency,
     select_model_context,
 )
 from vibe.core.compaction.manager import (
@@ -29,5 +30,6 @@ __all__ = [
     "parse_previous_user_messages",
     "render_compaction_context",
     "render_teleport_summary_request",
+    "reorder_for_tool_adjacency",
     "select_model_context",
 ]

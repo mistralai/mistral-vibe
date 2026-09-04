@@ -283,35 +283,51 @@ class WhoAmICache:
             return result
 
 
-def derive_user_plan(result: WhoAmIResult | None) -> str | None:
-    """Map a /whoami result to the legacy ``user_plan`` display label.
+def resolve_user_plan(
+    plan_type: AccountPlanKind | str | None, plan_name: str | None
+) -> str | None:
+    """Map a plan type + name to the ``user_plan`` display label.
 
-    Pure function shared by the account controller and the experiments init
-    path so telemetry's ``user_plan`` is populated before the early
-    ``vibe.new_session`` / ``vibe.ready`` events and on surfaces that never
-    call ``account/read`` (ACP, programmatic). Returns ``None`` when whoami
-    is unavailable or the plan is not in the known mapping.
+    Single source of truth for the label, shared by the account controller, the
+    experiments init path, and the emit-time derivation from the attribute
+    snapshot (``AgentLoop.user_plan``). ``NO_PLAN_DATA`` passes through unchanged
+    (the benign "not our user" sentinel); returns ``None`` for a missing plan or
+    one not in the known mapping.
+    """
+    if NO_PLAN_DATA in {plan_type, plan_name}:
+        return NO_PLAN_DATA
+    if plan_type is None:
+        return None
+    try:
+        kind = AccountPlanKind(plan_type)
+    except ValueError:
+        return None
+    name = (plan_name or "").strip().upper()
+    if kind is AccountPlanKind.CHAT:
+        return {
+            "FREE": "Free",
+            "INDIVIDUAL": "Pro",
+            "EDU": "Student",
+            "TEAM": "Team",
+        }.get(name)
+    if kind is AccountPlanKind.MISTRAL_CODE:
+        return {"F": "Free Codestral", "E": "Code Enterprise"}.get(name)
+    # API: an empty name is unmapped (null), never a guessed label.
+    return ("Free API" if "FREE" in name else "PAYG API") if name else None
+
+
+def derive_user_plan(result: WhoAmIResult | None) -> str | None:
+    """Map a /whoami result to the ``user_plan`` display label.
+
+    Thin wrapper over :func:`resolve_user_plan` so the account controller and the
+    experiments init path populate ``user_plan`` before the early
+    ``vibe.new_session`` / ``vibe.ready`` events and on surfaces that never call
+    ``account/read`` (ACP, programmatic). Returns ``None`` when whoami is
+    unavailable.
     """
     if result is None:
         return None
-    kind = result.plan_type
-    name = result.plan_name.strip().upper()
-    match kind:
-        case AccountPlanKind.CHAT:
-            return {
-                "FREE": "Free",
-                "INDIVIDUAL": "Pro",
-                "EDU": "Student",
-                "TEAM": "Team",
-            }.get(name)
-        case AccountPlanKind.API:
-            if not name:
-                return None
-            return "Free API" if "FREE" in name else "PAYG API"
-        case AccountPlanKind.MISTRAL_CODE:
-            return {"F": "Free Codestral", "E": "Code Enterprise"}.get(name)
-        case _:
-            return None
+    return resolve_user_plan(result.plan_type, result.plan_name)
 
 
 def _sanitize_tenant_url(candidate: str, *, field: str) -> str | None:
@@ -351,6 +367,22 @@ async def resolve_tenant_domains(
     Callers pass in the current values and receive replacements only for the
     fields whoami declared. When the fetch fails or the response omits
     ``api_base``/``vibe_base``, the inputs are returned unchanged.
+
+    /whoami is the source of truth for tenant domains on every sign-in,
+    including split-horizon deployments. The ``browser_auth_allow_origin_rewrite``
+    flag only re-homes the browser sign-in URL in the gateway; it must not
+    suppress tenant resolution.
+
+    Server contract — the dashboard handler at
+    ``dashboard/users/code/vibe_routes.py`` (``GET /api/vibe/whoami``) populates
+    ``api_base``/``vibe_base`` from the org's dedicated-deployment routing
+    (``SubscriptionHandler.custom_domains``), falling back to the deployment's
+    ``public_api_url`` / ``LE_CHAT_URL`` for SaaS. The handler reads no
+    connector or reverse-proxy headers — the returned hosts are the tenant's
+    own API/chat hosts, not a public default. Adopting them is therefore
+    correct in every topology; skipping adoption on the rewrite flag
+    discards real tenant data (regression fixed in this change). Reachability
+    of the returned hosts is the deployment's responsibility, not the CLI's.
     """
     whoami = await fetch_whoami(console_base_url, api_key)
     if whoami is None or (whoami.api_base is None and whoami.vibe_base is None):

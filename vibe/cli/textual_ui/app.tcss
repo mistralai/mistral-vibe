@@ -614,14 +614,6 @@ Markdown {
         margin-top: 0;
     }
 
-    &.queued {
-        margin-top: 0;
-
-        .bash-command,
-        .bash-prompt {
-            text-style: italic;
-        }
-    }
 }
 
 .bash-command-line {
@@ -1153,7 +1145,7 @@ StatusMessage {
 
 }
 
-#config-app, #voice-app, #mcp-app, #plugins-app, #connectorauth-app, #mcpoauth-app {
+#config-app, #voice-app, #mcp-app, #plugins-app, #connectorauth-app, #mcpoauth-app, #skillsbrowser-app {
     width: 100%;
     height: auto;
     background: transparent;
@@ -1162,17 +1154,9 @@ StatusMessage {
     margin: 0;
 }
 
-#config-content, #voice-content, #mcp-content, #plugins-content, #connectorauth-content, #mcpoauth-content {
+#config-content, #voice-content, #mcp-content, #plugins-content, #connectorauth-content, #mcpoauth-content, #skillsbrowser-content {
     width: 100%;
     height: auto;
-}
-
-#mcp-app {
-    height: 50vh;
-}
-
-#mcp-content {
-    height: 100%;
 }
 
 .settings-title {
@@ -1187,14 +1171,8 @@ StatusMessage {
     border: none;
 }
 
-#mcp-options {
-    height: 1fr;
-    max-height: 100%;
-}
-
 #mcp-search-row {
     width: 100%;
-    height: 1;
     background: transparent;
     padding-left: 1;
     margin-bottom: 1;
@@ -1229,6 +1207,54 @@ StatusMessage {
     background: transparent;
     border: none;
     padding: 0;
+}
+
+/* Skills browser: two panes (option list + live preview), fixed height so the
+   layout does not jump as row/preview content changes. */
+#skillsbrowser-tabs {
+    width: 100%;
+    height: 1;
+    margin: 0 0 1 0;
+}
+
+#skillsbrowser-search {
+    width: 100%;
+    margin: 0 0 1 0;
+    background: $boost;
+    color: $foreground;
+}
+
+#skillsbrowser-search:focus {
+    background: $surface;
+    color: $text;
+}
+
+#skillsbrowser-body {
+    layout: horizontal;
+    width: 100%;
+    height: 50vh;
+}
+
+#skillsbrowser-options {
+    width: 2fr;
+    height: 100%;
+    border: none;
+}
+
+#skillsbrowser-options:focus {
+    border: none;
+}
+
+#skillsbrowser-preview {
+    width: 3fr;
+    height: 100%;
+    padding: 0 1;
+    border-left: solid $foreground-muted;
+}
+
+#skillsbrowser-preview-body {
+    width: 100%;
+    height: auto;
 }
 
 #connectorauth-detail, #mcpoauth-detail {
@@ -2060,12 +2086,6 @@ FeedbackBar {
 
 .user-message.queue-selected {
     .user-message-content {
-        text-style: bold reverse;
-    }
-}
-
-.bash-output-message.queue-selected {
-    .bash-command {
         text-style: bold reverse;
     }
 }

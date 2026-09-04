@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from pathlib import Path
 import tomllib
 
@@ -18,8 +19,6 @@ class ManifestEntry(BaseModel):
 
     name: str
     skill_id: str
-    # Either a concrete version number (frozen pin) or an alias string such as
-    # "latest" (resolved to newest server-side, never written back here).
     version: int | str = REGISTRY_LATEST_ALIAS
     description: str = ""
 
@@ -34,7 +33,11 @@ class SkillManifest(BaseModel):
     skills: list[ManifestEntry] = Field(default_factory=list)
 
     def upsert(self, entry: ManifestEntry) -> None:
-        self.skills = [s for s in self.skills if s.name != entry.name]
+        self.skills = [
+            s
+            for s in self.skills
+            if s.name != entry.name and s.skill_id != entry.skill_id
+        ]
         self.skills.append(entry)
 
     def remove(self, name: str) -> bool:
@@ -48,22 +51,26 @@ def global_manifest_path() -> Path:
     return VIBE_HOME.path / "skills.toml"
 
 
-async def project_manifest_paths() -> list[Path]:
+async def project_manifest_paths(roots: Sequence[Path] | None = None) -> list[Path]:
     """Project-scoped manifests for the open project roots.
 
-    A root whose manifest resolves to the global manifest (e.g. running from the
-    home dir, where ``~/.vibe/skills.toml`` *is* the global one) is dropped, so
-    'project' scope is never an alias for global.
+    ``roots`` should be the caller's session project roots (e.g. the agent
+    loop's ``harness_files.project_roots``); when omitted it falls back to the
+    global harness singleton. A root whose manifest resolves to the global
+    manifest (e.g. running from the home dir, where ``~/.vibe/skills.toml`` *is*
+    the global one) is dropped, so 'project' scope is never an alias for global.
 
     Runs off the event loop since it touches the filesystem (path resolution).
     """
-    return await asyncio.to_thread(_project_manifest_paths)
+    return await asyncio.to_thread(_project_manifest_paths, roots)
 
 
-def _project_manifest_paths() -> list[Path]:
+def _project_manifest_paths(roots: Sequence[Path] | None = None) -> list[Path]:
+    if roots is None:
+        roots = get_harness_files_manager().project_roots
     global_path = global_manifest_path().resolve()
     out: list[Path] = []
-    for root in get_harness_files_manager().project_roots:
+    for root in roots:
         path = (root / ".vibe" / "skills.toml").resolve()
         if path == global_path or path in out:
             continue
@@ -96,3 +103,15 @@ def _save(path: Path, manifest: SkillManifest) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as f:
         tomli_w.dump(manifest.model_dump(), f)
+
+
+def load_sync(path: Path) -> SkillManifest:
+    return _load(path)
+
+
+def save_sync(path: Path, manifest: SkillManifest) -> None:
+    _save(path, manifest)
+
+
+def project_manifest_paths_sync(roots: Sequence[Path] | None = None) -> list[Path]:
+    return _project_manifest_paths(roots)

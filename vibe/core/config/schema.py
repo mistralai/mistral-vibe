@@ -28,14 +28,8 @@ class ConfigSchema(BaseModel):
         return self._origins.get(key)
 
     @classmethod
-    def validate_merged(
-        cls,
-        data: dict[str, Any],
-        *,
-        origins: dict[str, str],
-        context: dict[str, Any] | None = None,
-    ) -> Self:
-        config = cls.model_validate(data, context=context)
+    def validate_merged(cls, data: dict[str, Any], *, origins: dict[str, str]) -> Self:
+        config = cls.model_validate(data)
         config._origins = origins
         return config
 
@@ -95,7 +89,7 @@ class MergeFieldMetadata:
 
     Usage::
 
-        active_model: Annotated[str, WithReplaceMerge()] = "devstral-2"
+        active_model: Annotated[str, WithReplaceMerge()] = "mistral-medium-3-5"
         models: Annotated[list[M], WithUnionMerge(merge_key="alias")]
 
     Use the concrete subclasses (``WithReplaceMerge``, ``WithConcatMerge``, etc.)

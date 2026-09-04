@@ -7,9 +7,13 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from tests.skills.conftest import create_skill
+from tests.skills.registry.conftest import make_item
 from vibe.core.config import VibeConfigSchema
 from vibe.core.skills.builtins import BUILTIN_SKILLS
 from vibe.core.skills.manager import SkillManager
+from vibe.core.skills.models import SkillSource
+from vibe.core.skills.registry import _manifest, _store
+from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
 from vibe.core.trusted_folders import trusted_folders_manager
 
 
@@ -542,3 +546,73 @@ class TestParseSkillCommandExtras:
         assert parsed.name == "my-skill"
         assert parsed.content == "Do the thing."
         assert parsed.extra_instructions == "fix the bug"
+
+
+class TestRegistrySkillDiscovery:
+    async def _pin_materialized(
+        self, *, skill_id: str, name: str, description: str = "does things"
+    ) -> None:
+        await _store.materialize(
+            make_item(skill_id=skill_id, name=name, description=description, version=1),
+            name,
+        )
+        await _manifest.save(
+            _manifest.global_manifest_path(),
+            SkillManifest(
+                skills=[ManifestEntry(name=name, skill_id=skill_id, version=1)]
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_discovers_materialized_registry_pin(self) -> None:
+        await self._pin_materialized(skill_id="cid", name="reg-skill")
+
+        config = build_test_vibe_config(experimental_enable_registry_skills=True)
+        manager = SkillManager(lambda: config)
+
+        info = manager.available_skills.get("reg-skill")
+        assert info is not None
+        assert info.source is SkillSource.REGISTRY
+        assert info.registry is not None
+        assert info.registry.skill_id == "cid"
+        assert info.registry.version == 1
+
+    @pytest.mark.asyncio
+    async def test_disabled_flag_hides_registry_pins(self) -> None:
+        await self._pin_materialized(skill_id="cid", name="reg-skill")
+
+        config = build_test_vibe_config(experimental_enable_registry_skills=False)
+        manager = SkillManager(lambda: config)
+
+        assert "reg-skill" not in manager.available_skills
+
+    @pytest.mark.asyncio
+    async def test_local_skill_wins_over_registry(self, skills_dir: Path) -> None:
+        create_skill(skills_dir, "dup", "local one")
+        await self._pin_materialized(
+            skill_id="cid", name="dup", description="registry one"
+        )
+
+        config = build_test_vibe_config(
+            skill_paths=[skills_dir], experimental_enable_registry_skills=True
+        )
+        manager = SkillManager(lambda: config)
+
+        info = manager.available_skills.get("dup")
+        assert info is not None
+        assert info.source is SkillSource.LOCAL
+        assert info.description == "local one"
+
+    @pytest.mark.asyncio
+    async def test_unsafe_skill_id_is_skipped(self) -> None:
+        await _manifest.save(
+            _manifest.global_manifest_path(),
+            SkillManifest(
+                skills=[ManifestEntry(name="evil", skill_id="../escape", version=1)]
+            ),
+        )
+
+        config = build_test_vibe_config(experimental_enable_registry_skills=True)
+        manager = SkillManager(lambda: config)
+
+        assert "evil" not in manager.available_skills

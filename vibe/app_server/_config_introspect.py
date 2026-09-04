@@ -6,7 +6,6 @@ from pathlib import Path
 from types import UnionType
 from typing import Any, Union, get_args, get_origin
 
-from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
 
 from vibe.app_server.protocol import (
@@ -15,9 +14,12 @@ from vibe.app_server.protocol import (
     ConfigLayerValueWire,
 )
 from vibe.core.config.layer import ConfigLayer, ConfigLayerError, RawConfig
+from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.patch import escape_json_pointer_token
+from vibe.core.config.vibe_schema import VibeConfigSchema
 
 DEFAULT_ORIGIN = "default"
+AUTO_COMPACT_THRESHOLD = "auto_compact_threshold"
 
 # Internal fields populated at runtime (not by the user) that should never be
 # rendered in the settings UI.
@@ -94,11 +96,25 @@ async def collect_layer_values(
             values.setdefault(name, []).append(
                 ConfigLayerValueWire(layer=layer.name, value=value)
             )
+        models = data.get("models")
+        if not isinstance(models, Mapping):
+            continue
+        for alias, model in models.items():
+            if not isinstance(alias, str) or not isinstance(model, Mapping):
+                continue
+            if AUTO_COMPACT_THRESHOLD not in model:
+                continue
+            path = _model_field_path(alias, AUTO_COMPACT_THRESHOLD)
+            values.setdefault(path, []).append(
+                ConfigLayerValueWire(
+                    layer=layer.name, value=model[AUTO_COMPACT_THRESHOLD]
+                )
+            )
     return values
 
 
 def build_field_wires(
-    config: BaseModel,
+    config: VibeConfigSchema,
     layer_values: Mapping[str, list[ConfigLayerValueWire]],
     *,
     path_prefix: str = "",
@@ -111,8 +127,29 @@ def build_field_wires(
         if name in HIDDEN_SETTINGS:
             continue
         kind, choices = classify_annotation(info.annotation)
+        value = json_values.get(name)
+        path = f"{path_prefix}/{escape_json_pointer_token(name)}"
         values = list(layer_values.get(name, []))
-        if not info.is_required() and not any(
+        description = (info.description or "").strip()
+        if name == AUTO_COMPACT_THRESHOLD:
+            active_model = config.get_active_model()
+            value = active_model.auto_compact_threshold
+            model_path = _model_field_path(active_model.alias, name, prefix=path_prefix)
+            model_values = list(layer_values.get(model_path, []))
+            # A lower-priority, fully materialized model default must not hide
+            # the admin provenance that makes the global fallback read-only.
+            if values and values[0].layer == AdminConfigLayer.NAME:
+                value = values[0].value
+            elif model_values:
+                path = model_path
+                values = model_values
+            description = (
+                "Token count before automatic compaction for the active model "
+                f"({active_model.alias}). Set to 0 to disable automatic compaction."
+            )
+        if name == AUTO_COMPACT_THRESHOLD and not values:
+            values.append(ConfigLayerValueWire(layer=DEFAULT_ORIGIN, value=value))
+        elif not info.is_required() and not any(
             entry.layer == DEFAULT_ORIGIN for entry in values
         ):
             values.append(
@@ -127,12 +164,19 @@ def build_field_wires(
             ConfigFieldWire(
                 name=name,
                 kind=kind,
-                description=(info.description or "").strip(),
-                value=json_values.get(name),
-                path=f"{path_prefix}/{escape_json_pointer_token(name)}",
+                description=description,
+                value=value,
+                path=path,
                 popular=name in popular,
                 enum_choices=list(choices),
                 layer_values=values,
             )
         )
     return wires
+
+
+def _model_field_path(alias: str, field: str, *, prefix: str = "") -> str:
+    return (
+        f"{prefix}/models/{escape_json_pointer_token(alias)}/"
+        f"{escape_json_pointer_token(field)}"
+    )

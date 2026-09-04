@@ -108,59 +108,6 @@ def _serve_catalog(
     )
 
 
-# Unskip with the registry entries: both commands are unregistered for this
-# release, so the gate this asserts cannot be observed either way.
-@pytest.mark.skip(reason="The plugin commands are withheld from the registry")
-@pytest.mark.asyncio
-async def test_the_commands_are_offered_only_where_a_backend_resolves_plugins(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app = await _prepared_app()
-    _serve_catalog(app, monkeypatch, None)
-
-    await app._probe_plugin_catalog()
-    app._refresh_command_registry()
-    assert app.commands.get_command_name("/plugins") is None
-    assert app.commands.get_command_name("/reload-plugins") is None
-
-    _serve_catalog(app, monkeypatch, _catalog(_entry("productivity", "0bbb23a0")))
-    await app._probe_plugin_catalog()
-    app._refresh_command_registry()
-
-    assert app.commands.get_command_name("/plugins") == "plugins"
-    assert app.commands.get_command_name("/reload-plugins") == "reload-plugins"
-
-
-@pytest.mark.asyncio
-async def test_the_startup_probe_decides_availability_without_a_flag(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # `--experimental-harness` is argparse-only and never reaches a client, so
-    # the answer to a read is the only thing that can gate the commands.
-    app = await _prepared_app()
-    _serve_catalog(app, monkeypatch, _catalog(_entry("productivity", "0bbb23a0")))
-
-    await app._probe_plugin_catalog()
-
-    assert app._command_context().plugins_enabled is True
-
-
-@pytest.mark.asyncio
-async def test_a_probe_that_raises_leaves_the_commands_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app = await _prepared_app()
-    monkeypatch.setattr(
-        app.app_server.resources.plugins,
-        "read",
-        AsyncMock(side_effect=RuntimeError("transport closed")),
-    )
-
-    await app._probe_plugin_catalog()
-
-    assert app._command_context().plugins_enabled is False
-
-
 @pytest.mark.asyncio
 async def test_showing_plugins_opens_the_list(monkeypatch: pytest.MonkeyPatch) -> None:
     app = await _prepared_app()

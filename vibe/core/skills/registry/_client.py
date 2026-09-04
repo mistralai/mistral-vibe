@@ -18,9 +18,10 @@ _MAX_PAGES = 50
 
 
 class RegistrySkillsError(Exception):
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, status: int | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.status = status
 
 
 def _parse[M: BaseModel](model: type[M], payload: Any, what: str) -> M:
@@ -80,7 +81,6 @@ class RegistrySkillsClient:
     async def get_skill(
         self, skill_id: str, *, version: int | None = None, alias: str | None = None
     ) -> RegistrySkillItem:
-        # version_selector is a oneof: version XOR alias (omit both = latest).
         params: dict[str, Any] = {}
         if version is not None:
             params["version"] = version
@@ -110,8 +110,6 @@ class RegistrySkillsClient:
             if not page.next_page_token:
                 return items
             page_token = page.next_page_token
-        # Cap reached with pages still remaining: fail loudly rather than return
-        # a silently-truncated catalog that a caller would treat as complete.
         raise RegistrySkillsError("catalog exceeds the maximum number of pages")
 
     async def _get_json(self, url: str, params: dict[str, Any]) -> Any:
@@ -123,11 +121,15 @@ class RegistrySkillsClient:
             raise RegistrySkillsError(f"request failed: {exc}") from exc
 
         if response.status_code in {httpx.codes.UNAUTHORIZED, httpx.codes.FORBIDDEN}:
-            raise RegistrySkillsError(f"unauthorized ({response.status_code})")
+            raise RegistrySkillsError(
+                f"unauthorized ({response.status_code})", status=response.status_code
+            )
         if response.status_code == httpx.codes.NOT_FOUND:
-            raise RegistrySkillsError("not found (404)")
+            raise RegistrySkillsError("not found (404)", status=response.status_code)
         if not response.is_success:
-            raise RegistrySkillsError(f"unexpected status {response.status_code}")
+            raise RegistrySkillsError(
+                f"unexpected status {response.status_code}", status=response.status_code
+            )
 
         try:
             return response.json()

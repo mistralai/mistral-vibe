@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any, cast
 
 from pydantic import JsonValue
@@ -17,26 +18,44 @@ from vibe.app_server._config_introspect import (
     build_field_wires,
     collect_layer_values,
 )
-from vibe.app_server._config_write import config_write_ops_to_patches
+from vibe.app_server._config_write import (
+    config_write_ops_to_patches,
+    config_write_targets,
+)
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._execution import SessionExecution
 from vibe.app_server._identity import IdentityController, IdentityGateway
 from vibe.app_server._model import ProtocolModel, validate_wire
-from vibe.app_server._narration import NarrationService
+from vibe.app_server._narration import NarrationContext, NarrationService
 from vibe.app_server._projection import (
     project_agents,
     project_config,
     project_connectors,
     project_debug_logs,
     project_diagnostics,
+    project_installed_skills,
     project_mcp,
     project_session_log,
     project_skills,
     project_stats,
     project_tools,
 )
+from vibe.app_server._session_model import (
+    active_model_override_write_requested,
+    set_session_active_model_override,
+    with_session_active_model_write,
+)
 from vibe.app_server.config import ProxySettingsView
-from vibe.app_server.models import AccountView, IdentityView, MCPState, ScheduledLoop
+from vibe.app_server.models import (
+    AccountView,
+    IdentityView,
+    MCPState,
+    ScheduledLoop,
+    SkillCatalogEntry,
+    SkillDetailView,
+    SkillUpdateView,
+    SkillVersionView,
+)
 from vibe.app_server.protocol import (
     AccountReadParams,
     AccountReadResponse,
@@ -82,11 +101,29 @@ from vibe.app_server.protocol import (
     NarrationSummarizeParams,
     NarrationSummarizeResponse,
     ProtocolErrorCode,
+    RuntimeMutationResponse,
     RuntimeReadParams,
     RuntimeReadResponse,
     RuntimeSnapshot,
+    SkillsCatalogParams,
+    SkillsCatalogResponse,
+    SkillsConvertLocalParams,
+    SkillsConvertResponse,
+    SkillsDetailParams,
+    SkillsDetailResponse,
+    SkillsImportParams,
+    SkillsInstalledParams,
+    SkillsInstalledResponse,
     SkillsListParams,
     SkillsListResponse,
+    SkillsRemoveParams,
+    SkillsSetAliasParams,
+    SkillsSetLatestParams,
+    SkillsSetVersionParams,
+    SkillsUpdatesParams,
+    SkillsUpdatesResponse,
+    SkillsVersionsParams,
+    SkillsVersionsResponse,
     StatsReadParams,
     StatsReadResponse,
     TelemetryRecordParams,
@@ -99,7 +136,6 @@ from vibe.core.config.admin_config import (
     AdminConfigApplyResult,
     AdminConfigOutcome,
 )
-from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.orchestrator import ConfigPatchValidationError
 from vibe.core.feedback import (
     record_feedback_asked,
@@ -115,6 +151,24 @@ from vibe.core.proxy_setup import (
     get_current_proxy_settings,
     set_proxy_var,
     unset_proxy_var,
+)
+from vibe.core.skills.models import SkillScope
+from vibe.core.skills.registry import (
+    RegistrySkillsError,
+    check_new_versions,
+    check_updates,
+    convert_skill_to_local,
+    get_skill_body,
+    get_skill_details,
+    has_registry_endpoint,
+    import_skill,
+    list_catalog,
+    list_skill_versions,
+    project_scope_available,
+    remove_skill,
+    set_skill_alias,
+    set_skill_latest,
+    set_skill_version,
 )
 from vibe.core.types import Role, ScheduledLoop as CoreScheduledLoop
 from vibe.observability.logging import logger
@@ -138,7 +192,14 @@ class ResourceRequestHandler:
         self._identity = IdentityController(agent_loop, identity_gateway)
         self._loops = LoopManager(agent_loop.session_logger)
         self._logs = LogReader()
-        self._narration = NarrationService(agent_loop)
+        self._narration = NarrationService(
+            lambda: NarrationContext(
+                config=agent_loop.config,
+                launch_context=agent_loop.launch_context,
+                parent_session_id=agent_loop.parent_session_id,
+                user_plan=agent_loop.user_plan,
+            )
+        )
         self._mcp_discovery_errors: dict[str, str] = {}
         self.restore_loops()
 
@@ -155,7 +216,9 @@ class ResourceRequestHandler:
                 result = await self._dispatch_config(method, raw_params)
             case "agents":
                 result = await self._dispatch_agents(method, raw_params)
-            case "skills" | "tools" | "stats" | "diagnostics":
+            case "skills":
+                result = await self._dispatch_skills(method, raw_params)
+            case "tools" | "stats" | "diagnostics":
                 result = self._dispatch_catalog(method, raw_params)
             case "connectors":
                 result = await self._dispatch_connectors(method, raw_params)
@@ -223,6 +286,7 @@ class ResourceRequestHandler:
             hooks_count=hooks_count,
             connectors=project_connectors(self._agent_loop),
             mcp=self._mcp_state(),
+            bypass_tool_permissions=self._agent_loop.bypass_tool_permissions,
         )
 
     def _mcp_state(self) -> MCPState:
@@ -332,12 +396,10 @@ class ResourceRequestHandler:
         self, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult:
         match method:
-            case "skills/list":
-                response: ProtocolModel = self._skills_list(
-                    validate_wire(SkillsListParams, raw_params)
-                )
             case "tools/list":
-                response = self._tools_list(validate_wire(ToolsListParams, raw_params))
+                response: ProtocolModel = self._tools_list(
+                    validate_wire(ToolsListParams, raw_params)
+                )
             case "stats/read":
                 response = self._stats_read(validate_wire(StatsReadParams, raw_params))
             case "diagnostics/list":
@@ -494,11 +556,20 @@ class ResourceRequestHandler:
     async def _config_write(self, params: ConfigWriteParams) -> ConfigWriteResponse:
         self._execution.require_idle()
         self._require_session(params.session_id)
+        session_model_pinned = self._agent_loop.session_logger.active_model is not None
+        update_session_override = (
+            session_model_pinned and active_model_override_write_requested(params.ops)
+        )
+        ops = (
+            with_session_active_model_write(params.ops)
+            if update_session_override
+            else params.ops
+        )
         durable_aliases = (
             await self._agent_loop.config_orchestrator.durable_model_aliases()
         )
         operations = config_write_ops_to_patches(
-            self._agent_loop.config, params.ops, durable_model_aliases=durable_aliases
+            self._agent_loop.config, ops, durable_model_aliases=durable_aliases
         )
         try:
             failures = await self._agent_loop.config_orchestrator.apply_patch(
@@ -511,6 +582,18 @@ class ResourceRequestHandler:
                 runtime=self.runtime_snapshot(),
                 failures=[str(failure) for failure in failures],
             )
+        if update_session_override:
+            active_model = self._agent_loop.config.get_active_model().alias
+            failures = await set_session_active_model_override(
+                self._agent_loop.config_orchestrator,
+                active_model,
+                reason="normalize session active model",
+            )
+            if failures:
+                return ConfigWriteResponse(
+                    runtime=self.runtime_snapshot(),
+                    failures=[str(failure) for failure in failures],
+                )
         if params.reload_runtime:
             self._clear_mcp_discovery_errors()
             await self._agent_loop.reload_with_initial_messages(reload_hooks=True)
@@ -605,7 +688,6 @@ class ResourceRequestHandler:
         orchestrator = self._agent_loop.config_orchestrator
         config = orchestrator.config
         layer_values = await collect_layer_values(orchestrator.layers)
-        # Per-tool config editing is not exposed in the settings screen yet.
         fields = [
             wire
             for wire in build_field_wires(
@@ -616,16 +698,11 @@ class ResourceRequestHandler:
         return ConfigFieldsReadResponse(fields=fields, targets=self._config_targets())
 
     def _config_targets(self) -> list[str]:
-        orchestrator = self._agent_loop.config_orchestrator
-        names = {layer.name for layer in orchestrator.layers}
-        writable = orchestrator.writable_layer_name
-        targets = [writable]
-        if OverridesLayer.NAME in names and OverridesLayer.NAME not in targets:
-            targets.append(OverridesLayer.NAME)
-        return targets
+        return config_write_targets(self._agent_loop.config_orchestrator)
 
     def _agents_list(self, params: AgentsListParams) -> AgentsListResponse:
-        self._require_session(params.session_id)
+        if params.session_id is not None:
+            self._require_session(params.session_id)
         active, agents = project_agents(self._agent_loop)
         return AgentsListResponse(active=active, agents=agents)
 
@@ -661,6 +738,286 @@ class ResourceRequestHandler:
     def _skills_list(self, params: SkillsListParams) -> SkillsListResponse:
         self._require_session(params.session_id)
         return SkillsListResponse(skills=project_skills(self._agent_loop))
+
+    async def _dispatch_skills(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult:
+        match method:
+            case "skills/list":
+                response: ProtocolModel = self._skills_list(
+                    validate_wire(SkillsListParams, raw_params)
+                )
+                runtime_updated = False
+            case "skills/installed":
+                response = self._skills_installed(
+                    validate_wire(SkillsInstalledParams, raw_params)
+                )
+                runtime_updated = False
+            case "skills/catalog":
+                response = await self._skills_catalog(
+                    validate_wire(SkillsCatalogParams, raw_params)
+                )
+                runtime_updated = False
+            case "skills/versions":
+                response = await self._skills_versions(
+                    validate_wire(SkillsVersionsParams, raw_params)
+                )
+                runtime_updated = False
+            case "skills/updates":
+                response = await self._skills_updates(
+                    validate_wire(SkillsUpdatesParams, raw_params)
+                )
+                runtime_updated = False
+            case "skills/detail":
+                response = await self._skills_detail(
+                    validate_wire(SkillsDetailParams, raw_params)
+                )
+                runtime_updated = False
+            case "skills/import":
+                response = await self._skills_import(
+                    validate_wire(SkillsImportParams, raw_params)
+                )
+                runtime_updated = True
+            case "skills/setVersion":
+                response = await self._skills_set_version(
+                    validate_wire(SkillsSetVersionParams, raw_params)
+                )
+                runtime_updated = True
+            case "skills/setLatest":
+                response = await self._skills_set_latest(
+                    validate_wire(SkillsSetLatestParams, raw_params)
+                )
+                runtime_updated = True
+            case "skills/setAlias":
+                response = await self._skills_set_alias(
+                    validate_wire(SkillsSetAliasParams, raw_params)
+                )
+                runtime_updated = True
+            case "skills/remove":
+                response = await self._skills_remove(
+                    validate_wire(SkillsRemoveParams, raw_params)
+                )
+                runtime_updated = True
+            case "skills/convertLocal":
+                response = await self._skills_convert_local(
+                    validate_wire(SkillsConvertLocalParams, raw_params)
+                )
+                runtime_updated = True
+            case _:
+                raise method_not_found(method)
+        return DispatchResult(response, runtime_updated=runtime_updated)
+
+    def _skills_installed(
+        self, params: SkillsInstalledParams
+    ) -> SkillsInstalledResponse:
+        self._require_session(params.session_id)
+        return SkillsInstalledResponse(
+            skills=project_installed_skills(self._agent_loop)
+        )
+
+    async def _skills_catalog(
+        self, params: SkillsCatalogParams
+    ) -> SkillsCatalogResponse:
+        self._require_session(params.session_id)
+        config = self._agent_loop.config
+        roots = self._skill_roots()
+        project_available = project_scope_available(roots)
+        authenticated = await has_registry_endpoint(config)
+        if not authenticated:
+            return SkillsCatalogResponse(
+                skills=[],
+                updates={},
+                loaded=True,
+                project_available=project_available,
+                authenticated=False,
+            )
+        try:
+            catalog = await list_catalog(config)
+            updates = {
+                u.name: u.latest_version for u in await check_updates(config, roots)
+            }
+        except Exception:
+            return SkillsCatalogResponse(
+                skills=[], updates={}, loaded=False, project_available=project_available
+            )
+        return SkillsCatalogResponse(
+            skills=[
+                SkillCatalogEntry(
+                    name=c.name,
+                    skill_id=c.skill_id,
+                    description=c.description,
+                    latest_version=c.latest_version,
+                    sharing_scope=c.sharing_scope,
+                )
+                for c in catalog
+            ],
+            updates=updates,
+            loaded=True,
+            project_available=project_available,
+        )
+
+    async def _skills_versions(
+        self, params: SkillsVersionsParams
+    ) -> SkillsVersionsResponse:
+        self._require_session(params.session_id)
+        versions = await list_skill_versions(self._agent_loop.config, params.skill_id)
+        return SkillsVersionsResponse(
+            versions=[
+                SkillVersionView(version=v.version, aliases=list(v.aliases))
+                for v in versions
+            ]
+        )
+
+    async def _skills_updates(
+        self, params: SkillsUpdatesParams
+    ) -> SkillsUpdatesResponse:
+        self._require_session(params.session_id)
+        updates = await check_new_versions(self._agent_loop.config, self._skill_roots())
+        return SkillsUpdatesResponse(
+            updates=[
+                SkillUpdateView(
+                    name=u.name,
+                    current_version=u.current_version,
+                    latest_version=u.latest_version,
+                )
+                for u in updates
+            ]
+        )
+
+    async def _skills_detail(self, params: SkillsDetailParams) -> SkillsDetailResponse:
+        self._require_session(params.session_id)
+        config = self._agent_loop.config
+        detail = await get_skill_details(
+            config, params.skill_id, version=params.version
+        )
+        if detail is not None:
+            return SkillsDetailResponse(
+                detail=SkillDetailView.model_validate(detail.model_dump())
+            )
+        try:
+            body = await get_skill_body(config, params.skill_id, version=params.version)
+        except RegistrySkillsError:
+            body = None
+        return SkillsDetailResponse(detail=None, body=body)
+
+    def _skill_roots(self) -> list[Path]:
+        return self._agent_loop.harness_files.project_roots
+
+    def _skill_scope(self, scope: str) -> SkillScope:
+        if scope == "project":
+            return SkillScope.PROJECT
+        if scope == "global":
+            return SkillScope.GLOBAL
+        raise RequestFailure(
+            ProtocolErrorCode.INVALID_PARAMS, f"invalid skill scope: {scope!r}"
+        )
+
+    async def _refresh_after_skill_change(self) -> RuntimeMutationResponse:
+        await self._agent_loop.reload_with_initial_messages(reload_hooks=True)
+        return RuntimeMutationResponse(runtime=self.runtime_snapshot())
+
+    async def _skills_import(
+        self, params: SkillsImportParams
+    ) -> RuntimeMutationResponse:
+        self._execution.require_idle()
+        self._require_session(params.session_id)
+        try:
+            await import_skill(
+                self._agent_loop.config,
+                params.skill_id,
+                version=params.version,
+                alias=params.alias,
+                scope=self._skill_scope(params.scope),
+                roots=self._skill_roots(),
+            )
+        except RegistrySkillsError as exc:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
+        return await self._refresh_after_skill_change()
+
+    async def _skills_set_version(
+        self, params: SkillsSetVersionParams
+    ) -> RuntimeMutationResponse:
+        self._execution.require_idle()
+        self._require_session(params.session_id)
+        try:
+            await set_skill_version(
+                self._agent_loop.config,
+                params.name,
+                params.version,
+                self._skill_scope(params.scope),
+                self._skill_roots(),
+            )
+        except RegistrySkillsError as exc:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
+        return await self._refresh_after_skill_change()
+
+    async def _skills_set_latest(
+        self, params: SkillsSetLatestParams
+    ) -> RuntimeMutationResponse:
+        self._execution.require_idle()
+        self._require_session(params.session_id)
+        try:
+            await set_skill_latest(
+                self._agent_loop.config,
+                params.name,
+                self._skill_scope(params.scope),
+                self._skill_roots(),
+            )
+        except RegistrySkillsError as exc:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
+        return await self._refresh_after_skill_change()
+
+    async def _skills_set_alias(
+        self, params: SkillsSetAliasParams
+    ) -> RuntimeMutationResponse:
+        self._execution.require_idle()
+        self._require_session(params.session_id)
+        try:
+            await set_skill_alias(
+                self._agent_loop.config,
+                params.name,
+                params.alias,
+                self._skill_scope(params.scope),
+                self._skill_roots(),
+            )
+        except RegistrySkillsError as exc:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
+        return await self._refresh_after_skill_change()
+
+    async def _skills_remove(
+        self, params: SkillsRemoveParams
+    ) -> RuntimeMutationResponse:
+        self._execution.require_idle()
+        self._require_session(params.session_id)
+        try:
+            await asyncio.to_thread(
+                remove_skill,
+                params.name,
+                self._skill_scope(params.scope),
+                self._skill_roots(),
+            )
+        except (RegistrySkillsError, OSError) as exc:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
+        return await self._refresh_after_skill_change()
+
+    async def _skills_convert_local(
+        self, params: SkillsConvertLocalParams
+    ) -> SkillsConvertResponse:
+        self._execution.require_idle()
+        self._require_session(params.session_id)
+        try:
+            target = await asyncio.to_thread(
+                convert_skill_to_local,
+                params.name,
+                self._skill_scope(params.scope),
+                self._skill_roots(),
+            )
+        except (RegistrySkillsError, OSError) as exc:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
+        await self._agent_loop.reload_with_initial_messages(reload_hooks=True)
+        return SkillsConvertResponse(
+            converted=target is not None, runtime=self.runtime_snapshot()
+        )
 
     def _tools_list(self, params: ToolsListParams) -> ToolsListResponse:
         self._require_session(params.session_id)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 import errno
 import time
@@ -20,8 +20,10 @@ from mcp.client.auth import (
     TokenStorage,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+from mcp.types import LATEST_PROTOCOL_VERSION
 from pydantic import AnyUrl, BaseModel, ConfigDict
 
+from vibe import __version__
 from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 from vibe.utils.keyring import (
@@ -33,6 +35,8 @@ from vibe.utils.keyring import (
 _USERNAME_PREFIX: Final = "mcp-oauth"
 _CLIENT_NAME: Final = "Mistral Vibe"
 _LOGIN_TIMEOUT_SECONDS: Final = 300.0
+# What a streamable HTTP endpoint accepts: a POST that says both, per the spec.
+_MCP_ACCEPT: Final = "application/json, text/event-stream"
 _MIN_REQUEST_LINE_PARTS: Final = 2
 _HEADER_TERMINATORS: Final = frozenset({b"\r\n", b"\n", b""})
 # OAuth 2.0 token-endpoint error signalling a permanently dead refresh token.
@@ -694,7 +698,10 @@ def build_oauth_provider(
 
 
 async def perform_oauth_login(
-    server: MCPHttp | MCPStreamableHttp, *, on_url: Callable[[str], Awaitable[None]]
+    server: MCPHttp | MCPStreamableHttp,
+    *,
+    on_url: Callable[[str], Awaitable[None]],
+    headers: Mapping[str, str] | None = None,
 ) -> None:
     auth = server.auth
     if not isinstance(auth, MCPOAuth):
@@ -706,11 +713,12 @@ async def perform_oauth_login(
     provider = build_oauth_provider(
         server, redirect_handler=on_url, callback_handler=handler.serve_once
     )
+    declared = dict(headers or {})
     try:
         try:
-            await _request_oauth_login(server, provider)
+            await _request_oauth_login(server, provider, declared)
         except MCPOAuthInvalidGrant:
-            await _request_oauth_login(server, provider)
+            await _request_oauth_login(server, provider, declared)
     except MCPOAuthTransientRefreshError as exc:
         raise MCPOAuthLoginFailed(
             server_alias=server.name, reason=f"Transient error: {exc.reason}"
@@ -720,10 +728,41 @@ async def perform_oauth_login(
     await Fingerprint.compute(server).save(server.name)
 
 
+def _initialize_message() -> dict[str, object]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": LATEST_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": _CLIENT_NAME, "version": __version__},
+        },
+    }
+
+
 async def _request_oauth_login(
-    server: MCPHttp | MCPStreamableHttp, provider: OAuthClientProvider
+    server: MCPHttp | MCPStreamableHttp,
+    provider: OAuthClientProvider,
+    declared_headers: Mapping[str, str],
 ) -> None:
     async with VibeAsyncHTTPClient(
         auth=provider, timeout=_LOGIN_TIMEOUT_SECONDS, verify=build_ssl_context()
     ) as client:
-        await client.get(server.url)
+        # A login has nothing to ask; it needs the 401 that starts the flow.
+        # Streamable HTTP endpoints route on POST and answer a bare GET with
+        # 405 before looking at credentials, so only a real ``initialize``
+        # draws the challenge. Streamed because an authorized server answers
+        # with an event stream, and the login is done at the headers either way.
+        #
+        # Declared headers ride along for the same reason: this has to be the
+        # request every other one to this url is, or a server that routes on
+        # them need not answer with the challenge at all. ``Accept`` stays
+        # ours -- the transport depends on it.
+        async with client.stream(
+            "POST",
+            server.url,
+            json=_initialize_message(),
+            headers={**declared_headers, "Accept": _MCP_ACCEPT},
+        ):
+            pass

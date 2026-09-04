@@ -903,6 +903,108 @@ class TestMistralRetry:
         assert "service tier capacity exceeded" in (raised.value.body_text or "")
         assert all(response.is_closed for response in served)
 
+    @pytest.mark.asyncio
+    async def test_transport_timeouts_bound_everything_but_the_read(self):
+        with respx.mock(base_url="https://api.mistral.ai") as mock_api:
+            route = mock_api.post(CHAT_COMPLETIONS_PATH).mock(
+                return_value=httpx.Response(
+                    status_code=200, json=MISTRAL_SIMPLE_CONVERSATION_PARAMS[0][1]
+                )
+            )
+            backend = self._create_test_backend(timeout=720.0)
+            model = ModelConfig(
+                name="model_name", provider="test_provider", alias="model_alias"
+            )
+            messages = [LLMMessage(role=Role.user, content="Just say hi")]
+
+            await backend.complete(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+            assert route.calls.last.request.extensions["timeout"] == {
+                "connect": 10.0,
+                "read": 720.0,
+                "write": 30.0,
+                "pool": 10.0,
+            }
+
+    @pytest.mark.asyncio
+    async def test_transport_timeout_caps_come_from_config(self):
+        with respx.mock(base_url="https://api.mistral.ai") as mock_api:
+            route = mock_api.post(CHAT_COMPLETIONS_PATH).mock(
+                return_value=httpx.Response(
+                    status_code=200, json=MISTRAL_SIMPLE_CONVERSATION_PARAMS[0][1]
+                )
+            )
+            provider = ProviderConfig(
+                name="test_provider",
+                api_base="https://api.mistral.ai/v1",
+                api_key_env_var="API_KEY",
+            )
+            backend = MistralBackend(
+                provider=provider,
+                timeout=720.0,
+                connect_timeout=45.0,
+                write_timeout=90.0,
+                pool_timeout=60.0,
+            )
+            model = ModelConfig(
+                name="model_name", provider="test_provider", alias="model_alias"
+            )
+
+            await backend.complete(
+                model=model,
+                messages=[LLMMessage(role=Role.user, content="Just say hi")],
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+            assert route.calls.last.request.extensions["timeout"] == {
+                "connect": 45.0,
+                "read": 720.0,
+                "write": 90.0,
+                "pool": 60.0,
+            }
+
+    @pytest.mark.asyncio
+    async def test_a_shorter_overall_timeout_still_wins_on_every_axis(self):
+        with respx.mock(base_url="https://api.mistral.ai") as mock_api:
+            route = mock_api.post(CHAT_COMPLETIONS_PATH).mock(
+                return_value=httpx.Response(
+                    status_code=200, json=MISTRAL_SIMPLE_CONVERSATION_PARAMS[0][1]
+                )
+            )
+            backend = self._create_test_backend(timeout=5.0)
+            model = ModelConfig(
+                name="model_name", provider="test_provider", alias="model_alias"
+            )
+
+            await backend.complete(
+                model=model,
+                messages=[LLMMessage(role=Role.user, content="Just say hi")],
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+            assert route.calls.last.request.extensions["timeout"] == {
+                "connect": 5.0,
+                "read": 5.0,
+                "write": 5.0,
+                "pool": 5.0,
+            }
+
 
 class TestMistralMapperPrepareMessage:
     """Tests for MistralMapper.prepare_message thinking-block handling.

@@ -1839,6 +1839,49 @@ class TestPersistExperiments:
         )
 
 
+class TestPersistActiveModel:
+    @pytest.mark.asyncio
+    async def test_persists_before_first_save_and_updates_existing_metadata(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "active-model-session")
+        active_model = mock_vibe_config.get_active_model().alias
+
+        first_change = await logger.persist_active_model(active_model)
+        repeated_before_save = await logger.persist_active_model(active_model)
+
+        assert logger.session_dir is not None
+        metadata_path = logger.session_dir / "meta.json"
+        assert not metadata_path.exists()
+        assert logger.active_model == active_model
+
+        await logger.save_interaction(
+            messages=[
+                LLMMessage(role=Role.system, content="System prompt"),
+                LLMMessage(role=Role.user, content="Hello"),
+            ],
+            stats=AgentStats(steps=1),
+            config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+        second_change = await logger.persist_active_model("changed-model")
+        repeated_after_save = await logger.persist_active_model("changed-model")
+
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert first_change is True
+        assert repeated_before_save is False
+        assert second_change is True
+        assert repeated_after_save is False
+        assert metadata["config"]["active_model"] == "changed-model"
+        assert "models" in metadata["config"]
+        assert logger.active_model == "changed-model"
+
+
 class TestPersistCreatedWorktree:
     @pytest.fixture
     def worktree(self) -> WorktreeContext:

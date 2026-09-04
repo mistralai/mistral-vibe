@@ -24,7 +24,9 @@ from vibe.app_server.models import (
     AccountView,
 )
 from vibe.app_server.protocol import AccountReadParams
+from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.experiments.models import ExperimentAttributes
 from vibe.core.types import Backend
 from vibe.setup.auth.whoami import load_cached_whoami, store_cached_whoami
@@ -243,6 +245,81 @@ async def test_account_controller_fetches_plan_for_non_mistral_active_with_mistr
 
 
 @pytest.mark.asyncio
+async def test_account_reconcile_keeps_request_provider_when_active_model_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "server-secret")
+    base_config = build_test_vibe_config()
+    mistral_provider = base_config.get_active_provider().model_copy(
+        update={"api_base": "https://old.mistral.example/v1"}
+    )
+    anthropic_provider = ProviderConfig(
+        name="foundry-anthropic",
+        api_base="https://foundry.example/anthropic",
+        api_key_env_var="ANTHROPIC_API_KEY",
+        api_style="anthropic",
+        extra_headers={"x-user": "test-user"},
+    )
+    anthropic_model = ModelConfig(
+        name="claude-sonnet", provider=anthropic_provider.name, alias="sonnet"
+    )
+    config = build_test_vibe_config(
+        active_model=base_config.get_active_model().alias,
+        providers=[mistral_provider, anthropic_provider],
+        models=[base_config.get_active_model(), anthropic_model],
+    )
+    agent_loop = build_test_agent_loop(config=config)
+    request_started = asyncio.Event()
+    release_response = asyncio.Event()
+
+    class DelayedGateway:
+        async def read(
+            self, *, base_url: str, api_key: str, timeout: float | None = None
+        ) -> WhoAmIResult:
+            request_started.set()
+            await release_response.wait()
+            return WhoAmIResult(
+                plan_type=AccountPlanKind.CHAT,
+                plan_name="TEAM",
+                api_base="https://api.mistral.ai",
+            )
+
+    persisted_providers: list[ProviderConfig] = []
+
+    async def capture_provider(
+        _orchestrator, provider: ProviderConfig, *, reason: str
+    ) -> bool:
+        persisted_providers.append(provider)
+        return True
+
+    monkeypatch.setattr(
+        "vibe.app_server._account.apply_provider_to_config", capture_provider
+    )
+    read_task = asyncio.create_task(
+        AccountController(agent_loop, DelayedGateway()).read()
+    )
+
+    try:
+        await request_started.wait()
+        await agent_loop.config_orchestrator.set_field(
+            "/active_model", "sonnet", target_layer=OverridesLayer.NAME
+        )
+        release_response.set()
+        account = await read_task
+    finally:
+        release_response.set()
+        if not read_task.done():
+            read_task.cancel()
+        await agent_loop.aclose()
+
+    assert account.status is AccountStatus.UNAVAILABLE
+    assert len(persisted_providers) == 1
+    assert persisted_providers[0].name == mistral_provider.name
+    assert persisted_providers[0].api_base == "https://api.mistral.ai/v1"
+    assert agent_loop.config.get_active_provider() == anthropic_provider
+
+
+@pytest.mark.asyncio
 async def test_account_read_warms_cross_session_whoami_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -277,6 +354,7 @@ async def test_account_read_reconciles_manager_attributes(
             userId="u1",
             organizationId="org-1",
             entrypoint="cli",
+            harness=ExperimentSurface.LEGACY,
             agent_version="0",
             os="darwin",
             planType="chat",
@@ -324,6 +402,7 @@ async def test_apply_account_whoami_wins_over_in_flight_experiments() -> None:
                 userId="u1",
                 organizationId="org-1",
                 entrypoint="cli",
+                harness=ExperimentSurface.LEGACY,
                 agent_version="0",
                 os="darwin",
                 planType="chat",
@@ -370,6 +449,7 @@ async def test_account_read_unauthorized_clears_stale_plan(
             userId="u1",
             organizationId="org-1",
             entrypoint="cli",
+            harness=ExperimentSurface.LEGACY,
             agent_version="0",
             os="darwin",
             planType="chat",
@@ -631,6 +711,7 @@ async def test_reconcile_tenant_domains_noop_when_domains_absent(
         await reconcile_tenant_domains(
             agent_loop.config_orchestrator,
             WhoAmIResult(plan_type=AccountPlanKind.API, plan_name="FREE"),
+            provider_name=agent_loop.config.get_active_provider().name,
         )
     finally:
         await agent_loop.aclose()
@@ -664,6 +745,7 @@ async def test_reconcile_tenant_domains_noop_when_values_match(
                 api_base="https://api.tenant.corp",
                 vibe_base="https://chat.tenant.corp",
             ),
+            provider_name=agent_loop.config.get_active_provider().name,
         )
     finally:
         await agent_loop.aclose()
@@ -687,6 +769,7 @@ async def test_reconcile_tenant_domains_patches_api_base_only(
                 plan_name="FREE",
                 api_base="https://api.tenant.corp",
             ),
+            provider_name=agent_loop.config.get_active_provider().name,
         )
     finally:
         await agent_loop.aclose()
@@ -710,6 +793,7 @@ async def test_reconcile_tenant_domains_patches_chat_only(
                 plan_name="FREE",
                 vibe_base="https://chat.tenant.corp",
             ),
+            provider_name=agent_loop.config.get_active_provider().name,
         )
     finally:
         await agent_loop.aclose()
@@ -719,33 +803,22 @@ async def test_reconcile_tenant_domains_patches_chat_only(
 
 
 @pytest.mark.asyncio
-async def test_reconcile_tenant_domains_still_reconciles_chat_when_no_active_provider(
+async def test_reconcile_tenant_domains_still_reconciles_chat_when_provider_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: earlier code bailed out of the whole function when
-    ``get_active_provider`` raised, silently skipping the independent chat
-    reconciliation. The two branches must remain independent.
-    """
     spies = _ReconcileSpies()
     spies.install(monkeypatch)
     agent_loop = build_test_agent_loop()
     try:
-        orchestrator = agent_loop.config_orchestrator
-
-        def _raise_no_active_provider(self):
-            raise ValueError("no active provider")
-
-        monkeypatch.setattr(
-            type(orchestrator.config), "get_active_provider", _raise_no_active_provider
-        )
         await reconcile_tenant_domains(
-            orchestrator,
+            agent_loop.config_orchestrator,
             WhoAmIResult(
                 plan_type=AccountPlanKind.API,
                 plan_name="FREE",
                 api_base="https://api.tenant.corp",
                 vibe_base="https://chat.tenant.corp",
             ),
+            provider_name="removed-provider",
         )
     finally:
         await agent_loop.aclose()
@@ -771,6 +844,7 @@ async def test_reconcile_tenant_domains_rejects_non_https_urls(
                 api_base="http://api.tenant.corp",
                 vibe_base="http://chat.tenant.corp",
             ),
+            provider_name=agent_loop.config.get_active_provider().name,
         )
     finally:
         await agent_loop.aclose()

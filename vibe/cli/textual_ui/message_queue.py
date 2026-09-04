@@ -3,254 +3,192 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from textual.widget import Widget
 
-from vibe.app_server.models import PreparedPrompt
-from vibe.cli.textual_ui.queue_kinds import QueuedItemKind
-from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
-from vibe.cli.textual_ui.widgets.messages import (
-    BashOutputMessage,
-    ErrorMessage,
-    QueueHeaderMessage,
-    SlashCommandMessage,
-    UserMessage,
+from vibe.app_server.models import (
+    FileImageSource,
+    ImageAttachment,
+    InlineImageSource,
+    MentionStats,
+    PreparedPrompt,
+    PublicQueuedTurn,
+    PublicTurnQueue,
+    SessionImageContentBlock,
+    SessionTextContentBlock,
+    TurnUserInputEntry,
 )
+from vibe.cli.textual_ui.widgets.messages import QueueHeaderMessage, UserMessage
 from vibe.observability.logging import logger
+from vibe.utils.paths import file_uri_to_path
 
 if TYPE_CHECKING:
-    from vibe.app_server.config import ModelConfigView
     from vibe.cli.commands import Command
 
 
-async def _noop_async() -> None:
-    pass
+# Queued prompts merged into one turn join with a blank line, matching how the
+# app server renders a restored multi-block user entry.
+_MERGE_SEPARATOR = "\n\n"
+
+
+def _queued_turn_user_entry(queued_turn: PublicQueuedTurn) -> TurnUserInputEntry | None:
+    return next(
+        (
+            entry
+            for entry in reversed(queued_turn.entries)
+            if isinstance(entry, TurnUserInputEntry)
+        ),
+        None,
+    )
+
+
+def _queued_image_attachment(block: SessionImageContentBlock) -> ImageAttachment:
+    if block.uri.startswith("data:"):
+        header, separator, data = block.uri.partition(",")
+        if not separator or not header.endswith(";base64"):
+            raise ValueError("Queued image URI is not base64 data")
+        media_type = block.media_type or header[5:-7]
+        if not media_type:
+            raise ValueError("Queued image URI has no media type")
+        return ImageAttachment(
+            source=InlineImageSource(data=data),
+            alias=block.alt_text or "image",
+            mime_type=media_type,
+        )
+
+    parsed = urlparse(block.uri)
+    if parsed.scheme not in {"", "file"}:
+        raise ValueError(f"Queued image URI is not local: {block.uri!r}")
+    path = file_uri_to_path(block.uri) if parsed.scheme == "file" else block.uri
+    if block.media_type is None:
+        raise ValueError("Queued image URI has no media type")
+    return ImageAttachment(
+        source=FileImageSource(path=path),
+        alias=block.alt_text or Path(path).name or "image",
+        mime_type=block.media_type,
+    )
 
 
 @dataclass(frozen=True, slots=True)
-class QueuedItem:
-    kind: QueuedItemKind
+class _QueuedPrompt:
     content: str
     skill_name: str | None = None
     prepared_prompt: PreparedPrompt | None = None
-    # When set, content is cosmetic (display only) and the callback is what
-    # actually executes at drain time. When None, content is replayed via
-    # _dispatch_idle_input.
-    command_payload: Callable[[], Awaitable[None]] | None = None
-    # Invoked if this item is discarded before it drains (e.g. via Ctrl+C
-    # pop_last) so the caller can revert any speculative state it applied at
-    # enqueue time and clear its pending flag. Without this the payload's
-    # finally never runs, so the speculative change would stay applied but
-    # unpersisted. Defaults to a noop so callers that have nothing to revert
-    # need not pass anything.
-    on_discard: Callable[[], Awaitable[None]] = _noop_async
-    # Set on lifecycle commands that reset the conversation (e.g. /clear). At
-    # drain time the queue drops any prompts queued before such a command
-    # instead of running an LLM turn on the widgets the command tears down.
-    flushes_pending: bool = False
-
-
-@dataclass(slots=True)
-class MessageQueue:
-    _items: list[QueuedItem] = field(default_factory=list)
-    _paused: bool = False
-
-    def __len__(self) -> int:
-        return len(self._items)
-
-    def __bool__(self) -> bool:
-        return bool(self._items)
-
-    @property
-    def items(self) -> list[QueuedItem]:
-        return list(self._items)
-
-    @property
-    def paused(self) -> bool:
-        return self._paused
-
-    def append_prompt(
-        self,
-        content: str,
-        *,
-        skill_name: str | None = None,
-        prepared_prompt: PreparedPrompt | None = None,
-    ) -> None:
-        self._items.append(
-            QueuedItem(
-                QueuedItemKind.PROMPT,
-                content,
-                skill_name,
-                prepared_prompt=prepared_prompt,
-            )
-        )
-
-    def append_bash(self, content: str) -> None:
-        self._items.append(QueuedItem(QueuedItemKind.BASH, content))
-
-    def append_command(
-        self,
-        content: str,
-        *,
-        command_payload: Callable[[], Awaitable[None]] | None = None,
-        on_discard: Callable[[], Awaitable[None]] | None = None,
-        flushes_pending: bool = False,
-    ) -> None:
-        self._items.append(
-            QueuedItem(
-                QueuedItemKind.COMMAND,
-                content,
-                command_payload=command_payload,
-                on_discard=on_discard or _noop_async,
-                flushes_pending=flushes_pending,
-            )
-        )
-
-    def prepend_prompts(self, items: list[QueuedItem]) -> None:
-        if not items:
-            return
-        self._items[:0] = items
-
-    def pop_last(self) -> QueuedItem | None:
-        if not self._items:
-            return None
-        item = self._items.pop()
-        if not self._items:
-            self._paused = False
-        return item
-
-    def pop_first(self) -> QueuedItem | None:
-        if not self._items:
-            return None
-        return self._items.pop(0)
-
-    def pop_at(self, index: int) -> QueuedItem | None:
-        if index < 0 or index >= len(self._items):
-            return None
-        item = self._items.pop(index)
-        if not self._items:
-            self._paused = False
-        return item
-
-    def update_prompt_item(
-        self, index: int, content: str, *, prepared_prompt: PreparedPrompt | None = None
-    ) -> None:
-        old = self._items[index]
-        self._items[index] = replace(
-            old, content=content, prepared_prompt=prepared_prompt
-        )
-
-    def pause(self) -> None:
-        self._paused = True
-
-    def resume(self) -> None:
-        self._paused = False
-
-    def clear(self) -> None:
-        self._items.clear()
-        self._paused = False
+    message_entry_id: str | None = None
 
 
 @dataclass(frozen=True)
 class QueuePorts:
-    """Callbacks the controller uses to reach back into the app.
-
-    Everything the drain engine needs that only ``VibeApp`` can provide is
-    funnelled through here, so the controller never touches app internals
-    directly. The app keeps ownership of the things it must (the agent task
-    handle, the loading widget, the remote/feedback managers).
-    """
-
     mount_and_scroll: Callable[..., Awaitable[None]]
-    agent_running: Callable[[], bool]
-    bash_task: Callable[[], asyncio.Task | None]
-    active_model: Callable[[], ModelConfigView | None]
-    remove_loading_widget: Callable[[], Awaitable[None]]
+    current_turn_queue: Callable[[], PublicTurnQueue]
+    enqueue_turn: Callable[..., Awaitable[PublicQueuedTurn]]
+    replace_queued_turn: Callable[..., Awaitable[PublicQueuedTurn | None]]
+    remove_queued_turn: Callable[[str], Awaitable[bool]]
+    resume_turn_queue: Callable[[], Awaitable[PublicTurnQueue]]
+    steer_turn: Callable[..., Awaitable[None]]
+    turn_has_started: Callable[[str], bool]
     set_loading_queue_count: Callable[[int], None]
-    inject_queued_prompt: Callable[..., Awaitable[None]]
-    start_agent_turn: Callable[..., asyncio.Task]
-    await_agent_turn: Callable[[], Awaitable[None]]
-    run_bash: Callable[..., asyncio.Task]
-    run_command: Callable[[str, Callable[[], Awaitable[None]] | None], Awaitable[None]]
     maybe_show_feedback_bar: Callable[[], Awaitable[None]]
+    send_mention_telemetry: Callable[[MentionStats, str | None], None]
     send_skill_telemetry: Callable[[str | None], None]
-    # Awaited after a queued command runs, in case it opened a picker (e.g.
-    # /mcp, /resume) that must block the drain until the user dismisses it.
-    # No-op when no picker is open, so commands that don't open a picker
-    # return immediately.
-    await_input_app: Callable[[], Awaitable[None]] = _noop_async
 
 
 @dataclass(slots=True)
 class _Pending:
-    item: QueuedItem
+    prompt: _QueuedPrompt
     widget: UserMessage
 
 
-class QueueController:
-    """Owns the queued-input lifecycle: data, pending widgets, header, drain.
+@dataclass(slots=True)
+class _MergedEntry:
+    prompt: _QueuedPrompt
+    widget: UserMessage
 
-    ``MessageQueue`` stays a pure data structure; this controller keeps the
-    parallel list of pending widgets in lockstep with it, manages the header
-    widget, and runs the drain engine that turns queued items into real turns.
+
+@dataclass(slots=True)
+class _MergedTurn:
+    """The single server queue item that all busy-time prompts merge into.
+
+    Each queued prompt keeps its own ``UserMessage`` widget so the queue
+    selection/edit UX can navigate, edit, and remove prompts individually, but
+    they all share one ``item_id``: the CLI folds every prompt into that item
+    with ``queue/replace`` so the server promotes them together as one turn.
+    ``item_id`` is ``None`` only until the first enqueue returns.
+    """
+
+    entries: list[_MergedEntry]
+    message_entry_id: str
+    item_id: str | None = None
+
+
+class QueueController:
+    """Merge busy-time prompts into one app-server turn.
+
+    The app server keeps a FIFO queue and promotes one item at a time, which the
+    desktop app relies on for turn-by-turn delivery. The CLI wants queued prompts
+    delivered together, so it keeps a single queue item and folds each new prompt
+    into it with ``queue/replace``. The server queue behaviour is unchanged: it
+    still promotes exactly one (already-merged) item, and each queued prompt keeps
+    its own widget so it stays individually editable and removable.
     """
 
     def __init__(self, ports: QueuePorts) -> None:
         self._ports = ports
-        self._queue = MessageQueue()
-        self._widgets: list[Widget] = []
+        self._server_queue = PublicTurnQueue()
+        self._merged: _MergedTurn | None = None
+        # Optimistic prompts sent while idle: rendered as normal messages and
+        # promoted immediately, so they own their own queue item and never merge.
+        self._optimistic: dict[str, _Pending] = {}
         self._header: QueueHeaderMessage | None = None
-        self._drain_task: asyncio.Task | None = None
-        self._drain_enabled = True
-
-    @property
-    def queue(self) -> MessageQueue:
-        return self._queue
+        # Serialize mutations so app-server events (sync / turn_started) cannot
+        # interleave with an in-flight enqueue or replace.
+        self._lock = asyncio.Lock()
 
     @property
     def header(self) -> QueueHeaderMessage | None:
         return self._header
 
+    @property
+    def paused(self) -> bool:
+        return self._server_queue.paused
+
+    @property
+    def has_server_work(self) -> bool:
+        return bool(self)
+
+    @property
+    def has_removable(self) -> bool:
+        return self._merged is not None and self._merged.item_id is not None
+
     def __bool__(self) -> bool:
-        return bool(self._queue)
+        return self._merged is not None or bool(self._optimistic)
 
     def __len__(self) -> int:
-        return len(self._queue)
-
-    # -- pin target (used by the app's _mount_and_scroll) ------------------
+        merged = len(self._merged.entries) if self._merged is not None else 0
+        return merged + len(self._optimistic)
 
     def pin_target(self, messages_area: Widget) -> Widget | None:
         target: Widget | None = self._header
-        if target is None and self._widgets:
-            target = self._widgets[0]
+        if target is None:
+            target = self._first_pending_widget()
         if target is not None and target.parent is messages_area:
             return target
         return None
 
-    def _last_queue_anchor(self) -> Widget | None:
-        if self._widgets:
-            return self._widgets[-1]
-        return self._header
-
-    # -- quit / count helpers --------------------------------------------
-
     def quit_warning_extra(self) -> str:
-        if not self._queue:
+        if not self:
             return ""
-        n = len(self._queue)
-        plural = "s" if n != 1 else ""
-        return f"{n} queued message{plural} will be discarded"
-
-    def _push_loading_queue_count(self) -> None:
-        self._ports.set_loading_queue_count(len(self._queue))
+        count = len(self)
+        plural = "s" if count != 1 else ""
+        return f"{count} queued message{plural} will be discarded"
 
     def notify_busy_changed(self) -> None:
         self._push_loading_queue_count()
-
-    # -- enqueue ----------------------------------------------------------
 
     async def enqueue_prompt(
         self,
@@ -258,149 +196,512 @@ class QueueController:
         *,
         skill_name: str | None = None,
         prepared_prompt: PreparedPrompt | None = None,
+        optimistic_start: bool = False,
     ) -> None:
-        self._queue.append_prompt(
-            content, skill_name=skill_name, prepared_prompt=prepared_prompt
+        prompt = _QueuedPrompt(
+            content=content,
+            skill_name=skill_name,
+            prepared_prompt=prepared_prompt,
+            message_entry_id=str(uuid4()),
         )
-        await self._ensure_header()
-        images = prepared_prompt.images if prepared_prompt is not None else []
-        widget = UserMessage(content, pending=True, images=images or None)
-        anchor = self._last_queue_anchor()
-        self._widgets.append(widget)
-        await self._ports.mount_and_scroll(widget, after=anchor)
-        self._push_loading_queue_count()
-        self.start_drain_if_needed()
+        async with self._lock:
+            if optimistic_start and not self:
+                await self._enqueue_optimistic(prompt)
+            else:
+                await self._enqueue_merged(prompt)
 
-    async def enqueue_bash(self, content: str, workdir: str) -> None:
-        self._queue.append_bash(content)
-        await self._ensure_header()
-        widget = BashOutputMessage(content, workdir, pending=True)
-        widget.set_queued(True)
-        anchor = self._last_queue_anchor()
-        self._widgets.append(widget)
-        await self._ports.mount_and_scroll(widget, after=anchor)
-        self._push_loading_queue_count()
-        self.start_drain_if_needed()
+    async def sync_server_queue(self, queue: PublicTurnQueue) -> None:
+        async with self._lock:
+            self._server_queue = queue.model_copy(deep=True)
+            # Incremental queue updates never remove the merged block: promotion
+            # pops the queue item immediately before ``TurnStarted``, so a missing
+            # item does not mean the prompt was discarded. ``turn_started`` clears
+            # a promoted block and ``clear_server_queue`` clears a reset one.
+            known = set(self._optimistic)
+            if self._merged is not None and self._merged.item_id is not None:
+                known.add(self._merged.item_id)
+            for item in queue.items:
+                if item.id in known:
+                    continue
+                if self._ports.turn_has_started(item.id):
+                    continue
+                # A queued item we do not track yet: restore it as one block.
+                # The CLI only ever creates a single item, so this is the resume
+                # path, where the merged item is one combined user entry.
+                if self._merged is None:
+                    await self._restore_server_item(item)
+                    known.add(item.id)
 
-    async def enqueue_command(
-        self,
-        content: str,
-        *,
-        command_payload: Callable[[], Awaitable[None]] | None = None,
-        on_discard: Callable[[], Awaitable[None]] | None = None,
-        flushes_pending: bool = False,
-    ) -> None:
-        self._queue.append_command(
-            content,
-            command_payload=command_payload,
-            on_discard=on_discard,
-            flushes_pending=flushes_pending,
-        )
-        await self._ensure_header()
-        widget = SlashCommandMessage(content, pending=True)
-        anchor = self._last_queue_anchor()
-        self._widgets.append(widget)
-        await self._ports.mount_and_scroll(widget, after=anchor)
-        self._push_loading_queue_count()
-        self.start_drain_if_needed()
+            if self._header is not None:
+                self._header.set_paused(self.paused)
+            await self._remove_header_if_empty()
+            self._push_loading_queue_count()
+
+    async def clear_server_queue(self) -> None:
+        """Forget queued prompts after a server-side session reset."""
+        async with self._lock:
+            widgets: list[UserMessage] = []
+            if self._merged is not None:
+                widgets.extend(entry.widget for entry in self._merged.entries)
+            widgets.extend(pending.widget for pending in self._optimistic.values())
+
+            self._server_queue = PublicTurnQueue()
+            self._merged = None
+            self._optimistic.clear()
+
+            removed: set[int] = set()
+            for widget in widgets:
+                if id(widget) in removed:
+                    continue
+                removed.add(id(widget))
+                await widget.remove()
+
+            await self._remove_header_if_empty()
+            self._push_loading_queue_count()
+
+    async def turn_started(self, queue_item_id: str | None) -> None:
+        async with self._lock:
+            await self._turn_started_locked(queue_item_id)
 
     async def pop_last(self) -> bool:
-        item = self._queue.pop_last()
-        if item is None:
-            return False
-        await item.on_discard()
-        widget = self._widgets.pop() if self._widgets else None
-        if widget is not None:
-            await widget.remove()
-        await self._remove_header_if_empty()
-        self._push_loading_queue_count()
-        return True
+        async with self._lock:
+            merged = self._merged
+            if merged is None or merged.item_id is None or not merged.entries:
+                return False
+            if self._ports.turn_has_started(merged.item_id):
+                return False
+            return await self._drop_entry_locked(len(merged.entries) - 1)
 
-    def prompt_item_texts(self) -> list[tuple[int, str]]:
-        """Return (queue_index, content) for PROMPT items, in queue order."""
-        return [
-            (i, item.content)
-            for i, item in enumerate(self._queue._items)
-            if item.kind == QueuedItemKind.PROMPT
-        ]
+    async def steer_pending(self) -> bool:
+        """Send the queued prompts into the active turn as steering.
+
+        Removes the merged queue item first so it cannot also promote as its own
+        turn, then steers its combined text/images into the running turn. If the
+        steer fails (e.g. the turn ended between the guard and the steer), the
+        block is re-enqueued so it still promotes as the next turn -- nothing is
+        delivered twice and nothing is lost. On success the queued widgets
+        un-pend so they read as sent messages. Returns True when a steer was
+        sent, False when there was nothing steerable (empty queue, or the merged
+        block already started).
+        """
+        async with self._lock:
+            merged = self._merged
+            if merged is None or merged.item_id is None:
+                return False
+            if self._ports.turn_has_started(merged.item_id):
+                await self._turn_started_locked(merged.item_id)
+                return False
+            removed = await self._ports.remove_queued_turn(merged.item_id)
+            self._server_queue = self._ports.current_turn_queue().model_copy(deep=True)
+            if not removed or self._ports.turn_has_started(merged.item_id):
+                # Promoted or dropped between the guard and the remove: let the
+                # normal turn-start path finalize it instead of steering, so it
+                # is never delivered both as a steer and as its own turn.
+                if self._ports.turn_has_started(merged.item_id):
+                    await self._turn_started_locked(merged.item_id)
+                return False
+            entries = merged.entries
+            try:
+                await self._ports.steer_turn(
+                    self._server_text(entries),
+                    self._server_images(entries) or None,
+                    merged.message_entry_id,
+                )
+            except Exception:
+                # The item is removed but the steer failed (e.g. the turn just
+                # ended). Put the block back so it still promotes as the next
+                # turn; if re-enqueue also fails, drop it rather than leaving
+                # ghost pending widgets tied to a removed server item.
+                try:
+                    await self._reenqueue_after_failed_steer(merged)
+                except Exception:
+                    await self._discard_merged()
+                    self._push_loading_queue_count()
+                    raise
+                raise
+            for entry in entries:
+                await entry.widget.set_pending(False)
+                self._report_prompt(entry.prompt)
+            self._merged = None
+            await self._remove_header()
+            self._push_loading_queue_count()
+            return True
+
+    async def _reenqueue_after_failed_steer(self, merged: _MergedTurn) -> None:
+        # Use a fresh idempotency key: the original one (derived from
+        # ``message_entry_id``) was consumed by the now-removed item, so reusing
+        # it would be rejected. ``message_entry_id`` stays the same for rewind.
+        queued_turn = await self._ports.enqueue_turn(
+            self._server_text(merged.entries),
+            message_entry_id=merged.message_entry_id,
+            images=self._server_images(merged.entries) or None,
+            idempotency_key=str(uuid4()),
+        )
+        merged.item_id = queued_turn.id
+        self._server_queue = self._ports.current_turn_queue().model_copy(deep=True)
 
     def queue_item_texts(self) -> list[tuple[int, str]]:
-        """Return (queue_index, content) for all items, in queue order."""
-        return [(i, item.content) for i, item in enumerate(self._queue._items)]
-
-    def queue_items(self) -> list[tuple[int, QueuedItemKind, str]]:
-        """Return (queue_index, kind, content) for all items, in queue order."""
         return [
-            (i, item.kind, item.content) for i, item in enumerate(self._queue._items)
+            (index, entry.prompt.content) for index, entry in enumerate(self._entries())
         ]
 
     @property
-    def widgets(self) -> list[Widget]:
-        return list(self._widgets)
+    def widgets(self) -> list[UserMessage]:
+        return [entry.widget for entry in self._entries()]
 
     async def pop_at(self, index: int) -> bool:
-        item = self._queue.pop_at(index)
-        if item is None:
-            return False
-        await item.on_discard()
-        if index < len(self._widgets):
-            widget = self._widgets.pop(index)
+        async with self._lock:
+            merged = self._merged
+            if merged is None or merged.item_id is None:
+                return False
+            if index < 0 or index >= len(merged.entries):
+                return False
+            if self._ports.turn_has_started(merged.item_id):
+                return False
+            return await self._drop_entry_locked(index)
+
+    async def update_prompt(
+        self,
+        queue_index: int,
+        content: str,
+        *,
+        prepared_prompt: PreparedPrompt | None = None,
+    ) -> bool:
+        async with self._lock:
+            merged = self._merged
+            if merged is None or merged.item_id is None:
+                return False
+            if queue_index < 0 or queue_index >= len(merged.entries):
+                return False
+            if self._ports.turn_has_started(merged.item_id):
+                await self._turn_started_locked(merged.item_id)
+                return False
+            entry = merged.entries[queue_index]
+            edited = _MergedEntry(
+                replace(entry.prompt, content=content, prepared_prompt=prepared_prompt),
+                entry.widget,
+            )
+            candidate = list(merged.entries)
+            candidate[queue_index] = edited
+            if not await self._replace_entries_locked(candidate):
+                return False
+            entry.widget.update_content(content)
+            self._push_loading_queue_count()
+            return True
+
+    async def resume(self) -> None:
+        async with self._lock:
+            if self._server_queue.paused:
+                self._server_queue = await self._ports.resume_turn_queue()
+            if self._header is not None:
+                self._header.set_paused(self.paused)
+
+    # -- internal helpers (all run under ``self._lock``) -------------------
+
+    def _entries(self) -> list[_MergedEntry]:
+        return list(self._merged.entries) if self._merged is not None else []
+
+    async def _enqueue_optimistic(self, prompt: _QueuedPrompt) -> None:
+        images = (
+            prompt.prepared_prompt.images if prompt.prepared_prompt is not None else []
+        )
+        widget = UserMessage(
+            prompt.content,
+            pending=False,
+            history_entry_id=prompt.message_entry_id,
+            images=images or None,
+        )
+        await self._ports.mount_and_scroll(widget)
+        pending = _Pending(prompt, widget)
+        try:
+            queued_turn = await self._ports.enqueue_turn(
+                self._server_text_of(prompt),
+                message_entry_id=prompt.message_entry_id,
+                images=self._server_images_of(prompt) or None,
+            )
+        except Exception:
             await widget.remove()
-        await self._remove_header_if_empty()
+            raise
+        self._optimistic[queued_turn.id] = pending
+        self._server_queue = self._ports.current_turn_queue().model_copy(deep=True)
+        if self._ports.turn_has_started(queued_turn.id):
+            await self._turn_started_locked(queued_turn.id)
+        self._push_loading_queue_count()
+
+    async def _enqueue_merged(self, prompt: _QueuedPrompt) -> None:
+        merged = self._merged
+        if (
+            merged is not None
+            and merged.item_id is not None
+            and self._ports.turn_has_started(merged.item_id)
+        ):
+            # The current block promoted before this prompt arrived; finalize it
+            # and start a fresh block for the next turn.
+            await self._turn_started_locked(merged.item_id)
+            merged = self._merged
+
+        if merged is None:
+            await self._create_merged(prompt)
+            return
+
+        # Later prompts stay individually editable but share the first prompt's
+        # server history entry (the merged item has one entry_id), so they get no
+        # history id of their own -- a unique id would be a dangling rewind
+        # target once the turn starts.
+        widget = self._build_widget(prompt)
+        await self._ports.mount_and_scroll(widget, after=self._last_widget())
+        # Commit the new prompt to the merged item only if the replace lands.
+        # If the item promotes or is removed during the round-trip, the new
+        # prompt is not part of that turn, so it must not be un-pended with it.
+        candidate = [*merged.entries, _MergedEntry(prompt, widget)]
+        try:
+            replaced = await self._replace_entries_locked(candidate)
+        except Exception:
+            # The widget is mounted but not committed to the merged item; drop it
+            # so a failed replace does not leave an untracked pending prompt.
+            await widget.remove()
+            raise
+        if replaced:
+            self._push_loading_queue_count()
+            return
+        await widget.remove()
+        # The previous block started or was removed mid-replace: queue this
+        # prompt as a fresh block so it is not lost.
+        await self._create_merged(prompt)
+
+    async def _create_merged(self, prompt: _QueuedPrompt) -> None:
+        await self._ensure_header()
+        # The first prompt owns the merged item's server history entry, so its
+        # widget keeps that id for rewind and history lookups.
+        widget = self._build_widget(prompt, history_entry_id=prompt.message_entry_id)
+        await self._ports.mount_and_scroll(widget, after=self._header)
+        merged = _MergedTurn(
+            entries=[_MergedEntry(prompt, widget)],
+            message_entry_id=prompt.message_entry_id or str(uuid4()),
+        )
+        self._merged = merged
+        self._relink_merged()
+        try:
+            queued_turn = await self._ports.enqueue_turn(
+                self._server_text(merged.entries),
+                message_entry_id=merged.message_entry_id,
+                images=self._server_images(merged.entries) or None,
+            )
+        except Exception:
+            await widget.remove()
+            self._merged = None
+            await self._remove_header_if_empty()
+            raise
+        merged.item_id = queued_turn.id
+        self._server_queue = self._ports.current_turn_queue().model_copy(deep=True)
+        if self._ports.turn_has_started(queued_turn.id):
+            await self._turn_started_locked(queued_turn.id)
+        self._push_loading_queue_count()
+
+    async def _drop_entry_locked(self, index: int) -> bool:
+        merged = self._merged
+        if merged is None:
+            return False
+        entry = merged.entries[index]
+        if len(merged.entries) == 1:
+            return await self._remove_merged_locked()
+        candidate = [e for i, e in enumerate(merged.entries) if i != index]
+        if not await self._replace_entries_locked(candidate):
+            return False
+        await entry.widget.remove()
         self._push_loading_queue_count()
         return True
 
-    async def update_prompt_item(
-        self,
-        queue_index: int,
-        content: str,
-        *,
-        prepared_prompt: PreparedPrompt | None = None,
-    ) -> None:
-        self._queue.update_prompt_item(
-            queue_index, content, prepared_prompt=prepared_prompt
+    async def _replace_entries_locked(self, entries: list[_MergedEntry]) -> bool:
+        merged = self._merged
+        if merged is None or merged.item_id is None:
+            return False
+        queued_turn = await self._ports.replace_queued_turn(
+            merged.item_id,
+            self._server_text(entries),
+            message_entry_id=merged.message_entry_id,
+            images=self._server_images(entries) or None,
         )
-        widget = self._widgets[queue_index]
-        if isinstance(widget, UserMessage):
-            widget.update_content(content)
+        self._server_queue = self._ports.current_turn_queue().model_copy(deep=True)
+        if queued_turn is not None:
+            merged.entries = entries
+            self._relink_merged()
+            return True
+        # not_found: the item started or was removed.
+        if self._ports.turn_has_started(merged.item_id):
+            await self._turn_started_locked(merged.item_id)
+        else:
+            await self._discard_merged()
+        self._push_loading_queue_count()
+        return False
 
-    async def update_item(
-        self,
-        queue_index: int,
-        content: str,
-        *,
-        prepared_prompt: PreparedPrompt | None = None,
-    ) -> None:
-        """In-place edit of a queued item, refreshing its on-screen widget.
+    async def _remove_merged_locked(self) -> bool:
+        merged = self._merged
+        if merged is None or merged.item_id is None:
+            return False
+        removed = await self._ports.remove_queued_turn(merged.item_id)
+        self._server_queue = self._ports.current_turn_queue().model_copy(deep=True)
+        if not removed or self._ports.turn_has_started(merged.item_id):
+            return False
+        await self._discard_merged()
+        self._push_loading_queue_count()
+        return True
 
-        Prompts re-prepare mentions/images; bash commands refresh the rendered
-        command line. The widget list and queue positions are unchanged.
-        """
-        item = self._queue._items[queue_index]
-        if item.kind == QueuedItemKind.BASH:
-            self._queue.update_prompt_item(queue_index, content)
-            widget = self._widgets[queue_index]
-            if isinstance(widget, BashOutputMessage):
-                widget.update_command(content)
+    async def _discard_merged(self) -> None:
+        merged = self._merged
+        if merged is None:
             return
-        self._queue.update_prompt_item(
-            queue_index, content, prepared_prompt=prepared_prompt
-        )
-        widget = self._widgets[queue_index]
-        if isinstance(widget, UserMessage):
-            widget.update_content(content)
+        self._merged = None
+        for entry in merged.entries:
+            await entry.widget.remove()
+        await self._remove_header_if_empty()
 
-    # -- header lifecycle -------------------------------------------------
+    async def _turn_started_locked(self, queue_item_id: str | None) -> None:
+        if queue_item_id is None:
+            return
+        pending = self._optimistic.pop(queue_item_id, None)
+        if pending is not None:
+            await pending.widget.set_pending(False)
+            self._report_prompt(pending.prompt)
+            await self._ports.maybe_show_feedback_bar()
+            await self._reset_header_position()
+            self._push_loading_queue_count()
+            return
+        merged = self._merged
+        if merged is None or merged.item_id != queue_item_id:
+            return
+        for entry in merged.entries:
+            await entry.widget.set_pending(False)
+            self._report_prompt(entry.prompt)
+        self._merged = None
+        await self._ports.maybe_show_feedback_bar()
+        await self._reset_header_position()
+        self._push_loading_queue_count()
+
+    async def _restore_server_item(self, queued_turn: PublicQueuedTurn) -> None:
+        user_entry = _queued_turn_user_entry(queued_turn)
+        if user_entry is None:
+            return
+        content = _MERGE_SEPARATOR.join(
+            block.text
+            for block in user_entry.content
+            if isinstance(block, SessionTextContentBlock)
+        )
+        images = [
+            _queued_image_attachment(block)
+            for block in user_entry.content
+            if isinstance(block, SessionImageContentBlock)
+        ]
+        prompt = _QueuedPrompt(content, message_entry_id=user_entry.entry_id)
+        widget = UserMessage(
+            content,
+            pending=True,
+            history_entry_id=user_entry.entry_id,
+            images=images or None,
+        )
+        self._merged = _MergedTurn(
+            entries=[_MergedEntry(prompt, widget)],
+            message_entry_id=user_entry.entry_id or str(uuid4()),
+            item_id=queued_turn.id,
+        )
+        self._relink_merged()
+        await self._ensure_header()
+        await self._ports.mount_and_scroll(widget, after=self._header)
+
+    def _build_widget(
+        self, prompt: _QueuedPrompt, *, history_entry_id: str | None = None
+    ) -> UserMessage:
+        images = (
+            prompt.prepared_prompt.images if prompt.prepared_prompt is not None else []
+        )
+        return UserMessage(
+            prompt.content,
+            pending=True,
+            history_entry_id=history_entry_id,
+            images=images or None,
+        )
+
+    def _relink_merged(self) -> None:
+        """Render the merged prompts as one visual block.
+
+        Each queued prompt keeps its own widget, but consecutive prompts in the
+        same merged turn hide the separator between them and mark themselves as
+        continuations, so they read as a single grouped message (matching the
+        legacy queued-prompt rendering) even though they stay individually
+        selectable, editable, and removable.
+        """
+        if self._merged is None:
+            return
+        widgets = [entry.widget for entry in self._merged.entries]
+        last = len(widgets) - 1
+        # The merged turn has one server history entry. Only the first widget
+        # is rewindable; re-assign so popping the oldest prompt does not lose
+        # the id (later widgets are mounted with history_entry_id=None).
+        rewind_id = self._merged.message_entry_id
+        for index, widget in enumerate(widgets):
+            widget.set_follows_previous(index > 0)
+            widget.set_show_separator(index == last)
+            widget.history_entry_id = rewind_id if index == 0 else None
+
+    def _report_prompt(self, prompt: _QueuedPrompt) -> None:
+        prepared = prompt.prepared_prompt
+        if prepared is not None:
+            self._ports.send_mention_telemetry(
+                prepared.mentions, prompt.message_entry_id
+            )
+        self._ports.send_skill_telemetry(prompt.skill_name)
+
+    @staticmethod
+    def _server_text_of(prompt: _QueuedPrompt) -> str:
+        prepared = prompt.prepared_prompt
+        return prepared.prompt_text if prepared is not None else prompt.content
+
+    @staticmethod
+    def _server_images_of(prompt: _QueuedPrompt) -> list[ImageAttachment]:
+        prepared = prompt.prepared_prompt
+        return list(prepared.images) if prepared is not None else []
+
+    def _server_text(self, entries: list[_MergedEntry]) -> str:
+        return _MERGE_SEPARATOR.join(
+            self._server_text_of(entry.prompt) for entry in entries
+        )
+
+    def _server_images(self, entries: list[_MergedEntry]) -> list[ImageAttachment]:
+        images: list[ImageAttachment] = []
+        for entry in entries:
+            images.extend(self._server_images_of(entry.prompt))
+        return images
+
+    def _last_widget(self) -> UserMessage | QueueHeaderMessage | None:
+        if self._merged is not None and self._merged.entries:
+            return self._merged.entries[-1].widget
+        return self._header
+
+    def _first_pending_widget(self) -> UserMessage | None:
+        if self._merged is not None and self._merged.entries:
+            return self._merged.entries[0].widget
+        if self._optimistic:
+            return next(iter(self._optimistic.values())).widget
+        return None
 
     async def _ensure_header(self) -> None:
         if self._header is not None:
             return
-        header = QueueHeaderMessage(paused=self._queue.paused)
+        header = QueueHeaderMessage(paused=self.paused)
         self._header = header
         await self._ports.mount_and_scroll(header)
 
+    async def _reset_header_position(self) -> None:
+        await self._remove_header()
+        first_pending = self._first_pending_widget()
+        if first_pending is None:
+            return
+        header = QueueHeaderMessage(paused=self.paused)
+        self._header = header
+        await self._ports.mount_and_scroll(header, before=first_pending)
+
     async def _remove_header_if_empty(self) -> None:
-        if self._queue or self._header is None:
+        if self or self._header is None:
             return
         await self._remove_header()
 
@@ -409,216 +710,16 @@ class QueueController:
             return
         header = self._header
         self._header = None
-        await header.remove()
+        if header.parent is not None:
+            await header.remove()
 
-    def set_paused(self, paused: bool) -> None:
-        if paused:
-            self._queue.pause()
-        else:
-            self._queue.resume()
-        if self._header is not None:
-            self._header.set_paused(self._queue.paused)
-
-    # -- drain engine -----------------------------------------------------
-
-    def start_drain_if_needed(self) -> None:
-        if not self._drain_enabled:
-            return
-        if self._drain_task is not None and not self._drain_task.done():
-            return
-        if not self._queue or self._queue.paused:
-            return
-        if self._ports.agent_running():
-            return
-        bash_task = self._ports.bash_task()
-        if bash_task is not None and not bash_task.done():
-            return
-        self._drain_task = asyncio.create_task(self._drain())
-
-    @property
-    def draining(self) -> bool:
-        return self._drain_task is not None and not self._drain_task.done()
-
-    async def shutdown(self) -> None:
-        self._drain_enabled = False
-        drain_task = self._drain_task
-        if drain_task is None or drain_task.done():
-            return
-        drain_task.cancel()
-        with suppress(asyncio.CancelledError, Exception):
-            await drain_task
-
-    async def _drain(self) -> None:
-        try:
-            while self._drain_enabled and self._queue and not self._queue.paused:
-                # Block while a side-channel picker (e.g. /theme opened while
-                # busy) is on screen, so the drain doesn't run a queued turn
-                # behind it. Returns immediately when the input app is active.
-                await self._ports.await_input_app()
-                await self._remove_header()
-                pending = await self._consume_until_bash_or_empty()
-                if not pending:
-                    continue
-                if self._queue.paused:
-                    self._requeue(pending)
-                    continue
-                await self._run_pending_as_llm_turn(pending)
-        except Exception:
-            logger.exception("Queue drain crashed")
-        finally:
-            self._drain_task = None
-            self.notify_busy_changed()
-            await self._remove_header_if_empty()
-
-    async def _consume_until_bash_or_empty(self) -> list[_Pending]:
-        pending: list[_Pending] = []
-        while self._queue and not self._queue.paused:
-            item = self._queue.pop_first()
-            if item is None:
-                break
-            widget = self._widgets.pop(0) if self._widgets else None
-            if item.kind == QueuedItemKind.BASH:
-                # A bash item is a turn boundary: run any preceding prompts as
-                # a real LLM turn before executing the command. Injecting them
-                # without a turn (the old flush) silently dropped prompts that
-                # immediately preceded a bash item — the model never answered.
-                if pending:
-                    await self._run_pending_as_llm_turn(pending)
-                    pending = []
-                if widget is not None:
-                    await widget.remove()
-                if not await self._run_bash(item.content):
-                    return []
-            elif item.kind == QueuedItemKind.COMMAND:
-                # Commands are side effects, not turn boundaries. Keep
-                # preceding prompts so they still get an LLM turn, and wait
-                # if the command started an agent (e.g. /compact, /retry) or
-                # opened a picker (e.g. /mcp, /resume) that must block the drain
-                # until the user dismisses it. A flushes_pending command
-                # (e.g. /clear) resets the conversation, so drop any prompts
-                # queued before it instead of running a turn on the widgets it
-                # is about to tear down.
-                if item.flushes_pending:
-                    pending = []
-                elif pending:
-                    # Run preceding prompts as a real LLM turn before the
-                    # command's side effect. Without this, a queued [/mcp]
-                    # following a prompt opens its picker first and the prompt
-                    # only runs after the user dismisses it — out of FIFO order.
-                    await self._run_pending_as_llm_turn(pending)
-                    pending = []
-                if widget is not None:
-                    await widget.remove()
-                await self._ports.run_command(item.content, item.command_payload)
-                await self._await_tail_turn()
-                await self._ports.await_input_app()
-            elif isinstance(widget, UserMessage):
-                pending.append(_Pending(item, widget))
-        return pending
-
-    def _requeue(self, pending: list[_Pending]) -> None:
-        self._queue.prepend_prompts([p.item for p in pending])
-        self._widgets[:0] = [p.widget for p in pending]
-
-    async def _run_pending_as_llm_turn(self, pending: list[_Pending]) -> None:
-        if not await self._gate_queued_images_for_vision(pending):
-            return
-        head, tail = pending[:-1], pending[-1]
-        for p in head:
-            await self._inject_head_item(p.item, p.widget)
-            await p.widget.set_pending(False)
-        self._link_consecutive_user_messages([p.widget for p in pending])
-        await self._run_tail_prompt(tail.item, tail.widget)
-        await self._await_tail_turn()
-
-    async def _await_tail_turn(self) -> None:
-        try:
-            await self._ports.await_agent_turn()
-        except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if current is not None and current.cancelling():
-                raise
-            self._push_loading_queue_count()
-
-    async def _gate_queued_images_for_vision(self, pending: list[_Pending]) -> bool:
-        if not any(
-            p.item.prepared_prompt and p.item.prepared_prompt.images for p in pending
-        ):
-            return True
-        active_model = self._ports.active_model()
-        if active_model is None or active_model.supports_images:
-            return True
-        self._requeue(pending)
-        self.set_paused(True)
-        await self._ensure_header()
-        await self._ports.mount_and_scroll(
-            ErrorMessage(
-                shortcut_hint(
-                    f"Model `{active_model.display_name}` does not support images. "
-                    f"Switch with /model, then press {shortcut('Enter')} "
-                    "to resume the queue."
-                ),
-                show_border=False,
-            )
-        )
-        return False
-
-    async def _inject_head_item(self, item: QueuedItem, widget: UserMessage) -> None:
-        message_id = str(uuid4())
-        widget.history_entry_id = message_id
-        prepared = item.prepared_prompt
-        await self._ports.inject_queued_prompt(
-            prepared.prompt_text if prepared is not None else item.content,
-            images=prepared.images if prepared is not None else None,
-            client_message_id=message_id,
-            mention_stats=prepared.mentions if prepared is not None else None,
-        )
-        self._ports.send_skill_telemetry(item.skill_name)
-
-    async def _run_tail_prompt(self, item: QueuedItem, widget: UserMessage) -> None:
-        message_id = str(uuid4())
-        widget.history_entry_id = message_id
-        await widget.set_pending(False)
-        await self._ports.maybe_show_feedback_bar()
-
-        await self._ports.remove_loading_widget()
-        self._ports.start_agent_turn(
-            item.content,
-            prepared_prompt=item.prepared_prompt,
-            client_message_id=message_id,
-        )
-        self._ports.send_skill_telemetry(item.skill_name)
-        self.notify_busy_changed()
-
-    async def _run_bash(self, command: str) -> bool:
-        bash_task = self._ports.run_bash(command)
-        self.notify_busy_changed()
-        try:
-            await bash_task
-        except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if current is not None and current.cancelling():
-                raise
-            return False
-        return True
-
-    @staticmethod
-    def _link_consecutive_user_messages(widgets: list[UserMessage]) -> None:
-        for prev, curr in zip(widgets, widgets[1:], strict=False):
-            prev.set_show_separator(False)
-            curr.set_follows_previous(True)
+    def _push_loading_queue_count(self) -> None:
+        self._ports.set_loading_queue_count(len(self))
 
 
 @dataclass(frozen=True)
 class SideChannelPorts:
-    """Callbacks for side-channel slash command execution.
-
-    The side channel runs allowlisted slash commands while the agent or bash
-    is busy. It does not wait for the agent to become idle — that's the point.
-    Commands that need idle (lifecycle ops, config reloads) go to the main
-    queue instead. Commands that persist config defer to the main queue via
-    a COMMAND item with payload.
-    """
+    """Callbacks for side-channel slash command execution."""
 
     invoke_command: Callable[[str, Command, str, str], Awaitable[bool]]
 
@@ -632,16 +733,7 @@ class SideChannelItem:
 
 
 class SideChannelController:
-    """Single-slot runner for side-channel slash commands.
-
-    Only one side-channel command runs at a time; new submissions are rejected
-    while one is in flight. Does not check ``agent_running`` or ``bash_task`` —
-    the whole purpose is concurrency with the agent loop.
-
-    Commands that need to persist config changes enqueue a COMMAND item on
-    the main queue with a payload. The main queue drains when idle, so
-    persistence never hits CONFLICT.
-    """
+    """Run one allowlisted slash command alongside the active job."""
 
     def __init__(self, ports: SideChannelPorts) -> None:
         self._ports = ports

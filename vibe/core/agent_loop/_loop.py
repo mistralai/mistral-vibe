@@ -35,6 +35,7 @@ from vibe.core.compaction import (
 from vibe.core.compaction.context import (
     extract_summary,
     render_teleport_summary_request,
+    reorder_for_tool_adjacency,
     select_model_context,
 )
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
@@ -46,6 +47,7 @@ from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.experiments import ExperimentManager
+from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.models import EvalResponse
 from vibe.core.experiments.session import (
@@ -94,6 +96,10 @@ from vibe.core.session.session_logger import SessionLogger
 from vibe.core.session.session_migration import migrate_sessions_entrypoint
 from vibe.core.session.title_policy import DEFAULT_TITLE_POLICY
 from vibe.core.skills.manager import SkillManager
+from vibe.core.skills.registry._service import (
+    RegistrySyncStatus,
+    refresh_registry_skills,
+)
 from vibe.core.subagents import SubagentRunnerPort
 from vibe.core.system_prompt import get_universal_system_prompt
 from vibe.core.telemetry.build_metadata import (
@@ -153,6 +159,7 @@ from vibe.core.types import (
     ApprovalResponse,
     AssistantEvent,
     AvailableTool,
+    BackgroundWorkEvent,
     BaseEvent,
     ChildSessionLink,
     CompactEndEvent,
@@ -193,7 +200,12 @@ from vibe.core.utils import (
     is_user_cancellation_event,
 )
 from vibe.observability.logging import log_model_call_success, logger
-from vibe.setup.auth.whoami import WhoAmICache, WhoAmIResult, derive_user_plan
+from vibe.setup.auth.whoami import (
+    WhoAmICache,
+    WhoAmIResult,
+    derive_user_plan,
+    resolve_user_plan,
+)
 from vibe.user_content import UserDisplayContent, UserResource
 from vibe.utils import VIBE_WARNING_TAG
 from vibe.utils.api_keys import resolve_api_key
@@ -293,6 +305,14 @@ class _PreparedReload:
     system_prompt: str
     config_source: _SwappableConfigSource
     hook_config_result: HookConfigResult | None
+    skills_adopted: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ScheduledTitleGeneration:
+    started_event: BackgroundWorkEvent
+    start_gate: asyncio.Event
+    ticket: TitleGenTicket
 
 
 # Hold strong references to background backend-close tasks so CPython doesn't
@@ -341,6 +361,7 @@ class _ActiveTurn:
 
 
 _NO_TURN = _ActiveTurn()
+_SKILL_ADOPT_ATTEMPTS = 3
 
 # Test-only kill switch for harnesses that run the real CLI against a mock model.
 _DISABLE_AUTO_TITLE_ENV_VAR = "VIBE_TEST_DISABLE_AUTO_TITLE"
@@ -523,9 +544,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._init_error: Exception | None = None
         self._init_start_time = time.monotonic()
         self._experiments_task: asyncio.Task[None] | None = None
-        # Resume-time plan/org rebuild runs in its own task, NOT _experiments_task:
-        # reusing the latter would make start_initialize_experiments a no-op (its
-        # guard) and skip the GrowthBook eval on resume-then-continue paths.
+        self._registry_skills_task: asyncio.Task[None] | None = None
+        self._skills_adopted: int = 0
         self._plan_attrs_task: asyncio.Task[None] | None = None
         self._reload_generation: int = 0
         self._pending_new_session_telemetry: bool = False
@@ -570,6 +590,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             allow_subagent=is_subagent,
             harness_files=self.harness_files,
         )
+        self.config.require_active_provider_api_key()
         config = self.config
         self.experiment_manager = ExperimentManager(
             client=RemoteEvalClient.from_settings(
@@ -665,6 +686,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             experiments_getter=lambda: self.experiment_manager.assignments(),
             user_plan_getter=lambda: self.user_plan,
             experiment_attributes_getter=lambda: self.experiment_manager.attributes(),
+            harness_backend=ExperimentSurface.LEGACY,
         )
         self.session_logger = SessionLogger(
             config.session_logging,
@@ -769,7 +791,20 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def wait_until_ready(self) -> None:
         """Await deferred initialization (MCP + experiments) from an async context."""
+        self._start_refresh_registry_skills()
         await self._await_deferred_init()
+        # A rapid start/stop can cancel the experiments/plan-attrs task mid-init.
+        # ``_await_deferred_init`` suppresses that cancellation; emitting lifecycle
+        # telemetry then would produce half-initialized events (``vibe.new_session``
+        # missing ``experiment_attributes`` / ``user_plan``, or a ``vibe.ready``
+        # with no matching ``new_session``). Skip both emits when a tracked init
+        # task was cancelled — the session is being torn down.
+        init_cancelled = any(
+            task is not None and task is not asyncio.current_task() and task.cancelled()
+            for task in (self._experiments_task, self._plan_attrs_task)
+        )
+        if init_cancelled:
+            return
         self._ensure_init_duration_recorded()
         if self._pending_new_session_telemetry:
             self._pending_new_session_telemetry = False
@@ -787,6 +822,69 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 continue
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+    def _start_refresh_registry_skills(self) -> None:
+        """Kick off registry skill sync in the background (flag-gated, run once)."""
+        if self._registry_skills_task is not None:
+            return
+        if not self.config.experimental_enable_registry_skills:
+            return
+        self._registry_skills_task = asyncio.create_task(
+            self._refresh_registry_skills()
+        )
+
+    async def _refresh_registry_skills(self) -> None:
+        try:
+            result = await refresh_registry_skills(
+                self.config, self.harness_files.project_roots
+            )
+        except Exception:
+            logger.exception("Registry skill sync task failed")
+            return
+        if result.status is not RegistrySyncStatus.OK:
+            if result.status is RegistrySyncStatus.FAILED:
+                logger.warning(
+                    "Registry skill sync failed; continuing with cached skills"
+                )
+            return
+        if not await self._adopt_synced_skills():
+            logger.warning("Registry skill sync kept losing to a concurrent reload")
+            return
+        try:
+            await self._refresh_system_prompt_unless_reloaded()
+        except Exception:
+            logger.warning("Failed to refresh system prompt after registry sync")
+
+    async def _refresh_system_prompt_unless_reloaded(self) -> None:
+        """Rebuild the system prompt, discarding it if a reload landed meanwhile.
+
+        A reload commits a fresh skill manager and its prompt together, so a
+        prompt built off-thread from the pre-reload manager must not be applied
+        on top of it.
+        """
+        generation = self._reload_generation
+        prompt = await asyncio.to_thread(self._build_system_prompt)
+        if generation != self._reload_generation:
+            return
+        self.messages.update_system_prompt(prompt)
+
+    async def _adopt_synced_skills(self) -> bool:
+        """Rebuild discovery for the newly synced bodies, retrying past reloads.
+
+        A concurrent reload rebuilds discovery from the same on-disk state, but
+        one that started before the new bodies landed would not see them, so
+        give up the snapshot and build again rather than dropping the sync.
+        """
+        for _ in range(_SKILL_ADOPT_ATTEMPTS):
+            generation = self._reload_generation
+            manager = await asyncio.to_thread(
+                SkillManager, lambda: self.config, harness_files=self.harness_files
+            )
+            if generation == self._reload_generation:
+                self.skill_manager = manager
+                self._skills_adopted += 1
+                return True
+        return False
 
     def _ensure_init_duration_recorded(self) -> None:
         """Record init duration exactly once; emit ready telemetry on fresh start.
@@ -1042,6 +1140,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             manager=self.experiment_manager,
             session_logger=self.session_logger,
             launch_context=self.launch_context,
+            harness=ExperimentSurface.LEGACY,
             resolve_identity=self.identity_cache.resolve,
             resolve_whoami=self.whoami_cache.resolve,
         )
@@ -1054,6 +1153,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             with contextlib.suppress(Exception):
                 self._sync_growthbook_layer_variants()
                 await self.refresh_config()
+                self._start_refresh_registry_skills()
                 await self.refresh_system_prompt()
 
     async def hydrate_experiments_from_session(
@@ -1070,6 +1170,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             with contextlib.suppress(Exception):
                 self._sync_growthbook_layer_variants()
                 await self.refresh_config()
+                self._start_refresh_registry_skills()
                 if refresh_prompt:
                     await self.refresh_system_prompt()
         # Plan/org attributes and user_plan are user-scoped, not session-scoped:
@@ -1088,6 +1189,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 config=self.config,
                 manager=self.experiment_manager,
                 launch_context=self.launch_context,
+                harness=ExperimentSurface.LEGACY,
                 resolve_identity=self.identity_cache.resolve,
                 resolve_whoami=self.whoami_cache.resolve,
             )
@@ -1190,7 +1292,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def aclose(self) -> None:
         self._cancel_auto_title_task()
-        for task in (self._experiments_task, self._plan_attrs_task):
+        for task in (
+            self._experiments_task,
+            self._registry_skills_task,
+            self._plan_attrs_task,
+        ):
             if task is not None and not task.done():
                 task.cancel()
                 with contextlib.suppress(BaseException):
@@ -1309,7 +1415,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     @requires_init
     async def refresh_system_prompt(self) -> None:
         """Rebuild and replace the system prompt with current tool/skill state."""
-        self.messages.update_system_prompt(self._build_system_prompt())
+        prompt = await asyncio.to_thread(self._build_system_prompt)
+        self.messages.update_system_prompt(prompt)
 
     @property
     def _turn(self) -> _ActiveTurn:
@@ -1373,6 +1480,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             on_retry=self.notice_retry,
             timeout=config.api_timeout,
             retry_max_elapsed_time=config.api_retry_max_elapsed_time,
+            connect_timeout=config.api_connect_timeout,
+            write_timeout=config.api_write_timeout,
+            pool_timeout=config.api_pool_timeout,
             enable_otel=(
                 config.enable_telemetry
                 and config.enable_otel
@@ -1818,6 +1928,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     @property
     def user_plan(self) -> str | None:
+        # The experiment-attribute snapshot is authoritative: it is what is
+        # emitted as ``experiment_attributes``, so deriving ``user_plan`` from it
+        # keeps the two from ever diverging (a populated planName with a null
+        # user_plan). The legacy ``_user_plan`` field is only a fallback for
+        # paths that resolve a plan without a snapshot (e.g. ``account/read``
+        # before experiments init has stamped one).
+        attributes = self.experiment_manager.attributes()
+        if attributes is not None:
+            return resolve_user_plan(attributes.planType, attributes.planName)
         return self._user_plan
 
     def set_user_plan(self, user_plan: str | None) -> None:
@@ -1928,7 +2047,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if self._hooks_manager:
             self._hooks_manager.reset_retry_count()
 
-    async def _conversation_loop(
+    async def _conversation_loop(  # noqa: PLR0912 - explicit turn lifecycle
         self,
         user_msg: str,
         client_message_id: str | None = None,
@@ -1996,9 +2115,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 # land as soon as there is usable context. The step ending with
                 # an assistant answer (not a tool result) means the turn is
                 # completing, which the cadence uses to time the initial title.
-                self._maybe_schedule_title_generation(
+                async for event in self._schedule_title_generation_events(
                     turn_completing=self.messages[-1].role != Role.tool
-                )
+                ):
+                    yield event
 
                 if self._pending_clear_context:
                     async for event in self._clear_context_after_plan_accept():
@@ -2028,20 +2148,36 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.messages.append(retry_msg)
         return False
 
-    def _maybe_schedule_title_generation(self, *, turn_completing: bool) -> None:
-        # Schedule a background title refresh when due; never blocks the turn.
-        if os.environ.get(_DISABLE_AUTO_TITLE_ENV_VAR) == "1":
+    async def _schedule_title_generation_events(
+        self, *, turn_completing: bool
+    ) -> AsyncGenerator[BackgroundWorkEvent, None]:
+        scheduled = self._maybe_schedule_title_generation(
+            turn_completing=turn_completing
+        )
+        if scheduled is None:
             return
+        try:
+            yield scheduled.started_event
+        except (GeneratorExit, asyncio.CancelledError):
+            # Closing or cancelling at this yield means the started event never
+            # reached the delivery layer. Do not let title generation run while
+            # the session still appears quiescent.
+            self._title_cadence.restore(scheduled.ticket)
+            self._cancel_auto_title_task()
+            raise
+        else:
+            # Let the title task run only after the delivery layer has observed
+            # that background work is pending.
+            scheduled.start_gate.set()
+
+    def _maybe_schedule_title_generation(
+        self, *, turn_completing: bool
+    ) -> _ScheduledTitleGeneration | None:
+        # Schedule a background title refresh when due; never blocks the turn.
         # Core owns the capability; the delivery layer decides whether this
         # surface drives it. Other clients keep title=None and fall back to the
         # message preview at the ACP boundary until the harness owns titles.
-        if not self._auto_title_enabled:
-            return
-        if not self.session_logger.enabled:
-            return
-        if self.session_logger.title_source == "manual":
-            return
-        if self._auto_title_task is not None and not self._auto_title_task.done():
+        if self._title_generation_is_blocked():
             return
 
         # Only refresh periodically when the title runs on the cheap fast model;
@@ -2054,14 +2190,51 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             return
 
         snapshot = list(self.messages)
+        session_id = self.session_id
+        work_id = str(uuid4())
+        start_gate = asyncio.Event()
         self._auto_title_task = asyncio.create_task(
             self._generate_title_task(
-                snapshot, ticket=ticket, session_id=self.session_id
-            )
+                snapshot,
+                ticket=ticket,
+                session_id=session_id,
+                work_id=work_id,
+                start_gate=start_gate,
+            ),
+            name="vibe-session-title",
+        )
+        return _ScheduledTitleGeneration(
+            started_event=BackgroundWorkEvent(
+                work_id=work_id,
+                kind="session_title",
+                phase="started",
+                session_id=session_id,
+            ),
+            start_gate=start_gate,
+            ticket=ticket,
         )
 
+    def _title_generation_is_blocked(self) -> bool:
+        if (
+            os.environ.get(_DISABLE_AUTO_TITLE_ENV_VAR) == "1"
+            or not self._auto_title_enabled
+        ):
+            return True
+        if (
+            not self.session_logger.enabled
+            or self.session_logger.title_source == "manual"
+        ):
+            return True
+        return self._auto_title_task is not None and not self._auto_title_task.done()
+
     async def _generate_title_task(
-        self, messages: list[LLMMessage], *, ticket: TitleGenTicket, session_id: str
+        self,
+        messages: list[LLMMessage],
+        *,
+        ticket: TitleGenTicket,
+        session_id: str,
+        work_id: str,
+        start_gate: asyncio.Event,
     ) -> None:
         # session_id pins the conversation this title was generated for: a /new or
         # /clear reset swaps the loop (and its in-place logger) to a new id mid
@@ -2069,6 +2242,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         from vibe.core.session.title_model import generate_session_title
 
         try:
+            await start_gate.wait()
             title = await generate_session_title(
                 messages,
                 config=self.config,
@@ -2091,13 +2265,21 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         except Exception:
             self._title_cadence.restore(ticket)
             logger.warning("Background session title update failed", exc_info=True)
+        finally:
+            self._out_of_band_events.put_nowait(
+                BackgroundWorkEvent(
+                    work_id=work_id,
+                    kind="session_title",
+                    phase="finished",
+                    session_id=session_id,
+                )
+            )
 
     async def out_of_band_events(self) -> AsyncGenerator[BaseEvent, None]:
-        """Stream events produced outside a turn (e.g. background title updates).
+        """Stream events produced outside a turn.
 
-        The delivery layer drains this as the single consumer, so a result
-        surfaces once and cannot race the turn projector for the same event.
-        Only surfaces that opt into background titles run a drain.
+        The delivery layer drains this as the single consumer, so title and
+        background-work events stay ordered and surface once.
         """
         while True:
             yield await self._out_of_band_events.get()
@@ -2846,7 +3028,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def _messages_for_backend(
         self, messages: Sequence[LLMMessage], active_model: ModelConfig
     ) -> Sequence[LLMMessage]:
-        messages = select_model_context(messages)
+        # Keep every tool_use adjacent to its tool_result: a message steered
+        # into a running turn mid-tool-call can otherwise sit in that gap and
+        # make the provider reject the request.
+        messages = reorder_for_tool_adjacency(select_model_context(messages))
         if active_model.supports_images:
             return messages
         if not any(m.images for m in messages):
@@ -3639,6 +3824,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def _prepare_reload(
         self, target_config: VibeConfigSchema, reload_hooks: bool
     ) -> _PreparedReload:
+        skills_adopted = self._skills_adopted
         config_source = _SwappableConfigSource(lambda: target_config)
         tool_manager = ToolManager(
             config_source.get,
@@ -3669,6 +3855,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             system_prompt=system_prompt,
             config_source=config_source,
             hook_config_result=hook_config_result,
+            skills_adopted=skills_adopted,
         )
 
     def _commit_reload(
@@ -3691,8 +3878,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             self._schedule_backend_close(self.backend)
         self.backend = prepared.backend
         self.tool_manager = prepared.tool_manager
-        self.skill_manager = prepared.skill_manager
-        self.messages.update_system_prompt(prepared.system_prompt)
+        if prepared.skills_adopted == self._skills_adopted:
+            self.skill_manager = prepared.skill_manager
+            self.messages.update_system_prompt(prepared.system_prompt)
+        else:
+            self.messages.update_system_prompt(
+                self._render_system_prompt(
+                    self.skill_manager, self.config, prepared.tool_manager
+                )
+            )
         self._hook_config_result = prepared.hook_config_result
         self._hooks_manager = (
             HooksManager(prepared.hook_config_result.hooks, cwd=self.cwd)

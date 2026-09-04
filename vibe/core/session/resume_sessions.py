@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from vibe.core.config import VibeConfigSchema
 from vibe.core.session.session_loader import SessionLoader
+from vibe.observability.logging import logger
 from vibe.utils.session_id import shorten_session_id
 
 
@@ -55,3 +57,25 @@ def session_latest_messages(
             )
         )
     return messages
+
+
+def resume_directories(config: VibeConfigSchema) -> tuple[Path, ...]:
+    """Every directory a saved session in this store would resume into.
+
+    The sweep's half of the answer, kept beside the listing it reads rather
+    than in the lifecycle: the harness keeps its sessions elsewhere and reads
+    them its own way, and a sweep that knew both layouts would carry a private
+    detail of each.
+
+    Read with no cwd filter. A worktree can hold a session started from
+    anywhere, and one omitted here is one the sweep is free to delete.
+
+    Raising is how "I could not see my sessions" is said. It abandons the sweep
+    for that run and keeps every worktree, which is the safe way to be wrong.
+    """
+    try:
+        sessions = list_local_resume_sessions(config, None)
+    except OSError:
+        logger.debug("Could not list resumable sessions before the sweep")
+        raise
+    return tuple(Path(session.cwd) for session in sessions if session.cwd)

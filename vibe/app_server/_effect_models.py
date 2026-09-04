@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from enum import StrEnum, auto
-from typing import Annotated, ClassVar, Literal, cast
+from typing import Annotated, ClassVar, Literal, Self, cast
 
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import BaseModel, Field, JsonValue, model_validator
 
 from vibe.app_server._model import ProtocolModel
 from vibe.questions import UserQuestionRequest
@@ -38,6 +38,17 @@ class FileEditEffectInput(ProtocolModel):
     replace_all: bool = False
 
 
+class FileEditEffectChange(ProtocolModel):
+    old_string: str
+    new_string: str
+    replace_all: bool = False
+
+
+class FileEditEffectBatchInput(ProtocolModel):
+    file_path: str
+    changes: list[FileEditEffectChange] = Field(min_length=1)
+
+
 class FileEditEffectOccurrence(ProtocolModel):
     start_line: int | None = None
     old_text: str
@@ -46,9 +57,18 @@ class FileEditEffectOccurrence(ProtocolModel):
 
 class FileEditEffectOutput(ProtocolModel):
     file: str
-    old_string: str
-    new_string: str
+    old_string: str | None = None
+    new_string: str | None = None
     occurrences: list[FileEditEffectOccurrence] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_diff_content(self) -> Self:
+        has_legacy_pair = self.old_string is not None and self.new_string is not None
+        if (self.old_string is None) != (self.new_string is None):
+            raise ValueError("old_string and new_string must be provided together")
+        if not has_legacy_pair and not self.occurrences:
+            raise ValueError("file edit output requires a diff pair or occurrences")
+        return self
 
 
 class FileSearchEffectInput(ProtocolModel):
@@ -74,7 +94,7 @@ class FileReadEffectInput(ProtocolModel):
 
     file_path: str
     offset: int | None = None
-    limit: int = DEFAULT_LIMIT
+    limit: int | None = DEFAULT_LIMIT
 
 
 class FileReadEffectOutput(ProtocolModel):
@@ -83,7 +103,7 @@ class FileReadEffectOutput(ProtocolModel):
     num_lines: int
     start_line: int
     requested_offset: int | None = None
-    requested_limit: int = FileReadEffectInput.DEFAULT_LIMIT
+    requested_limit: int | None = FileReadEffectInput.DEFAULT_LIMIT
     total_lines: int | None = None
     was_truncated: bool = False
 
@@ -201,7 +221,7 @@ class ShellEffectDetail(_EffectDetailBase):
 
 class FileEditEffectDetail(_EffectDetailBase):
     kind: Literal[ToolEffectKind.FILE_EDIT] = ToolEffectKind.FILE_EDIT
-    input: FileEditEffectInput | None = None
+    input: FileEditEffectInput | FileEditEffectBatchInput | None = None
 
 
 class FileSearchEffectDetail(_EffectDetailBase):

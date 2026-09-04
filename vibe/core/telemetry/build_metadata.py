@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import platform
 from typing import Any, cast
 
 from vibe import __version__
+from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.telemetry.types import (
     AgentEntrypoint,
     AttachmentKind,
@@ -25,6 +27,7 @@ def build_base_metadata(
     experiment_assignments: list[ExperimentAssignment] | None = None,
     user_plan: str | None = None,
     experiment_attributes: dict[str, Any] | None = None,
+    harness_backend: ExperimentSurface | None = None,
 ) -> dict[str, Any]:
     launch_payload = (
         launch_context.telemetry_fields() if launch_context is not None else {}
@@ -35,6 +38,7 @@ def build_base_metadata(
         dict[str, Any],
         TelemetryBaseMetadata(
             os=get_platform_id(),
+            arch=platform.machine().lower(),
             os_version=get_platform_version(),
             version=__version__,
             session_id=session_id,
@@ -43,6 +47,7 @@ def build_base_metadata(
             experiment_assignments=experiment_assignments or None,
             user_plan=user_plan,
             experiment_attributes=experiment_attributes or None,
+            harness_backend=harness_backend,
             **launch_payload,
         ).model_dump(exclude_none=True),
     )
@@ -62,6 +67,7 @@ def build_request_metadata(
     )
     return TelemetryRequestMetadata(
         os=get_platform_id(),
+        arch=platform.machine().lower(),
         os_version=get_platform_version(),
         version=__version__,
         session_id=session_id,

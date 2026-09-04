@@ -11,7 +11,7 @@ import tomllib
 import tomli_w
 
 from vibe.core.config.fingerprint import capture_stable_file, create_file_fingerprint
-from vibe.core.config.layer import ConfigLayer, RawConfig
+from vibe.core.config.layer import ConfigLayer, ConfigStorageError, RawConfig
 from vibe.core.config.models import (
     ModelConfig,
     normalize_model_configs,
@@ -34,12 +34,18 @@ class BaseTomlConfigLayer(ConfigLayer[RawConfig]):
         ...
 
     async def _build_config_snapshot(self) -> LayerConfigSnapshot:
-        return await asyncio.to_thread(_read_toml_snapshot, self._target_path)
+        try:
+            return await asyncio.to_thread(_read_toml_snapshot, self._target_path)
+        except OSError as e:
+            raise ConfigStorageError(self.name, self._target_path, "read") from e
 
     async def _save_to_store(self, next_config: RawConfig) -> str:
-        return await asyncio.to_thread(
-            _write_toml_snapshot, self._target_path, next_config
-        )
+        try:
+            return await asyncio.to_thread(
+                _write_toml_snapshot, self._target_path, next_config
+            )
+        except OSError as e:
+            raise ConfigStorageError(self.name, self._target_path, "write") from e
 
 
 def _read_toml_snapshot(path: Path) -> LayerConfigSnapshot:

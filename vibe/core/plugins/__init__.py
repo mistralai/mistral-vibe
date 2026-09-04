@@ -112,6 +112,7 @@ from vibe.core.plugins._snapshot import (
 if TYPE_CHECKING:
     from vibe.core.plugins._catalog import (
         PluginConnectorCatalog,
+        PluginMCPAuthorizationRequired,
         PluginMCPDiscovery,
         PluginMCPDiscoveryError,
         RegistryConnectorCatalog,
@@ -121,6 +122,7 @@ if TYPE_CHECKING:
 
 _LAZY = {
     "PluginConnectorCatalog": "_catalog",
+    "PluginMCPAuthorizationRequired": "_catalog",
     "PluginMCPDiscovery": "_catalog",
     "PluginMCPDiscoveryError": "_catalog",
     "RegistryConnectorCatalog": "_catalog",
@@ -161,6 +163,7 @@ __all__ = [
     "PluginKnowledgeSnapshot",
     "PluginLibraryDefinition",
     "PluginLibrarySnapshot",
+    "PluginMCPAuthorizationRequired",
     "PluginMCPDiscovery",
     "PluginMCPDiscoveryError",
     "PluginMCPServerDefinition",

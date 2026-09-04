@@ -169,6 +169,32 @@ class TestInitFileLogging:
 
         assert len(test_logger.handlers) == initial_handler_count + 1
 
+    def test_also_captures_unified_harness_logger(
+        self, log_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The experimental harness runtime logs under "mistralai_vibe_local_harness", which
+        # is not a child of "vibe"; without explicit capture its diagnostics propagate
+        # to the root logger and never reach vibe.log.
+        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        resolved = log_file.expanduser().resolve()
+        harness_logger = logging.getLogger("mistralai_vibe_local_harness")
+
+        def file_handlers() -> list[_VibeFileHandler]:
+            return [
+                handler
+                for handler in harness_logger.handlers
+                if isinstance(handler, _VibeFileHandler)
+                and Path(handler.baseFilename) == resolved
+            ]
+
+        assert file_handlers() == []
+
+        init_file_logging(
+            log_file, target_logger=logging.getLogger("test_harness_capture")
+        )
+
+        assert len(file_handlers()) == 1
+
     def test_creates_log_file(
         self, log_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

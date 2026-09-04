@@ -45,8 +45,7 @@ async def _complete(prompt: str, *, cwd: Path) -> str | None:
     # prompts through the global singleton, so callers have to have initialised
     # it regardless and a private instance here would only mask that.
     orchestrator = await build_default_orchestrator(
-        harness_files=get_harness_files_manager().for_session(cwd),
-        require_api_key=False,
+        harness_files=get_harness_files_manager().for_session(cwd)
     )
     content = await run_utility_completion(
         config=orchestrator.config,

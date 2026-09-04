@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
 
 import pytest
 
@@ -13,10 +14,12 @@ from vibe.app_server._config_introspect import (
     collect_layer_values,
 )
 from vibe.app_server.protocol import ConfigFieldKind, ConfigLayerValueWire
+from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.models import ModelConfig, OtelRedactionMode
 from vibe.core.config.vibe_schema import VibeConfigSchema
+from vibe.core.experiments.active import ExperimentName
 
 
 def test_popular_settings_are_valid_fields() -> None:
@@ -95,6 +98,40 @@ def test_build_field_wires_resolves_layers(
     assert by_name["theme"].layer_values[-1].layer == DEFAULT_ORIGIN
 
 
+def test_build_field_wires_keeps_admin_lock_for_global_compaction_threshold(
+    make_config: Callable[..., VibeConfigSchema],
+) -> None:
+    config = make_config(
+        active_model="custom",
+        auto_compact_threshold=50_000,
+        models=[
+            ModelConfig(
+                name="custom",
+                provider="mistral",
+                alias="custom",
+                auto_compact_threshold=200_000,
+            )
+        ],
+    )
+    wires = build_field_wires(
+        config,
+        {
+            "auto_compact_threshold": [
+                ConfigLayerValueWire(layer="admin", value=50_000)
+            ],
+            "/models/custom/auto_compact_threshold": [
+                ConfigLayerValueWire(layer="user-toml", value=200_000),
+                ConfigLayerValueWire(layer=DEFAULT_ORIGIN, value=200_000),
+            ],
+        },
+    )
+
+    threshold = next(wire for wire in wires if wire.name == "auto_compact_threshold")
+    assert threshold.value == 50_000
+    assert threshold.path == "/auto_compact_threshold"
+    assert threshold.origin == "admin"
+
+
 @pytest.mark.asyncio
 async def test_collect_layer_values_groups_fields_by_priority(tmp_path) -> None:
     missing = UserConfigLayer(path=tmp_path / "missing.toml", name="missing")
@@ -110,3 +147,38 @@ async def test_collect_layer_values_groups_fields_by_priority(tmp_path) -> None:
     assert [(entry.layer, entry.value) for entry in values["api_timeout"]] == [
         ("overrides", 1.0)
     ]
+
+
+@pytest.mark.asyncio
+async def test_build_field_wires_projects_growthbook_routed_model_threshold(
+    make_config: Callable[..., VibeConfigSchema],
+) -> None:
+    routed = {
+        "name": "routed-model",
+        "provider": "mistral",
+        "alias": "routed",
+        "auto_compact_threshold": 168_000,
+    }
+    growthbook = GrowthbookLayer()
+    growthbook.set_variants({
+        ExperimentName.CLI_MODEL_ROUTING.value: json.dumps({
+            "active_model": "routed",
+            "model_config": routed,
+        })
+    })
+
+    values = await collect_layer_values([growthbook])
+    config = make_config(
+        active_model="",
+        routed_default_model="routed",
+        routed_model_config=json.dumps(routed),
+    )
+    threshold = next(
+        wire
+        for wire in build_field_wires(config, values)
+        if wire.name == "auto_compact_threshold"
+    )
+
+    assert threshold.value == 168_000
+    assert threshold.path == "/models/routed/auto_compact_threshold"
+    assert threshold.origin == "growthbook"

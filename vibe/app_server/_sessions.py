@@ -22,6 +22,7 @@ from vibe.app_server.models import (
     PublicHistoryEntry,
     PublicSessionState,
     PublicTurn,
+    PublicTurnQueue,
     PublicTurnStatus,
     TextContentBlock,
 )
@@ -184,6 +185,7 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
         callbacks: list[PublicCallbackEntry],
         active_turn: PublicTurn,
         completed_turns: list[PublicTurn],
+        turn_queue: PublicTurnQueue,
         history_limit: int = 200,
     ) -> SessionHandoff:
         runtime = self._require_child(old_session_id)
@@ -218,7 +220,10 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
             history_limit=history_limit,
         )
         state = state.model_copy(
-            update={"event_id": self._event_watermark(new_session_id)}
+            update={
+                "event_id": self._event_watermark(new_session_id),
+                "turn_queue": turn_queue,
+            }
         )
         return SessionHandoff(
             old_session_id=old_session_id,
@@ -271,7 +276,10 @@ class SessionRuntimeRegistry(SubagentRunnerPort):
             include_turns=include_turns,
         )
         return state.model_copy(
-            update={"event_id": self._event_watermark(runtime.agent_loop.session_id)}
+            update={
+                "event_id": self._event_watermark(runtime.agent_loop.session_id),
+                "turn_queue": runtime.turns.queue_state,
+            }
         )
 
     def history(self, session_id: str) -> list[PublicHistoryEntry]:

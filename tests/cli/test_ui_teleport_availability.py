@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import platform
 import time
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 import pytest
 
@@ -48,7 +49,12 @@ async def _wait_until(pause, predicate, timeout: float = 2.0) -> None:
 
 
 def _expected_system_metadata() -> dict[str, Any]:
-    metadata: dict[str, Any] = {"os": get_platform_id(), "version": __version__}
+    metadata: dict[str, Any] = {
+        "os": get_platform_id(),
+        "arch": platform.machine().lower(),
+        "version": __version__,
+        "harness_backend": "legacy",
+    }
     if os_version := get_platform_version():
         metadata["os_version"] = os_version
     return metadata
@@ -86,6 +92,28 @@ async def test_teleport_command_visible_for_paid_chat_users() -> None:
         input_widget = app.query_one(ChatInputContainer).input_widget
         assert input_widget is not None
         assert "&" in input_widget.mode_characters
+
+
+@pytest.mark.asyncio
+async def test_teleport_command_uses_effective_harness_backend() -> None:
+    app = build_test_vibe_app(config=_vibe_code_enabled_config())
+
+    async with app.run_test() as pilot:
+        await _wait_until(
+            pilot.pause,
+            lambda: app.commands.get_command_name("/teleport") == "teleport",
+        )
+        runtime = app.app_server.resources.runtime
+
+        with patch.object(
+            type(runtime),
+            "experimental_harness",
+            new_callable=PropertyMock,
+            return_value=True,
+        ):
+            app._refresh_command_registry()
+
+        assert app.commands.get_command_name("/teleport") is None
 
 
 @pytest.mark.asyncio

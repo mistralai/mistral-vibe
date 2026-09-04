@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
+
 from vibe.app_server.protocol import NarrationSummarizeParams
-from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import ModelConfig
+from vibe.core.config import ModelConfig, VibeConfigSchema
 from vibe.core.llm.backend.factory import create_backend
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.telemetry.build_metadata import build_request_metadata
+from vibe.core.telemetry.types import LaunchContext
 from vibe.core.types import Backend, LLMMessage, Role
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key
@@ -20,15 +23,25 @@ _NARRATION_MODEL = ModelConfig(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class NarrationContext:
+    config: VibeConfigSchema
+    launch_context: LaunchContext | None
+    parent_session_id: str | None
+    user_plan: str | None
+
+
 class NarrationService:
-    def __init__(self, agent_loop: AgentLoop) -> None:
-        self._agent_loop = agent_loop
+    def __init__(self, context_getter: Callable[[], NarrationContext]) -> None:
+        self._context_getter = context_getter
 
     async def summarize(self, params: NarrationSummarizeParams) -> str | None:
+        context = self._context_getter()
+        config = context.config
         provider = next(
             (
                 provider
-                for provider in self._agent_loop.config.providers
+                for provider in config.providers
                 if provider.name == _NARRATION_MODEL.provider
             ),
             None,
@@ -48,17 +61,20 @@ class NarrationService:
             LLMMessage(role=Role.user, content="\n\n".join(sections)),
         ]
         metadata = build_request_metadata(
-            launch_context=self._agent_loop.launch_context,
-            session_id=self._agent_loop.session_id,
-            parent_session_id=self._agent_loop.parent_session_id,
+            launch_context=context.launch_context,
+            session_id=params.session_id,
+            parent_session_id=context.parent_session_id,
             call_type="secondary_call",
             message_id=params.message_id,
-            user_plan=self._agent_loop.user_plan,
+            user_plan=context.user_plan,
         ).model_dump(exclude_none=True)
         backend = create_backend(
             provider=provider,
-            timeout=self._agent_loop.config.api_timeout,
-            retry_max_elapsed_time=(self._agent_loop.config.api_retry_max_elapsed_time),
+            timeout=config.api_timeout,
+            retry_max_elapsed_time=config.api_retry_max_elapsed_time,
+            connect_timeout=config.api_connect_timeout,
+            write_timeout=config.api_write_timeout,
+            pool_timeout=config.api_pool_timeout,
         )
         try:
             async with backend:

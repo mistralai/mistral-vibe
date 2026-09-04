@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Coroutine
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,9 +32,17 @@ type ServerMessage = Notification | ServerRequest
 
 
 @dataclass(frozen=True, slots=True)
+class _ResponseBoundary:
+    request_id: str
+    result: dict[str, Any]
+    callback: Callable[[dict[str, Any]], None]
+    future: asyncio.Future[_ClientResponse]
+
+
+@dataclass(frozen=True, slots=True)
 class _IncomingMessage:
     sequence: int
-    message: ServerMessage
+    message: ServerMessage | _ResponseBoundary
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +65,7 @@ class AppServerClient:
         self._reader_task: asyncio.Task[None] | None = None
         self._next_request_id = 1
         self._pending: dict[str, asyncio.Future[_ClientResponse]] = {}
+        self._response_boundaries: dict[str, Callable[[dict[str, Any]], None]] = {}
         self._abandoned_request_ids: set[str] = set()
         self._incoming: asyncio.Queue[_IncomingMessage] = asyncio.Queue(maxsize=256)
         self._incoming_closed = asyncio.Event()
@@ -103,6 +111,7 @@ class AppServerClient:
         params: ProtocolModel | dict[str, Any] | None = None,
         *,
         wait_for_incoming: bool = False,
+        response_boundary: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         await self.start()
         request_id = f"client-{self._next_request_id}"
@@ -111,6 +120,8 @@ class AppServerClient:
             asyncio.get_running_loop().create_future()
         )
         self._pending[request_id] = future
+        if response_boundary is not None:
+            self._response_boundaries[request_id] = response_boundary
         sent = False
         try:
             await self._transport.send({
@@ -132,6 +143,7 @@ class AppServerClient:
             raise
         finally:
             self._pending.pop(request_id, None)
+            self._response_boundaries.pop(request_id, None)
 
     async def respond(
         self,
@@ -157,8 +169,26 @@ class AppServerClient:
             incoming = await self._next_incoming()
             if incoming is None:
                 continue
+            message = incoming.message
             try:
-                yield incoming.message
+                if isinstance(message, _ResponseBoundary):
+                    try:
+                        message.callback(message.result)
+                    except Exception as exc:
+                        response = _ClientResponse(
+                            result=None, error=exc, incoming_sequence=incoming.sequence
+                        )
+                    else:
+                        response = _ClientResponse(
+                            result=message.result,
+                            error=None,
+                            incoming_sequence=incoming.sequence,
+                        )
+                    if not message.future.done():
+                        message.future.set_result(response)
+                    self._abandoned_request_ids.discard(message.request_id)
+                    continue
+                yield message
             finally:
                 async with self._processed:
                     self._processed_sequence = incoming.sequence
@@ -171,11 +201,9 @@ class AppServerClient:
         await self._transport.close()
         if self._reader_task is not None:
             self._reader_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._reader_task
+            await _await_cancelled_task(self._reader_task)
         if self._peer_task is not None:
-            with suppress(asyncio.CancelledError):
-                await self._peer_task
+            await _await_cancelled_task(self._peer_task)
         self._fail_pending(AppServerConnectionClosed("App server client closed"))
         self._abandoned_request_ids.clear()
         await self._close_incoming(None)
@@ -204,6 +232,7 @@ class AppServerClient:
             if not future.done():
                 future.set_exception(error)
         self._pending.clear()
+        self._response_boundaries.clear()
 
     async def _dispatch(self, message: dict[str, Any]) -> None:
         envelope = validate_json_rpc_envelope(message)
@@ -214,7 +243,7 @@ class AppServerClient:
         request_id = response.id
         if not isinstance(request_id, str):
             raise JsonRpcProtocolError("Client request responses require string IDs")
-        future = self._pending.pop(request_id, None)
+        future = self._pending.get(request_id)
         if future is not None and future.cancelled():
             self._abandoned_request_ids.discard(request_id)
             return
@@ -226,6 +255,7 @@ class AppServerClient:
                 f"Response does not match a pending client request: {request_id}"
             )
         if isinstance(response, JsonRpcErrorResponse):
+            self._pending.pop(request_id, None)
             future.set_result(
                 _ClientResponse(
                     result=None,
@@ -234,6 +264,18 @@ class AppServerClient:
                 )
             )
             return
+        if boundary := self._response_boundaries.pop(request_id, None):
+            # Session-attachment responses carry the authoritative replacement
+            # snapshot. Put the adoption callback in the same ordered stream as
+            # notifications so earlier messages are reduced first and later
+            # messages cannot be reduced against the old session. The reader
+            # remains free to receive responses needed while reducing an earlier
+            # notification (for example, an event-gap resync).
+            await self._put_incoming(
+                _ResponseBoundary(request_id, response.result, boundary, future)
+            )
+            return
+        self._pending.pop(request_id, None)
         future.set_result(
             _ClientResponse(
                 result=response.result,
@@ -242,7 +284,7 @@ class AppServerClient:
             )
         )
 
-    async def _put_incoming(self, message: ServerMessage) -> None:
+    async def _put_incoming(self, message: ServerMessage | _ResponseBoundary) -> None:
         self._received_sequence += 1
         await self._incoming.put(
             _IncomingMessage(sequence=self._received_sequence, message=message)
@@ -257,8 +299,7 @@ class AppServerClient:
         for task in pending:
             task.cancel()
         for task in pending:
-            with suppress(asyncio.CancelledError):
-                await task
+            await _await_cancelled_task(task)
         if message in done:
             return message.result()
         if self._incoming.empty():
@@ -293,3 +334,12 @@ class AppServerClient:
             raise self._incoming_error or AppServerConnectionClosed(
                 "App server connection closed"
             )
+
+
+async def _await_cancelled_task[ResultT](task: asyncio.Task[ResultT]) -> None:
+    try:
+        await task
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise

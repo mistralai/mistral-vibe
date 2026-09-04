@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,13 +12,22 @@ from tests.stubs.app_server import (
     create_test_app_server_session,
     start_test_app_server,
 )
+from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.app_server._mcp_auth import MCPAuthenticationService
+from vibe.app_server._plugin_mcp import (
+    PluginMCPServerEntry,
+    PluginMCPSource,
+    PluginMCPStatus,
+    PluginMCPTool,
+)
 from vibe.app_server._session_backend_port import (
     MCPAuthorizationRequired,
     MCPAuthorizationSnapshot,
+    SessionMCPState,
 )
+from vibe.app_server.mcp_catalog import project_mcp_sources
 from vibe.app_server.models import MCPSourceKind, MCPSourceStatus
 from vibe.app_server.protocol import (
     AppServerResponseError,
@@ -28,6 +38,7 @@ from vibe.app_server.protocol import (
 )
 from vibe.core.config import ConnectorConfig, MCPHttp, MCPOAuth, MCPStdio
 from vibe.core.config.types import ConcurrencyConflictError
+from vibe.core.plugins import PluginMCPServerDefinition
 from vibe.core.tools.mcp.tools import RemoteTool
 
 
@@ -44,6 +55,140 @@ class FailingMCPRegistry(FakeMCPRegistry):
             if s.name == self._failing_server:
                 self._failed[s.name] = "connection refused"
         return await super().get_tools_async(working)
+
+
+def test_project_mcp_sources_includes_disabled_server_without_discovery() -> None:
+    config = build_test_vibe_config(
+        mcp_servers=[
+            MCPStdio(name="local", transport="stdio", command="fake-mcp", disabled=True)
+        ]
+    )
+
+    sources, discovery_errors = project_mcp_sources(
+        orchestrator=FakeConfigOrchestrator(config),
+        state=SessionMCPState(
+            catalog_revision="catalog",
+            route_revision="route",
+            sources=(),
+            discovery_errors={},
+        ),
+    )
+
+    assert [(source.name, source.status) for source in sources] == [
+        ("local", MCPSourceStatus.DISABLED)
+    ]
+    assert discovery_errors == {}
+
+
+def _plugin_source(
+    source_id: str,
+    *,
+    status: PluginMCPStatus = "needs_auth",
+    tools: tuple[PluginMCPTool, ...] = (),
+) -> PluginMCPSource:
+    return PluginMCPSource(
+        entry=PluginMCPServerEntry(
+            definition=PluginMCPServerDefinition(
+                plugin_name="linear-probe",
+                plugin_namespace="linear-probe",
+                source_id=source_id,
+                private_alias=f"plugin_probe_{source_id}",
+                server=MCPHttp(
+                    name=f"plugin_probe_{source_id}",
+                    transport="http",
+                    url="https://plugin.test/mcp",
+                ),
+                config_file=Path("/plugins/linear-probe/mcp.json"),
+            ),
+            server=MCPHttp(
+                name=source_id, transport="http", url="https://plugin.test/mcp"
+            ),
+        ),
+        status=status,
+        tools=tools,
+    )
+
+
+def test_project_mcp_sources_carries_plugin_servers_into_the_runtime() -> None:
+    # Prepare
+    config = build_test_vibe_config(
+        mcp_servers=[MCPStdio(name="local", transport="stdio", command="fake-mcp")]
+    )
+
+    # Do
+    sources, _ = project_mcp_sources(
+        orchestrator=FakeConfigOrchestrator(config),
+        state=SessionMCPState(
+            catalog_revision="catalog",
+            route_revision="route",
+            sources=(),
+            discovery_errors={},
+        ),
+        plugin_sources=[_plugin_source("linear-plugin")],
+    )
+
+    # Assert
+    assert [(source.name, source.status) for source in sources] == [
+        ("local", MCPSourceStatus.UNAVAILABLE),
+        ("linear-plugin", MCPSourceStatus.NEEDS_AUTH),
+    ]
+    assert sources[1].plugin_name == "linear-probe"
+
+
+def test_project_mcp_sources_drops_a_plugin_server_a_config_name_shadows() -> None:
+    # Prepare
+    config = build_test_vibe_config(
+        mcp_servers=[MCPStdio(name="local", transport="stdio", command="fake-mcp")]
+    )
+
+    # Do
+    sources, _ = project_mcp_sources(
+        orchestrator=FakeConfigOrchestrator(config),
+        state=SessionMCPState(
+            catalog_revision="catalog",
+            route_revision="route",
+            sources=(),
+            discovery_errors={},
+        ),
+        plugin_sources=[_plugin_source("local")],
+    )
+
+    # Assert
+    assert [(source.name, source.plugin_name) for source in sources] == [
+        ("local", None)
+    ]
+
+
+def test_a_plugin_tool_description_is_flattened_to_the_row_the_view_renders() -> None:
+    # Prepare
+    config = build_test_vibe_config(mcp_servers=[])
+    source = _plugin_source(
+        "linear-plugin",
+        status="connected",
+        tools=(
+            PluginMCPTool(
+                name="create_issue",
+                description=(
+                    "Create an issue.\n\nAccepts a title and a team id.\n- title\n- team"
+                ),
+            ),
+        ),
+    )
+
+    # Do
+    sources, _ = project_mcp_sources(
+        orchestrator=FakeConfigOrchestrator(config),
+        state=SessionMCPState(
+            catalog_revision="catalog",
+            route_revision="route",
+            sources=(),
+            discovery_errors={},
+        ),
+        plugin_sources=[source],
+    )
+
+    # Assert
+    assert [tool.description for tool in sources[0].tools] == ["Create an issue."]
 
 
 @pytest.mark.asyncio
@@ -102,6 +247,7 @@ async def test_mcp_login_streams_typed_auth_url_notification(
         name: str,
         *,
         on_url: Callable[[str], Awaitable[None]],
+        owner: object | None = None,
     ) -> str:
         login_calls.append(name)
         await on_url("https://auth.example.com/oauth")
@@ -299,6 +445,7 @@ async def test_mcp_login_rediscovers_tools(monkeypatch: pytest.MonkeyPatch) -> N
         name: str,
         *,
         on_url: Callable[[str], Awaitable[None]],
+        owner: object | None = None,
     ) -> str:
         await on_url("https://auth.example.com/oauth")
         return _service.descriptor_revision(name)
@@ -355,6 +502,7 @@ async def test_mcp_login_keeps_disabled_source_transport_inactive(
         name: str,
         *,
         on_url: Callable[[str], Awaitable[None]],
+        owner: object | None = None,
     ) -> str:
         await on_url("https://auth.example.com/oauth")
         return "descriptor-2"
@@ -404,7 +552,9 @@ async def test_mcp_logout_authorization_required_does_not_restore_routes(
     """
 
     # Prepare
-    async def logout(_service: MCPAuthenticationService, name: str) -> str:
+    async def logout(
+        _service: MCPAuthenticationService, name: str, *, owner: object | None = None
+    ) -> str:
         return "descriptor-2"
 
     async def resolve(_service, reference):

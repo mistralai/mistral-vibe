@@ -20,9 +20,19 @@ selection never reaches the wire protocol.
 
 During the dual-backend migration, the invocation selects one Host for every
 new, resume, fork, and child-session open. There is no shared catalogue or
-persisted backend discriminator. Continue-latest and list remain scoped to the
+persisted backend discriminator. Continue-latest remains scoped to the
 selected backend, while an explicit session ID is the cross-backend migration
 entry point.
+
+> **Amendment (2026-09):** The unified backend's `list` now includes legacy
+> sessions alongside unified sessions, so the `/resume` picker under
+> `--experimental-harness` can discover and resume sessions from both stores.
+> Each row carries a `harness` provenance tag (`legacy` / `unified`). This
+> narrows the original "list remains scoped to the selected backend" statement
+> to the unified backend only — the legacy backend's list stays scoped.
+> `--continue` and `continue_session_id` remain scoped to the unified store.
+> See `docs/design/resume-cross-harness-session-listing.md` for the full
+> proposal.
 
 Before binding, restoring, or importing an explicit session ID, either backend
 acquires the same cross-harness operating-system lease for that ID. The

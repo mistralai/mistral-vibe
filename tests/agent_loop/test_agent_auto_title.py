@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -13,6 +14,7 @@ from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import SessionLoggingConfig
 from vibe.core.types import (
+    BackgroundWorkEvent,
     BaseEvent,
     FunctionCall,
     SessionTitleUpdatedEvent,
@@ -105,9 +107,9 @@ class TestAgentLoopIntraTurnScheduling:
         seen: list[int] = []
         original = AgentLoop._maybe_schedule_title_generation
 
-        def spy(self: AgentLoop, *, turn_completing: bool) -> None:
+        def spy(self: AgentLoop, *, turn_completing: bool) -> object | None:
             seen.append(len(self.messages))
-            original(self, turn_completing=turn_completing)
+            return original(self, turn_completing=turn_completing)
 
         monkeypatch.setattr(AgentLoop, "_maybe_schedule_title_generation", spy)
 
@@ -159,19 +161,23 @@ class TestAgentLoopBackgroundTitle:
         self._patch_generator(monkeypatch, "Generated title")
         loop = _make_agent_loop(tmp_path)
 
-        await _collect(loop, "first", auto_title="Deterministic")
+        events = await _collect(loop, "first", auto_title="Deterministic")
+        started = [event for event in events if isinstance(event, BackgroundWorkEvent)]
+        assert len(started) == 1
+        assert started[0].phase == "started"
+        assert started[0].kind == "session_title"
         assert loop._auto_title_task is not None
         await loop._auto_title_task
 
         assert loop.session_logger.title == "Generated title"
-        # The result waits on the out-of-band queue for its single drain
-        # consumer; a later turn never re-emits it into the turn stream.
-        assert loop._out_of_band_events.qsize() == 1
+        # The title and its terminal lifecycle event wait on the out-of-band
+        # queue for their single drain consumer.
+        assert loop._out_of_band_events.qsize() == 2
 
         events = await _collect(loop, "second", auto_title=None)
         title_events = [e for e in events if isinstance(e, SessionTitleUpdatedEvent)]
         assert title_events == []
-        assert loop._out_of_band_events.qsize() == 1
+        assert loop._out_of_band_events.qsize() == 2
 
     @pytest.mark.asyncio
     async def test_out_of_band_events_yields_title_immediately(
@@ -180,19 +186,26 @@ class TestAgentLoopBackgroundTitle:
         self._patch_generator(monkeypatch, "Generated title")
         loop = _make_agent_loop(tmp_path)
 
-        await _collect(loop, "first", auto_title=None)
+        events = await _collect(loop, "first", auto_title=None)
+        started_event = next(
+            event for event in events if isinstance(event, BackgroundWorkEvent)
+        )
         assert loop._auto_title_task is not None
         await loop._auto_title_task
 
         # The result is available out-of-band without waiting for the next turn.
         stream = loop.out_of_band_events()
-        event = await asyncio.wait_for(stream.__anext__(), timeout=1)
+        title_event = await asyncio.wait_for(stream.__anext__(), timeout=1)
+        finished_event = await asyncio.wait_for(stream.__anext__(), timeout=1)
         await stream.aclose()
 
-        assert isinstance(event, SessionTitleUpdatedEvent)
-        assert event.title == "Generated title"
+        assert isinstance(title_event, SessionTitleUpdatedEvent)
+        assert title_event.title == "Generated title"
         # Stamped with the originating session so a reset can drop a stale title.
-        assert event.session_id == loop.session_id
+        assert title_event.session_id == loop.session_id
+        assert isinstance(finished_event, BackgroundWorkEvent)
+        assert finished_event.phase == "finished"
+        assert finished_event.work_id == started_event.work_id
 
     @pytest.mark.asyncio
     async def test_does_not_regenerate_manual_title(
@@ -253,6 +266,33 @@ class TestAgentLoopBackgroundTitle:
         await loop._auto_title_task
 
         assert loop.session_logger.title == "Deterministic"
+        event = loop._out_of_band_events.get_nowait()
+        assert isinstance(event, BackgroundWorkEvent)
+        assert event.phase == "finished"
+
+    @pytest.mark.asyncio
+    async def test_finishes_background_work_when_generation_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def fail_generate(*_args, **_kwargs) -> None:
+            raise RuntimeError("title failed")
+
+        monkeypatch.setattr(
+            "vibe.core.session.title_model.generate_session_title", fail_generate
+        )
+        loop = _make_agent_loop(tmp_path)
+
+        events = await _collect(loop, "first", auto_title="Deterministic")
+        started_event = next(
+            event for event in events if isinstance(event, BackgroundWorkEvent)
+        )
+        assert loop._auto_title_task is not None
+        await loop._auto_title_task
+
+        finished_event = loop._out_of_band_events.get_nowait()
+        assert isinstance(finished_event, BackgroundWorkEvent)
+        assert finished_event.phase == "finished"
+        assert finished_event.work_id == started_event.work_id
 
     @pytest.mark.asyncio
     async def test_compaction_forces_refresh_before_interval(
@@ -358,6 +398,49 @@ class TestAgentLoopBackgroundTitle:
         assert loop._auto_title_task is not None
         await loop._auto_title_task
         assert loop.session_logger.title == "Title 2"
+
+    @pytest.mark.asyncio
+    async def test_closing_at_started_cancels_untracked_generation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        generated = False
+
+        async def fake_generate(
+            messages, *, config, previous_title=None, policy=None
+        ) -> str:
+            nonlocal generated
+            generated = True
+            return "Generated title"
+
+        monkeypatch.setattr(
+            "vibe.core.session.title_model.generate_session_title", fake_generate
+        )
+        loop = _make_agent_loop(tmp_path)
+
+        try:
+            events = loop._schedule_title_generation_events(turn_completing=True)
+            started = await events.__anext__()
+            assert isinstance(started, BackgroundWorkEvent)
+            assert started.phase == "started"
+            title_task = loop._auto_title_task
+            assert title_task is not None
+
+            await events.aclose()
+
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(title_task, timeout=1)
+            assert generated is False
+            assert loop._auto_title_task is None
+
+            retry = loop._maybe_schedule_title_generation(turn_completing=True)
+            assert retry is not None
+            retry.start_gate.set()
+            retry_task = cast(asyncio.Task[None] | None, loop._auto_title_task)
+            assert retry_task is not None
+            await retry_task
+            assert generated is True
+        finally:
+            await loop.aclose()
 
 
 class _RecordingCadence:

@@ -73,6 +73,7 @@ class ConfigView(ProtocolModel):
     enable_update_checks: bool
     enable_notifications: bool
     vibe_code_enabled: bool
+    experimental_enable_registry_skills: bool = False
     models: list[ModelConfigView]
     transcribe_models: list[str]
     tts_models: list[str]

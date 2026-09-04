@@ -33,6 +33,7 @@ def test_help_shows_check_upgrade_flag(
     output = capsys.readouterr().out
     assert "--check-upgrade" in output
     assert "Check for a Vibe update now" in output
+    assert "update         Check for a Vibe update now" in output
 
 
 # def test_auto_approve_conflicts_with_agent(

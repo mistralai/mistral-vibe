@@ -5,8 +5,8 @@ from collections.abc import Callable
 from importlib import import_module, util
 from typing import cast
 
-_HARNESS_DISTRIBUTION_MODULE = "mistralai_rust_harness"
-_VIBE_HARNESS_MODULE = "mistralai_rust_harness.vibe"
+_HARNESS_DISTRIBUTION_MODULE = "mistralai_vibe_local_harness"
+_VIBE_HARNESS_MODULE = "mistralai_vibe_local_harness.vibe"
 
 
 class ExperimentalHarnessUnavailableError(RuntimeError):
@@ -40,7 +40,6 @@ def create_experimental_harness_host() -> object:
         factory = cast(Callable[[], object], module.create_harness_host)
     except (AttributeError, ModuleNotFoundError) as exc:
         raise ExperimentalHarnessUnavailableError(
-            "The Unified Harness backend is not installed. Enable the internal "
-            "local Harness wiring before using --experimental-harness."
+            "The Unified Harness backend is not available"
         ) from exc
     return factory()

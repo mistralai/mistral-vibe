@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from vibe.app_server.protocol import ConfigWriteOpWire
+from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.models import ModelConfig
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.patch import (
     AddOperationPatch,
     PatchOp,
@@ -17,6 +20,29 @@ from vibe.core.config.vibe_schema import VibeConfigSchema
 # field avoids baking in values from higher-priority layers (admin/GrowthBook)
 # into the user's writable config.
 _REQUIRED_MODEL_FIELDS = {"name", "provider", "alias"}
+
+
+def config_write_targets(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+) -> list[str]:
+    """Save targets offered by /config, default first.
+
+    The default write target leads, then the trusted project layer, then the
+    session-only override layer. The project layer is only offered once a
+    project config file has actually been discovered: an undiscovered project
+    layer reports itself trusted, and offering it would add a third save target
+    for a scope the user never opted into.
+    """
+    targets = [orchestrator.writable_layer_name]
+    for layer in orchestrator.layers:
+        if layer.name in targets:
+            continue
+        if isinstance(layer, ProjectConfigLayer):
+            if layer.is_file_discovered and layer.is_trusted is not False:
+                targets.append(layer.name)
+        elif layer.name == OverridesLayer.NAME:
+            targets.append(layer.name)
+    return targets
 
 
 def config_write_ops_to_patches(

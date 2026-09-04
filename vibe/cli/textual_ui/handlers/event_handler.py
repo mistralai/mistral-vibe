@@ -12,6 +12,7 @@ from vibe.app_server.events import (
     HistoryEntryAdded,
     HistoryEntryUpdated,
     SessionSnapshot,
+    SessionUpdated,
 )
 from vibe.app_server.models import (
     AgentChangedNoticeDetail,
@@ -136,11 +137,20 @@ class EventHandler:
                 return await self._handle_entry_added(entry, loading_widget)
             case HistoryEntryUpdated() as update:
                 await self._handle_entry_updated(update, loading_widget)
+            case SessionUpdated() as updated:
+                self._handle_session_updated(updated)
             case SessionSnapshot(state=state) if loading_widget is not None:
                 loading_widget.set_retrying(state.retrying is not None)
             case _:
                 pass
         return None
+
+    def _handle_session_updated(self, event: SessionUpdated) -> None:
+        title = event.session.title
+        if title is None or title == event.previous.title:
+            return
+        if self.on_session_title_changed is not None:
+            self.on_session_title_changed(title)
 
     async def _handle_entry_added(
         self, entry: PublicHistoryEntry, loading_widget: LoadingWidget | None

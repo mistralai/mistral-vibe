@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -8,6 +8,7 @@ from enum import StrEnum, auto
 from functools import cached_property
 import os
 from pathlib import Path, PureWindowsPath
+from typing import Any
 
 from vibe.core.git.errors import GitError
 from vibe.core.git.repo import GitRepo, GitStatus, RepoPaths, _git_python
@@ -32,6 +33,10 @@ _MAX_AUTO_WORKTREE_ATTEMPTS = 100
 # Long enough to cover a checkout of a large repo, so a session that is still
 # starting is never mistaken for one that died.
 _CLAIM_SWEEP_GRACE = timedelta(minutes=10)
+# Under `refs/vibe/` rather than `refs/heads/`, so a snapshot never appears in
+# the branch picker, in `git branch`, or as something to push. It is a way back
+# to work the reaper removed, not a branch anybody is meant to develop on.
+SNAPSHOT_REF_PREFIX = "refs/vibe/reaped"
 _RESERVED_WORKTREE_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"}
     | {f"COM{index}" for index in range(1, 10)}
@@ -62,9 +67,11 @@ class PreparedWorktree:
         git = _git_python()
         try:
             repo = git.repo(self.root)
-            status_lines = repo.git.status(
-                "--porcelain", "--untracked-files=all"
-            ).splitlines()
+            status_lines = (
+                _unhooked(repo)
+                .status("--porcelain", "--untracked-files=all")
+                .splitlines()
+            )
             new_commit_count = int(
                 repo.git.rev_list("--count", f"{self.base_commit}..HEAD").strip()
             )
@@ -82,6 +89,52 @@ class PreparedWorktree:
             has_untracked_files=any(line.startswith("??") for line in status_lines),
             new_commit_count=new_commit_count,
         )
+
+    def snapshot(self) -> str:
+        """Commit this worktree's whole state to a ref nothing checks out.
+
+        Returns the ref. Raises when the state could not be saved, which is
+        the caller's signal to keep the worktree instead of removing it.
+
+        The reaper deletes a worktree whose session is gone even when work was
+        left behind, and that is only defensible because the work survives
+        somewhere. Untracked files are in: an agent that wrote a file and
+        never staged it produced exactly the state a user would most regret
+        losing, and here it is the common case rather than the corner. Ignored
+        files are out, for the same reason `git add` leaves them -- a snapshot
+        that swept up `node_modules` would cost more than the work it saved.
+
+        Written through a second index, so the worktree's own is untouched: a
+        failure here aborts the removal, and the worktree the user is then left
+        with must be the one they had. That index lives in the worktree's own
+        git directory, which the removal takes with it, rather than in a
+        temporary directory that would outlive a crash.
+        """
+        git = _git_python()
+        ref = f"{SNAPSHOT_REF_PREFIX}/{self.name}"
+        try:
+            repo = git.repo(self.root)
+            index = Path(repo.git.rev_parse("--absolute-git-dir").strip())
+            with repo.git.custom_environment(
+                GIT_INDEX_FILE=str(index / "index.vibe-snapshot")
+            ):
+                _unhooked(repo).read_tree("HEAD")
+                _unhooked(repo).add("--all", ".")
+                tree = repo.git.write_tree().strip()
+                head = repo.git.rev_parse("HEAD").strip()
+                commit = repo.git.commit_tree(
+                    tree,
+                    "-p",
+                    head,
+                    "-m",
+                    f"vibe: state of worktree {self.name} before it was reaped",
+                ).strip()
+            repo.git.update_ref(ref, commit)
+        except (git.invalid_git_repository_error, git.git_command_error) as e:
+            raise WorktreeError(
+                f"Failed to snapshot worktree {self.name!r}: {e}"
+            ) from e
+        return ref
 
     def remove(self, *, delete_branch: bool = True) -> None:
         git = _git_python()
@@ -131,6 +184,9 @@ class WorktreeRelease:
     branch: str | None = None
     branch_deleted: bool = False
     reasons: tuple[str, ...] = field(default_factory=tuple)
+    # Where the work went when a removed worktree still had some. None when it
+    # had none, so a caller can tell "nothing to recover" from "recover here".
+    snapshot_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -196,10 +252,10 @@ class WorktreeRepository:
             return None
 
     @classmethod
-    def sweep_claims(cls, base: Path) -> None:
+    def sweep_claims(cls, base: Path, *, in_use: Collection[Path]) -> None:
         try:
             with cls.open(base) as repository:
-                repository.sweep()
+                repository.sweep(in_use=in_use)
         except GitError:
             return
 
@@ -365,28 +421,51 @@ class WorktreeRepository:
 
         return tuple(sorted(linked, key=lambda worktree: str(worktree.path)))
 
-    def sweep(self) -> None:
+    def sweep(self, *, in_use: Collection[Path]) -> None:
+        """Remove the worktrees of this repository that nothing needs.
+
+        ``in_use`` names the directories sessions still resume into. Holders
+        cannot answer that: they mark a session *attached*, and closing one
+        drops its hold while leaving the session on disk and resumable. Without
+        this the sweep would delete the working directory out from under every
+        session the user has not opened today.
+
+        Only the caller knows which those are -- this module has no notion of
+        a session -- which is why it is required rather than defaulted: the
+        safe default would be "everything", and a caller that forgot would
+        silently get the dangerous one.
+        """
         try:
             worktree_root = self.worktree_root
         except GitError:
             return
         cutoff = utc_now() - _CLAIM_SWEEP_GRACE
+        kept = {path.resolve() for path in in_use}
 
         for claim in WorktreeClaim.in_bucket(self.bucket):
             record = claim.read()
-            # An app-server that died leaves a worktree with a stale holder and
-            # no way to know whether its session was finished with. It is kept:
-            # the session is still on disk and resumable, and its worktree is
-            # the work. Only a reservation that never became a worktree is
-            # swept - an empty directory from a mkdir claim whose `git worktree
-            # add` never landed. It holds nothing and no session ever saw it.
-            if record is None or record.base_commit is not None:
+            if record is None:
                 continue
             # The grace period guards the live claim: between the mkdir and the
-            # add completing, the directory is legitimately empty.
+            # `git worktree add`, and between the add and a session taking hold,
+            # a worktree legitimately looks like nobody's.
             if record.claimed_at > cutoff or claim.holders():
                 continue
             target = worktree_root / claim.name
+            if record.base_commit is not None:
+                # A position inside the checkout, not only its root: a session
+                # opened in a subdirectory is relocated to the matching
+                # subdirectory, which is what `linked()` reports as `path` and
+                # what resume records as the cwd. Comparing against the root
+                # alone read every one of those as gone and reaped a worktree
+                # the user could still resume into.
+                root = target.resolve()
+                if not any(cwd.is_relative_to(root) for cwd in kept):
+                    self._reap(claim, target)
+                continue
+            # A reservation, not a worktree: an empty directory from a mkdir
+            # claim whose `git worktree add` never landed. It holds nothing and
+            # no session ever saw it.
             if not _is_empty_dir(target):
                 logger.warning(
                     "Keeping worktree %s: its claim records no base commit, so "
@@ -398,6 +477,22 @@ class WorktreeRepository:
                 target, record.branch, branch_created=record.branch_created
             )
             logger.info("Discarded an abandoned worktree reservation at %s", target)
+
+    # Through release() rather than removing the directory, so a worktree that
+    # turns out to hold work is kept by the same gate that protects an explicit
+    # delete: no session may reclaim it mid-inspection, and anything
+    # uncommitted, untracked, or committed since it was created stays. What is
+    # reaped is therefore provably a checkout nothing ever happened in.
+    def _reap(self, claim: WorktreeClaim, target: Path) -> None:
+        try:
+            release = ManagedWorktree(claim=claim).release()
+        except (GitError, OSError) as exc:
+            logger.debug("Failed to reap worktree %s: %s", target, exc)
+            return
+        if release.outcome is WorktreeReleaseOutcome.REMOVED:
+            logger.info(
+                "Reaped the worktree of a session that no longer exists: %s", target
+            )
 
     def _base_ref(self) -> str | None:
         """The ref a newly created worktree branch starts from.
@@ -635,19 +730,30 @@ class ManagedWorktree:
             branch_created=record.branch_created,
         )
         state = prepared.inspect_for_cleanup()
+        snapshot: str | None = None
         if not state.is_clean:
-            logger.info(
-                "Keeping worktree %s on branch %s: %s",
-                root,
-                record.branch,
-                ", ".join(state.reasons),
-            )
-            return WorktreeRelease(
-                WorktreeReleaseOutcome.KEPT_DIRTY,
-                root=root,
-                branch=record.branch,
-                reasons=state.reasons,
-            )
+            # Work left behind is a reason to save it, not a reason to keep the
+            # directory. Keeping was safe and unbounded: a session deleted after
+            # writing one uncommitted file left a worktree nothing would ever
+            # collect, and dogfooding grew a pile of them. So the removal is
+            # made recoverable instead, and only a snapshot that will not
+            # write is still worth stopping for.
+            try:
+                snapshot = prepared.snapshot()
+            except (WorktreeError, OSError) as exc:
+                logger.warning(
+                    "Keeping worktree %s on branch %s: %s could not be saved (%s)",
+                    root,
+                    record.branch,
+                    ", ".join(state.reasons),
+                    exc,
+                )
+                return WorktreeRelease(
+                    WorktreeReleaseOutcome.KEPT_DIRTY,
+                    root=root,
+                    branch=record.branch,
+                    reasons=state.reasons,
+                )
 
         # Re-checked immediately before the destructive step. Inspecting a
         # worktree shells out to git, which is long enough for a session in
@@ -668,11 +774,26 @@ class ManagedWorktree:
 
         prepared.remove(delete_branch=record.branch_created)
         self.claim.delete()
+        if snapshot is not None:
+            # At INFO with the command spelled out, because this is the only
+            # trace of the work left and a ref nobody can name is not a way
+            # back. `git branch -D` above orphans any commits the session made;
+            # the ref is what keeps them reachable.
+            logger.info(
+                "Removed worktree %s, which still had %s. Recover it with: "
+                "git -C %s switch -c %s %s",
+                root,
+                ", ".join(state.reasons),
+                record.repo_root,
+                self.claim.name,
+                snapshot,
+            )
         return WorktreeRelease(
             WorktreeReleaseOutcome.REMOVED,
             root=root,
             branch=record.branch,
             branch_deleted=record.branch_created,
+            snapshot_ref=snapshot,
         )
 
 
@@ -701,6 +822,22 @@ def _is_empty_dir(target: Path) -> bool:
         return not any(target.iterdir())
     except OSError:
         return False
+
+
+def _unhooked(repo: Any) -> Any:
+    """This repository's git, with any fsmonitor hook disabled.
+
+    `core.fsmonitor` is a command git runs to ask what changed, and a
+    repository can name any command it likes. Every read of a working tree
+    here is a read of somebody else's repository, so the hook is somebody
+    else's command running with the user's privileges -- the same reason
+    `vibe.core.system_prompt` passes `-c core.fsmonitor=` to every git it
+    spawns.
+
+    It matters more here than it did: the reaper used to run only when a
+    worktree was explicitly deleted, and now runs on every session attach.
+    """
+    return repo.git(c="core.fsmonitor=")
 
 
 def _validate_worktree_name(name: str) -> None:

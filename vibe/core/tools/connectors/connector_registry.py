@@ -176,6 +176,7 @@ def _connector_bootstrap_cache_payload(connector: dict[str, Any]) -> dict[str, A
     payload: dict[str, Any] = {
         "id": connector.get("id"),
         "name": connector.get("name"),
+        "protocol": connector.get("protocol"),
         "status": {"is_ready": bool(status.get("is_ready", False))},
         "tools": [
             _tool_bootstrap_cache_payload(tool)
@@ -505,7 +506,10 @@ class ConnectorRegistry:
         base_url = self._server_url or _DEFAULT_BASE_URL
         url = f"{base_url}/v1/connectors/bootstrap"
         headers = {"Authorization": f"Bearer {self._api_key}"}
-        params = {"include_auth_actionable_connectors": "true"}
+        params = {
+            "include_auth_actionable_connectors": "true",
+            "builtin_connectors": "web_search",
+        }
         async with VibeAsyncHTTPClient(
             timeout=_BOOTSTRAP_TIMEOUT, verify=build_ssl_context()
         ) as http:
@@ -515,18 +519,12 @@ class ConnectorRegistry:
 
     def _read_cached_bootstrap(self) -> dict[str, Any] | None:
         entry = _read_bootstrap_cache_entries().get(self._bootstrap_cache_key)
+        if not _is_fresh_bootstrap_cache_entry(entry, int(time.time())):
+            return None
         if not isinstance(entry, dict):
             return None
-
-        stored_at = entry.get("stored_at_timestamp")
         payload = entry.get("payload")
-        if not isinstance(stored_at, int) or not isinstance(payload, dict):
-            return None
-        if stored_at <= int(time.time()) - _BOOTSTRAP_CACHE_TTL_SECONDS:
-            return None
-        if not isinstance(payload.get("connectors"), list):
-            return None
-        return payload
+        return payload if isinstance(payload, dict) else None
 
     def _write_cached_bootstrap(self, payload: dict[str, Any]) -> None:
         now = int(time.time())
@@ -609,7 +607,13 @@ class ConnectorRegistry:
 
             self._bootstrap_error = None
 
-            unique_connectors = _deduplicate_connectors(data.get("connectors") or [])
+            mcp_connectors = [
+                connector
+                for connector in data.get("connectors") or []
+                if isinstance(connector, dict)
+                and (not (protocol := connector.get("protocol")) or protocol == "mcp")
+            ]
+            unique_connectors = _deduplicate_connectors(mcp_connectors)
 
             cache: dict[str, dict[str, type[BaseTool]]] = {}
             all_tools: dict[str, type[BaseTool]] = {}

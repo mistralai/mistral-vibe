@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from textual.geometry import Offset
+from textual.message import Message
 from textual.selection import Selection
 
 from tests.conftest import build_test_vibe_app
@@ -166,3 +167,60 @@ async def test_option_left_and_option_right_move_by_word(
 
         assert chat_input.value == "hello brave world"
         assert len(app.query(UserMessage)) == 0
+
+
+@pytest.mark.parametrize("chord", ["ctrl+enter", "super+enter"])
+@pytest.mark.asyncio
+async def test_steer_chord_posts_request_when_input_empty(chord: str) -> None:
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        text_area = app.query_one(ChatTextArea)
+        text_area.focus()
+        await pilot.pause()
+
+        posted: list[ChatTextArea.SteerQueueRequested] = []
+        original = text_area.post_message
+
+        def capture(message: Message) -> bool:
+            if isinstance(message, ChatTextArea.SteerQueueRequested):
+                posted.append(message)
+            return original(message)
+
+        text_area.post_message = capture  # type: ignore[method-assign]
+
+        await pilot.press(chord)
+        await pilot.pause()
+
+        assert len(posted) == 1
+        assert app.query_one(ChatInputContainer).value == ""
+
+
+@pytest.mark.asyncio
+async def test_steer_chord_does_nothing_when_input_has_text() -> None:
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        text_area = app.query_one(ChatTextArea)
+        text_area.focus()
+        text_area.insert("draft message")
+        await pilot.pause()
+
+        posted: list[ChatTextArea.SteerQueueRequested] = []
+        submitted: list[ChatTextArea.Submitted] = []
+        original = text_area.post_message
+
+        def capture(message: Message) -> bool:
+            if isinstance(message, ChatTextArea.SteerQueueRequested):
+                posted.append(message)
+            if isinstance(message, ChatTextArea.Submitted):
+                submitted.append(message)
+            return original(message)
+
+        text_area.post_message = capture  # type: ignore[method-assign]
+
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+
+        # A non-empty input must not steer, and the chord must not submit either.
+        assert posted == []
+        assert submitted == []
+        assert app.query_one(ChatInputContainer).value == "draft message"

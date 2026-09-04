@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from vibe.core.experiments.active import ExperimentName
+from vibe.core.experiments.active import ExperimentName, ExperimentSurface
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
@@ -28,7 +28,11 @@ class _StubClient(RemoteEvalClient):
 
 def _attrs() -> ExperimentAttributes:
     return ExperimentAttributes(
-        userId="x", entrypoint="cli", agent_version="0", os="darwin"
+        userId="x",
+        entrypoint="cli",
+        harness=ExperimentSurface.LEGACY,
+        agent_version="0",
+        os="darwin",
     )
 
 
@@ -90,6 +94,7 @@ async def test_resume_round_trip_restores_experiment_attributes() -> None:
     attributes = ExperimentAttributes(
         userId="user-1",
         entrypoint="cli",
+        harness=ExperimentSurface.LEGACY,
         agent_version="0",
         os="darwin",
         planType="mistral_code",

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+from pathlib import Path
+import ssl
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
+import tomli_w
 
+from vibe.core.config import ProviderConfig
 from vibe.core.config._defaults import (
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
     DEFAULT_MISTRAL_SERVER_URL,
     DEFAULT_VIBE_BASE_URL,
 )
-from vibe.core.config.vibe_schema import DEFAULT_PROVIDERS
+from vibe.core.config.vibe_schema import DEFAULT_PROVIDERS, VibeConfigSchema
+from vibe.core.types import Backend
 from vibe.setup import onboarding
 from vibe.setup.auth import HttpBrowserSignInGateway
 from vibe.setup.auth.api_key_persistence import (
@@ -18,10 +24,42 @@ from vibe.setup.auth.api_key_persistence import (
 )
 from vibe.setup.onboarding import OnboardingApp
 from vibe.setup.onboarding.context import OnboardingContext
+from vibe.utils.http import build_ssl_context
 
 
 def _mistral_context() -> OnboardingContext:
     return OnboardingContext(provider=DEFAULT_PROVIDERS[0])
+
+
+def test_run_onboarding_applies_resolved_trust_store_before_starting_app(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = config_dir / "config.toml"
+    config_file.write_text(
+        tomli_w.dumps({"enable_system_trust_store": True}), encoding="utf-8"
+    )
+    ssl_context = MagicMock(spec=ssl.SSLContext)
+    received_configs: list[VibeConfigSchema] = []
+
+    class FakeOnboardingApp:
+        selected_theme = None
+
+        def __init__(
+            self, config: VibeConfigSchema, launch_context: object | None = None
+        ) -> None:
+            received_configs.append(config)
+
+        def run(self) -> str:
+            assert build_ssl_context() is ssl_context
+            return "completed"
+
+    monkeypatch.setattr(onboarding, "OnboardingApp", FakeOnboardingApp)
+
+    with patch("vibe.utils.http.truststore.SSLContext", return_value=ssl_context):
+        result = onboarding.run_onboarding()
+
+    assert result.config.enable_system_trust_store is True
+    assert received_configs == [result.config]
 
 
 def _patch_persistence(
@@ -76,6 +114,128 @@ def test_mistral_default_domain_resets_custom_auth_urls() -> None:
     assert isinstance(gateway, HttpBrowserSignInGateway)
     assert gateway._browser_base_url == "https://console.mistral.ai"
     assert gateway._api_base_url == "https://console.mistral.ai/api"
+
+
+def _split_horizon_context() -> OnboardingContext:
+    provider = ProviderConfig(
+        name="mistral",
+        api_base="https://api.mistral.ai/v1",
+        browser_auth_base_url="https://console.internal.example",
+        browser_auth_api_base_url="https://connector.internal.example/api",
+        backend=Backend.MISTRAL,
+    )
+    return OnboardingContext(provider=provider)
+
+
+def test_apply_custom_domain_without_api_base_disables_origin_rewrite() -> None:
+    app = OnboardingApp(_mistral_context())
+    app.apply_custom_domain("https://custom.example.com")
+
+    assert app._provider.browser_auth_api_base_url == "https://custom.example.com/api"
+    assert app._provider.browser_auth_allow_origin_rewrite is False
+
+
+def test_apply_custom_domain_with_split_api_base_enables_origin_rewrite() -> None:
+    app = OnboardingApp(_mistral_context())
+    app.apply_custom_domain(
+        "https://console.internal.example", "https://connector.internal.example:443/api"
+    )
+
+    assert app._provider.browser_auth_base_url == "https://console.internal.example"
+    assert (
+        app._provider.browser_auth_api_base_url
+        == "https://connector.internal.example:443/api"
+    )
+    assert app._provider.browser_auth_allow_origin_rewrite is True
+
+    assert app._browser_sign_in_service_factory is not None
+    gateway = app._browser_sign_in_service_factory()._gateway
+    assert isinstance(gateway, HttpBrowserSignInGateway)
+    assert gateway._allow_origin_rewrite is True
+
+
+def test_apply_mistral_default_domain_clears_origin_rewrite() -> None:
+    app = OnboardingApp(_mistral_context())
+    app.apply_custom_domain(
+        "https://console.internal.example", "https://connector.internal.example/api"
+    )
+    assert app._provider.browser_auth_allow_origin_rewrite is True
+
+    app.apply_mistral_default_domain()
+
+    assert app._provider.browser_auth_allow_origin_rewrite is False
+
+
+def test_configured_custom_api_base_returns_split_horizon_base() -> None:
+    app = OnboardingApp(_split_horizon_context())
+
+    assert app.configured_custom_api_base == "https://connector.internal.example/api"
+
+
+def test_configured_custom_api_base_none_for_same_origin_api_base() -> None:
+    app = OnboardingApp(_mistral_context())
+
+    assert app.configured_custom_api_base is None
+
+
+def test_configured_custom_domain_none_for_mistral_default() -> None:
+    app = OnboardingApp(_mistral_context())
+
+    assert app.configured_custom_domain is None
+
+
+def test_configured_custom_api_base_surfaces_default_console_split_horizon() -> None:
+    # Default console host but a connector API base + rewrite are configured:
+    # configured_custom_domain stays None (no custom browser domain to seed),
+    # but the connector API base must surface so the sign-in-target overwrite
+    # warning still fires and the Mistral default cannot silently clear it.
+    provider = ProviderConfig(
+        name="mistral",
+        api_base="https://connector.internal.example/v1",
+        browser_auth_base_url=DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
+        browser_auth_api_base_url="https://connector.internal.example/api",
+        browser_auth_allow_origin_rewrite=True,
+        backend=Backend.MISTRAL,
+    )
+    app = OnboardingApp(OnboardingContext(provider=provider))
+
+    assert app.configured_custom_domain is None
+    assert app.configured_custom_api_base == "https://connector.internal.example/api"
+
+
+def test_apply_custom_domain_points_console_at_connector_origin() -> None:
+    app = OnboardingApp(_mistral_context())
+    app.apply_custom_domain(
+        "https://console.internal.example", "https://connector.internal.example:443/api"
+    )
+
+    # /whoami and plan lookups must hit the CLI-reachable connector, not the
+    # browser-only console origin.
+    assert app._console_base_url == "https://connector.internal.example:443"
+
+
+def test_apply_custom_domain_same_origin_keeps_console_base() -> None:
+    app = OnboardingApp(_mistral_context())
+    app.apply_custom_domain("https://console.internal.example")
+
+    assert app._console_base_url == "https://console.internal.example"
+
+
+def test_configured_custom_api_base_tolerates_bad_port() -> None:
+    provider = ProviderConfig(
+        name="mistral",
+        api_base="https://api.mistral.ai/v1",
+        browser_auth_base_url="https://console.internal.example",
+        browser_auth_api_base_url="https://connector.internal.example:999999/api",
+        backend=Backend.MISTRAL,
+    )
+    app = OnboardingApp(OnboardingContext(provider=provider))
+
+    # A hand-edited bad port must not crash the custom-domain screen on mount.
+    assert (
+        app.configured_custom_api_base
+        == "https://connector.internal.example:999999/api"
+    )
 
 
 @pytest.mark.asyncio

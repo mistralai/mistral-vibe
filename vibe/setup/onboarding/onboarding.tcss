@@ -522,3 +522,28 @@ ThemeSelectionScreen #enter-hint {
     height: 1;
     padding: 0 1;
 }
+
+#api-base-box {
+    border-title-align: left;
+    border-title-color: $text;
+    border-title-style: bold;
+    margin-left: 2;
+    margin-bottom: 1;
+    width: 100%;
+    height: 3;
+}
+
+#api-base-box.valid {
+    border: solid $success;
+}
+
+#api-base-box.invalid {
+    border: solid $error;
+}
+
+#api-base {
+    border: none;
+    width: 100%;
+    height: 1;
+    padding: 0 1;
+}

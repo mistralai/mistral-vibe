@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 import pytest
+from textual.screen import ModalScreen
+from textual.widgets import Static
 
 from tests.conftest import build_test_vibe_app
 from tests.stubs.app_config import build_test_app_config
 from vibe.app_server import AppServerSession
 from vibe.app_server.events import StatsUpdated
-from vibe.app_server.models import AgentStatsSnapshot
+from vibe.app_server.models import AgentStatsSnapshot, ConfigIssue
 from vibe.app_server.protocol import ConfigReadResponse, StatsUpdatedParams
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputBody, ChatInputContainer
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress
+from vibe.cli.textual_ui.widgets.loading import DEFAULT_LOADING_STATUS
 from vibe.cli.textual_ui.widgets.narrator_status import NarratorStatus
 
 
@@ -49,6 +52,43 @@ async def test_cold_mount_applies_configured_theme_not_fallback() -> None:
         await pilot.pause(0.1)
         assert app._app_server is None
         assert app.theme == "gruvbox"
+
+
+@pytest.mark.asyncio
+async def test_cold_mount_shows_startup_issue_before_session_starts() -> None:
+    message = "--experimental-harness\nunavailable; falling back to the legacy harness."
+    starter_called = asyncio.Event()
+
+    async def _blocking_starter() -> AppServerSession:
+        assert any(
+            notification.message == message for notification in app._notifications
+        )
+        starter_called.set()
+        await asyncio.Event().wait()
+        raise RuntimeError("unreachable")
+
+    app = build_test_vibe_app(app_server=_blocking_starter)
+    app._mount_first = True
+    app._initial_config_response = ConfigReadResponse(
+        config=build_test_app_config(),
+        startup_issue=ConfigIssue(
+            file="--experimental-harness",
+            message="unavailable; falling back to the legacy harness.",
+        ),
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.1)
+
+        assert app._app_server is None
+        assert starter_called.is_set()
+
+
+def test_config_read_response_accepts_missing_startup_issue() -> None:
+    response = ConfigReadResponse.model_validate({
+        "config": build_test_app_config().model_dump(mode="json", by_alias=True)
+    })
+
+    assert response.startup_issue is None
 
 
 @pytest.mark.asyncio
@@ -128,6 +168,36 @@ async def test_stats_update_keeps_context_progress_visible() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stats_update_while_modal_is_open_updates_main_progress() -> None:
+    class _BlankModal(ModalScreen[None]):
+        def compose(self):
+            yield Static("modal")
+
+    app = build_test_vibe_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.2)
+        context_progress = app.query_one(ContextProgress)
+        app.push_screen(_BlankModal())
+        await pilot.pause()
+
+        app._update_context_progress(
+            StatsUpdated(
+                StatsUpdatedParams(
+                    event_id=1,
+                    session_id="session-1",
+                    emitted_at=0,
+                    stats=AgentStatsSnapshot(context_tokens=12_500),
+                    context_window=200_000,
+                )
+            )
+        )
+        await pilot.pause()
+
+        assert context_progress.tokens.max_tokens == 200_000
+        assert context_progress.tokens.current_tokens == 12_500
+
+
+@pytest.mark.asyncio
 async def test_real_managers_bound_to_widgets_after_cold_bootstrap() -> None:
     # Cold mount-first path: compose binds the idle noop voice/narrator
     # managers. Once the session opens, _complete_mount must re-bind the real
@@ -155,3 +225,59 @@ def test_cold_path_force_quit_does_not_access_config() -> None:
         app.action_interrupt_or_quit()
         app.action_delete_right_or_quit()
     assert mock_quit.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_init_completion_keeps_repurposed_turn_spinner() -> None:
+    """A submit during init reuses the init spinner as the turn spinner (flipping
+    its label to "Generating"), so the init-completion watcher must not remove it
+    -- otherwise the first-turn indicator vanishes during discovery.
+    """
+    app = build_test_vibe_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app._session_ready.wait()
+        await app.app_server.resources.runtime.wait_until_ready()
+        runtime = app.app_server.resources.runtime
+        with (
+            patch.object(
+                type(runtime), "ready", new_callable=PropertyMock, return_value=False
+            ),
+            patch.object(runtime, "wait_until_ready", AsyncMock()),
+            patch.object(app, "_show_post_init_notices_once", AsyncMock()),
+        ):
+            # Simulate a submit repurposing the init spinner mid-init.
+            original_ensure = app._ensure_loading_widget
+
+            async def repurpose_after_init(
+                status: str = DEFAULT_LOADING_STATUS, *, show_hint: bool = True
+            ) -> None:
+                await original_ensure(status, show_hint=show_hint)
+                assert app._loading_widget is not None
+                app._loading_widget.set_status(DEFAULT_LOADING_STATUS)
+
+            with patch.object(app, "_ensure_loading_widget", repurpose_after_init):
+                await app._watch_init_completion()
+
+            assert app._loading_widget is not None
+            assert app._loading_widget.base_status == DEFAULT_LOADING_STATUS
+        await pilot.pause(0.05)
+
+
+@pytest.mark.asyncio
+async def test_init_completion_removes_idle_init_spinner() -> None:
+    """When nothing repurposed it, the init watcher still tears its spinner down."""
+    app = build_test_vibe_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app._session_ready.wait()
+        await app.app_server.resources.runtime.wait_until_ready()
+        runtime = app.app_server.resources.runtime
+        with (
+            patch.object(
+                type(runtime), "ready", new_callable=PropertyMock, return_value=False
+            ),
+            patch.object(runtime, "wait_until_ready", AsyncMock()),
+            patch.object(app, "_show_post_init_notices_once", AsyncMock()),
+        ):
+            await app._watch_init_completion()
+            assert app._loading_widget is None
+        await pilot.pause(0.05)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import pytest
 
 from vibe.acp.agent import VibeAcpAgent as VibeAcpAgentLoop
@@ -490,6 +491,86 @@ class TestACPAuthenticateCustomDomain:
         assert (
             captured[0].browser_auth_api_base_url == "https://console.acme.internal/api"
         )
+        assert captured[0].browser_auth_allow_origin_rewrite is False
+
+    @pytest.mark.asyncio
+    async def test_start_custom_api_base_enables_origin_rewrite(self) -> None:
+        captured: list[ProviderConfig] = []
+        browser_sign_in = FakeBrowserSignInService()
+
+        def factory(provider: ProviderConfig) -> FakeBrowserSignInService:
+            captured.append(provider)
+            return browser_sign_in
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(
+                build_mistral_provider()
+            ),
+            browser_sign_in_service_factory=factory,
+        )
+
+        await acp_agent_loop.authenticate(
+            "browser-auth-delegated",
+            action="start",
+            signInTarget="custom",
+            domain="console.example.com",
+            apiBaseUrl="https://connector.example:443/api",
+        )
+
+        assert captured[0].browser_auth_base_url == "https://console.example.com"
+        assert (
+            captured[0].browser_auth_api_base_url == "https://connector.example:443/api"
+        )
+        assert captured[0].browser_auth_allow_origin_rewrite is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "api_base_url", ["https://", "not a url", "ftp://example.com", 123, 0]
+    )
+    async def test_start_rejects_invalid_custom_api_base(
+        self, api_base_url: Any
+    ) -> None:
+        acp_agent_loop, _, _ = build_acp_agent()
+
+        with pytest.raises(
+            InvalidRequestError, match="Invalid custom sign-in API base URL"
+        ):
+            await acp_agent_loop.authenticate(
+                "browser-auth-delegated",
+                action="start",
+                signInTarget="custom",
+                domain="console.acme.internal",
+                apiBaseUrl=api_base_url,
+            )
+
+    @pytest.mark.asyncio
+    async def test_start_empty_custom_api_base_derives_default(self) -> None:
+        captured: list[ProviderConfig] = []
+        browser_sign_in = FakeBrowserSignInService()
+
+        def factory(provider: ProviderConfig) -> FakeBrowserSignInService:
+            captured.append(provider)
+            return browser_sign_in
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(
+                build_mistral_provider()
+            ),
+            browser_sign_in_service_factory=factory,
+        )
+
+        await acp_agent_loop.authenticate(
+            "browser-auth-delegated",
+            action="start",
+            signInTarget="custom",
+            domain="console.acme.internal",
+            apiBaseUrl="",
+        )
+
+        assert (
+            captured[0].browser_auth_api_base_url == "https://console.acme.internal/api"
+        )
+        assert captured[0].browser_auth_allow_origin_rewrite is False
 
     @pytest.mark.asyncio
     async def test_start_without_sign_in_target_keeps_configured_urls(self) -> None:
@@ -519,8 +600,8 @@ class TestACPAuthenticateCustomDomain:
         captured: list[ProviderConfig] = []
         provider = build_mistral_provider(
             browser_auth_base_url="https://console.acme.internal",
-            browser_auth_api_base_url="https://console.acme.internal/api",
-        )
+            browser_auth_api_base_url="https://connector.acme.internal/api",
+        ).model_copy(update={"browser_auth_allow_origin_rewrite": True})
 
         def factory(started: ProviderConfig) -> FakeBrowserSignInService:
             captured.append(started)
@@ -537,6 +618,7 @@ class TestACPAuthenticateCustomDomain:
 
         assert captured[0].browser_auth_base_url == "https://console.mistral.ai"
         assert captured[0].browser_auth_api_base_url == "https://console.mistral.ai/api"
+        assert captured[0].browser_auth_allow_origin_rewrite is False
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("domain", ["", "   ", "https://", "not a domain", None])
@@ -594,6 +676,100 @@ class TestACPAuthenticateCustomDomain:
         assert request.console_base_url == "https://console.acme.internal"
         assert request.vibe_base_url is None
         assert api_key_persister.custom_domain_flags == [True]
+
+    @pytest.mark.asyncio
+    async def test_completion_split_horizon_uses_connector_origin_for_account(
+        self,
+    ) -> None:
+        provider = build_mistral_provider()
+        credentials_persister = InMemoryCredentialsPersister()
+        resolver_calls: list[str] = []
+
+        async def _resolver(
+            _provider: ProviderConfig, console: str, _key: str, current_vibe: str
+        ) -> tuple[ProviderConfig, str]:
+            resolver_calls.append(console)
+            return _provider, current_vibe
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(provider),
+            browser_sign_in_service_factory=lambda _: FakeBrowserSignInService(),
+            api_key_persister=InMemoryApiKeyPersister().persist,
+            credentials_persister=credentials_persister.persist,
+            tenant_domain_resolver=_resolver,
+        )
+        start_response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated",
+            action="start",
+            signInTarget="custom",
+            domain="console.acme.internal",
+            apiBaseUrl="https://connector.acme.internal:443/api",
+        )
+        attempt_id = require_auth_meta(start_response, "browser-auth-delegated")[
+            "attemptId"
+        ]
+
+        await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="complete", attemptId=attempt_id
+        )
+
+        # /whoami tenant resolution must target the CLI-reachable connector origin.
+        assert resolver_calls == ["https://connector.acme.internal:443"]
+        request = credentials_persister.saved[0]
+        assert request.provider.browser_auth_base_url == "https://console.acme.internal"
+        assert (
+            request.provider.browser_auth_api_base_url
+            == "https://connector.acme.internal:443/api"
+        )
+        assert request.provider.browser_auth_allow_origin_rewrite is True
+        # The persisted console URL uses the connector origin, not the console.
+        assert request.console_base_url == "https://connector.acme.internal:443"
+
+    @pytest.mark.asyncio
+    async def test_completion_default_console_with_connector_routes_whoami_to_connector(
+        self,
+    ) -> None:
+        # Edge case: browser_auth_base_url is the default Mistral console but
+        # the API base points at a distinct connector. _account_base_of must
+        # still return the connector origin (not None) so /whoami reaches the
+        # CLI-reachable host. Uses signInTarget=custom to override the provider
+        # (matching the real ACP flow) so the persist path runs.
+        provider = build_mistral_provider()
+        credentials_persister = InMemoryCredentialsPersister()
+        resolver_calls: list[str] = []
+
+        async def _resolver(
+            _provider: ProviderConfig, console: str, _key: str, current_vibe: str
+        ) -> tuple[ProviderConfig, str]:
+            resolver_calls.append(console)
+            return _provider, current_vibe
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(provider),
+            browser_sign_in_service_factory=lambda _: FakeBrowserSignInService(),
+            api_key_persister=InMemoryApiKeyPersister().persist,
+            credentials_persister=credentials_persister.persist,
+            tenant_domain_resolver=_resolver,
+        )
+        start_response = await acp_agent_loop.authenticate(
+            "browser-auth-delegated",
+            action="start",
+            signInTarget="custom",
+            domain="console.mistral.ai",
+            apiBaseUrl="https://connector.example:443/api",
+        )
+        attempt_id = require_auth_meta(start_response, "browser-auth-delegated")[
+            "attemptId"
+        ]
+
+        await acp_agent_loop.authenticate(
+            "browser-auth-delegated", action="complete", attemptId=attempt_id
+        )
+
+        # /whoami must target the connector, not the default console.
+        assert resolver_calls == ["https://connector.example:443"]
+        request = credentials_persister.saved[0]
+        assert request.console_base_url == "https://connector.example:443"
 
     @pytest.mark.asyncio
     async def test_completion_does_not_persist_provider_without_override(self) -> None:
@@ -739,6 +915,125 @@ class TestACPAuthenticateCustomDomain:
 
         assert resolver_calls == []
         assert credentials_persister.saved == []
+
+    @pytest.mark.asyncio
+    async def test_completion_aligns_console_url_for_split_horizon_without_override(
+        self,
+    ) -> None:
+        # Regression: a split-horizon provider configured in config.toml (not
+        # via signInTarget) must still align console_base_url to the connector
+        # origin on sign-in, so /whoami and plan lookups reach the CLI-reachable
+        # host instead of the stale browser-only console.
+        provider = build_mistral_provider(
+            browser_auth_base_url="https://console.acme.internal",
+            browser_auth_api_base_url="https://connector.acme.internal:443/api",
+        ).model_copy(update={"browser_auth_allow_origin_rewrite": True})
+        credentials_persister = InMemoryCredentialsPersister()
+        resolver_calls: list[str] = []
+
+        async def _resolver(
+            _provider: ProviderConfig, console: str, _key: str, current_vibe: str
+        ) -> tuple[ProviderConfig, str]:
+            resolver_calls.append(console)
+            return _provider, current_vibe
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(provider),
+            browser_sign_in_service_factory=lambda _: FakeBrowserSignInService(),
+            api_key_persister=InMemoryApiKeyPersister().persist,
+            credentials_persister=credentials_persister.persist,
+            tenant_domain_resolver=_resolver,
+        )
+        # No signInTarget — the provider matches the context. Before the fix
+        # the early return skipped console_base_url alignment entirely.
+        await acp_agent_loop.authenticate("browser-auth")
+
+        assert resolver_calls == ["https://connector.acme.internal:443"]
+        assert len(credentials_persister.saved) == 1
+        request = credentials_persister.saved[0]
+        assert request.console_base_url == "https://connector.acme.internal:443"
+
+    @pytest.mark.asyncio
+    async def test_completion_aligns_console_url_for_default_console_with_origin_rewrite(
+        self,
+    ) -> None:
+        # Regression: the default Mistral console with a distinct connector API
+        # base and origin rewrite (case 4 in _account_base_of) must also align
+        # console_base_url without a signInTarget override.
+        provider = build_mistral_provider(
+            browser_auth_base_url="https://console.mistral.ai",
+            browser_auth_api_base_url="https://connector.example:443/api",
+        ).model_copy(update={"browser_auth_allow_origin_rewrite": True})
+        credentials_persister = InMemoryCredentialsPersister()
+        resolver_calls: list[str] = []
+
+        async def _resolver(
+            _provider: ProviderConfig, console: str, _key: str, current_vibe: str
+        ) -> tuple[ProviderConfig, str]:
+            resolver_calls.append(console)
+            return _provider, current_vibe
+
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(provider),
+            browser_sign_in_service_factory=lambda _: FakeBrowserSignInService(),
+            api_key_persister=InMemoryApiKeyPersister().persist,
+            credentials_persister=credentials_persister.persist,
+            tenant_domain_resolver=_resolver,
+        )
+        await acp_agent_loop.authenticate("browser-auth")
+
+        assert resolver_calls == ["https://connector.example:443"]
+        assert len(credentials_persister.saved) == 1
+        assert (
+            credentials_persister.saved[0].console_base_url
+            == "https://connector.example:443"
+        )
+
+    @pytest.mark.asyncio
+    async def test_completion_split_horizon_adopts_whoami_tenant_domains(
+        self, respx_mock
+    ) -> None:
+        # Contract: /whoami returns the tenant's own reachable hosts (see
+        # dashboard/users/code/vibe_routes.py), even behind a split-horizon
+        # connector. Adoption must run regardless of
+        # browser_auth_allow_origin_rewrite — the flag only re-homes the
+        # browser sign-in URL, not tenant resolution. Uses the REAL
+        # resolve_tenant_domains so the adoption path is exercised end to end.
+        provider = build_mistral_provider(
+            browser_auth_base_url="https://console.acme.internal",
+            browser_auth_api_base_url="https://connector.acme.internal:443/api",
+        ).model_copy(
+            update={
+                "api_base": "https://connector.acme.internal:443/v1",
+                "browser_auth_allow_origin_rewrite": True,
+            }
+        )
+        respx_mock.get("https://connector.acme.internal:443/api/vibe/whoami").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "plan_type": "API",
+                    "plan_name": "FREE",
+                    "api_base": "https://api.acme.internal",
+                    "vibe_base": "https://chat.acme.internal",
+                },
+            )
+        )
+        credentials_persister = InMemoryCredentialsPersister()
+        acp_agent_loop = VibeAcpAgentLoop(
+            onboarding_context_loader=MutableOnboardingContextLoader(provider),
+            browser_sign_in_service_factory=lambda _: FakeBrowserSignInService(),
+            api_key_persister=InMemoryApiKeyPersister().persist,
+            credentials_persister=credentials_persister.persist,
+        )
+
+        await acp_agent_loop.authenticate("browser-auth")
+
+        assert len(credentials_persister.saved) == 1
+        request = credentials_persister.saved[0]
+        assert request.provider.api_base == "https://api.acme.internal/v1"
+        assert request.console_base_url == "https://connector.acme.internal:443"
+        assert request.vibe_base_url == "https://chat.acme.internal"
 
 
 class TestACPAuthStatusCustomDomain:

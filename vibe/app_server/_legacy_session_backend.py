@@ -10,15 +10,14 @@ from vibe.app_server._dispatch import DispatchResult, RequestFailure
 from vibe.app_server._execution import SessionExecutionConflict, SessionExecutionKind
 from vibe.app_server._handler import CoreRequestHandler
 from vibe.app_server._host import HostRequestHandler, project_session_list
+from vibe.app_server._mcp_authorization_bridge import RegistryAuthorizationProvider
 from vibe.app_server._model import ProtocolModel
 from vibe.app_server._resources import ResourceRequestHandler
 from vibe.app_server._root_session import RootSessionCoordinator
 from vibe.app_server._session_backend_port import (
     ConnectorAuthRequest,
     MCPAuthorizationProvider,
-    MCPAuthorizationRef,
     MCPAuthorizationRequired,
-    MCPAuthorizationSnapshot,
     ResolvedConnector,
     ResolvedConnectorCatalog,
     ResolvedConnectorSelection,
@@ -37,6 +36,7 @@ from vibe.app_server._session_backend_port import (
     SessionMCPState,
     SessionMCPToolDescriptor,
 )
+from vibe.app_server._session_model import set_session_active_model_override
 from vibe.app_server._sessions import SessionRuntime, SessionRuntimeRegistry
 from vibe.app_server._streaming import finish_event_queue
 from vibe.app_server.connector_catalog import (
@@ -85,8 +85,20 @@ from vibe.app_server.protocol import (
     SessionRewindResponse,
     SessionSettingsUpdateParams,
     SessionStartParams,
+    SessionTitleUpdateParams,
+    SessionTitleUpdateResponse,
+    TurnEnqueueParams,
+    TurnEnqueueResponse,
     TurnInterruptParams,
     TurnInterruptResponse,
+    TurnQueueReadParams,
+    TurnQueueReadResponse,
+    TurnQueueRemoveParams,
+    TurnQueueRemoveResponse,
+    TurnQueueReplaceParams,
+    TurnQueueReplaceResponse,
+    TurnQueueResumeParams,
+    TurnQueueResumeResponse,
     TurnStartParams,
     TurnStartResponse,
     TurnSteerParams,
@@ -102,10 +114,8 @@ from vibe.core.tools.connectors.connector_registry import (
     ConnectorToolDefinition,
 )
 from vibe.core.tools.mcp.authorization import (
-    MCPAuthorizationProvider as LegacyMCPAuthorizationProvider,
     MCPAuthorizationRef as LegacyMCPAuthorizationRef,
     MCPAuthorizationRequired as LegacyMCPAuthorizationRequired,
-    MCPAuthorizationSnapshot as LegacyMCPAuthorizationSnapshot,
 )
 from vibe.core.tools.mcp.registry import MCPRegistry
 from vibe.observability.logging import logger
@@ -130,59 +140,6 @@ type _StopBackgroundTasks = Callable[[Any], Awaitable[list[BaseException]]]
 type _AfterLifecycleResponse = Callable[[], None]
 
 
-class _LegacyMCPAuthorizationProviderAdapter(LegacyMCPAuthorizationProvider):
-    def __init__(self, provider: MCPAuthorizationProvider) -> None:
-        self._provider = provider
-
-    async def resolve(
-        self, reference: LegacyMCPAuthorizationRef
-    ) -> LegacyMCPAuthorizationSnapshot | LegacyMCPAuthorizationRequired:
-        result = await self._provider.resolve(_app_authorization_ref(reference))
-        return _legacy_authorization_result(result)
-
-    async def reject(
-        self,
-        reference: LegacyMCPAuthorizationRef,
-        *,
-        observed_connection_revision: str,
-        reason: str,
-    ) -> LegacyMCPAuthorizationSnapshot | LegacyMCPAuthorizationRequired:
-        if reason not in {"http_unauthorized", "mcp_unauthorized"}:
-            raise ValueError("Unsupported MCP authorization rejection reason")
-        result = await self._provider.reject(
-            _app_authorization_ref(reference),
-            observed_connection_revision=observed_connection_revision,
-            reason=cast(Any, reason),
-        )
-        return _legacy_authorization_result(result)
-
-
-def _app_authorization_ref(reference: LegacyMCPAuthorizationRef) -> MCPAuthorizationRef:
-    return MCPAuthorizationRef(
-        server_name=reference.server_name,
-        server_fingerprint=reference.server_fingerprint,
-        kind=reference.kind,
-        descriptor_revision=reference.descriptor_revision,
-    )
-
-
-def _legacy_authorization_result(
-    result: MCPAuthorizationSnapshot | MCPAuthorizationRequired,
-) -> LegacyMCPAuthorizationSnapshot | LegacyMCPAuthorizationRequired:
-    if isinstance(result, MCPAuthorizationRequired):
-        return LegacyMCPAuthorizationRequired(
-            reason=result.reason,
-            descriptor_revision=result.descriptor_revision,
-            observed_connection_revision=result.observed_connection_revision,
-        )
-    return LegacyMCPAuthorizationSnapshot(
-        headers=result.headers,
-        connection_revision=result.connection_revision,
-        descriptor_revision=result.descriptor_revision,
-        expires_at=result.expires_at,
-    )
-
-
 def configure_legacy_mcp_registry(
     registry: MCPRegistry,
     configuration: ResolvedMCPCatalog,
@@ -195,7 +152,7 @@ def configure_legacy_mcp_registry(
     descriptor_cache_root: Path | None = None,
 ) -> None:
     registry.configure_authorization(
-        _LegacyMCPAuthorizationProviderAdapter(provider),
+        RegistryAuthorizationProvider(provider),
         {
             server.name: LegacyMCPAuthorizationRef(
                 server_name=server.authorization.server_name,
@@ -208,19 +165,6 @@ def configure_legacy_mcp_registry(
         required_sink=required_sink,
         descriptor_cache_root=descriptor_cache_root,
     )
-
-
-def create_legacy_mcp_registry(
-    configuration: ResolvedMCPCatalog,
-    provider: MCPAuthorizationProvider,
-    *,
-    descriptor_cache_root: Path | None = None,
-) -> MCPRegistry:
-    registry = MCPRegistry()
-    configure_legacy_mcp_registry(
-        registry, configuration, provider, descriptor_cache_root=descriptor_cache_root
-    )
-    return registry
 
 
 def _legacy_connector_entries(
@@ -779,7 +723,62 @@ class LegacySessionBackend:
     async def start_turn(
         self, params: TurnStartParams
     ) -> SessionBackendResult[TurnStartResponse]:
-        return await self._request("turn/start", params, TurnStartResponse)
+        runtime_updated = await self._pin_session_active_model()
+        result = await self._request("turn/start", params, TurnStartResponse)
+        return replace(result, runtime_updated=runtime_updated)
+
+    async def enqueue_turn(
+        self, params: TurnEnqueueParams
+    ) -> SessionBackendResult[TurnEnqueueResponse]:
+        runtime_updated = await self._pin_session_active_model()
+        result = await self._request(
+            "app_server/session/turn/enqueue", params, TurnEnqueueResponse
+        )
+        return replace(result, runtime_updated=runtime_updated)
+
+    async def _pin_session_active_model(self) -> bool:
+        loop = self.session.agent_loop
+        logger = loop.session_logger
+        if not logger.enabled:
+            return False
+        active_model = loop.config.get_active_model().alias
+        failures = await set_session_active_model_override(
+            loop.config_orchestrator, active_model, reason="pin session active model"
+        )
+        if failures:
+            raise SessionBackendError(
+                ProtocolErrorCode.INTERNAL_ERROR,
+                f"Failed to pin session active model: {failures[0]}",
+            )
+        return await logger.persist_active_model(active_model)
+
+    async def read_turn_queue(
+        self, params: TurnQueueReadParams
+    ) -> SessionBackendResult[TurnQueueReadResponse]:
+        return await self._request(
+            "app_server/session/turn/queue/read", params, TurnQueueReadResponse
+        )
+
+    async def remove_queued_turn(
+        self, params: TurnQueueRemoveParams
+    ) -> SessionBackendResult[TurnQueueRemoveResponse]:
+        return await self._request(
+            "app_server/session/turn/queue/remove", params, TurnQueueRemoveResponse
+        )
+
+    async def replace_queued_turn(
+        self, params: TurnQueueReplaceParams
+    ) -> SessionBackendResult[TurnQueueReplaceResponse]:
+        return await self._request(
+            "app_server/session/turn/queue/replace", params, TurnQueueReplaceResponse
+        )
+
+    async def resume_turn_queue(
+        self, params: TurnQueueResumeParams
+    ) -> SessionBackendResult[TurnQueueResumeResponse]:
+        return await self._request(
+            "app_server/session/turn/queue/resume", params, TurnQueueResumeResponse
+        )
 
     async def steer_turn(
         self, params: TurnSteerParams
@@ -1055,6 +1054,17 @@ class LegacySessionBackendHost:
                 if exc.code is not ProtocolErrorCode.NOT_FOUND:
                     raise
         return await self._host_request("session/read", params, SessionReadResponse)
+
+    async def rename(
+        self, params: SessionTitleUpdateParams
+    ) -> SessionTitleUpdateResponse:
+        if backend := self._live_backend(params.session_id):
+            return await self._session_request(
+                backend, "session/rename", params, SessionTitleUpdateResponse
+            )
+        return await self._host_request(
+            "session/rename", params, SessionTitleUpdateResponse
+        )
 
     async def shutdown(self) -> None:
         if self._closed:

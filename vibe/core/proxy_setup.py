@@ -13,6 +13,9 @@ SUPPORTED_PROXY_VARS: dict[str, str] = {
     "SSL_CERT_DIR": "Path to directory containing SSL certificates",
 }
 
+# Proxy URL vars need an http(s):// scheme, else httpx crashes on startup (VIBE-4084).
+PROXY_URL_VARS: frozenset[str] = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"})
+
 
 class ProxySetupError(Exception):
     pass
@@ -34,6 +37,11 @@ def set_proxy_var(key: str, value: str) -> None:
     if key not in SUPPORTED_PROXY_VARS:
         raise ProxySetupError(
             f"Unknown key '{key}'. Supported: {', '.join(SUPPORTED_PROXY_VARS.keys())}"
+        )
+
+    if key in PROXY_URL_VARS and not value.startswith(("http://", "https://")):
+        raise ProxySetupError(
+            f"{key} must start with http:// or https:// (got '{value}')"
         )
 
     GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)

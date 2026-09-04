@@ -88,6 +88,12 @@ class ProviderConfig(BaseModel):
     api_key_env_var: str = ""
     browser_auth_base_url: str | None = None
     browser_auth_api_base_url: str | None = None
+    # Split-horizon deployments (e.g. behind an SAP Cloud Connector) expose the
+    # console under a virtual host the CLI reaches but the server does not know
+    # about, so it returns sign-in/poll URLs on its own public host. When True,
+    # returned URLs are re-homed onto the configured browser auth base URLs
+    # instead of being rejected for an origin mismatch.
+    browser_auth_allow_origin_rewrite: bool = False
     api_style: str = "openai"
     backend: Backend = Backend.GENERIC
     reasoning_field_name: str = "reasoning_content"

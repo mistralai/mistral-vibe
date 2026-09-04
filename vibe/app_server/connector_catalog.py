@@ -153,6 +153,7 @@ class _BootstrapConnector(BaseModel):
 
     id: str | None = None
     name: str | None = None
+    protocol: str | None = None
     status: _BootstrapStatus = Field(default_factory=_BootstrapStatus)
     tools: list[_BootstrapTool] = Field(default_factory=list)
     auth_action: _BootstrapAuthAction | None = None
@@ -586,7 +587,7 @@ class ConnectorCatalogService:
         self, params: ConnectorCatalogReadParams, root: SessionBackend | None
     ) -> ConnectorCatalogReadResponse:
         context = await self._read_context(params.session_id, root)
-        result = self.read_catalog(context.orchestrator)
+        result = await self._read_catalog_async(context.orchestrator)
         session = (
             await context.require_control().read_connectors()
             if context.control is not None
@@ -1173,19 +1174,42 @@ class ConnectorCatalogService:
         )
         return _catalog_read_result(hit.catalog, "fresh_cache", backend=self._backend)
 
+    async def _read_catalog_async(
+        self, orchestrator: ConfigOrchestrator[VibeConfigSchema]
+    ) -> ConnectorCatalogReadResult:
+        provider = await asyncio.to_thread(_resolve_provider, orchestrator.config)
+        return await self._read_catalog_for_provider(provider)
+
+    async def _read_catalog_for_provider(
+        self, provider: _ConnectorProvider | None
+    ) -> ConnectorCatalogReadResult:
+        if provider is None:
+            return _catalog_read_result(None, "not_loaded", backend=self._backend)
+        now = self._clock()
+        memory = self._memory.get(provider.fingerprint)
+        if memory is not None and _is_fresh(memory.stored_at, now=now):
+            return _catalog_read_result(memory.catalog, "memory", backend=self._backend)
+        hit = await asyncio.to_thread(self._cache.read, provider.fingerprint, now=now)
+        if hit is None:
+            return _catalog_read_result(None, "not_loaded", backend=self._backend)
+        self._memory[provider.fingerprint] = _MemoryCatalog(
+            catalog=hit.catalog, stored_at=hit.stored_at
+        )
+        return _catalog_read_result(hit.catalog, "fresh_cache", backend=self._backend)
+
     async def resolve_catalog(
         self,
         orchestrator: ConfigOrchestrator[VibeConfigSchema],
         *,
         force_refresh: bool = False,
     ) -> ResolvedConnectorCatalog | None:
-        provider = _resolve_provider(orchestrator.config)
+        provider = await asyncio.to_thread(_resolve_provider, orchestrator.config)
         if provider is None:
             return None
         lock = self._locks.setdefault(provider.fingerprint, asyncio.Lock())
         async with lock:
             if not force_refresh:
-                cached = self.read_catalog(orchestrator)
+                cached = await self._read_catalog_for_provider(provider)
                 if cached.catalog is not None:
                     return cached.catalog
             return await self._refresh(provider)
@@ -1198,7 +1222,9 @@ class ConnectorCatalogService:
                 payload = await self._fetch_bootstrap(
                     provider.base_url, provider.api_key
                 )
-                catalog = _resolve_catalog(payload, provider.fingerprint)
+                catalog = await asyncio.to_thread(
+                    _resolve_catalog, payload, provider.fingerprint
+                )
             except asyncio.CancelledError:
                 span.set_attribute("mistral_ai.vibe.connector.outcome", "cancelled")
                 record_connector_catalog_operation(
@@ -1285,16 +1311,24 @@ class ConnectorCatalogService:
 
 async def _fetch_bootstrap(base_url: str, api_key: str) -> object:
     url = f"{base_url.rstrip('/')}/v1/connectors/bootstrap"
-    async with VibeAsyncHTTPClient(
-        timeout=_BOOTSTRAP_TIMEOUT_SECONDS, verify=build_ssl_context()
-    ) as client:
+    client = await asyncio.to_thread(_build_bootstrap_http_client)
+    async with client:
         response = await client.get(
             url,
             headers={"Authorization": f"Bearer {api_key}"},
-            params={"include_auth_actionable_connectors": "true"},
+            params={
+                "include_auth_actionable_connectors": "true",
+                "builtin_connectors": "web_search",
+            },
         )
         response.raise_for_status()
-        return response.json()
+        return await asyncio.to_thread(response.json)
+
+
+def _build_bootstrap_http_client() -> VibeAsyncHTTPClient:
+    return VibeAsyncHTTPClient(
+        timeout=_BOOTSTRAP_TIMEOUT_SECONDS, verify=build_ssl_context()
+    )
 
 
 async def _connector_auth_url(
@@ -1476,6 +1510,8 @@ def _resolve_catalog(
     raw_ids: set[str] = set()
     prepared_connectors: list[tuple[str, str, _BootstrapConnector]] = []
     for raw_connector in parsed.connectors:
+        if raw_connector.protocol and raw_connector.protocol != "mcp":
+            continue
         raw_id = (raw_connector.id or "").strip()
         if not raw_id:
             continue
@@ -1613,6 +1649,7 @@ def _connector_cache_payload(connector: ResolvedConnector) -> dict[str, object]:
     payload: dict[str, object] = {
         "id": connector.raw_id,
         "name": connector.display_name,
+        "protocol": "mcp",
         "status": {"is_ready": connector.ready},
         "tools": [
             {

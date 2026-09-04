@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from vibe.core.config.layers.admin import AdminConfigLayer
+from vibe.core.config.layers.default import DefaultConfigLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.vibe_schema import VibeConfigSchema
@@ -85,3 +86,26 @@ async def test_write_to_lower_layer_stays_shadowed() -> None:
 
     # The write lands in the overrides layer but admin still wins the merge.
     assert orchestrator.config.api_timeout == 99.0
+
+
+@pytest.mark.asyncio
+async def test_admin_global_compaction_threshold_cannot_be_bypassed_by_model() -> None:
+    defaults = DefaultConfigLayer(schema=VibeConfigSchema)
+    overrides = OverridesLayer(data={})
+    admin = AdminConfigLayer(data={"auto_compact_threshold": 50_000})
+
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[defaults, overrides, admin],
+        default_layer_resolver=lambda: overrides,
+    )
+
+    assert orchestrator.config.get_active_model().auto_compact_threshold == 50_000
+    alias = orchestrator.config.get_active_model().alias
+
+    failures = await orchestrator.set_field(
+        f"/models/{alias}/auto_compact_threshold", 0
+    )
+
+    assert failures == []
+    assert orchestrator.config.get_active_model().auto_compact_threshold == 50_000

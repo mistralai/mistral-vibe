@@ -15,6 +15,8 @@ class MCPAuthorizationRef:
     server_fingerprint: str
     kind: Literal["none", "static", "oauth"]
     descriptor_revision: str
+    # Which catalog above resolves this name. Opaque here: carried, not read.
+    owner: Literal["config", "plugin"] = "config"
 
 
 @dataclass(frozen=True, slots=True)

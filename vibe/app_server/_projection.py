@@ -8,6 +8,7 @@ from typing import Literal, Protocol, TypedDict
 
 from pydantic import JsonValue
 
+from vibe.app_server._session_model import active_model_is_pinned
 from vibe.app_server._shell import restored_shell_effect_state, shell_effect_detail
 from vibe.app_server._tool_projection import (
     project_effect_detail,
@@ -73,7 +74,7 @@ from vibe.core.config import (
     VibeConfigSchema,
 )
 from vibe.core.log_reader import PaginatedLogs
-from vibe.core.skills.models import SkillInfo
+from vibe.core.skills.models import SkillInfo, SkillSource
 from vibe.core.tools.connectors.connector_registry import ConnectorAuthAction
 from vibe.core.tools.connectors.counts import compute_connector_counts
 from vibe.core.tools.remote import AuthStatus, MCPTool
@@ -86,15 +87,14 @@ from vibe.core.types import (
 )
 from vibe.core.utils import CANCELLATION_TAG, TOOL_ERROR_TAG, TaggedText
 from vibe.user_content import UserResource
+from vibe.utils.mcp import format_tool_display_description
 from vibe.utils.tool_presentation import ToolCallPresentation
 
 
 def project_config(agent_loop: AgentLoop) -> ConfigView:
     return project_config_view(
         agent_loop.config,
-        active_model_pinned=bool(
-            agent_loop.config_orchestrator.persisted_active_model()
-        ),
+        active_model_pinned=active_model_is_pinned(agent_loop.config_orchestrator),
         awaiting_experiment_model=agent_loop.awaiting_experiment_model,
     )
 
@@ -107,16 +107,14 @@ def project_config_view(
 ) -> ConfigView:
     transcribe_model = config.get_active_transcribe_model()
     tts_model = config.get_active_tts_model()
-    default_model_alias = (
-        config.resolve_default_model_alias()
-        if active_model_pinned
-        else config.get_active_model().alias
-    )
     return ConfigView(
         active_model=_project_model_config(config.get_active_model()),
         active_model_pinned=active_model_pinned,
         awaiting_experiment_model=awaiting_experiment_model,
-        default_model_alias=default_model_alias,
+        # The configured default, never the active model: clients render it as
+        # the "Default (currently X)" hint, which must stay stable while a pin
+        # is in effect.
+        default_model_alias=config.resolve_default_model_alias(),
         theme=config.theme,
         log_level=config.log_level,
         disable_welcome_banner_animation=config.disable_welcome_banner_animation,
@@ -130,6 +128,7 @@ def project_config_view(
         enable_update_checks=config.enable_update_checks,
         enable_notifications=config.enable_notifications,
         vibe_code_enabled=config.vibe_code_enabled,
+        experimental_enable_registry_skills=config.experimental_enable_registry_skills,
         models=[
             _project_model_config(model) for model in config.available_models().values()
         ],
@@ -251,6 +250,8 @@ def project_skill_summaries(skills: Iterable[SkillInfo]) -> list[SkillSummary]:
             "prompt": skill.prompt,
             "user_invocable": skill.user_invocable,
             "source": skill.source.value,
+            "scope": skill.scope.value,
+            "registry": skill.registry.model_dump() if skill.registry else None,
         })
         for skill in skills
     ]
@@ -258,6 +259,21 @@ def project_skill_summaries(skills: Iterable[SkillInfo]) -> list[SkillSummary]:
 
 def project_skills(agent_loop: AgentLoop) -> list[SkillSummary]:
     return project_skill_summaries(agent_loop.skill_manager.available_skills.values())
+
+
+def project_installed_skills(agent_loop: AgentLoop) -> list[SkillSummary]:
+    """Registry pins (one per name+scope) plus local skills, for the browser.
+
+    Unlike ``project_skills`` (de-duped, project-wins) this keeps a global and a
+    project pin of the same skill as separate rows so the browser can manage each.
+    """
+    mgr = agent_loop.skill_manager
+    local = [
+        info
+        for info in mgr.available_skills.values()
+        if info.source is SkillSource.LOCAL
+    ]
+    return project_skill_summaries([*mgr.registry_pins(), *local])
 
 
 def project_tools(agent_loop: AgentLoop) -> list[ToolSummary]:
@@ -310,15 +326,12 @@ def _project_mcp_tools(
             if tool_class.is_connector()
             else MCPSourceKind.SERVER
         )
-        description = (
-            (tool_class.description or "")
-            .removeprefix(f"[{source_name}] ")
-            .split("\n")[0]
-        )
         tools.setdefault((kind, source_name), []).append(
             MCPToolSummary(
                 name=tool_class.get_remote_name(),
-                description=description,
+                description=format_tool_display_description(
+                    tool_class.description, source_name=source_name
+                ),
                 enabled=tool_name in available,
             )
         )

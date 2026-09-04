@@ -81,3 +81,11 @@ def test_trust_flag_skips_the_trust_prompt(captured_startup: dict[str, Any]) -> 
     _run(_make_args(trust=True))
 
     assert captured_startup["startup"].prompt_for_workspace_trust is False
+
+
+def test_experimental_harness_is_forwarded_to_local_harness(
+    captured_startup: dict[str, Any],
+) -> None:
+    _run(_make_args(experimental_harness=True))
+
+    assert captured_startup["harness_options"].experimental_harness is True

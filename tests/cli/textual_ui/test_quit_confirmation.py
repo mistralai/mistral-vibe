@@ -192,9 +192,13 @@ class TestActionDeleteRightOrQuit(_SessionReadyApp):
         mock_confirm.assert_called_once_with("Ctrl+D", "")
 
     def test_shows_queue_warning_when_queue_non_empty(self, app: VibeApp) -> None:
-        app._input_queue.append_prompt("queued")
         with (
             patch.object(app, "_get_chat_input", return_value=None),
+            patch.object(
+                app._queue,
+                "quit_warning_extra",
+                return_value="1 queued message will be discarded",
+            ),
             patch.object(app._quit_manager, "request_confirmation") as mock_confirm,
         ):
             app.action_delete_right_or_quit()
@@ -240,24 +244,14 @@ async def test_shutdown_cleanup_cancels_in_flight_tasks(app: VibeApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_shutdown_disables_future_queue_drains(app: VibeApp) -> None:
-    app._input_queue.append_prompt("queued")
-
-    await app._begin_shutdown()
-
-    with patch("vibe.cli.textual_ui.message_queue.asyncio.create_task") as create_task:
-        app._queue.start_drain_if_needed()
-
-    create_task.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_begin_shutdown_stops_the_input_queue(app: VibeApp) -> None:
+async def test_begin_shutdown_stops_the_side_channel(app: VibeApp) -> None:
     await app.prepare()
-    with patch.object(app._queue, "shutdown", new_callable=AsyncMock) as queue_shutdown:
+    with patch.object(
+        app._side_channel, "shutdown", new_callable=AsyncMock
+    ) as side_channel_shutdown:
         await app._begin_shutdown()
 
-    queue_shutdown.assert_awaited_once()
+    side_channel_shutdown.assert_awaited_once()
     await app.shutdown_cleanup()
 
 

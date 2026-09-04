@@ -5,15 +5,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vibe.utils import http as http_module
 from vibe.utils.http import build_ssl_context, configure_ssl_context
 
 
 @pytest.fixture(autouse=True)
-def _clear_ssl_cache():
-    configure_ssl_context(enable_system_trust_store=False)
+def _clear_ssl_cache(monkeypatch):
+    monkeypatch.setattr(http_module, "_use_system_trust_store", False)
     build_ssl_context.cache_clear()
     yield
-    configure_ssl_context(enable_system_trust_store=False)
     build_ssl_context.cache_clear()
 
 
@@ -54,6 +54,25 @@ def test_build_ssl_context_uses_system_trust_store_when_configured(monkeypatch):
 
     truststore_context.assert_called_once_with(ssl.PROTOCOL_TLS_CLIENT)
     create_default_context.assert_not_called()
+
+
+def test_build_ssl_context_does_not_parse_vibe_config_from_the_environment(monkeypatch):
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    monkeypatch.setenv("VIBE_ENABLE_SYSTEM_TRUST_STORE", "true")
+
+    mock_ctx = MagicMock(spec=ssl.SSLContext)
+    with (
+        patch("vibe.utils.http.certifi.where", return_value="/certifi.pem"),
+        patch(
+            "vibe.utils.http.ssl.create_default_context", return_value=mock_ctx
+        ) as create_default_context,
+        patch("vibe.utils.http.truststore.SSLContext") as truststore_context,
+    ):
+        assert build_ssl_context() is mock_ctx
+
+    create_default_context.assert_called_once_with(cafile="/certifi.pem")
+    truststore_context.assert_not_called()
 
 
 def test_build_ssl_context_loads_custom_cert_file(monkeypatch, tmp_path):

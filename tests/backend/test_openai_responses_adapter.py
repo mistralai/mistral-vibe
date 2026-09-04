@@ -722,6 +722,30 @@ class TestParseStreamingEvents:
         chunk = adapter.parse_response(data, provider)
         assert chunk.message.content == "Hello"
 
+    def test_text_delta_rejects_an_invalid_consumed_field(self, adapter, provider):
+        with pytest.raises(ValidationError):
+            adapter.parse_response(
+                {
+                    "type": "response.output_text.delta",
+                    "output_index": 0,
+                    "delta": {"text": "Hello"},
+                },
+                provider,
+            )
+
+    def test_text_delta_ignores_unconsumed_provider_fields(self, adapter, provider):
+        chunk = adapter.parse_response(
+            {
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "delta": "Hello",
+                "error": {"code": None},
+            },
+            provider,
+        )
+
+        assert chunk.message.content == "Hello"
+
     def test_function_call_args_delta(self, adapter, provider):
         data = {
             "type": "response.function_call_arguments.delta",
@@ -1339,6 +1363,55 @@ class TestParseStreamingEvents:
         assert exc_info.value.message == "backend failed"
         assert exc_info.value.status == HTTPStatus.TOO_MANY_REQUESTS
 
+    @pytest.mark.parametrize(
+        ("data", "expected_type", "expected_status"),
+        [
+            (
+                {
+                    "type": "error",
+                    "code": None,
+                    "message": "backend failed",
+                    "param": None,
+                    "sequence_number": 1,
+                },
+                "unknown_error",
+                None,
+            ),
+            (
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "rate_limit_exceeded",
+                        "code": None,
+                        "message": "backend failed",
+                    },
+                },
+                "rate_limit_exceeded",
+                HTTPStatus.TOO_MANY_REQUESTS,
+            ),
+        ],
+    )
+    def test_error_event_accepts_nullable_code_from_provider_contract(
+        self, adapter, provider, data, expected_type, expected_status
+    ):
+        with pytest.raises(OpenAIResponsesStreamError) as exc_info:
+            adapter.parse_response(data, provider)
+
+        assert exc_info.value.error_type == expected_type
+        assert exc_info.value.message == "backend failed"
+        assert exc_info.value.status == expected_status
+
+    def test_error_event_defaults_a_missing_message(self, adapter, provider):
+        with pytest.raises(OpenAIResponsesStreamError) as exc_info:
+            adapter.parse_response(
+                {"type": "error", "code": "rate_limit_exceeded", "message": None},
+                provider,
+            )
+
+        assert exc_info.value.error_type == "rate_limit_exceeded"
+        assert exc_info.value.message == "Unknown streaming error"
+        assert exc_info.value.status == HTTPStatus.TOO_MANY_REQUESTS
+
     def test_invalid_error_payload_schema_raises(self, adapter, provider):
         with pytest.raises(ValidationError):
             adapter.parse_response({"type": "error", "error": "not-a-dict"}, provider)
@@ -1440,7 +1513,7 @@ class TestGenericBackendIntegration:
                 b'data: {"type":"response.content_part.added","output_index":0}\n\n'
                 b'data: {"type":"response.output_text.delta","output_index":0,"delta":""}\n\n'
                 b'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":""}\n\n'
-                b'data: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit exceeded"}\n\n'
+                b'data: {"type":"error","error":{"type":"rate_limit_exceeded","code":null,"message":"Rate limit exceeded"}}\n\n'
             ),
             headers={"Content-Type": "text/event-stream"},
         )

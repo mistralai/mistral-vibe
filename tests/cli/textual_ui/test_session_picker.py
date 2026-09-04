@@ -567,6 +567,31 @@ class TestSessionPickerPublicSessions:
         assert option_list.highlighted == 1
 
 
+class TestUnmountedPickerGuard:
+    """load_sessions and add_sessions must be no-ops when the picker has been
+    removed from the DOM (e.g. the user closed it while sessions were still
+    loading asynchronously).  Previously these methods called query_one(OptionList)
+    on the unmounted widget and crashed with NoMatches.
+    """
+
+    def test_load_sessions_noop_when_unmounted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = public_session("unmounted-load", 1_000)
+        picker = SessionPickerApp(sessions=[], latest_messages={})
+        assert not picker.is_mounted
+
+        def _boom(_selector: object) -> OptionList:
+            raise AssertionError("query_one must not run on an unmounted picker")
+
+        monkeypatch.setattr(picker, "query_one", _boom)
+
+        # Should not raise; the OptionList is never queried.
+        picker.load_sessions([session], {session.id: "msg"})
+
+        assert picker._sessions == []
+
+
 class FakeOption:
     def __init__(self, option_id: str) -> None:
         self.id = option_id

@@ -419,7 +419,7 @@ class ProjectLinksController:
     # -- internals -------------------------------------------------------------
 
     async def _load_config(self) -> VibeConfigSchema:
-        orchestrator = await build_default_orchestrator(require_api_key=False)
+        orchestrator = await build_default_orchestrator()
         return orchestrator.config
 
     async def _build_service(self, repo_root: Path) -> VibeCodeProjectPickerService:

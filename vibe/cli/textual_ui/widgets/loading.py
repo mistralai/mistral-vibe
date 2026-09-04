@@ -19,6 +19,8 @@ from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 DEFAULT_LOADING_STATUS = "Generating"
 THINKING_LOADING_STATUS = "Thinking"
 RETRYING_LOADING_STATUS = "Retrying"
+INTERRUPTING_LOADING_STATUS = "Interrupting"
+INITIALIZING_LOADING_STATUS = "Initializing"
 _DEBOUNCE_HINT_TEXT = "[dim italic]typing detected, waiting…[/]"
 _REPLACEABLE_STATUSES = frozenset({DEFAULT_LOADING_STATUS, THINKING_LOADING_STATUS})
 
@@ -96,7 +98,10 @@ class LoadingWidget(SpinnerMixin, Static):
         self._last_hint_width: int = -1
         self._paused_total: float = 0.0
         self._pause_start: float | None = None
+        self._action_required_status: str | None = None
+        self._status_before_action_required: str | None = None
         self._queued_count: int = 0
+        self._interrupting = False
 
     def _get_easter_egg(self) -> str | None:
         EASTER_EGG_PROBABILITY = 0.10
@@ -114,6 +119,11 @@ class LoadingWidget(SpinnerMixin, Static):
 
             return random.choice(available_eggs)
         return None
+
+    @property
+    def base_status(self) -> str:
+        """The semantic status label (without easter-egg substitution)."""
+        return self._base_status
 
     def _with_easter_egg(self, status: str) -> str:
         """Only generic labels are replaceable; other statuses carry information."""
@@ -139,7 +149,43 @@ class LoadingWidget(SpinnerMixin, Static):
             self._paused_total += time() - self._pause_start
             self._pause_start = None
 
+    def begin_action_required(self, status: str) -> None:
+        """Show a blocking user-action status without losing live progress state."""
+        if self._interrupting:
+            return
+        if self._action_required_status is None:
+            self._status_before_action_required = self._base_status
+            self.pause_timer()
+        self._action_required_status = status
+        self._set_status(status)
+
+    def end_action_required(self) -> None:
+        """Resume progress after the final open callback has been answered."""
+        if self._action_required_status is None:
+            return
+        status = self._status_before_action_required or DEFAULT_LOADING_STATUS
+        self._action_required_status = None
+        self._status_before_action_required = None
+        self.resume_timer()
+        self.set_status(status)
+
     def set_status(self, status: str) -> None:
+        # Once interrupting, ignore late status updates: the turn keeps streaming
+        # until the cancel propagates and the event handler drives set_status on
+        # those events, which would otherwise clobber the "Interrupting" label
+        # and make the interrupt look ignored. The widget is torn down right
+        # after, so this latch never needs releasing.
+        if self._interrupting and status != INTERRUPTING_LOADING_STATUS:
+            return
+        if status == INTERRUPTING_LOADING_STATUS:
+            self._interrupting = True
+        elif self._action_required_status is not None:
+            if status != self._action_required_status:
+                self._status_before_action_required = status
+            return
+        self._set_status(status)
+
+    def _set_status(self, status: str) -> None:
         # Idempotent on the semantic status: re-setting the same status is a
         # no-op so callers can drive it on every event without re-rolling the
         # easter egg or flickering the label.
@@ -178,6 +224,7 @@ class LoadingWidget(SpinnerMixin, Static):
         if self._queued_count > 0:
             return (
                 f"({elapsed_str} {shortcut('Esc')} to interrupt · "
+                f"{shortcut('Enter')} to steer · "
                 f"{shortcut('Ctrl+C')} to cancel last queued message)"
             )
         return f"({elapsed_str} {shortcut('Esc/Ctrl+C')} to interrupt)"

@@ -49,6 +49,7 @@ def apply_stacked_width(screen: Screen[Any], content: Widget) -> None:
 
 DEFAULT_ORIGIN = "default"
 OVERRIDES_LAYER = "overrides"
+PROJECT_LAYER = "project-toml"
 ENVIRONMENT_LAYER = "environment"
 ADMIN_LAYER = "admin"
 
@@ -206,20 +207,41 @@ def inspector_text(
 
 
 def target_hint(name: str) -> str:
-    return "until restart" if name == OVERRIDES_LAYER else "saved"
+    if name == OVERRIDES_LAYER:
+        return "until restart"
+    if name == PROJECT_LAYER:
+        return "saved for this project"
+    return "saved globally"
+
+
+TARGET_BAR_PREFIX = "Save to"
+_TARGET_BAR_GAP = 4
+_TARGET_MARKER_WIDTH = 2
 
 
 def target_bar_text(target: str, targets: tuple[str, ...]) -> Content:
-    parts: list[str | tuple[str, str]] = [("Save to", "bold"), "   "]
+    """Two lines: the targets, then each target's persistence hint beneath it.
+
+    Hints live on their own line so every option stays readable and the
+    selection line keeps its exact layout as Tab moves the marker.
+    """
+    indent = " " * (len(TARGET_BAR_PREFIX) + 3)
+    parts: list[str | tuple[str, str]] = [(TARGET_BAR_PREFIX, "bold"), "   "]
+    hints: list[str | tuple[str, str]] = [indent]
     for index, name in enumerate(targets):
-        if index:
-            parts.append("    ")
+        label = origin_label(name)
+        hint = target_hint(name)
+        width = max(len(label), len(hint))
+        gap = " " * _TARGET_BAR_GAP if index else ""
         active = name == target
         style = origin_style(name)
+        parts.append(gap)
         parts.append(("● " if active else "○ ", style if active else "dim"))
-        parts.append((origin_label(name), f"{style} bold" if active else "dim"))
-        parts.append((f" ({target_hint(name)})", "dim"))
-    return Content.assemble(*parts)
+        parts.append((f"{label:<{width}}", f"{style} bold" if active else "dim"))
+        hints.append(gap)
+        hints.append(" " * _TARGET_MARKER_WIDTH)
+        hints.append((f"{hint:<{width}}", "dim italic"))
+    return Content.assemble(*parts, "\n", *hints)
 
 
 class ConfigOptionList(NavigableOptionList):

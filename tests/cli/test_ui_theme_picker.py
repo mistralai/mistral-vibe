@@ -24,13 +24,6 @@ async def _wait_until(
     return False
 
 
-async def _wait_until_drained(pilot, app, timeout: float = 2.0) -> bool:
-    # Config-persisting pickers defer their side effect to the main queue, so
-    # callers must wait for the drain (and the pending flag it clears) before
-    # asserting on the persisted state. See ADR 0012.
-    return await _wait_until(pilot, lambda: not app._queue.draining, timeout)
-
-
 @pytest.mark.asyncio
 async def test_theme_opens_theme_picker() -> None:
     app = build_test_vibe_app(config=build_test_vibe_config())
@@ -134,8 +127,6 @@ async def test_theme_picker_select_does_not_reload_config() -> None:
             await app.on_theme_picker_app_theme_selected(
                 ThemePickerApp.ThemeSelected("dracula")
             )
-            # Theme persistence is deferred to the queue; wait for it to drain.
-            assert await _wait_until_drained(pilot, app)
 
         update_config.assert_awaited_once_with({"theme": "dracula"})
         reload_config.assert_not_awaited()
@@ -160,18 +151,18 @@ async def test_theme_picker_select_applies_before_persisting() -> None:
             "update",
             new=AsyncMock(side_effect=delayed_update),
         ):
-            await app.on_theme_picker_app_theme_selected(
-                ThemePickerApp.ThemeSelected("dracula")
+            selection = asyncio.create_task(
+                app.on_theme_picker_app_theme_selected(
+                    ThemePickerApp.ThemeSelected("dracula")
+                )
             )
             await update_started.wait()
 
-            # The visual theme is applied before the deferred persist runs.
+            # The visual theme is applied before the app-server write completes.
             assert app.theme == "dracula"
-            assert app._queue.draining
 
             allow_update.set()
-            assert await _wait_until_drained(pilot, app)
-            assert app._pending_theme is None
+            await selection
 
 
 @pytest.mark.asyncio
@@ -190,8 +181,6 @@ async def test_theme_picker_restores_canonical_theme_when_write_fails() -> None:
             await app.on_theme_picker_app_theme_selected(
                 ThemePickerApp.ThemeSelected("dracula")
             )
-            # The deferred persist fails and reverts the speculative apply.
-            assert await _wait_until_drained(pilot, app)
 
         assert app.config.theme == "ansi-dark"
         assert app.theme == "ansi-dark"

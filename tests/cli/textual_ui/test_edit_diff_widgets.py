@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from textual.app import App, ComposeResult
 
-from vibe.app_server.models import FileEditEffectInput, FileEditEffectOutput
-from vibe.cli.textual_ui.widgets.diff_rendering import DiffOccurrence, render_edit_diff
+from vibe.app_server.models import (
+    FileEditEffectBatchInput,
+    FileEditEffectChange,
+    FileEditEffectInput,
+    FileEditEffectOccurrence,
+    FileEditEffectOutput,
+)
+from vibe.cli.textual_ui.widgets.diff_rendering import (
+    DiffOccurrence,
+    edit_diff_batch_inputs,
+    render_edit_diff,
+)
 from vibe.cli.textual_ui.widgets.tool_widgets import (
     EditApprovalWidget,
     EditResultWidget,
@@ -30,6 +41,58 @@ def _approval_widget() -> EditApprovalWidget:
             file_path="example.py", old_string="value = 1", new_string="value = 2"
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_batch_approval_applies_changes_in_order_from_one_file_read(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "example.py"
+    target.write_text("alpha\n", encoding="utf-8")
+
+    occurrences = await edit_diff_batch_inputs(
+        str(target), [("alpha", "beta", False), ("beta", "gamma", False)]
+    )
+
+    assert [item.start_line for item in occurrences] == [1, 1]
+    assert occurrences[0].old_lines == "alpha"
+    assert occurrences[0].new_lines == "beta"
+    assert occurrences[1].old_lines == "beta"
+    assert occurrences[1].new_lines == "gamma"
+
+
+def test_batch_approval_and_occurrence_only_result_build_diff_widgets() -> None:
+    approval = EditApprovalWidget(
+        FileEditEffectBatchInput(
+            file_path="example.py",
+            changes=[
+                FileEditEffectChange(old_string="alpha", new_string="beta"),
+                FileEditEffectChange(old_string="beta", new_string="gamma"),
+            ],
+        )
+    )
+    result = EditResultWidget(
+        FileEditEffectOutput(
+            file="example.py",
+            occurrences=[
+                FileEditEffectOccurrence(
+                    start_line=1, old_text="alpha\n", new_text="beta\n"
+                ),
+                FileEditEffectOccurrence(
+                    start_line=1, old_text="beta\n", new_text="gamma\n"
+                ),
+            ],
+        ),
+        success=True,
+        message="updated",
+    )
+
+    assert isinstance(approval.args, FileEditEffectBatchInput)
+    assert approval.args.changes[1].new_string == "gamma"
+    assert result._occurrences == [
+        DiffOccurrence(1, "alpha\n", "beta\n"),
+        DiffOccurrence(1, "beta\n", "gamma\n"),
+    ]
 
 
 @pytest.mark.asyncio

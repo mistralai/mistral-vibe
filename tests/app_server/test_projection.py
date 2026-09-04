@@ -10,6 +10,7 @@ from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.app_server._projection import (
     project_config,
+    project_config_view,
     project_history,
     project_mcp,
     project_session_log,
@@ -191,6 +192,38 @@ def test_config_view_reports_unpinned_default_model() -> None:
     # The unpinned state resolves to the first configured model for display.
     assert config.default_model_alias == "alpha"
     assert config.active_model.alias == "alpha"
+
+
+def test_config_view_default_alias_never_follows_the_active_model() -> None:
+    """``default_model_alias`` names the configured default, never the pin.
+
+    It used to be read off the active model unless the caller passed
+    ``active_model_pinned``, so any projection that omitted the flag -- every
+    unified-harness runtime snapshot -- advertised the user's own pinned model
+    as the "Default (currently ...)" hint.
+    """
+    from vibe.core.config import ModelConfig
+
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="alpha"),
+        ModelConfig(name="model-b", provider="mistral", alias="beta"),
+    ]
+    pinned_config = build_test_vibe_config(models=models, active_model="beta")
+
+    pinned = project_config_view(pinned_config, active_model_pinned=True)
+    # A caller that forgets the flag still must not echo the pin back as the
+    # default; only ``active_model_pinned`` itself may differ.
+    unflagged = project_config_view(pinned_config)
+    unpinned = project_config_view(
+        build_test_vibe_config(models=models, active_model="")
+    )
+
+    assert pinned.active_model.alias == "beta"
+    assert pinned.default_model_alias == "alpha"
+    assert pinned.default_model_display_name == "alpha"
+    assert unflagged.default_model_alias == "alpha"
+    assert unpinned.active_model.alias == "alpha"
+    assert unpinned.default_model_alias == "alpha"
 
 
 def test_config_view_hydrates_display_name_from_alias() -> None:

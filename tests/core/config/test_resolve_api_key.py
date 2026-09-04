@@ -141,8 +141,10 @@ def test_check_api_key_raises_when_neither_env_nor_keyring(
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.setattr(keyring, "get_password", lambda service, username: None)
 
+    config = build_test_vibe_config()
+
     with pytest.raises(MissingAPIKeyError):
-        build_test_vibe_config()
+        config.require_active_provider_api_key()
 
 
 def test_mistral_backend_reads_keyring_only_key(
@@ -185,6 +187,7 @@ def test_vibe_code_api_key_reuses_cached_keyring_value(
         keyring, "get_password", lambda service, username: "keyring-key"
     )
     config = build_config()
+    config.require_active_provider_api_key()
 
     monkeypatch.setattr(keyring, "get_password", lambda service, username: None)
 

@@ -3,13 +3,25 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import time
-from unittest.mock import MagicMock, call
+from unittest.mock import ANY, AsyncMock, MagicMock, call
+from weakref import WeakKeyDictionary
 
 import pytest
 
-from tests.conftest import build_test_vibe_app, build_test_vibe_config
+from tests.conftest import (
+    build_test_agent_loop,
+    build_test_vibe_app,
+    build_test_vibe_config,
+)
+from tests.mock.utils import mock_llm_chunk
 from tests.skills.conftest import create_skill
-from vibe.app_server.models import CompletedEffectState, PublicEffectEntry
+from tests.stubs.fake_backend import FakeBackend
+from vibe.app_server.models import (
+    CompletedEffectState,
+    MentionStats,
+    PreparedPrompt,
+    PublicEffectEntry,
+)
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
 from vibe.cli.textual_ui.widgets.messages import ErrorMessage, UserMessage
@@ -18,21 +30,43 @@ from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 SKILL_BODY = "## Instructions\n\nDo the thing."
 
 
-def _block_agent_job(app: VibeApp) -> tuple[asyncio.Task[bool], asyncio.Event]:
-    release = asyncio.Event()
-    task = asyncio.create_task(release.wait())
-    app._agent_task = task
-    return task, release
+class _BlockingBackend(FakeBackend):
+    def __init__(self) -> None:
+        super().__init__([[mock_llm_chunk(content="done")]] * 4)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def complete(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            await self.release.wait()
+        return await super().complete(**kwargs)
 
 
-async def _release_agent_job(
-    app: VibeApp, task: asyncio.Task[bool], release: asyncio.Event
-) -> None:
-    release.set()
-    if not task.cancelled():
-        await task
-    if app._agent_task is task:
-        app._agent_task = None
+_blocking_backends: WeakKeyDictionary[VibeApp, _BlockingBackend] = WeakKeyDictionary()
+
+
+async def _block_agent_job(app: VibeApp, pilot) -> _BlockingBackend:
+    backend = _blocking_backends[app]
+    chat_input = app.query_one(ChatInputContainer)
+    chat_input.post_message(ChatInputContainer.Submitted("block queue"))
+    assert await _wait_until(pilot, backend.started.is_set)
+    # Wait until the client has handled TurnStarted, not just until the session
+    # projection reports the turn active (that flag flips earlier, often before
+    # backend.started returns). Only once TurnStarted is processed is the blocking
+    # turn cleared from the optimistic len(app._queue), so a later follow-up count
+    # is accurate instead of being inflated by the still-pending running turn.
+    assert await _wait_until(
+        pilot, lambda: not app._pending_turn and len(app._queue) == 0
+    )
+    return backend
+
+
+async def _release_agent_job(app: VibeApp, pilot, backend: _BlockingBackend) -> None:
+    backend.release.set()
+    assert await _wait_until(pilot, lambda: not app._agent_job_active(), timeout=5.0)
 
 
 @pytest.fixture
@@ -40,7 +74,13 @@ def vibe_app_with_skills(tmp_path: Path) -> VibeApp:
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir()
     create_skill(skills_dir, "my-skill", body=SKILL_BODY)
-    return build_test_vibe_app(config=build_test_vibe_config(skill_paths=[skills_dir]))
+    config = build_test_vibe_config(skill_paths=[skills_dir])
+    backend = _BlockingBackend()
+    app = build_test_vibe_app(
+        config=config, agent_loop=build_test_agent_loop(config=config, backend=backend)
+    )
+    _blocking_backends[app] = backend
+    return app
 
 
 async def _wait_for_user_message_containing(
@@ -204,6 +244,64 @@ async def test_idle_skill_fires_telemetry(
 
 
 @pytest.mark.asyncio
+async def test_prompt_fires_at_mention_telemetry_when_its_turn_starts(
+    vibe_app_with_skills: VibeApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: Prompt preparation reports one Python file mention.
+    *Do*: Submit the prompt and wait for its queued Turn to start.
+    *Assert*: The existing mention event is recorded with its message identity.
+    """
+    record = MagicMock()
+    async with vibe_app_with_skills.run_test() as pilot:
+        # Prepare
+        monkeypatch.setattr(
+            vibe_app_with_skills.app_server.resources.telemetry, "record", record
+        )
+        monkeypatch.setattr(
+            vibe_app_with_skills,
+            "_prepare_prompt_or_abort",
+            AsyncMock(
+                return_value=PreparedPrompt(
+                    display_text="read @example.py",
+                    prompt_text="read @example.py",
+                    mentions=MentionStats(
+                        count=1, context_types={"file": 1}, file_extensions={".py": 1}
+                    ),
+                )
+            ),
+        )
+        backend = _blocking_backends[vibe_app_with_skills]
+
+        # Do
+        try:
+            chat_input = vibe_app_with_skills.query_one(ChatInputContainer)
+            chat_input.post_message(ChatInputContainer.Submitted("read @example.py"))
+            await _wait_until(
+                pilot,
+                lambda: any(
+                    recorded.args and recorded.args[0] == "vibe.at_mention_inserted"
+                    for recorded in record.call_args_list
+                ),
+            )
+        finally:
+            backend.release.set()
+
+        # Assert
+        assert (
+            call(
+                "vibe.at_mention_inserted",
+                {
+                    "nb_mentions": 1,
+                    "context_types": {"file": 1},
+                    "file_extensions": {".py": 1},
+                    "message_id": ANY,
+                },
+            )
+            in record.call_args_list
+        )
+
+
+@pytest.mark.asyncio
 async def test_popped_queued_skill_does_not_fire_telemetry(
     vibe_app_with_skills: VibeApp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -214,15 +312,15 @@ async def test_popped_queued_skill_does_not_fire_telemetry(
         )
 
         chat_input = vibe_app_with_skills.query_one(ChatInputContainer)
-        blocker, release = _block_agent_job(vibe_app_with_skills)
+        backend = await _block_agent_job(vibe_app_with_skills, pilot)
         try:
             chat_input.post_message(ChatInputContainer.Submitted("/my-skill"))
             await pilot.pause(0.1)
-            assert len(vibe_app_with_skills._input_queue) == 1
+            assert len(vibe_app_with_skills._queue) == 1
 
             await pilot.press("ctrl+c")
             await pilot.pause(0.1)
-            assert len(vibe_app_with_skills._input_queue) == 0
+            assert len(vibe_app_with_skills._queue) == 0
             assert (
                 call(
                     "vibe.slash_command_used",
@@ -231,7 +329,7 @@ async def test_popped_queued_skill_does_not_fire_telemetry(
                 not in record.call_args_list
             )
         finally:
-            await _release_agent_job(vibe_app_with_skills, blocker, release)
+            await _release_agent_job(vibe_app_with_skills, pilot, backend)
 
 
 @pytest.mark.asyncio
@@ -240,21 +338,20 @@ async def test_queued_head_skill_injects_skill_tool_message(
 ) -> None:
     async with vibe_app_with_skills.run_test() as pilot:
         chat_input = vibe_app_with_skills.query_one(ChatInputContainer)
-        blocker, release = _block_agent_job(vibe_app_with_skills)
+        backend = await _block_agent_job(vibe_app_with_skills, pilot)
         try:
             chat_input.post_message(ChatInputContainer.Submitted("/my-skill"))
             chat_input.post_message(ChatInputContainer.Submitted("follow-up prompt"))
-            await pilot.pause(0.1)
-            assert len(vibe_app_with_skills._input_queue) == 2
+            assert await _wait_until(
+                pilot, lambda: len(vibe_app_with_skills._queue) == 2
+            )
         finally:
-            await _release_agent_job(vibe_app_with_skills, blocker, release)
-
-        vibe_app_with_skills._queue.start_drain_if_needed()
+            await _release_agent_job(vibe_app_with_skills, pilot, backend)
 
         assert await _wait_until(
             pilot,
             lambda: (
-                len(vibe_app_with_skills._input_queue) == 0
+                len(vibe_app_with_skills._queue) == 0
                 and vibe_app_with_skills._agent_task is None
                 and any(
                     widget._tool_name == "skill"
@@ -272,26 +369,33 @@ async def test_queued_head_skill_injects_skill_tool_message(
 
 
 @pytest.mark.asyncio
-async def test_skill_prompt_flushed_before_bash_injects_skill_tool_message(
+async def test_skill_prompt_runs_after_following_bash_is_rejected(
     vibe_app_with_skills: VibeApp,
 ) -> None:
     async with vibe_app_with_skills.run_test() as pilot:
         chat_input = vibe_app_with_skills.query_one(ChatInputContainer)
-        blocker, release = _block_agent_job(vibe_app_with_skills)
+        backend = await _block_agent_job(vibe_app_with_skills, pilot)
         try:
             chat_input.post_message(ChatInputContainer.Submitted("/my-skill"))
             chat_input.post_message(ChatInputContainer.Submitted("!echo queued"))
-            await pilot.pause(0.1)
-            assert len(vibe_app_with_skills._input_queue) == 2
+            assert await _wait_until(
+                pilot,
+                lambda: (
+                    len(vibe_app_with_skills._queue) == 1
+                    and any(
+                        "Shell commands cannot be queued" in notification.message
+                        for notification in vibe_app_with_skills._notifications
+                    )
+                ),
+            )
+            assert chat_input.value == "!echo queued"
         finally:
-            await _release_agent_job(vibe_app_with_skills, blocker, release)
-
-        vibe_app_with_skills._queue.start_drain_if_needed()
+            await _release_agent_job(vibe_app_with_skills, pilot, backend)
 
         assert await _wait_until(
             pilot,
             lambda: (
-                len(vibe_app_with_skills._input_queue) == 0
+                len(vibe_app_with_skills._queue) == 0
                 and vibe_app_with_skills._agent_task is None
                 and vibe_app_with_skills._bash_task is None
                 and any(
@@ -307,3 +411,7 @@ async def test_skill_prompt_flushed_before_bash_injects_skill_tool_message(
         )
 
         assert _skill_effect_loaded(vibe_app_with_skills, "my-skill")
+        assert not any(
+            widget.tool_name == "shell"
+            for widget in vibe_app_with_skills.query(ToolResultMessage)
+        )

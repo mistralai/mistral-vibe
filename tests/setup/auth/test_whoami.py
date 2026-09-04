@@ -254,6 +254,74 @@ async def test_resolve_tenant_domains_rejects_hostile_chat_url(respx_mock) -> No
     assert new_vibe == "https://vibe.old"  # vibe_base rejected → unchanged
 
 
+@pytest.mark.asyncio
+async def test_resolve_tenant_domains_adopts_whoami_hosts_with_origin_rewrite_on(
+    respx_mock,
+) -> None:
+    # Contract: /whoami (dashboard/users/code/vibe_routes.py) returns the
+    # tenant's own API/chat hosts from dedicated-deployment routing, not a
+    # public default. The origin-rewrite flag only re-homes the browser
+    # sign-in URL; it must not suppress adoption of whoami's api_base/vibe_base.
+    # Regression: a prior flag-based skip discarded real tenant data here.
+    respx_mock.get("https://connector.acme:443/api/vibe/whoami").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "plan_type": "API",
+                "plan_name": "FREE",
+                "api_base": "https://api.tenant.acme",
+                "vibe_base": "https://chat.tenant.acme",
+            },
+        )
+    )
+    provider = _mistral_provider().model_copy(
+        update={
+            "api_base": "https://connector.acme:443/v1",
+            "browser_auth_allow_origin_rewrite": True,
+        }
+    )
+
+    new_provider, new_vibe = await resolve_tenant_domains(
+        provider, "https://connector.acme:443", "secret", "https://vibe.configured"
+    )
+
+    assert new_provider.api_base == "https://api.tenant.acme/v1"
+    assert new_vibe == "https://chat.tenant.acme"
+
+
+@pytest.mark.asyncio
+async def test_resolve_tenant_domains_adopts_only_api_base_with_origin_rewrite_on(
+    respx_mock,
+) -> None:
+    # Per-field contract: whoami may advertise only api_base (vibe_base absent).
+    # Adoption is per-field — api_base is updated, vibe_base_url is returned
+    # unchanged (not defaulted). Pins the partial-response shape under the
+    # origin-rewrite flag so the skip cannot reappear for a subset of fields.
+    respx_mock.get("https://connector.acme:443/api/vibe/whoami").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "plan_type": "API",
+                "plan_name": "FREE",
+                "api_base": "https://api.tenant.acme",
+            },
+        )
+    )
+    provider = _mistral_provider().model_copy(
+        update={
+            "api_base": "https://connector.acme:443/v1",
+            "browser_auth_allow_origin_rewrite": True,
+        }
+    )
+
+    new_provider, new_vibe = await resolve_tenant_domains(
+        provider, "https://connector.acme:443", "secret", "https://vibe.configured"
+    )
+
+    assert new_provider.api_base == "https://api.tenant.acme/v1"
+    assert new_vibe == "https://vibe.configured"
+
+
 def test_derive_user_plan_maps_known_plans() -> None:
     from vibe.setup.auth.whoami import derive_user_plan
 
@@ -413,3 +481,47 @@ async def test_whoami_cache_resolve_does_not_persist_failures() -> None:
 
     assert resolved is None
     assert load_cached_whoami("secret") is None
+
+
+@pytest.mark.parametrize(
+    ("plan_type", "plan_name", "expected"),
+    [
+        ("chat", "FREE", "Free"),
+        ("chat", "INDIVIDUAL", "Pro"),
+        ("chat", "EDU", "Student"),
+        ("chat", "TEAM", "Team"),
+        ("chat", "team", "Team"),  # case-insensitive
+        ("chat", "UNKNOWN", None),
+        ("api", "FREE", "Free API"),
+        ("api", "PAY_AS_YOU_GO", "PAYG API"),
+        ("api", "", None),
+        ("mistral_code", "F", "Free Codestral"),
+        ("mistral_code", "E", "Code Enterprise"),
+        (AccountPlanKind.CHAT, "TEAM", "Team"),  # enum accepted too
+        (None, "TEAM", None),
+        ("bogus", "TEAM", None),
+    ],
+)
+def test_resolve_user_plan(
+    plan_type: AccountPlanKind | str | None, plan_name: str, expected: str | None
+) -> None:
+    from vibe.setup.auth.whoami import resolve_user_plan
+
+    assert resolve_user_plan(plan_type, plan_name) == expected
+
+
+def test_resolve_user_plan_passes_through_sentinel() -> None:
+    from vibe.setup.auth.whoami import NO_PLAN_DATA, resolve_user_plan
+
+    assert resolve_user_plan(NO_PLAN_DATA, NO_PLAN_DATA) == NO_PLAN_DATA
+    assert resolve_user_plan(NO_PLAN_DATA, "FREE") == NO_PLAN_DATA
+
+
+def test_derive_user_plan_delegates_to_resolve() -> None:
+    from vibe.setup.auth.whoami import derive_user_plan
+
+    assert derive_user_plan(None) is None
+    assert (
+        derive_user_plan(WhoAmIResult(plan_type=AccountPlanKind.CHAT, plan_name="TEAM"))
+        == "Team"
+    )

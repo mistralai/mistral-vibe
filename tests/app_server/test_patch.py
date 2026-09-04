@@ -7,7 +7,7 @@ from jsonpointer import JsonPointerException
 from pydantic import JsonValue
 import pytest
 
-from vibe.app_server._patch import apply_json_patch
+from vibe.app_server._patch import apply_json_patch, make_json_patch
 from vibe.app_server.models import JsonPatchOperation
 
 
@@ -84,3 +84,31 @@ def test_append_requires_string_target_and_value(
         apply_json_patch(
             document, [JsonPatchOperation(op="append", path="/target", value=value)]
         )
+
+
+def test_make_json_patch_expands_a_relocated_field_into_remove_then_add() -> None:
+    source: JsonValue = {"detail": {"input": {"filePath": "/a/b/c"}, "other": 1}}
+    target: JsonValue = {"detail": {"input": {}, "filePath": "/a/b/c", "other": 1}}
+
+    operations = make_json_patch(source, target)
+
+    assert operations == [
+        JsonPatchOperation(op="remove", path="/detail/input/filePath"),
+        JsonPatchOperation(op="add", path="/detail/filePath", value="/a/b/c"),
+    ]
+    assert apply_json_patch(source, operations) == target
+
+
+def test_make_json_patch_expands_a_relocated_list_element_into_remove_then_add() -> (
+    None
+):
+    source: JsonValue = {"items": ["a", "b", "c"]}
+    target: JsonValue = {"items": ["c", "a", "b"]}
+
+    operations = make_json_patch(source, target)
+
+    assert operations == [
+        JsonPatchOperation(op="remove", path="/items/2"),
+        JsonPatchOperation(op="add", path="/items/0", value="c"),
+    ]
+    assert apply_json_patch(source, operations) == target

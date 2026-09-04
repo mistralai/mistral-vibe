@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import asyncio
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from jsonpatch import JsonPatchException, apply_patch
@@ -77,6 +78,23 @@ class LayerImplementationError(ConfigLayerError):
     def __init__(self, layer_name: str, method_name: str) -> None:
         super().__init__(layer_name, f"Layer '{layer_name}': {method_name}() failed")
         self.method_name = method_name
+
+
+class ConfigStorageError(ConfigLayerError):
+    """Raised when a config file cannot be read from or written to.
+
+    Wraps the underlying ``OSError`` (e.g. a read-only ``config.toml``) so
+    callers can surface a clear message without catching raw ``OSError``,
+    which other subsystems also raise.
+    """
+
+    def __init__(self, layer_name: str, path: Path, operation: str) -> None:
+        super().__init__(
+            layer_name,
+            f"Layer '{layer_name}': cannot {operation} config file at {path}",
+        )
+        self.path = path
+        self.operation = operation
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,7 +233,7 @@ class ConfigLayer[S: BaseModel](ABC):
                     data=self.validate_output(snapshot.data),
                     fingerprint=snapshot.fingerprint,
                 )
-            except ConcurrencyConflictError:
+            except (ConcurrencyConflictError, ConfigStorageError):
                 raise
             except Exception as e:
                 raise LayerImplementationError(
@@ -256,7 +274,7 @@ class ConfigLayer[S: BaseModel](ABC):
 
         try:
             new_fingerprint = await self._save_to_store(validated_new_data)
-        except NotImplementedError:
+        except (NotImplementedError, ConfigStorageError):
             raise
         except Exception as e:
             raise LayerImplementationError(self.name, "_save_to_store") from e

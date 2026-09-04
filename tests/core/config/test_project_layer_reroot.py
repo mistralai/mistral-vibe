@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import threading
+import tomllib
 
 import pytest
 import tomli_w
@@ -72,8 +73,15 @@ async def test_re_rooting_moves_where_project_config_is_written(
     # The layer has to stay the same object. The orchestrator's default-layer
     # resolver closes over the one built at startup, so swapping in a
     # replacement leaves it resolving a layer that is no longer in the stack
-    # and every implicit write fails.
-    assert orchestrator.writable_layer_name == ProjectConfigLayer.NAME
+    # and every write fails.
+    failures = await orchestrator.set_field(
+        "/theme", "moved-theme", target_layer=ProjectConfigLayer.NAME
+    )
+    assert failures == []
+    with (destination / ".vibe" / "config.toml").open("rb") as f:
+        assert tomllib.load(f)["theme"] == "moved-theme"
+    with (tmp_working_directory / ".vibe" / "config.toml").open("rb") as f:
+        assert tomllib.load(f)["theme"] == "origin-theme"
 
 
 @pytest.mark.asyncio

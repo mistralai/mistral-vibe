@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
+import platform
 
 import httpx
 import pytest
 import respx
 
 from vibe.core.experiments._constants import build_eval_url
-from vibe.core.experiments.active import ExperimentName
+from vibe.core.experiments.active import ExperimentName, ExperimentSurface
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.models import ExperimentAttributes
 
@@ -21,6 +22,7 @@ def _attrs() -> ExperimentAttributes:
     return ExperimentAttributes(
         userId="hashed",
         entrypoint="cli",
+        harness=ExperimentSurface.LEGACY,
         agent_version="1.2.3",
         client_name="vibe",
         client_version="1.2.3",
@@ -53,6 +55,7 @@ async def test_evaluate_happy_path() -> None:
     assert route.called
     request_body = route.calls.last.request.read()
     assert b'"userId":"hashed"' in request_body
+    assert f'"arch":"{platform.machine().lower()}"'.encode() in request_body
     assert b'"forcedVariations":{}' in request_body
     assert b'"forcedFeatures":[]' in request_body
     assert response is not None

@@ -5,6 +5,7 @@ from contextlib import AbstractContextManager, contextmanager
 import io
 import os
 from pathlib import Path
+import sys
 from typing import cast
 
 import pexpect
@@ -69,9 +70,15 @@ def spawned_vibe_process() -> SpawnedVibeFactory:
         env = os.environ.copy()
         env["VIBE_TEST_DISABLE_KEYRING"] = "1"
         env["VIBE_TEST_DISABLE_AUTO_TITLE"] = "1"
+        arguments = ["--workdir", str(workdir), *(extra_args or [])]
+        executable = "uv"
+        if "--experimental-harness" in arguments:
+            executable = str(Path(sys.executable).with_name("vibe"))
+        else:
+            arguments = ["run", "vibe", *arguments]
         child = pexpect.spawn(
-            "uv",
-            ["run", "vibe", "--workdir", str(workdir), *(extra_args or [])],
+            executable,
+            arguments,
             cwd=str(TESTS_ROOT.parent),
             env=cast("os._Environ[str]", env),
             encoding="utf-8",

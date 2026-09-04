@@ -72,6 +72,40 @@ async def edit_diff_inputs(
     )
 
 
+async def edit_diff_batch_inputs(
+    file_path: str, changes: Sequence[tuple[str, str, bool]]
+) -> list[DiffOccurrence]:
+    return await asyncio.to_thread(_edit_diff_batch_inputs, file_path, changes)
+
+
+def _edit_diff_batch_inputs(
+    file_path: str, changes: Sequence[tuple[str, str, bool]]
+) -> list[DiffOccurrence]:
+    """Preview ordered replacements against one pre-edit file read."""
+    path = Path(file_path)
+    if not path.is_file():
+        return [
+            DiffOccurrence(None, old_string, new_string)
+            for old_string, new_string, _replace_all in changes
+        ]
+    content = read_safe(path).text
+    occurrences: list[DiffOccurrence] = []
+    for old_string, new_string, replace_all in changes:
+        contexts = line_contexts(content, old_string)
+        selected = contexts if replace_all else contexts[:1]
+        if not selected:
+            occurrences.append(DiffOccurrence(None, old_string, new_string))
+            continue
+        occurrences.extend(
+            DiffOccurrence(
+                start, prefix + old_string + suffix, prefix + new_string + suffix
+            )
+            for start, prefix, suffix in selected
+        )
+        content = content.replace(old_string, new_string, -1 if replace_all else 1)
+    return occurrences
+
+
 def _edit_diff_inputs(
     file_path: str, old_string: str, new_string: str, *, replace_all: bool
 ) -> list[DiffOccurrence]:

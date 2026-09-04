@@ -21,7 +21,6 @@ from tests.e2e.common import (
     send_ctrl_c_until_quit_confirmation,
     wait_for_main_screen,
     wait_for_rendered_text,
-    wait_for_request_count,
 )
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
@@ -94,8 +93,12 @@ def test_denylisted_bash_tool_does_not_run_and_is_reported_to_the_model(
         child.send("Try a denied shell command")
         child.send("\r")
 
-        wait_for_request_count(
-            lambda: len(streaming_mock_server.requests), expected_count=1, timeout=10
+        wait_for_request_count_while_draining_child_output(
+            child,
+            captured,
+            lambda: len(streaming_mock_server.requests),
+            expected_count=1,
+            timeout=10,
         )
         wait_for_request_count_while_draining_child_output(
             child,
@@ -136,8 +139,12 @@ def test_failed_bash_tool_result_is_reported_to_the_model_and_turn_recovers(
         child.send("Run a failing shell command")
         child.send("\r")
 
-        wait_for_request_count(
-            lambda: len(streaming_mock_server.requests), expected_count=1, timeout=10
+        wait_for_request_count_while_draining_child_output(
+            child,
+            captured,
+            lambda: len(streaming_mock_server.requests),
+            expected_count=1,
+            timeout=10,
         )
         answer_approval(child, captured, tool_name="bash", key="y")
         wait_for_request_count_while_draining_child_output(

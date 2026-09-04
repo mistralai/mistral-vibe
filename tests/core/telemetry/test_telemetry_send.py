@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import platform
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,12 +13,17 @@ from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_tool import FakeTool, FakeToolArgs
 from vibe import __version__
 from vibe.core.agent_loop import ToolDecision, ToolExecutionResponse
+from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.llm.format import ResolvedToolCall
 from vibe.core.telemetry.build_metadata import (
     build_base_metadata,
     build_request_metadata,
 )
-from vibe.core.telemetry.send import TelemetryClient, _extract_file_extension
+from vibe.core.telemetry.send import (
+    TelemetryClient,
+    _extract_file_extension,
+    send_unified_subagent_tool_call_finished,
+)
 from vibe.core.telemetry.types import (
     AttachmentKind,
     ExperimentAssignment,
@@ -87,7 +93,11 @@ def _run_telemetry_tasks() -> None:
 def _expected_system_metadata(
     terminal_emulator: TerminalEmulator | None = None,
 ) -> dict[str, Any]:
-    metadata: dict[str, Any] = {"os": get_platform_id(), "version": __version__}
+    metadata: dict[str, Any] = {
+        "os": get_platform_id(),
+        "arch": platform.machine().lower(),
+        "version": __version__,
+    }
     if os_version := get_platform_version():
         metadata["os_version"] = os_version
     if terminal_emulator is not None:
@@ -99,6 +109,7 @@ def _assert_system_metadata(
     properties: dict[str, Any], terminal_emulator: TerminalEmulator | None = None
 ) -> None:
     assert properties["os"] == get_platform_id()
+    assert properties["arch"] == platform.machine().lower()
     assert properties["version"] == __version__
     if os_version := get_platform_version():
         assert properties["os_version"] == os_version
@@ -266,6 +277,104 @@ class TestTelemetryClient:
         )
 
         assert telemetry_events[0]["properties"]["message_id"] == "msg-123"
+
+    def test_send_unified_subagent_tool_call_finished_uses_safe_dimensions(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        """*Prepare*: A telemetry client with event collection enabled.
+        *Do*: Record a successful Unified subagent spawn.
+        *Assert*: Only the approved bounded dimensions are emitted, including the
+        client-level ``harness_backend`` tag.
+        """
+        # Prepare
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(
+            config_getter=lambda: config, harness_backend=ExperimentSurface.UNIFIED
+        )
+
+        # Do
+        send_unified_subagent_tool_call_finished(
+            client,
+            operation="spawn",
+            outcome="success",
+            model="mistral-vibe-cli-latest",
+            profile_source="vibe_profile",
+        )
+
+        # Assert
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["event_name"] == "vibe.tool_call_finished"
+        properties = telemetry_events[0]["properties"]
+        assert properties == properties | {
+            "tool_name": "subagent.spawn",
+            "status": "success",
+            "decision": None,
+            "approval_type": None,
+            "agent_profile_name": None,
+            "model": "mistral-vibe-cli-latest",
+            "nb_files_created": 0,
+            "nb_files_modified": 0,
+            "file_extension": None,
+            "message_id": None,
+            "harness_backend": "unified",
+            "subagent_operation": "spawn",
+            "subagent_outcome": "success",
+            "subagent_depth": 1,
+            "subagent_profile_source": "vibe_profile",
+        }
+        assert "agent_name" not in properties
+        assert "agent_type" not in properties
+        assert "child_session_id" not in properties
+        assert "prompt" not in properties
+
+    def test_harness_backend_rides_every_event_without_experiments(self) -> None:
+        """*Prepare*: A client tagged legacy with no experiment snapshot.
+        *Do*: Build the base metadata every event carries.
+        *Assert*: ``harness_backend`` is present even though experiment
+        segmentation is entirely absent.
+        """
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(
+            config_getter=lambda: config, harness_backend=ExperimentSurface.LEGACY
+        )
+
+        metadata = client.build_client_event_metadata()
+
+        assert metadata["harness_backend"] == "legacy"
+        assert "experiment_attributes" not in metadata
+
+    def test_harness_backend_absent_when_client_is_untagged(self) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        assert "harness_backend" not in client.build_client_event_metadata()
+
+    def test_experiment_attributes_serialize_nested_enums_as_strings(self) -> None:
+        """*Prepare*: A client whose attribute snapshot carries enum fields.
+        *Do*: Build the base metadata every event carries.
+        *Assert*: Nested enums (harness, terminal_emulator) are plain strings,
+        not Python enum objects — a clean wire payload and clean debug logs.
+        """
+        from vibe.core.experiments.models import ExperimentAttributes
+
+        config = build_test_vibe_config(enable_telemetry=True)
+        attributes = ExperimentAttributes(
+            entrypoint="cli",
+            harness=ExperimentSurface.UNIFIED,
+            agent_version="1.2.3",
+            os="darwin",
+            terminal_emulator=TerminalEmulator.GHOSTTY,
+        )
+        client = TelemetryClient(
+            config_getter=lambda: config,
+            experiment_attributes_getter=lambda: attributes,
+        )
+
+        emitted = client.build_client_event_metadata()["experiment_attributes"]
+
+        assert emitted["harness"] == "unified"
+        assert not isinstance(emitted["harness"], ExperimentSurface)
+        assert emitted["terminal_emulator"] == "ghostty"
 
     def test_send_tool_call_finished_nb_files_created_write_file(
         self, telemetry_events: list[dict[str, Any]]
@@ -823,6 +932,7 @@ class TestTelemetryClient:
         assert properties["nb_mcp_servers"] == 1
         assert properties["nb_models"] == 3
         assert properties["entrypoint"] == "cli"
+        assert properties["host_kind"] == "local"
         assert properties["client_name"] == "vscode"
         assert properties["client_version"] == "1.96.0"
         assert properties["terminal_emulator"] == "vscode"
@@ -964,6 +1074,7 @@ class TestTelemetryClient:
             parent_session_id="parent-session-456",
             call_source="vibe_code",
             call_type="secondary_call",
+            host_kind="local",
             message_id="message-456",
             user_plan="Pro",
         )

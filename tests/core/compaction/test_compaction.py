@@ -7,10 +7,11 @@ from vibe.core.compaction import (
     parse_previous_user_messages,
     render_compaction_context,
     render_teleport_summary_request,
+    reorder_for_tool_adjacency,
     select_model_context,
 )
 from vibe.core.teleport.types import TELEPORT_MESSAGE_CONTEXT_MAX_LENGTH
-from vibe.core.types import LLMMessage, Role
+from vibe.core.types import FunctionCall, LLMMessage, Role, ToolCall
 
 _PREFIX = "Another language model started to solve this problem"
 
@@ -358,3 +359,115 @@ def test_select_model_context_starts_at_latest_compaction() -> None:
     ]
 
     assert select_model_context(messages) == [messages[0], second, messages[-1]]
+
+
+def _tool_use(call_id: str) -> LLMMessage:
+    return LLMMessage(
+        role=Role.assistant,
+        content="",
+        tool_calls=[ToolCall(id=call_id, index=0, function=FunctionCall(name="todo"))],
+    )
+
+
+def _tool_result(call_id: str) -> LLMMessage:
+    return LLMMessage(role=Role.tool, tool_call_id=call_id, content="ok")
+
+
+def test_reorder_moves_user_message_out_of_tool_gap() -> None:
+    messages = [
+        LLMMessage(role=Role.user, content="prompt"),
+        _tool_use("call_1"),
+        LLMMessage(role=Role.user, content="steered"),
+        _tool_result("call_1"),
+    ]
+
+    reordered = reorder_for_tool_adjacency(messages)
+
+    assert [(m.role, m.content) for m in reordered] == [
+        (Role.user, "prompt"),
+        (Role.assistant, ""),
+        (Role.tool, "ok"),
+        (Role.user, "steered"),
+    ]
+
+
+def test_reorder_leaves_valid_history_untouched() -> None:
+    messages = [
+        LLMMessage(role=Role.user, content="prompt"),
+        _tool_use("call_1"),
+        _tool_result("call_1"),
+        LLMMessage(role=Role.user, content="follow up"),
+    ]
+
+    assert reorder_for_tool_adjacency(messages) == messages
+
+
+def test_reorder_keeps_parallel_tool_results_adjacent() -> None:
+    assistant = LLMMessage(
+        role=Role.assistant,
+        content="",
+        tool_calls=[
+            ToolCall(id="a", index=0, function=FunctionCall(name="todo")),
+            ToolCall(id="b", index=1, function=FunctionCall(name="todo")),
+        ],
+    )
+    messages = [
+        LLMMessage(role=Role.user, content="prompt"),
+        assistant,
+        _tool_result("a"),
+        LLMMessage(role=Role.user, content="steered"),
+        _tool_result("b"),
+    ]
+
+    reordered = reorder_for_tool_adjacency(messages)
+
+    assert [(m.role, m.content, m.tool_call_id) for m in reordered] == [
+        (Role.user, "prompt", None),
+        (Role.assistant, "", None),
+        (Role.tool, "ok", "a"),
+        (Role.tool, "ok", "b"),
+        (Role.user, "steered", None),
+    ]
+
+
+def test_reorder_moves_nested_tool_pair_out_of_gap_without_splitting() -> None:
+    # Steering with skill/file injection drops a nested tool_use/tool_result pair
+    # into the outer call's gap. The nested pair must move out intact, and the
+    # inner result must not be mistaken for the outer call's result.
+    outer_use = _tool_use("outer")
+    skill_use = LLMMessage(
+        role=Role.assistant,
+        content="",
+        tool_calls=[ToolCall(id="skill", index=0, function=FunctionCall(name="skill"))],
+    )
+    messages = [
+        LLMMessage(role=Role.user, content="prompt"),
+        outer_use,
+        LLMMessage(role=Role.user, content="steered"),
+        skill_use,
+        LLMMessage(role=Role.tool, tool_call_id="skill", content="skill-body"),
+        LLMMessage(role=Role.tool, tool_call_id="outer", content="outer-ok"),
+    ]
+
+    reordered = reorder_for_tool_adjacency(messages)
+
+    assert [(m.role, m.content, m.tool_call_id) for m in reordered] == [
+        (Role.user, "prompt", None),
+        (Role.assistant, "", None),
+        (Role.tool, "outer-ok", "outer"),
+        (Role.user, "steered", None),
+        (Role.assistant, "", None),
+        (Role.tool, "skill-body", "skill"),
+    ]
+    _assert_no_result_before_its_call(reordered)
+
+
+def _assert_no_result_before_its_call(messages: list[LLMMessage]) -> None:
+    seen_calls: set[str] = set()
+    for message in messages:
+        if message.role == Role.assistant and message.tool_calls:
+            seen_calls.update(tc.id for tc in message.tool_calls if tc.id is not None)
+        if message.role == Role.tool:
+            assert message.tool_call_id in seen_calls, (
+                f"tool_result {message.tool_call_id} precedes its tool_use"
+            )

@@ -35,6 +35,7 @@ from vibe.app_server._runtime import (
     RuntimeSessionNotFoundError,
     _apply_stored_stats,
 )
+from vibe.app_server._turns import TurnController
 from vibe.app_server.client import AppServerClient, AppServerConnectionClosed
 from vibe.app_server.connector_catalog import ConnectorRuntimeAuthorization
 from vibe.app_server.events import (
@@ -46,6 +47,7 @@ from vibe.app_server.events import (
     SessionSnapshot,
     StatsUpdated,
     TurnCompleted,
+    TurnQueueUpdated,
     TurnRetrying,
     TurnStarted,
 )
@@ -55,15 +57,21 @@ from vibe.app_server.models import (
     ApprovalDecisionType,
     CompletedEffectState,
     FileReadEffectDetail,
+    ImageAttachment,
+    InlineImageSource,
     PublicCallbackEntry,
     PublicCheckpointEntry,
     PublicEffectEntry,
     PublicHistoryEntry,
     PublicMessageEntry,
     PublicNoticeEntry,
+    PublicQueuedTurn,
     PublicRetryCategory,
+    PublicTurnQueue,
+    PublicTurnStatus,
     ResourceContentBlock,
     ScheduledLoopFiredNoticeDetail,
+    TextContentBlock,
     TurnErrorCode,
     UserAnswer,
     UserInputCallbackOutput,
@@ -92,13 +100,21 @@ from vibe.app_server.protocol import (
     SessionReadyWaitResponse,
     SessionResumeParams,
     SessionStartParams,
+    SessionTextContentBlock,
     SessionTurnsListParams,
     SessionTurnsListResponse,
     SessionUpdatedParams,
+    TurnQueueRemoveParams,
+    TurnStartParams,
+    TurnUserInputEntry,
     validate_callback_acknowledgement,
 )
 from vibe.app_server.server import AppServer
-from vibe.app_server.session import AppServerSession, AppServerTurnError
+from vibe.app_server.session import (
+    AppServerSession,
+    AppServerTurnError,
+    _PublishedEvent,
+)
 from vibe.app_server.transport import memory_transport_pair
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.compaction import CompactionFailedError, select_model_context
@@ -122,7 +138,7 @@ from vibe.core.types import (
     UserMessageEvent,
 )
 from vibe.core.utils import RetryReason
-from vibe.user_content import UserResourceLink
+from vibe.user_content import UserDisplayContent, UserResourceLink
 
 
 def _wire_resume_request(session_id: str) -> dict:
@@ -284,13 +300,15 @@ async def test_slow_unsolicited_event_consumer_applies_bounded_backpressure() ->
     event = SessionSnapshot(session.state)
     try:
         for _ in range(queue.maxsize):
-            queue.put_nowait(event)
+            queue.put_nowait(_PublishedEvent(session._event_generation, event))
 
         blocked = asyncio.create_task(session._publish_event(event))
         await asyncio.sleep(0)
         assert not blocked.done()
 
-        assert queue.get_nowait() is event
+        published = queue.get_nowait()
+        assert isinstance(published, _PublishedEvent)
+        assert published.event is event
         await asyncio.wait_for(blocked, timeout=1)
         assert queue.qsize() == queue.maxsize
     finally:
@@ -305,12 +323,30 @@ async def test_session_close_does_not_wait_for_full_event_queues() -> None:
     event = SessionSnapshot(session.state)
     for queue in (session._events, session._unsolicited_events):
         for _ in range(queue.maxsize):
-            queue.put_nowait(event)
+            queue.put_nowait(_PublishedEvent(session._event_generation, event))
 
     await asyncio.wait_for(session.close(), timeout=1)
 
     assert session._events.qsize() == 1
     assert session._unsolicited_events.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_session_close_does_not_reconnect_after_stop() -> None:
+    """*Prepare*: A reconnectable in-process app-server session.
+    *Do*: Close the session through its public client facade.
+    *Assert*: Intentional shutdown does not open a replacement connection.
+    """
+    # Prepare
+    session = await _create_reconnectable_session(build_test_agent_loop())
+    reconnect = Mock(wraps=session._connection._client_factory)
+    session._connection._client_factory = reconnect
+
+    # Do
+    await asyncio.wait_for(session.close(), timeout=1)
+
+    # Assert
+    reconnect.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -542,6 +578,35 @@ async def test_in_place_resume_clears_previous_turn_state(tmp_path: Path) -> Non
         await session.close()
 
     assert SessionTurnsListResponse.model_validate(result).items == []
+
+
+@pytest.mark.asyncio
+async def test_in_place_resume_discards_events_from_previous_session(
+    tmp_path: Path,
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+
+    session = await create_test_app_server_session(build_test_agent_loop(config=config))
+    old_event = SessionSnapshot(session.state)
+    await session._publish_event(old_event)
+    try:
+        await session.resume(saved_session_id)
+        new_event = SessionSnapshot(session.state)
+        await session._publish_event(new_event)
+
+        events = session.events()
+        observed = await asyncio.wait_for(anext(events), timeout=1)
+        await events.aclose()
+    finally:
+        await session.close()
+
+    assert observed is new_event
 
 
 @pytest.mark.asyncio
@@ -1825,6 +1890,41 @@ async def test_reconnect_resumes_live_turn_and_redelivers_open_callback() -> Non
 
 
 @pytest.mark.asyncio
+async def test_resume_and_reconnect_preserve_session_options(tmp_path: Path) -> None:
+    # Prepare
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    saved = build_test_agent_loop(config=config)
+    await saved.persist_empty_session()
+    saved_session_id = saved.session_id
+    await saved.aclose()
+    resume_params: list[SessionResumeParams] = []
+    options = SessionOptions(
+        cwd=str(tmp_path), auto_approve=True, disabled_tools=["bash"]
+    )
+    session = await _create_reconnectable_session(
+        build_test_agent_loop(config=config),
+        session_options=options,
+        resume_params=resume_params,
+    )
+
+    try:
+        # Do
+        await session.resume(saved_session_id)
+        snapshot = asyncio.create_task(_next_event(session.events(), SessionSnapshot))
+        client = session._connection.current
+        assert client is not None
+        await client.close()
+        await asyncio.wait_for(snapshot, timeout=1)
+
+        # Assert
+        assert [params.agent_config for params in resume_params] == [options, options]
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_live_retry_is_in_session_read_and_reconnect_snapshot() -> None:
     retry_started = asyncio.Event()
     agent_loop = build_test_agent_loop()
@@ -2069,6 +2169,20 @@ async def test_interrupt_waits_for_pending_turn_events() -> None:
             "wait_for_incoming": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_inject_user_context_require_active_turn_does_not_idle_inject() -> None:
+    session = object.__new__(AppServerSession)
+    session._active_public_turn_id = Mock(return_value=None)
+    client = _InterruptClient({"entries": []})
+    session._ensure_attached = AsyncMock(return_value=client)
+
+    with pytest.raises(AppServerResponseError, match="No active turn") as exc_info:
+        await session.inject_user_context("follow up", require_active_turn=True)
+
+    assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT
+    assert client.requests == []
 
 
 @pytest.mark.asyncio
@@ -2457,6 +2571,69 @@ async def test_clear_history_adopts_replacement_before_next_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_clear_history_refreshes_the_cached_context_gauge() -> None:
+    """*Prepare*: A session that spent context, and a server reporting it cleared.
+    *Do*: Clear the history.
+    *Assert*: The client's cached stats followed the server, with no turn between.
+
+    Clients render the gauge from this cache, so a clear that left it holding the
+    discarded conversation would keep showing a full context until the next turn.
+    """
+    # Prepare
+    backend = FakeBackend([[mock_llm_chunk(content="Before")]])
+    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+    session = await create_test_app_server_session(agent_loop)
+
+    # Do
+    try:
+        agent_loop.stats.context_tokens = 50_000
+        await session.resources.refresh()
+        filled = session.resources.runtime.stats.context_tokens
+        agent_loop.stats.context_tokens = 0
+        await session.clear_history()
+        cleared = session.resources.runtime.stats.context_tokens
+    finally:
+        await session.close()
+
+    # Assert
+    assert filled == 50_000
+    assert cleared == 0
+
+
+@pytest.mark.asyncio
+async def test_compact_refreshes_the_cached_context_gauge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """*Prepare*: A session whose compaction empties the context server-side.
+    *Do*: Compact.
+    *Assert*: The client's cached stats followed, with no turn in between.
+    """
+    # Prepare
+    agent_loop = build_test_agent_loop()
+    session = await create_test_app_server_session(agent_loop)
+
+    async def compact(_instructions: str = "") -> str:
+        agent_loop.stats.context_tokens = 0
+        return "summary"
+
+    monkeypatch.setattr(agent_loop, "compact", compact)
+
+    # Do
+    try:
+        agent_loop.stats.context_tokens = 50_000
+        await session.resources.refresh()
+        filled = session.resources.runtime.stats.context_tokens
+        await session.compact()
+        cleared = session.resources.runtime.stats.context_tokens
+    finally:
+        await session.close()
+
+    # Assert
+    assert filled == 50_000
+    assert cleared == 0
+
+
+@pytest.mark.asyncio
 async def test_auto_compaction_keeps_active_turn_in_same_session() -> None:
     agent_loop = build_test_agent_loop()
     agent_loop.stats.session_prompt_tokens = 11
@@ -2580,6 +2757,796 @@ async def test_interrupt_routes_during_compaction_without_session_handoff() -> N
     )
     assert session.state.latest_turn is not None
     assert session.state.latest_turn.status == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_legacy_queue_exposes_canonical_procedures_and_minimal_results() -> None:
+    agent_loop = build_test_agent_loop()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_act(msg: str, **_kwargs):
+        started.set()
+        await release.wait()
+        yield UserMessageEvent(content=msg, message_id="active-user")
+        yield AssistantEvent(content="done", message_id="active-assistant")
+
+    agent_loop.act = blocking_act
+    session = await create_test_app_server_session(agent_loop)
+    active_turn = asyncio.create_task(_consume(session.act("active")))
+    try:
+        await started.wait()
+        client = session._connection.current
+        assert client is not None
+        enqueue_result = await client.request(
+            "app_server/session/turn/enqueue",
+            {
+                "idempotencyKey": "enqueue-1",
+                "sessionId": session.session_id,
+                "entries": [
+                    {
+                        "role": "user",
+                        "entryId": "message-queued",
+                        "content": [{"type": "text", "text": "queued"}],
+                    }
+                ],
+            },
+        )
+        queue_item_id = enqueue_result["queueItemId"]
+
+        read_result = await client.request(
+            "app_server/session/turn/queue/read", {"sessionId": session.session_id}
+        )
+        item = read_result["queue"]["items"][0]
+        remove_result = await client.request(
+            "app_server/session/turn/queue/remove",
+            {"sessionId": session.session_id, "queueItemId": queue_item_id},
+        )
+        resume_result = await client.request(
+            "app_server/session/turn/queue/resume", {"sessionId": session.session_id}
+        )
+
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await client.request(
+                "turn/enqueue",
+                {
+                    "idempotencyKey": "old-route",
+                    "sessionId": session.session_id,
+                    "message": [{"type": "text", "text": "old"}],
+                },
+            )
+    finally:
+        release.set()
+        await active_turn
+        await session.close()
+
+    assert enqueue_result == {"queueItemId": queue_item_id}
+    assert isinstance(item["createdAt"], int)
+    assert {key: value for key, value in item.items() if key != "createdAt"} == {
+        "id": queue_item_id,
+        "entries": [
+            {
+                "role": "user",
+                "entryId": "message-queued",
+                "content": [{"type": "text", "text": "queued"}],
+                "annotations": {},
+            }
+        ],
+    }
+    assert remove_result == {}
+    assert resume_result == {}
+    assert exc_info.value.error.code is ProtocolErrorCode.METHOD_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_legacy_queue_injects_context_before_promoting_the_user_entry() -> None:
+    agent_loop = build_test_agent_loop()
+    calls: list[tuple[str, object]] = []
+    display = UserDisplayContent(
+        version="1", host="vibe", content=[{"type": "text", "text": "shown prompt"}]
+    )
+
+    async def inject_user_context(content: str, **_kwargs: object) -> list[object]:
+        calls.append(("context", content))
+        return []
+
+    async def queued_act(msg: str, **kwargs: object):
+        calls.append(("user", (msg, kwargs["user_display_content"])))
+        yield UserMessageEvent(content=msg, message_id="queued-user")
+        yield AssistantEvent(content="done", message_id="queued-assistant")
+
+    agent_loop.inject_user_context = inject_user_context
+    agent_loop.act = queued_act
+    session = await create_test_app_server_session(agent_loop)
+    try:
+        client = session._connection.current
+        assert client is not None
+        await client.request(
+            "app_server/session/turn/enqueue",
+            {
+                "sessionId": session.session_id,
+                "entries": [
+                    {
+                        "role": "context",
+                        "entryId": "context-1",
+                        "content": [{"type": "text", "text": "hidden context"}],
+                    },
+                    {
+                        "role": "user",
+                        "entryId": "user-1",
+                        "content": [{"type": "text", "text": "visible prompt"}],
+                        "annotations": {
+                            "vibe.userDisplayContent": display.model_dump(mode="json")
+                        },
+                    },
+                ],
+            },
+        )
+
+        async with asyncio.timeout(2):
+            while (
+                session.state.latest_turn is None
+                or session.state.latest_turn.status is PublicTurnStatus.IN_PROGRESS
+            ):
+                await asyncio.sleep(0)
+    finally:
+        await session.close()
+
+    assert calls == [
+        ("context", "hidden context"),
+        ("user", ("visible prompt", display)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_while_idle_promotes_without_leaving_stale_queue_state() -> None:
+    agent_loop = build_test_agent_loop()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def queued_act(msg: str, **_kwargs):
+        started.set()
+        await release.wait()
+        yield UserMessageEvent(content=msg, message_id="queued-user")
+        yield AssistantEvent(content="done", message_id="queued-assistant")
+
+    agent_loop.act = queued_act
+    session = await create_test_app_server_session(agent_loop)
+    try:
+        queued = await session.enqueue("start from queue")
+        await started.wait()
+        async with asyncio.timeout(2):
+            while (
+                session.state.latest_turn is None
+                or session.state.latest_turn.queue_item_id != queued.id
+            ):
+                await asyncio.sleep(0)
+        assert session.turn_queue.items == []
+
+        release.set()
+        async with asyncio.timeout(2):
+            while session.state.latest_turn.status is PublicTurnStatus.IN_PROGRESS:
+                await asyncio.sleep(0)
+    finally:
+        release.set()
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_idle_queued_turn_refreshes_persisted_session_exit_summary(
+    tmp_path: Path,
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    backend = FakeBackend([mock_llm_chunk(content="done")])
+    session = await create_test_app_server_session(
+        build_test_agent_loop(config=config, backend=backend, enable_streaming=True)
+    )
+    events = session.events()
+
+    try:
+        assert session.exit_summary().session_id is None
+
+        await session.enqueue("start from queue")
+        await asyncio.wait_for(_next_event(events, TurnCompleted), timeout=2)
+
+        assert session.exit_summary().session_id == session.session_id
+    finally:
+        await events.aclose()
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_response_does_not_restore_a_turn_promoted_by_newer_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """*Prepare*: An idle enqueue whose promotion events finish before its response resumes.
+    *Do*: Let the client finish reconciling the enqueue response.
+    *Assert*: The already-promoted turn is not restored to the local queue projection.
+    """
+    # Prepare
+    agent_loop = build_test_agent_loop()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def queued_act(msg: str, **_kwargs):
+        started.set()
+        await release.wait()
+        yield UserMessageEvent(content=msg, message_id="queued-user")
+        yield AssistantEvent(content="done", message_id="queued-assistant")
+
+    agent_loop.act = queued_act
+    session = await create_test_app_server_session(agent_loop)
+    client = session._connection.current
+    assert client is not None
+    request = client.request
+
+    async def wait_for_promotion_before_returning(
+        method, params=None, *, wait_for_incoming=False
+    ):
+        response = await request(method, params, wait_for_incoming=wait_for_incoming)
+        if method != "app_server/session/turn/enqueue":
+            return response
+        queue_item_id = response["queueItemId"]
+        async with asyncio.timeout(2):
+            while (
+                session.state.latest_turn is None
+                or session.state.latest_turn.queue_item_id != queue_item_id
+                or session.turn_queue.items
+            ):
+                await asyncio.sleep(0)
+        return response
+
+    monkeypatch.setattr(client, "request", wait_for_promotion_before_returning)
+
+    try:
+        # Do
+        queued = await session.enqueue("start from queue")
+
+        # Assert
+        assert session.state.latest_turn is not None
+        assert session.state.latest_turn.queue_item_id == queued.id
+        assert session.turn_queue.items == []
+    finally:
+        release.set()
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_during_turn_finalization_waits_for_finishing_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_loop = build_test_agent_loop()
+    prompts: list[str] = []
+    finalizing = asyncio.Event()
+    release_finalizer = asyncio.Event()
+    queue_promotion_attempted = asyncio.Event()
+    gated = False
+    original_after_turn_terminal = TurnController._after_turn_terminal
+    original_promote_next = TurnController._promote_next
+
+    async def queued_act(msg: str, **_kwargs):
+        prompts.append(msg)
+        yield UserMessageEvent(content=msg, message_id=f"user-{msg}")
+        yield AssistantEvent(content=f"response {msg}", message_id=f"assistant-{msg}")
+
+    async def gate_first_finalizer(
+        self: TurnController, status: PublicTurnStatus
+    ) -> None:
+        nonlocal gated
+        if not gated:
+            gated = True
+            finalizing.set()
+            await release_finalizer.wait()
+        await original_after_turn_terminal(self, status)
+
+    async def observe_promotion(self: TurnController) -> None:
+        if asyncio.current_task() is not self._active_task:
+            queue_promotion_attempted.set()
+        await original_promote_next(self)
+
+    monkeypatch.setattr(TurnController, "_after_turn_terminal", gate_first_finalizer)
+    monkeypatch.setattr(TurnController, "_promote_next", observe_promotion)
+    agent_loop.act = queued_act
+    session = await create_test_app_server_session(agent_loop)
+    first_turn = asyncio.create_task(_consume(session.act("A")))
+    try:
+        await finalizing.wait()
+        queued = await session.enqueue("B")
+        await queue_promotion_attempted.wait()
+
+        assert [item.id for item in session.turn_queue.items] == [queued.id]
+
+        release_finalizer.set()
+        await first_turn
+        async with asyncio.timeout(2):
+            while (
+                session.state.latest_turn is None
+                or session.state.latest_turn.queue_item_id != queued.id
+                or session.state.latest_turn.status is PublicTurnStatus.IN_PROGRESS
+            ):
+                await asyncio.sleep(0)
+    finally:
+        release_finalizer.set()
+        first_turn.cancel()
+        await session.close()
+
+    assert prompts == ["A", "B"]
+    assert session.state.turn_queue.items == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_queue_input_is_rejected_before_acceptance() -> None:
+    agent_loop = build_test_agent_loop()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_act(msg: str, **_kwargs):
+        started.set()
+        await release.wait()
+        yield UserMessageEvent(content=msg, message_id="active-user")
+        yield AssistantEvent(content="done", message_id="active-assistant")
+
+    agent_loop.act = blocking_act
+    session = await create_test_app_server_session(agent_loop)
+    active_turn = asyncio.create_task(_consume(session.act("active")))
+    invalid_image = ImageAttachment(
+        source=InlineImageSource(data="invalid-base64"),
+        alias="invalid.png",
+        mime_type="image/png",
+    )
+    try:
+        await started.wait()
+        with pytest.raises(
+            AppServerResponseError, match="Invalid base64 image data"
+        ) as exc_info:
+            await session.enqueue(
+                "invalid image", images=[invalid_image], idempotency_key="reusable-key"
+            )
+
+        assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS
+        assert session.turn_queue.items == []
+        queued = await session.enqueue("valid input", idempotency_key="reusable-key")
+        assert [item.id for item in session.turn_queue.items] == [queued.id]
+    finally:
+        release.set()
+        await active_turn
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_queued_turn_events_follow_a_directly_consumed_turn() -> None:
+    agent_loop = build_test_agent_loop()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def queued_act(msg: str, **_kwargs):
+        if msg == "A":
+            first_started.set()
+            await release_first.wait()
+        yield UserMessageEvent(content=msg, message_id=f"user-{msg}")
+        yield AssistantEvent(content=f"response {msg}", message_id=f"assistant-{msg}")
+
+    agent_loop.act = queued_act
+    session = await create_test_app_server_session(agent_loop)
+    first_turn = asyncio.create_task(_consume(session.act("A")))
+    events = session.events()
+    try:
+        await first_started.wait()
+        queued = await session.enqueue("B")
+        release_first.set()
+        await first_turn
+
+        received = []
+        async with asyncio.timeout(2):
+            while True:
+                event = await anext(events)
+                received.append(event)
+                if (
+                    isinstance(event, TurnStarted)
+                    and event.turn.queue_item_id == queued.id
+                ):
+                    break
+    finally:
+        release_first.set()
+        first_turn.cancel()
+        await events.aclose()
+        await session.close()
+
+    assert any(isinstance(event, TurnQueueUpdated) for event in received)
+
+
+@pytest.mark.asyncio
+async def test_queued_turns_run_fifo_and_continue_after_failure() -> None:
+    agent_loop = build_test_agent_loop()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    prompts: list[str] = []
+
+    async def queued_act(msg: str, **_kwargs):
+        prompts.append(msg)
+        if msg == "A":
+            first_started.set()
+            await release_first.wait()
+        if msg == "B":
+            raise RuntimeError("B failed")
+        yield UserMessageEvent(content=msg, message_id=f"user-{msg}")
+        yield AssistantEvent(content=f"response {msg}", message_id=f"assistant-{msg}")
+
+    agent_loop.act = queued_act
+    session = await create_test_app_server_session(agent_loop)
+    first_turn = asyncio.create_task(_consume(session.act("A")))
+    try:
+        await first_started.wait()
+        queued_b = await session.enqueue("B", message_entry_id="queue-b")
+        replayed_b = await session.enqueue("B", message_entry_id="queue-b")
+        queued_c = await session.enqueue(
+            "C", message_entry_id="queue-c", idempotency_key="explicit-queue-c"
+        )
+        assert replayed_b.id == queued_b.id
+        assert [item.id for item in session.turn_queue.items] == [
+            queued_b.id,
+            queued_c.id,
+        ]
+
+        release_first.set()
+        await first_turn
+        async with asyncio.timeout(2):
+            while (
+                session.state.latest_turn is None
+                or session.state.latest_turn.queue_item_id != queued_c.id
+                or session.state.latest_turn.status is not PublicTurnStatus.COMPLETED
+            ):
+                await asyncio.sleep(0)
+    finally:
+        release_first.set()
+        first_turn.cancel()
+        await session.close()
+
+    assert prompts == ["A", "B", "C"]
+    assert session.state.turn_queue.items == []
+    queued_turns = [
+        turn for turn in session.state.turns or [] if turn.queue_item_id is not None
+    ]
+    assert [turn.queue_item_id for turn in queued_turns] == [queued_b.id, queued_c.id]
+    assert [turn.status for turn in queued_turns] == [
+        PublicTurnStatus.FAILED,
+        PublicTurnStatus.COMPLETED,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_interrupt_pauses_queue_until_remove_and_resume() -> None:
+    agent_loop = build_test_agent_loop()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    prompts: list[str] = []
+
+    async def queued_act(msg: str, **_kwargs):
+        prompts.append(msg)
+        if msg == "A":
+            first_started.set()
+            await release_first.wait()
+        yield UserMessageEvent(content=msg, message_id=f"user-{msg}")
+        yield AssistantEvent(content=f"response {msg}", message_id=f"assistant-{msg}")
+
+    agent_loop.act = queued_act
+    session = await create_test_app_server_session(agent_loop)
+    first_turn = asyncio.create_task(_consume(session.act("A")))
+    try:
+        await first_started.wait()
+        client = session._connection.current
+        assert client is not None
+        queued_b = await session.enqueue("B", idempotency_key="queue-b")
+        queued_c = await session.enqueue("C", idempotency_key="queue-c")
+
+        await session.interrupt()
+        await first_turn
+        queue = await session.read_turn_queue()
+        assert queue.paused
+        assert [item.id for item in queue.items] == [queued_b.id, queued_c.id]
+        assert prompts == ["A"]
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await client.request(
+                "turn/start",
+                TurnStartParams(
+                    session_id=session.session_id,
+                    message=[TextContentBlock(text="overtake")],
+                ),
+            )
+        assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT
+
+        assert await session.remove_queued_turn(queued_b.id)
+        assert [item.id for item in session.turn_queue.items] == [queued_c.id]
+        resumed = await session.resume_turn_queue()
+        assert not resumed.paused
+
+        async with asyncio.timeout(2):
+            while (
+                session.state.latest_turn is None
+                or session.state.latest_turn.queue_item_id != queued_c.id
+                or session.state.latest_turn.status is not PublicTurnStatus.COMPLETED
+            ):
+                await asyncio.sleep(0)
+    finally:
+        release_first.set()
+        first_turn.cancel()
+        await session.close()
+
+    assert prompts == ["A", "C"]
+    assert session.state.turn_queue.items == []
+    assert not session.state.turn_queue.paused
+
+
+@pytest.mark.asyncio
+async def test_replace_queued_turn_preserves_identity_and_fifo_order() -> None:
+    agent_loop = build_test_agent_loop()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    prompts: list[str] = []
+
+    async def queued_act(msg: str, **_kwargs):
+        prompts.append(msg)
+        if msg == "active":
+            first_started.set()
+            await release_first.wait()
+        yield UserMessageEvent(content=msg, message_id=f"user-{msg}")
+        yield AssistantEvent(content="done", message_id=f"assistant-{msg}")
+
+    agent_loop.act = queued_act
+    session = await create_test_app_server_session(agent_loop)
+    active_turn = asyncio.create_task(_consume(session.act("active")))
+    try:
+        await first_started.wait()
+        queued_a = await session.enqueue("A", message_entry_id="queue-a")
+        queued_b = await session.enqueue("B", message_entry_id="queue-b")
+
+        replaced = await session.replace_queued_turn(
+            queued_a.id, "A-edited", message_entry_id="queue-a"
+        )
+
+        assert replaced is not None
+        assert replaced.id == queued_a.id
+        assert [item.id for item in session.turn_queue.items] == [
+            queued_a.id,
+            queued_b.id,
+        ]
+        assert session.turn_queue.items[0].entries == [
+            TurnUserInputEntry(
+                entry_id="queue-a", content=[SessionTextContentBlock(text="A-edited")]
+            )
+        ]
+
+        release_first.set()
+        await active_turn
+        async with asyncio.timeout(2):
+            while prompts != ["active", "A-edited", "B"]:
+                await asyncio.sleep(0)
+    finally:
+        release_first.set()
+        active_turn.cancel()
+        with suppress(asyncio.CancelledError):
+            await active_turn
+        await session.close()
+
+    assert prompts == ["active", "A-edited", "B"]
+
+
+@pytest.mark.asyncio
+async def test_replace_queued_turn_returns_none_after_removal() -> None:
+    agent_loop = build_test_agent_loop()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_act(msg: str, **_kwargs):
+        started.set()
+        await release.wait()
+        yield UserMessageEvent(content=msg, message_id="active-user")
+
+    agent_loop.act = blocking_act
+    session = await create_test_app_server_session(agent_loop)
+    active_turn = asyncio.create_task(_consume(session.act("active")))
+    try:
+        await started.wait()
+        queued = await session.enqueue("queued")
+        assert await session.remove_queued_turn(queued.id)
+
+        replaced = await session.replace_queued_turn(queued.id, "edited")
+
+        assert replaced is None
+    finally:
+        release.set()
+        await active_turn
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_read_does_not_restore_an_item_removed_by_a_newer_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_loop = build_test_agent_loop()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_act(msg: str, **_kwargs):
+        started.set()
+        await release.wait()
+        yield UserMessageEvent(content=msg, message_id="active-user")
+        yield AssistantEvent(content="done", message_id="active-assistant")
+
+    agent_loop.act = blocking_act
+    session = await create_test_app_server_session(agent_loop)
+    active_turn = asyncio.create_task(_consume(session.act("active")))
+    read_captured = asyncio.Event()
+    release_read = asyncio.Event()
+    read_task: asyncio.Task[PublicTurnQueue] | None = None
+    try:
+        await started.wait()
+        queued = await session.enqueue("queued")
+        client = session._connection.current
+        assert client is not None
+        request = client.request
+
+        async def delay_queue_read(method, params=None, *, wait_for_incoming=False):
+            response = await request(
+                method, params, wait_for_incoming=wait_for_incoming
+            )
+            if method == "app_server/session/turn/queue/read":
+                read_captured.set()
+                await release_read.wait()
+            return response
+
+        monkeypatch.setattr(client, "request", delay_queue_read)
+        read_task = asyncio.create_task(session.read_turn_queue())
+        await read_captured.wait()
+
+        await request(
+            "app_server/session/turn/queue/remove",
+            TurnQueueRemoveParams(
+                session_id=session.session_id, queue_item_id=queued.id
+            ),
+        )
+        async with asyncio.timeout(2):
+            while session.turn_queue.items:
+                await asyncio.sleep(0)
+
+        release_read.set()
+        queue = await read_task
+
+        assert queue.items == []
+        assert session.turn_queue.items == []
+    finally:
+        release_read.set()
+        release.set()
+        if read_task is not None and not read_task.done():
+            read_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await read_task
+        await active_turn
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_remove_queued_turn_reports_concurrent_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_loop = build_test_agent_loop()
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+    release_second = asyncio.Event()
+
+    async def blocking_act(msg: str, **_kwargs):
+        if msg == "A":
+            first_started.set()
+            await release_first.wait()
+        else:
+            second_started.set()
+            await release_second.wait()
+        yield UserMessageEvent(content=msg, message_id=f"user-{msg}")
+        yield AssistantEvent(content="done", message_id=f"assistant-{msg}")
+
+    agent_loop.act = blocking_act
+    session = await create_test_app_server_session(agent_loop)
+    first_turn = asyncio.create_task(_consume(session.act("A")))
+    queued: PublicQueuedTurn | None = None
+    try:
+        await first_started.wait()
+        queued = await session.enqueue("B")
+        client = session._connection.current
+        assert client is not None
+        request = client.request
+
+        async def promote_before_remove(
+            method, params=None, *, wait_for_incoming=False
+        ):
+            if method == "app_server/session/turn/queue/remove":
+                release_first.set()
+                await second_started.wait()
+            return await request(method, params, wait_for_incoming=wait_for_incoming)
+
+        monkeypatch.setattr(client, "request", promote_before_remove)
+
+        assert not await session.remove_queued_turn(queued.id)
+    finally:
+        release_first.set()
+        release_second.set()
+        await first_turn
+        if queued is not None:
+            async with asyncio.timeout(2):
+                while (
+                    session.state.latest_turn is None
+                    or session.state.latest_turn.queue_item_id != queued.id
+                    or session.state.latest_turn.status is PublicTurnStatus.IN_PROGRESS
+                ):
+                    await asyncio.sleep(0)
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_rewind_clears_paused_queue_and_emits_queue_update() -> None:
+    agent_loop = build_test_agent_loop()
+    original_session_id = agent_loop.session_id
+    replacement_session_id = f"{original_session_id}-rewind"
+    user_index = len(agent_loop.messages)
+    agent_loop.messages.extend([
+        LLMMessage(role=Role.user, content="rewind me", message_id="user-1"),
+        LLMMessage(role=Role.assistant, content="response", message_id="assistant-1"),
+    ])
+    started = asyncio.Event()
+
+    async def blocking_act(msg: str, **_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+        yield UserMessageEvent(content=msg, message_id="active-user")
+
+    async def rewind(
+        message_index: int, *, restore_files: bool, inplace: bool = False
+    ) -> tuple[str, list[str], list[str]]:
+        assert message_index == user_index
+        assert not restore_files
+        assert not inplace
+        agent_loop.session_id = replacement_session_id
+        agent_loop.parent_session_id = original_session_id
+        agent_loop.session_logger.reset_session(
+            replacement_session_id, parent_session_id=original_session_id
+        )
+        return "rewind me", [], []
+
+    agent_loop.act = blocking_act
+    agent_loop.rewind_manager.rewind_to_message = rewind
+    session = await create_test_app_server_session(agent_loop)
+    events = session.events()
+    active_turn = asyncio.create_task(_consume(session.act("active")))
+    try:
+        await started.wait()
+        queued = await session.enqueue("queued")
+        await session.interrupt()
+        await active_turn
+
+        paused = await asyncio.wait_for(
+            _next_event(events, TurnQueueUpdated), timeout=2
+        )
+        assert paused.queue.paused
+        assert [item.id for item in paused.queue.items] == [queued.id]
+
+        result = await session.resources.sessions.rewind("user-1", restore_files=False)
+        cleared = await asyncio.wait_for(
+            _next_event(events, TurnQueueUpdated), timeout=2
+        )
+
+        assert result.message == "rewind me"
+        assert cleared.queue.items == []
+        assert not cleared.queue.paused
+        assert session.session_id == replacement_session_id
+        assert session.turn_queue.items == []
+    finally:
+        active_turn.cancel()
+        with suppress(asyncio.CancelledError):
+            await active_turn
+        await events.aclose()
+        await session.close()
 
 
 @pytest.mark.asyncio
@@ -2767,10 +3734,22 @@ async def _next_event[EventT](
 
 
 async def _create_reconnectable_session(
-    agent_loop, *, reconnect_gate: asyncio.Event | None = None
+    agent_loop,
+    *,
+    reconnect_gate: asyncio.Event | None = None,
+    session_options: SessionOptions | None = None,
+    resume_params: list[SessionResumeParams] | None = None,
 ) -> AppServerSession:
     client_transport, server_transport = memory_transport_pair()
     server = build_test_app_server(agent_loop, server_transport)
+    if resume_params is not None:
+        original_resume = server._session_backend_host.resume
+
+        async def record_resume(params: SessionResumeParams):
+            resume_params.append(params)
+            return await original_resume(params)
+
+        server._session_backend_host.resume = record_resume  # type: ignore[method-assign]
 
     def make_client(
         next_client_transport, next_server_transport, *, wait_for_gate: bool
@@ -2791,6 +3770,7 @@ async def _create_reconnectable_session(
         make_client(client_transport, server_transport, wait_for_gate=False),
         client_info=ClientInfo(name="reconnect-client", version="1"),
         capabilities=ClientCapabilities(callback_kinds=["approval", "user_input"]),
+        session_options=session_options,
         client_factory=reconnect,
     )
 

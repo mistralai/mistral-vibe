@@ -60,7 +60,7 @@ session durability, or shared runtime:
 | Server or harness ownership | Client ownership |
 | --- | --- |
 | Root and child runtime construction | Widgets and layout |
-| Session identity, turns, and execution reservations | Keyboard and prompt editing |
+| Session identity, active and queued turns, turn ordering, and execution reservations | Keyboard and prompt editing |
 | Private session storage and public projections | Rendering public models |
 | Canonical cwd, workspace roots, trust, and prompt preparation | Display aliases and autocomplete presentation |
 | Effective config, persistence, agents, and model selection | Applying an accepted theme |
@@ -200,12 +200,64 @@ Session creation and user execution are separate:
 - `session/stop` flushes and shuts down the attached runtime;
 - `turn/start` begins structured user input and may mark harness instructions as
   injected so they remain hidden from public history;
+- `app_server/session/turn/enqueue` accepts canonical `entries` containing
+  context entries followed by at most one user entry as a separate future
+  turn;
+- `app_server/session/turn/queue/read` reads the accepted queued turns;
+- `app_server/session/turn/queue/remove` removes one accepted queued turn by its stable queue item
+  ID;
+- `app_server/session/turn/queue/replace` replaces one accepted queued turn
+  without changing its identity or FIFO position;
+- `app_server/session/turn/queue/resume` resumes automatic draining after an
+  interruption;
 - `turn/steer` adds input to the active turn; and
 - `turn/interrupt` interrupts the active turn.
 
 A session has at most one active turn. Steering and interruption include the
 expected turn identity so stale control requests fail instead of affecting a
 new turn.
+
+Starting, steering, and queueing are different actions. `turn/start` begins
+work immediately and requires the session to be idle. `turn/steer` adds input
+to the expected active turn and never creates a future turn.
+`app_server/session/turn/enqueue`
+accepts one future user turn and never changes the active turn. If queueing
+finds an idle, unpaused session, the server promotes exactly one queued item
+after returning the enqueue response. This makes a busy-submit race safe
+without changing `turn/start` semantics.
+
+Queue editing uses the `app_server/session/turn/queue/replace` Session
+procedure. It accepts the same typed entries as enqueue plus the target queue
+item ID. A successful replacement preserves the item's ID, creation time, and
+FIFO position. The enqueue request does not accept Vibe-only `message`,
+`messageEntryId`, or `replaceQueueItemId` fields.
+
+The accepted turn queue has these rules:
+
+- Queue items are structured user turns. Shell commands, slash commands,
+  scheduled loops, and other harness work are not queue items.
+- Items have stable IDs and run in FIFO order as separate turns. The server
+  never combines adjacent queued prompts.
+- Replacement returns `not_found` after the target starts or is removed.
+- A completed or failed turn promotes at most one next item. An interrupted
+  turn preserves the remaining items and pauses automatic draining.
+- Removal and resume are idempotent. Enqueue and replacement retries use an
+  idempotency key. Accepted keys remain reserved for the lifetime of the live
+  session backend. Reusing a key with different input is a conflict.
+- The server enforces a fixed queue size limit and rejects enqueue requests
+  beyond it without changing the queue.
+- Unsolicited work such as scheduled loops does not overtake accepted user
+  turns.
+
+Promoting an item removes it from the queue before emitting `turn/started`.
+The resulting public turn keeps the queue item ID so clients can replace a
+pending message with the running turn. Queued input does not enter public
+history until its turn starts.
+
+Terminal and promotion notifications have one order: `turn/completed`, then
+the queue update that records a pause or removes the promoted item, then the
+next `turn/started`. Responses are still written before notifications caused
+by the accepted request.
 
 Turn input is structured content. The server owns normalization into
 model-visible input and persistence. Delivery surfaces do not construct private
@@ -235,8 +287,9 @@ assignment from the first rendered prompt.
 - a format identifier and per-session event watermark;
 - public session metadata;
 - a page of public history;
-- currently open callback entries; and
-- the active or most recently terminal turn; and
+- currently open callback entries;
+- the active or most recently terminal turn;
+- the accepted queued turns and whether automatic draining is paused; and
 - the current model-provider retry, including its turn, category, and technical
   detail.
 
@@ -289,8 +342,9 @@ process. The snapshot's `eventId` is its watermark. The client reducer:
 
 The core notification families are `session/snapshot`, session handoffs,
 `session/updated`, `history/entryAdded`, `history/entryUpdated`,
-`turn/started`, `turn/completed`, and `session/statsUpdated`. Warnings, errors,
-and resource notifications remain typed rather than using a generic envelope.
+`turn_queue_updated`, `turn/started`, `turn/completed`, and
+`session/statsUpdated`. Warnings, errors, and resource notifications remain
+typed rather than using a generic envelope.
 
 Retry-state changes use numbered `session/snapshot` notifications and therefore
 share the session event watermark. A live same-session snapshot contains a
@@ -369,6 +423,14 @@ result handling.
 Textual, ACP, and programmatic mode share the same app-server session and
 resource APIs:
 
+- Textual renders and edits the server-owned prompt queue. It does not keep a
+  second accepted queue or schedule queued work itself.
+- Textual `!` commands and non-side-channel slash commands require an idle
+  session. They are rejected while other work or accepted prompts are pending.
+- Other delivery surfaces use the same enqueue, read, remove, and resume
+  methods when they add queueing; they do not implement another accepted
+  queue.
+
 - Textual renders public models and owns terminal-local facilities.
 - ACP translates ACP requests, callbacks, content, client tools, and updates to
   and from the app-server API.
@@ -386,6 +448,12 @@ projection from the returned snapshot, receives still-open callbacks, and sees
 the current retry state when the live turn is waiting to retry. Stdio EOF closes
 its server process; process restart uses normal persisted-session resume
 semantics and does not restore an in-flight turn or its retry state.
+
+Accepted queued turns belong to the live session backend. Reconnecting to the
+same live backend recovers them through the subscription snapshot or
+`session/read`. Stopping the session or restarting the app-server process
+discards them. Persisting queued turns across process restarts requires a
+separate storage decision and is not part of the initial queue implementation.
 
 Transport detachment only removes that connection's subscriptions and callback
 claims. A successful `session/stop` is the delivery surface's durability and

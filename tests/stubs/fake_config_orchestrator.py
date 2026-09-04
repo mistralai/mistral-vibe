@@ -192,8 +192,11 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         self._publish(before, reason)
         return []
 
-    async def reload(self) -> None:
-        return None
+    async def reload(
+        self, *, preflight: Callable[[C], Awaitable[None]] | None = None
+    ) -> None:
+        if preflight is not None:
+            await preflight(self._config)
 
     async def _persistence_orchestrator(self) -> ConfigOrchestrator[C]:
         layer = UserConfigLayer()

@@ -16,6 +16,7 @@ from vibe.app_server.events import (
     SessionCompacted,
     SessionSnapshot,
     StatsUpdated,
+    TurnQueueUpdated,
     UnknownNotificationError,
     parse_server_event,
     reconcile_snapshot,
@@ -29,12 +30,14 @@ from vibe.app_server.models import (
     PublicEntryGenerationStatus,
     PublicError,
     PublicMessageEntry,
+    PublicQueuedTurn,
     PublicReasoningEntry,
     PublicRetryCategory,
     PublicRetryState,
     PublicSession,
     PublicSessionState,
     PublicTurn,
+    PublicTurnQueue,
     PublicTurnStatus,
     ResourceContentBlock,
     TextContentBlock,
@@ -44,6 +47,9 @@ from vibe.app_server.protocol import (
     JsonPatchOperation,
     MCPAuthRequiredParams,
     Notification,
+    SessionTextContentBlock,
+    TurnQueueUpdatedParams,
+    TurnUserInputEntry,
 )
 from vibe.core.tools.builtins.read_file import ReadFile, ReadFileArgs, ReadFileResult
 from vibe.core.tools.ui import ToolUIDataAdapter
@@ -80,6 +86,18 @@ def _notification(sequence: int, update) -> Notification:
     params = update.params.model_copy(update={"event_id": sequence})
     return Notification(
         method=update.method, params=params.model_dump(mode="json", by_alias=True)
+    )
+
+
+def _queued_turn(item_id: str, message_id: str, text: str) -> PublicQueuedTurn:
+    return PublicQueuedTurn(
+        id=item_id,
+        created_at=1,
+        entries=[
+            TurnUserInputEntry(
+                entry_id=message_id, content=[SessionTextContentBlock(text=text)]
+            )
+        ],
     )
 
 
@@ -172,6 +190,102 @@ def test_snapshot_reconciliation_replays_missing_stream_updates() -> None:
     assert apply_json_patch(
         entry.model_dump(mode="json", by_alias=True), update.patch
     ) == completed.model_dump(mode="json", by_alias=True)
+
+
+def test_turn_queue_update_replaces_public_queue_state() -> None:
+    projection = _projection()
+    queue = PublicTurnQueue(
+        items=[_queued_turn("queue-1", "message-1", "next")], paused=True
+    )
+    notification = Notification(
+        method="turn_queue_updated",
+        params=TurnQueueUpdatedParams(
+            event_id=1, session_id="session-1", queue=queue, emitted_at=2
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    event = projection.consume(notification)
+
+    assert isinstance(event, TurnQueueUpdated)
+    assert event.queue == queue
+    assert projection.state.turn_queue == queue
+
+
+def test_turn_queue_read_does_not_overwrite_newer_notification() -> None:
+    projection = _projection()
+    response_queue = PublicTurnQueue(
+        items=[_queued_turn("queue-1", "message-1", "next")]
+    )
+    after_event_id = projection.last_event_id
+    notification = Notification(
+        method="turn_queue_updated",
+        params=TurnQueueUpdatedParams(
+            event_id=1, session_id="session-1", queue=PublicTurnQueue(), emitted_at=2
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    projection.consume(notification)
+    queue = projection.adopt_turn_queue(response_queue, after_event_id=after_event_id)
+
+    assert queue == PublicTurnQueue()
+    assert projection.state.turn_queue == PublicTurnQueue()
+
+
+def test_enqueue_reconciliation_only_skips_a_retired_queue_item() -> None:
+    projection = _projection()
+    existing = _queued_turn("queue-existing", "message-existing", "existing")
+    queued = _queued_turn("queue-new", "message-new", "new").model_copy(
+        update={"created_at": 2}
+    )
+    first_update = Notification(
+        method="turn_queue_updated",
+        params=TurnQueueUpdatedParams(
+            event_id=1,
+            session_id="session-1",
+            queue=PublicTurnQueue(items=[existing]),
+            emitted_at=2,
+        ).model_dump(mode="json", by_alias=True),
+    )
+    second_update = Notification(
+        method="turn_queue_updated",
+        params=TurnQueueUpdatedParams(
+            event_id=2,
+            session_id="session-1",
+            queue=PublicTurnQueue(items=[existing]),
+            emitted_at=3,
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    projection.consume(first_update)
+    projection.track_queued_turn(queued, session_id="session-1")
+
+    assert [item.id for item in projection.state.turn_queue.items] == [
+        existing.id,
+        queued.id,
+    ]
+
+    projection.consume(second_update)
+    projection.track_queued_turn(queued, session_id="session-1")
+
+    assert [item.id for item in projection.state.turn_queue.items] == [existing.id]
+
+
+def test_started_turn_prevents_stale_enqueue_reconciliation() -> None:
+    projection = _projection()
+    queued = _queued_turn("queue-1", "message-1", "queued")
+    projection.begin_turn(
+        PublicTurn(
+            id="turn-1",
+            session_id="session-1",
+            status=PublicTurnStatus.IN_PROGRESS,
+            started_at=2,
+            queue_item_id=queued.id,
+        )
+    )
+
+    projection.track_queued_turn(queued, session_id="session-1")
+
+    assert projection.state.turn_queue.items == []
 
 
 def test_live_snapshot_preserves_loaded_history_and_turn_prefixes() -> None:

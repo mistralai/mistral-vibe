@@ -286,8 +286,9 @@ def test_mcp_add_oauth_logs_in_and_opens_browser(
     # Prepare
     opened_urls: list[str] = []
 
-    async def fake_login(server, *, on_url) -> None:
+    async def fake_login(server, *, on_url, headers) -> None:
         assert isinstance(server.auth, MCPOAuth)
+        assert headers == {}
         await on_url("https://auth.example/authorize")
 
     monkeypatch.setattr(_mcp_auth, "perform_oauth_login", fake_login)
@@ -318,7 +319,7 @@ def test_mcp_add_oauth_keeps_config_after_login_failure(
     """
 
     # Prepare
-    async def fail_login(server, *, on_url) -> None:
+    async def fail_login(server, *, on_url, headers) -> None:
         raise MCPOAuthError("login failed")
 
     monkeypatch.setattr(_mcp_auth, "perform_oauth_login", fail_login)

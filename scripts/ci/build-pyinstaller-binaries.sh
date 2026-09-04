@@ -8,6 +8,11 @@ fi
 
 uv sync --no-dev --group build
 
+uv_run_args=(--no-dev --group build)
+if [ -n "${VIBE_PYINSTALLER_WITH:-}" ]; then
+  uv_run_args+=(--with "$VIBE_PYINSTALLER_WITH")
+fi
+
 for spec in "$@"; do
-  uv run --no-dev --group build pyinstaller "${spec}"
+  uv run "${uv_run_args[@]}" pyinstaller "${spec}"
 done

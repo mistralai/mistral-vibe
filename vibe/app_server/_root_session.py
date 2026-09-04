@@ -18,9 +18,11 @@ from vibe.app_server.models import (
     PublicRetryState,
     PublicSessionState,
     PublicTurn,
+    PublicTurnQueue,
     SessionLogSummary,
 )
 from vibe.core.agent_loop import AgentLoop
+from vibe.core.types import BackgroundWorkEvent
 from vibe.observability.logging import logger
 
 
@@ -47,6 +49,7 @@ class SessionCoordinator(Protocol):
         callbacks: list[PublicCallbackEntry],
         active_turn: PublicTurn,
         completed_turns: list[PublicTurn],
+        turn_queue: PublicTurnQueue,
         history_limit: int = 200,
     ) -> SessionHandoff: ...
 
@@ -75,6 +78,7 @@ class RootSessionCoordinator:
         self._attached_session_id: str | None = None
         self._history = history
         self._handoffs: dict[str, str] = {}
+        self._background_work: dict[str, set[str]] = {}
 
     @property
     def current_session_id(self) -> str:
@@ -92,6 +96,23 @@ class RootSessionCoordinator:
 
     def is_attached(self, session_id: str) -> bool:
         return self.is_current(session_id) and self._attached_session_id == session_id
+
+    @property
+    def is_quiescent(self) -> bool:
+        return not self._background_work.get(self.current_session_id)
+
+    def update_background_work(self, event: BackgroundWorkEvent) -> bool:
+        was_quiescent = self.is_quiescent
+        pending = self._background_work.setdefault(event.session_id, set())
+        if event.phase == "started":
+            pending.add(event.work_id)
+        else:
+            pending.discard(event.work_id)
+            if not pending:
+                self._background_work.pop(event.session_id, None)
+        return event.session_id == self.current_session_id and (
+            was_quiescent != self.is_quiescent
+        )
 
     def routes_active_turn(self, session_id: str, turn: PublicTurn) -> bool:
         if self.is_attached(session_id):
@@ -116,6 +137,7 @@ class RootSessionCoordinator:
             history = []
         self._history.replace(history)
         self._handoffs.clear()
+        self._background_work.clear()
         self._resources.restore_loops()
 
     def all_history(
@@ -134,6 +156,7 @@ class RootSessionCoordinator:
         turns_limit: int | None = None,
         include_history: bool = True,
         include_turns: bool = True,
+        turn_queue: PublicTurnQueue | None = None,
     ) -> PublicSessionState:
         state = build_public_state(
             self._agent_loop,
@@ -147,9 +170,13 @@ class RootSessionCoordinator:
             include_history=include_history,
             include_turns=include_turns,
         )
-        return state.model_copy(
-            update={"event_id": self._event_watermark(state.session.id)}
-        )
+        update: dict[str, object] = {
+            "event_id": self._event_watermark(state.session.id),
+            "is_quiescent": self.is_quiescent,
+        }
+        if turn_queue is not None:
+            update["turn_queue"] = turn_queue
+        return state.model_copy(update=update)
 
     async def handoff_active_turn(
         self,
@@ -159,6 +186,7 @@ class RootSessionCoordinator:
         callbacks: list[PublicCallbackEntry],
         active_turn: PublicTurn,
         completed_turns: list[PublicTurn],
+        turn_queue: PublicTurnQueue,
         history_limit: int = 200,
     ) -> SessionHandoff:
         new_session_id = self._begin_handoff(old_session_id)
@@ -169,6 +197,7 @@ class RootSessionCoordinator:
             turns=[*completed_turns, active_turn],
             retrying=None,
             history_limit=history_limit,
+            turn_queue=turn_queue,
         )
         return SessionHandoff(
             old_session_id=old_session_id,
@@ -274,19 +303,12 @@ class RootSessionCoordinator:
         details: JsonValue,
         history_limit: int,
     ) -> PublicSessionState:
-        history = _rebind_history(self.all_history(current_history), session_id)
-        timestamp = now_ms()
-        history.append(
-            PublicCheckpointEntry(
-                id=f"checkpoint:{kind}:{uuid4()}",
-                session_id=session_id,
-                created_at=timestamp,
-                updated_at=timestamp,
-                generation_status=PublicEntryGenerationStatus.COMPLETED,
-                kind=kind,
-                message=message,
-                details=details,
-            )
+        history = rebind_history_with_checkpoint(
+            self.all_history(current_history),
+            session_id,
+            kind=kind,
+            message=message,
+            details=details,
         )
         self._history.replace(history)
         return self.public_state(
@@ -303,6 +325,7 @@ class RootSessionCoordinator:
             raise RuntimeError("Session handoff did not change the session ID")
         if self._attached_session_id == old_session_id:
             self._attached_session_id = new_session_id
+        self._background_work.pop(old_session_id, None)
         self._handoffs[old_session_id] = new_session_id
         self._child_sessions.handoff_root(old_session_id, new_session_id)
         self._resources.transfer_loops()
@@ -320,6 +343,31 @@ def rebind_history(
     history: list[PublicHistoryEntry], session_id: str
 ) -> list[PublicHistoryEntry]:
     return _rebind_history(history, session_id)
+
+
+def rebind_history_with_checkpoint(
+    history: list[PublicHistoryEntry],
+    session_id: str,
+    *,
+    kind: str,
+    message: str,
+    details: JsonValue = None,
+) -> list[PublicHistoryEntry]:
+    rebound = _rebind_history(history, session_id)
+    timestamp = now_ms()
+    rebound.append(
+        PublicCheckpointEntry(
+            id=f"checkpoint:{kind}:{uuid4()}",
+            session_id=session_id,
+            created_at=timestamp,
+            updated_at=timestamp,
+            generation_status=PublicEntryGenerationStatus.COMPLETED,
+            kind=kind,
+            message=message,
+            details=details,
+        )
+    )
+    return rebound
 
 
 def _rebind_history(

@@ -28,10 +28,16 @@ from vibe.app_server._runtime import (
     RuntimeSessionNotFoundError,
     close_agent_loop,
 )
+from vibe.app_server._session_model import clear_session_active_model_override
 from vibe.app_server._sessions import SessionRuntimeRegistry
 from vibe.app_server._shell import ShellConflictError
 from vibe.app_server._shell_requests import ShellRequestHandler
 from vibe.app_server._state import build_public_state, history_page
+from vibe.app_server._turn_queue import (
+    TurnQueueFullError,
+    TurnQueueIdempotencyConflictError,
+    TurnQueueItemNotFoundError,
+)
 from vibe.app_server._turns import (
     CallbackClosedError,
     CallbackConflictError,
@@ -52,6 +58,7 @@ from vibe.app_server._workspace import (
     decide_workspace_trust,
     prepare_prompt,
 )
+from vibe.app_server._worktree_session import SessionWorktrees
 from vibe.app_server.models import (
     CallbackOutput,
     PublicCallbackEntry,
@@ -111,8 +118,18 @@ from vibe.app_server.protocol import (
     TeleportPushRespondParams,
     TeleportStartParams,
     TeleportStartResponse,
+    TurnEnqueueParams,
+    TurnEnqueueResponse,
     TurnInterruptParams,
     TurnInterruptResponse,
+    TurnQueueReadParams,
+    TurnQueueReadResponse,
+    TurnQueueRemoveParams,
+    TurnQueueRemoveResponse,
+    TurnQueueReplaceParams,
+    TurnQueueReplaceResponse,
+    TurnQueueResumeParams,
+    TurnQueueResumeResponse,
     TurnStartParams,
     TurnStartResponse,
     TurnSteerParams,
@@ -136,7 +153,7 @@ from vibe.app_server.protocol import (
 )
 from vibe.core.agent_loop import AgentLoop, AgentLoopStateError
 from vibe.core.compaction import CompactionFailedError
-from vibe.core.git.worktree import ManagedWorktree
+from vibe.core.session.image_snapshot import ImageSnapshotError
 from vibe.observability.logging import logger
 
 DEFAULT_HISTORY_LIMIT = 200
@@ -214,6 +231,22 @@ class CoreRequestHandler:
             return await self._dispatch(method, raw_params)
         except TurnConflictError as exc:
             raise RequestFailure(ProtocolErrorCode.CONFLICT, str(exc)) from exc
+        except TurnQueueFullError as exc:
+            raise RequestFailure(
+                ProtocolErrorCode.CONFLICT, str(exc), data={"maxItems": exc.max_items}
+            ) from exc
+        except TurnQueueIdempotencyConflictError as exc:
+            raise RequestFailure(
+                ProtocolErrorCode.CONFLICT,
+                str(exc),
+                data={"idempotencyKey": exc.idempotency_key},
+            ) from exc
+        except TurnQueueItemNotFoundError as exc:
+            raise RequestFailure(
+                ProtocolErrorCode.NOT_FOUND,
+                str(exc),
+                data={"queueItemId": exc.queue_item_id},
+            ) from exc
         except StaleTurnError as exc:
             raise RequestFailure(
                 ProtocolErrorCode.STALE_TURN,
@@ -226,7 +259,7 @@ class CoreRequestHandler:
             raise RequestFailure(ProtocolErrorCode.CALLBACK_CLOSED, str(exc)) from exc
         except CallbackConflictError as exc:
             raise RequestFailure(ProtocolErrorCode.CONFLICT, str(exc)) from exc
-        except (PromptPreparationError, WorkspaceTrustError) as exc:
+        except (ImageSnapshotError, PromptPreparationError, WorkspaceTrustError) as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
         except ShellConflictError as exc:
             raise RequestFailure(ProtocolErrorCode.CONFLICT, str(exc)) from exc
@@ -249,6 +282,8 @@ class CoreRequestHandler:
     async def _dispatch(
         self, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult:
+        if method.startswith("app_server/session/turn/"):
+            return await self._dispatch_turn(method, raw_params)
         namespace = method.partition("/")[0]
         match namespace:
             case "session":
@@ -414,6 +449,7 @@ class CoreRequestHandler:
             return await self._dispatch_session_delegated(method, raw_params)
         runtime_updated = False
         session_attached = False
+        after_response: Callable[[], None] | None = None
         match method:
             case "session/ready/wait":
                 response: ProtocolModel = await self._wait_ready(
@@ -452,13 +488,16 @@ class CoreRequestHandler:
                 self._require_attached(params.session_id)
                 response = await self._turns.inject(params)
             case "session/history/clear":
-                response = await self._history_clear(
+                response, after_response = await self._history_clear(
                     validate_wire(SessionHistoryClearParams, raw_params)
                 )
             case _:
                 raise method_not_found(method)
         return DispatchResult(
-            response, runtime_updated=runtime_updated, session_attached=session_attached
+            response,
+            after_response=after_response,
+            runtime_updated=runtime_updated,
+            session_attached=session_attached,
         )
 
     async def _dispatch_session_delegated(
@@ -475,9 +514,10 @@ class CoreRequestHandler:
                 )
             )
         if method == "session/compact":
-            return DispatchResult(
-                await self._compact(validate_wire(SessionCompactParams, raw_params))
+            response, after_response = await self._compact(
+                validate_wire(SessionCompactParams, raw_params)
             )
+            return DispatchResult(response, after_response=after_response)
         return await self._dispatch_session_catalog(method, raw_params)
 
     async def _dispatch_session_catalog(
@@ -590,24 +630,56 @@ class CoreRequestHandler:
     async def _dispatch_rewind(
         self, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult:
+        after_response: Callable[[], None] | None = None
         match method:
             case "session/rewind/read":
                 response: ProtocolModel = self._rewind_read(
                     validate_wire(SessionRewindReadParams, raw_params)
                 )
             case "session/rewind":
-                response = await self._rewind(
+                response, after_response = await self._rewind(
                     validate_wire(SessionRewindParams, raw_params)
                 )
             case _:
                 raise method_not_found(method)
-        return DispatchResult(response)
+        return DispatchResult(response, after_response=after_response)
 
     async def _dispatch_turn(
         self, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult:
         response: ProtocolModel
+        after_response: Callable[[], None] | None = None
         match method:
+            case "app_server/session/turn/enqueue":
+                params = validate_wire(TurnEnqueueParams, raw_params)
+                self._require_attached(params.session_id)
+                result, after_response = self._turns.enqueue(params)
+                response = TurnEnqueueResponse(
+                    queue_item_id=result.record.queued_turn.id
+                )
+            case "app_server/session/turn/queue/read":
+                params = validate_wire(TurnQueueReadParams, raw_params)
+                self._require_attached(params.session_id)
+                response = TurnQueueReadResponse(queue=self._turns.queue_state)
+            case "app_server/session/turn/queue/remove":
+                params = validate_wire(TurnQueueRemoveParams, raw_params)
+                self._require_attached(params.session_id)
+                _, after_response = self._turns.remove_queued_turn(params.queue_item_id)
+                response = TurnQueueRemoveResponse()
+            case "app_server/session/turn/queue/replace":
+                params = validate_wire(TurnQueueReplaceParams, raw_params)
+                self._require_attached(params.session_id)
+                result, after_response = self._turns.replace_queued_turn(
+                    params.queue_item_id, params.as_enqueue_params()
+                )
+                response = TurnQueueReplaceResponse(
+                    queue_item_id=result.record.queued_turn.id
+                )
+            case "app_server/session/turn/queue/resume":
+                params = validate_wire(TurnQueueResumeParams, raw_params)
+                self._require_attached(params.session_id)
+                after_response = self._turns.resume_queue()
+                response = TurnQueueResumeResponse()
             case "turn/start":
                 start_params = validate_wire(TurnStartParams, raw_params)
                 self._require_attached(start_params.session_id)
@@ -625,7 +697,6 @@ class CoreRequestHandler:
                 response = TurnSteerResponse(
                     last_event_id=self._current_event_id(steer_params.session_id)
                 )
-                after_response = None
             case "turn/interrupt":
                 params = validate_wire(TurnInterruptParams, raw_params)
                 self._require_turn_route(params.session_id, params.expected_turn_id)
@@ -633,7 +704,6 @@ class CoreRequestHandler:
                 response = TurnInterruptResponse(
                     last_event_id=self._current_event_id(params.session_id)
                 )
-                after_response = None
             case _:
                 raise method_not_found(method)
         return DispatchResult(response, after_response)
@@ -870,7 +940,9 @@ class CoreRequestHandler:
         paths = self._agent_loop.rewind_manager.restorable_paths_at(index)
         return SessionRewindReadResponse(has_file_changes=bool(paths), paths=paths)
 
-    async def _rewind(self, params: SessionRewindParams) -> SessionRewindResponse:
+    async def _rewind(
+        self, params: SessionRewindParams
+    ) -> tuple[SessionRewindResponse, Callable[[], None] | None]:
         self._require_attached(params.session_id)
         index = self._rewind_index(params.entry_id)
         history = self._all_history()
@@ -896,7 +968,7 @@ class CoreRequestHandler:
             ) = await self._agent_loop.rewind_manager.rewind_to_message(
                 index, restore_files=params.restore_files, inplace=params.inplace
             )
-            await self._turns.reset()
+            after_response = await self._turns.reset()
             handoff = self._root_session.replace_idle_with_history(
                 params.session_id,
                 history=history[:history_index],
@@ -908,12 +980,15 @@ class CoreRequestHandler:
                     "inplace": params.inplace,
                 },
             )
-        return SessionRewindResponse(
-            message=message,
-            restore_errors=restore_errors,
-            restored_paths=restored_paths,
-            state=handoff.state,
-            session_log=handoff.session_log,
+        return (
+            SessionRewindResponse(
+                message=message,
+                restore_errors=restore_errors,
+                restored_paths=restored_paths,
+                state=handoff.state,
+                session_log=handoff.session_log,
+            ),
+            after_response,
         )
 
     def _rewind_index(self, entry_id: str) -> int:
@@ -1070,7 +1145,7 @@ class CoreRequestHandler:
 
     async def _history_clear(
         self, params: SessionHistoryClearParams
-    ) -> SessionHistoryClearResponse:
+    ) -> tuple[SessionHistoryClearResponse, Callable[[], None] | None]:
         self._require_session(params.session_id)
         if self._turns.active_turn is not None:
             raise RequestFailure(
@@ -1081,19 +1156,38 @@ class CoreRequestHandler:
             SessionExecutionKind.LIFECYCLE, f"clear:{params.session_id}"
         ):
             previous_history = self._turns.history
+            session_model_pinned = (
+                self._agent_loop.session_logger.active_model is not None
+            )
             await self._agent_loop.clear_history()
-            await self._turns.reset()
+            if session_model_pinned:
+                failures = await clear_session_active_model_override(
+                    self._agent_loop.config_orchestrator,
+                    reason="clear session active model",
+                )
+                if failures:
+                    raise RequestFailure(
+                        ProtocolErrorCode.INTERNAL_ERROR,
+                        f"Failed to clear session active model: {failures[0]}",
+                    )
+                await self._agent_loop.reload_with_initial_messages()
+            after_response = await self._turns.reset()
             handoff = self._root_session.replace_idle(
                 params.session_id,
                 current_history=previous_history,
                 checkpoint_kind="clear",
                 checkpoint_message="New conversation started",
             )
-        return SessionHistoryClearResponse(
-            state=handoff.state, session_log=handoff.session_log
+        return (
+            SessionHistoryClearResponse(
+                state=handoff.state, session_log=handoff.session_log
+            ),
+            after_response,
         )
 
-    async def _compact(self, params: SessionCompactParams) -> SessionCompactResponse:
+    async def _compact(
+        self, params: SessionCompactParams
+    ) -> tuple[SessionCompactResponse, Callable[[], None] | None]:
         self._require_session(params.session_id)
         if self._turns.active_turn is not None:
             raise RequestFailure(
@@ -1111,7 +1205,7 @@ class CoreRequestHandler:
                     str(exc),
                     {"reason": exc.reason},
                 ) from exc
-            await self._turns.reset()
+            after_response = await self._turns.reset()
             handoff = self._root_session.replace_idle(
                 params.session_id,
                 current_history=previous_history,
@@ -1119,8 +1213,11 @@ class CoreRequestHandler:
                 checkpoint_message="Context compacted",
                 checkpoint_details={"summaryLength": len(summary)},
             )
-        return SessionCompactResponse(
-            summary=summary, state=handoff.state, session_log=handoff.session_log
+        return (
+            SessionCompactResponse(
+                summary=summary, state=handoff.state, session_log=handoff.session_log
+            ),
+            after_response,
         )
 
     async def _relocate(self, params: SessionRelocateParams) -> SessionRelocateResponse:
@@ -1132,29 +1229,27 @@ class CoreRequestHandler:
         with self._execution.reserve(SessionExecutionKind.LIFECYCLE, "relocate"):
             previous_cwd = self._agent_loop.cwd
             session_id = self._agent_loop.session_id
-            # Expanded here rather than passed through raw, because the loop
-            # expands before it moves: a `~` target would relocate the session
-            # and leave the holder on a path that never existed.
-            target = Path(params.cwd).expanduser().resolve()
-            # A move that stays inside one managed worktree -- into a
-            # subdirectory of it, or to a sibling path the loop then refuses --
-            # resolves to the claim the session already holds. Taking that hold
-            # is a no-op, so giving it back would drop the one the session is
-            # still standing on and leave the checkout readable as idle for
-            # another session to delete.
-            changes_worktree = _worktree_root(target) != _worktree_root(previous_cwd)
+            # Off the loop, and in one hop. Both halves are filesystem reads --
+            # `resolve` walks symlinks, and locating a claim resolves twice more
+            # -- so a relocate onto a slow mount would otherwise stall every
+            # other session while this one worked out where it was going.
+            target, changes_worktree = await asyncio.to_thread(
+                _relocation_target, params.cwd, previous_cwd
+            )
             # A session is held only where it was opened, and a move would
             # otherwise leave the destination unheld: another session reading it
             # as idle may remove the checkout this one is standing in. Taken
             # before the move so nothing can reclaim it in between, and given
             # back if the move is refused.
             if changes_worktree:
-                await asyncio.to_thread(_hold_worktree, target, session_id)
+                await asyncio.to_thread(SessionWorktrees.hold, target, session_id)
             try:
                 await self._agent_loop.relocate(target)
             except AgentLoopStateError as exc:
                 if changes_worktree:
-                    await asyncio.to_thread(_release_worktree, target, session_id)
+                    await asyncio.to_thread(
+                        SessionWorktrees.release, target, session_id
+                    )
                 raise RequestFailure(
                     ProtocolErrorCode.INVALID_PARAMS, str(exc)
                 ) from exc
@@ -1164,7 +1259,9 @@ class CoreRequestHandler:
                 # would not give this hold back, because close releases the cwd
                 # the loop has rolled back to, not the one taken above.
                 if changes_worktree:
-                    await asyncio.to_thread(_release_worktree, target, session_id)
+                    await asyncio.to_thread(
+                        SessionWorktrees.release, target, session_id
+                    )
                 raise
             destination = self._agent_loop.cwd
             if destination == previous_cwd:
@@ -1180,7 +1277,9 @@ class CoreRequestHandler:
             # above rather than before it, so the session is never briefly
             # holding neither checkout.
             if changes_worktree:
-                await asyncio.to_thread(_release_worktree, previous_cwd, session_id)
+                await asyncio.to_thread(
+                    SessionWorktrees.release, previous_cwd, session_id
+                )
             previous_history = self._turns.history
             await self._turns.reset()
             state = self._root_session.append_checkpoint(
@@ -1213,6 +1312,7 @@ class CoreRequestHandler:
             turns_limit=turns_limit,
             include_history=include_history,
             include_turns=include_turns,
+            turn_queue=self._turns.queue_state,
         )
 
     def _all_history(self) -> list[PublicHistoryEntry]:
@@ -1241,22 +1341,22 @@ class CoreRequestHandler:
             )
 
 
-# The marker that says a session is working in a managed worktree. `at` answers
-# None for a directory Vibe did not create, which is most of them, so both of
-# these do nothing outside one.
-def _hold_worktree(cwd: Path, session_id: str) -> None:
-    if managed := ManagedWorktree.at(cwd):
-        managed.hold(session_id)
-
-
-def _release_worktree(cwd: Path, session_id: str) -> None:
-    if managed := ManagedWorktree.at(cwd):
-        managed.release_holder(session_id)
-
-
-# None for a path outside every managed worktree, which compares unequal to any
-# root and equal to another such path: two unmanaged directories share no hold
-# to preserve, and there is nothing to take or give back either way.
-def _worktree_root(cwd: Path) -> Path | None:
-    managed = ManagedWorktree.at(cwd)
-    return None if managed is None else managed.root
+# Where the move is going, and whether it changes which worktree is held.
+#
+# One function because both answers come from the same filesystem reads, and
+# the caller wants them together on one trip off the event loop.
+#
+# A move that stays inside one managed worktree -- into a subdirectory of it,
+# or to a sibling path the loop then refuses -- resolves to the claim the
+# session already holds. Taking that hold is a no-op, so giving it back would
+# drop the one the session is still standing on and leave the checkout readable
+# as idle for another session to delete.
+def _relocation_target(requested: str, previous_cwd: Path) -> tuple[Path, bool]:
+    # Expanded here rather than passed through raw, because the loop expands
+    # before it moves: a `~` target would relocate the session and leave the
+    # holder on a path that never existed.
+    target = Path(requested).expanduser().resolve()
+    changes_worktree = SessionWorktrees.root(target) != SessionWorktrees.root(
+        previous_cwd
+    )
+    return target, changes_worktree

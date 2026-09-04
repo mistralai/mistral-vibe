@@ -56,6 +56,7 @@ from vibe.core.plugins._compatibility import (
     typescript_identifier,
 )
 from vibe.core.plugins._content import digest_plugin_tree
+from vibe.core.plugins._diagnostics import PluginDiagnosticCode
 from vibe.core.plugins._foreign import OpenCodePluginAdapter
 from vibe.core.plugins._kimi import KimiPluginAdapter
 from vibe.core.skills.models import SkillInfo, SkillMetadata, SkillScope, SkillSource
@@ -519,10 +520,13 @@ class PluginResolver:
             for candidate in sorted(selected, key=lambda item: item.descriptor.name)
             for name, skill in candidate.skills.items()
         }
-        mcp_servers = tuple(
-            server
-            for candidate in sorted(selected, key=lambda item: item.descriptor.name)
-            for server in candidate.mcp_servers
+        mcp_servers = self._remove_config_shadowed_mcp_servers(
+            tuple(
+                server
+                for candidate in sorted(selected, key=lambda item: item.descriptor.name)
+                for server in candidate.mcp_servers
+            ),
+            {candidate.descriptor.name: candidate.descriptor for candidate in selected},
         )
         runtime_hooks = tuple(
             hook
@@ -1506,6 +1510,47 @@ class PluginResolver:
                         component="library",
                     )
                 )
+        return tuple(selected)
+
+    def _remove_config_shadowed_mcp_servers(
+        self,
+        definitions: tuple[PluginMCPServerDefinition, ...],
+        plugins: Mapping[str, PluginDescriptor],
+    ) -> tuple[PluginMCPServerDefinition, ...]:
+        # The keyring, /mcp and every login key on the source id, so a plugin
+        # sharing one with a configured server would be handed the tokens the
+        # user granted that server and send them to the url the plugin
+        # declared. Config owns the name. Dropping rather than renaming: the
+        # name is the identity the token was granted against, so a rename would
+        # point the plugin's server at a grant that was never made.
+        if self._config_orchestrator is None:
+            return definitions
+        configured = {
+            server.name for server in self._config_orchestrator.config.mcp_servers
+        }
+        selected: list[PluginMCPServerDefinition] = []
+        for definition in definitions:
+            if definition.source_id not in configured:
+                selected.append(definition)
+                continue
+            plugin = plugins.get(definition.plugin_name)
+            self._issues.append(
+                PluginConfigIssue(
+                    file=definition.config_file,
+                    message=(
+                        f"Plugin {definition.plugin_name!r} MCP server "
+                        f"{definition.source_id!r} was disabled: a configured MCP "
+                        "server already uses that name, and the two would share "
+                        "credentials. Rename it in the plugin, or remove the "
+                        "configured server."
+                    ),
+                    severity="warning",
+                    code=PluginDiagnosticCode.MCP_SERVER_SHADOWED,
+                    fatal=False,
+                    source_format=None if plugin is None else plugin.source_format,
+                    component="mcp_server",
+                )
+            )
         return tuple(selected)
 
     def _load_mcp_servers(

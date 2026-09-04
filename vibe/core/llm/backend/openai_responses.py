@@ -100,8 +100,8 @@ class _ResponsesReasoningItem(TypedDict, total=False):
 
 class _ResponsesErrorData(TypedDict, total=False):
     type: str
-    code: str
-    message: str
+    code: str | None
+    message: str | None
 
 
 class _ResponsesObject(TypedDict, total=False):
@@ -110,22 +110,52 @@ class _ResponsesObject(TypedDict, total=False):
     error: _ResponsesErrorData | None
 
 
-class _ResponsesStreamEvent(TypedDict, total=False):
+type _RawResponsesStreamEvent = dict[str, Any]
+
+# Compatible providers can add fields or vary fields that Vibe does not read. Validate
+# the event type at ingestion, then validate only the fields that its handler consumes.
+# Keep these local schemas consistent with the published provider contracts:
+# https://github.com/openai/openai-python/blob/main/src/openai/types/responses/response_stream_event.py
+# https://github.com/Azure/azure-rest-api-specs/blob/main/specification/cognitiveservices/data-plane/AzureOpenAI/inference/preview/2025-04-01-preview/inference.yaml
+
+
+class _ResponsesStreamEventEnvelope(TypedDict):
     type: str
-    code: str
-    message: str
+
+
+class _ResponsesDeltaEvent(_ResponsesStreamEventEnvelope, total=False):
     output_index: int
     delta: str
+
+
+class _ResponsesToolCallEvent(_ResponsesDeltaEvent, total=False):
     call_id: str
     name: str
     arguments: str
+
+
+class _ResponsesOutputItemEvent(_ResponsesStreamEventEnvelope, total=False):
+    output_index: int
     item: dict[str, Any]
+
+
+class _ResponsesTerminalEvent(_ResponsesStreamEventEnvelope, total=False):
     response: _ResponsesObject
-    error: _ResponsesErrorData
+
+
+class _ResponsesErrorEvent(_ResponsesTerminalEvent, total=False):
+    code: str | None
+    message: str | None
+    error: _ResponsesErrorData | None
 
 
 _RESPONSES_OBJECT_ADAPTER = TypeAdapter(_ResponsesObject)
-_RESPONSES_STREAM_EVENT_ADAPTER = TypeAdapter(_ResponsesStreamEvent)
+_RESPONSES_STREAM_EVENT_ENVELOPE_ADAPTER = TypeAdapter(_ResponsesStreamEventEnvelope)
+_RESPONSES_DELTA_EVENT_ADAPTER = TypeAdapter(_ResponsesDeltaEvent)
+_RESPONSES_TOOL_CALL_EVENT_ADAPTER = TypeAdapter(_ResponsesToolCallEvent)
+_RESPONSES_OUTPUT_ITEM_EVENT_ADAPTER = TypeAdapter(_ResponsesOutputItemEvent)
+_RESPONSES_TERMINAL_EVENT_ADAPTER = TypeAdapter(_ResponsesTerminalEvent)
+_RESPONSES_ERROR_EVENT_ADAPTER = TypeAdapter(_ResponsesErrorEvent)
 _RESPONSES_FUNCTION_CALL_ITEM_ADAPTER = TypeAdapter(_ResponsesFunctionCallItem)
 _RESPONSES_MESSAGE_ITEM_ADAPTER = TypeAdapter(_ResponsesMessageItem)
 _RESPONSES_REASONING_ITEM_ADAPTER = TypeAdapter(_ResponsesReasoningItem)
@@ -152,11 +182,12 @@ class _OpenAIResponsesStreamParser:
         self._ignored_event_types.clear()
         self._tool_call_states.clear()
 
-    def parse(self, data: _ResponsesStreamEvent) -> LLMChunk:
-        handler = self._EVENT_HANDLERS.get(data.get("type", ""))
+    def parse(self, data: _RawResponsesStreamEvent) -> LLMChunk:
+        event = _RESPONSES_STREAM_EVENT_ENVELOPE_ADAPTER.validate_python(data)
+        handler = self._EVENT_HANDLERS.get(event["type"])
         if handler is not None:
             return handler(self, data)
-        return self._on_unknown_event(data)
+        return self._on_unknown_event(event)
 
     @staticmethod
     def _is_commentary_message(item: dict[str, Any]) -> bool:
@@ -311,47 +342,51 @@ class _OpenAIResponsesStreamParser:
             index=index,
         )
 
-    def _on_response_created(self, _data: _ResponsesStreamEvent) -> LLMChunk:
+    def _on_response_created(self, _data: _RawResponsesStreamEvent) -> LLMChunk:
         self.reset()
         return self._empty_chunk()
 
-    def _on_text_delta(self, data: _ResponsesStreamEvent) -> LLMChunk:
-        delta = data.get("delta", "")
-        if data.get("output_index", 0) not in self._commentary_indices:
+    def _on_text_delta(self, data: _RawResponsesStreamEvent) -> LLMChunk:
+        event = _RESPONSES_DELTA_EVENT_ADAPTER.validate_python(data)
+        delta = event.get("delta", "")
+        if event.get("output_index", 0) not in self._commentary_indices:
             return self._assistant_text_chunk(delta)
         return self._reasoning_chunk(delta)
 
-    def _on_reasoning_delta(self, data: _ResponsesStreamEvent) -> LLMChunk:
-        return self._reasoning_chunk(data.get("delta", ""))
+    def _on_reasoning_delta(self, data: _RawResponsesStreamEvent) -> LLMChunk:
+        event = _RESPONSES_DELTA_EVENT_ADAPTER.validate_python(data)
+        return self._reasoning_chunk(event.get("delta", ""))
 
-    def _on_tool_call_delta(self, data: _ResponsesStreamEvent) -> LLMChunk:
-        delta = data.get("delta", "")
-        if not delta and not data.get("name") and not data.get("call_id"):
+    def _on_tool_call_delta(self, data: _RawResponsesStreamEvent) -> LLMChunk:
+        event = _RESPONSES_TOOL_CALL_EVENT_ADAPTER.validate_python(data)
+        delta = event.get("delta", "")
+        if not delta and not event.get("name") and not event.get("call_id"):
             return self._empty_chunk()
 
-        index = data.get("output_index")
+        index = event.get("output_index")
         if index is None:
             raise ValueError("Tool call chunk missing index")
 
         state = self._tool_call_states.get(index, _ResponsesToolCallState())
         self._remember_tool_call_state(
             index=index,
-            call_id=data.get("call_id"),
-            name=data.get("name"),
+            call_id=event.get("call_id"),
+            name=event.get("name"),
             arguments=state.arguments + delta,
             name_emitted=state.name_emitted,
             arguments_emitted=state.arguments_emitted,
         )
         return self._empty_chunk()
 
-    def _on_output_item_added(self, data: _ResponsesStreamEvent) -> LLMChunk:
-        item = data.get("item") or {}
+    def _on_output_item_added(self, data: _RawResponsesStreamEvent) -> LLMChunk:
+        event = _RESPONSES_OUTPUT_ITEM_EVENT_ADAPTER.validate_python(data)
+        item = event.get("item") or {}
         match item.get("type"):
             case "message" if self._is_commentary_message(item):
-                self._commentary_indices.add(data.get("output_index", 0))
+                self._commentary_indices.add(event.get("output_index", 0))
             case "function_call":
                 item = _RESPONSES_FUNCTION_CALL_ITEM_ADAPTER.validate_python(item)
-                index = data.get("output_index")
+                index = event.get("output_index")
                 if index is not None:
                     self._remember_tool_call_state(
                         index=index,
@@ -372,31 +407,34 @@ class _OpenAIResponsesStreamParser:
                 )
         return self._empty_chunk()
 
-    def _on_tool_call_done(self, data: _ResponsesStreamEvent) -> LLMChunk:
+    def _on_tool_call_done(self, data: _RawResponsesStreamEvent) -> LLMChunk:
+        event = _RESPONSES_TOOL_CALL_EVENT_ADAPTER.validate_python(data)
         return self._finalize_tool_call(
-            index=data.get("output_index"),
-            call_id=data.get("call_id"),
-            name=data.get("name"),
-            arguments=data.get("arguments"),
+            index=event.get("output_index"),
+            call_id=event.get("call_id"),
+            name=event.get("name"),
+            arguments=event.get("arguments"),
         )
 
-    def _on_output_item_done(self, data: _ResponsesStreamEvent) -> LLMChunk:
-        item = data.get("item") or {}
+    def _on_output_item_done(self, data: _RawResponsesStreamEvent) -> LLMChunk:
+        event = _RESPONSES_OUTPUT_ITEM_EVENT_ADAPTER.validate_python(data)
+        item = event.get("item") or {}
         match item.get("type"):
             case "message" if self._is_commentary_message(item):
-                self._commentary_indices.add(data.get("output_index", 0))
+                self._commentary_indices.add(event.get("output_index", 0))
             case "function_call":
                 item = _RESPONSES_FUNCTION_CALL_ITEM_ADAPTER.validate_python(item)
                 return self._finalize_tool_call(
-                    index=data.get("output_index"),
+                    index=event.get("output_index"),
                     call_id=item.get("call_id") or item.get("id"),
                     name=item.get("name"),
                     arguments=item.get("arguments"),
                 )
         return self._empty_chunk()
 
-    def _on_response_terminal(self, data: _ResponsesStreamEvent) -> LLMChunk:
-        response_obj = cast(_ResponsesObject, data.get("response") or {})
+    def _on_response_terminal(self, data: _RawResponsesStreamEvent) -> LLMChunk:
+        event = _RESPONSES_TERMINAL_EVENT_ADAPTER.validate_python(data)
+        response_obj = cast(_ResponsesObject, event.get("response") or {})
         self.reset()
         output = response_obj.get("output") or []
         return LLMChunk(
@@ -406,20 +444,22 @@ class _OpenAIResponsesStreamParser:
                 reasoning_payloads=self._reasoning_payloads_from_output(output),
             ),
             usage=self._usage_from_response(response_obj.get("usage")),
-            stop=StopInfo(reason=data.get("type", "").removeprefix("response.")),
+            stop=StopInfo(reason=event["type"].removeprefix("response.")),
         )
 
-    def _on_error(self, data: _ResponsesStreamEvent) -> LLMChunk:
+    def _on_error(self, data: _RawResponsesStreamEvent) -> LLMChunk:
+        event = _RESPONSES_ERROR_EVENT_ADAPTER.validate_python(data)
         self.reset()
-        response = data.get("response") or {}
-        error = _RESPONSES_ERROR_DATA_ADAPTER.validate_python(
-            response.get("error") or data.get("error") or data
-        )
+        response = event.get("response") or {}
+        error_data = response.get("error") or event.get("error")
+        if error_data is None:
+            error_data = {"code": event.get("code"), "message": event.get("message")}
+        error = _RESPONSES_ERROR_DATA_ADAPTER.validate_python(error_data)
         error_type = error.get("code") or error.get("type") or "unknown_error"
-        error_message = error.get("message", "Unknown streaming error")
+        error_message = error.get("message") or "Unknown streaming error"
         raise OpenAIResponsesStreamError(error_type, error_message)
 
-    def _on_unknown_event(self, data: _ResponsesStreamEvent) -> LLMChunk:
+    def _on_unknown_event(self, data: _ResponsesStreamEventEnvelope) -> LLMChunk:
         if event_type := data.get("type"):
             if event_type not in self._ignored_event_types:
                 logger.debug(
@@ -431,7 +471,9 @@ class _OpenAIResponsesStreamParser:
     _EVENT_HANDLERS: ClassVar[
         dict[
             str,
-            Callable[[_OpenAIResponsesStreamParser, _ResponsesStreamEvent], LLMChunk],
+            Callable[
+                [_OpenAIResponsesStreamParser, _RawResponsesStreamEvent], LLMChunk
+            ],
         ]
     ] = {
         "response.created": _on_response_created,
@@ -696,9 +738,7 @@ class OpenAIResponsesAdapter(APIAdapter):
                 ),
             )
 
-        return self._stream_parser.parse(
-            _RESPONSES_STREAM_EVENT_ADAPTER.validate_python(data)
-        )
+        return self._stream_parser.parse(data)
 
     async def parse_stream(
         self, responses: AsyncGenerator[dict[str, Any]], provider: ProviderConfig

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import json
-from typing import Final
+from typing import Any, Final
+
+from pydantic import ValidationError
 
 from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
+from vibe.core.config.models import ModelConfig
 from vibe.core.config.types import EMPTY_CONFIG_SNAPSHOT, LayerConfigSnapshot
 from vibe.core.experiments.active import ExperimentName
 
@@ -87,6 +90,12 @@ GROWTHBOOK_CONFIG_MAPPINGS: Final[
             lambda variant: True if variant == "managed" else None,
         ),
     ),
+    ExperimentName.REGISTRY_SKILLS: (
+        (
+            "experimental_enable_registry_skills",
+            lambda variant: True if variant == "on" else None,
+        ),
+    ),
 }
 
 
@@ -108,7 +117,7 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
         if not self._variants:
             return EMPTY_CONFIG_SNAPSHOT
 
-        data: dict[str, str | bool] = {}
+        data: dict[str, Any] = {}
         for experiment_name, field_mappers in GROWTHBOOK_CONFIG_MAPPINGS.items():
             variant = self._variants.get(experiment_name.value)
             if variant is None:
@@ -117,6 +126,14 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
                 mapped_value = map_variant(variant)
                 if mapped_value is not None:
                     data[config_field] = mapped_value
+
+        models = _routed_models(data)
+        if models:
+            # Expose routed models through the canonical deep-merged field as
+            # well as the compatibility routing fields. Higher-priority user
+            # layers can then override them sparsely, and config provenance can
+            # address their fields like every other model.
+            data["models"] = models
 
         if not data:
             return EMPTY_CONFIG_SNAPSHOT
@@ -127,3 +144,23 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
 
     async def _save_to_store(self, _next_config: RawConfig) -> str:
         raise NotImplementedError("GrowthbookLayer is read-only")
+
+
+def _routed_models(data: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    models: dict[str, dict[str, Any]] = {}
+    for value in (data.get("routed_model_config"), data.get("routed_extra_models")):
+        if not isinstance(value, str):
+            continue
+        decoded = json.loads(value)
+        entries = decoded if isinstance(decoded, list) else [decoded]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                model = ModelConfig.model_validate(entry)
+            except ValidationError:
+                continue
+            if not model.alias:
+                continue
+            models[model.alias] = entry
+    return models

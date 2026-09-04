@@ -4,8 +4,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
 from pathlib import Path
+import threading
 from threading import Event
 from typing import cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -23,6 +25,7 @@ from vibe.app_server._session_backend_port import (
     SessionConnectorState,
     SessionConnectorToolDescriptor,
 )
+import vibe.app_server.connector_catalog as connector_catalog
 from vibe.app_server.connector_catalog import (
     ConnectorCatalogCache,
     ConnectorCatalogService,
@@ -42,10 +45,11 @@ def _connector(
     connector_id: str = "connector-1",
     name: str = "wiki",
     ready: bool = True,
+    protocol: str | None = "mcp",
     tool_name: str = "search",
     bootstrap_errors: list[str] | None = None,
 ) -> dict[str, object]:
-    return {
+    connector: dict[str, object] = {
         "id": connector_id,
         "name": name,
         "status": {"is_ready": ready},
@@ -61,6 +65,146 @@ def _connector(
         ],
         "bootstrap_errors": bootstrap_errors,
     }
+    if protocol is not None:
+        connector["protocol"] = protocol
+    return connector
+
+
+@pytest.mark.asyncio
+async def test_connector_bootstrap_processing_runs_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The blocking HTTP setup and response parsing do not stall the caller's loop."""
+    # Prepare
+    event_loop_thread = threading.get_ident()
+    construction_threads: list[int] = []
+    parsing_threads: list[int] = []
+    response = MagicMock()
+    response.json.side_effect = lambda: (
+        parsing_threads.append(threading.get_ident()),
+        {"connectors": []},
+    )[1]
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.get = AsyncMock(return_value=response)
+
+    def build_client() -> MagicMock:
+        construction_threads.append(threading.get_ident())
+        return client
+
+    monkeypatch.setattr(connector_catalog, "_build_bootstrap_http_client", build_client)
+
+    # Do
+    payload = await connector_catalog._fetch_bootstrap(
+        "https://api.example.test", "secret"
+    )
+
+    # Assert
+    assert payload == {"connectors": []}
+    assert construction_threads[0] != event_loop_thread
+    assert parsing_threads[0] != event_loop_thread
+
+
+@pytest.mark.asyncio
+async def test_connector_catalog_skips_explicit_non_mcp_connectors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    async def fetch(_base_url: str, _api_key: str) -> object:
+        return {
+            "connectors": [
+                _connector(connector_id="mcp", name="MCP"),
+                _connector(connector_id="legacy", name="Legacy", protocol=None),
+                _connector(connector_id="empty", name="Empty", protocol=""),
+                _connector(connector_id="http", name="HTTP", protocol="http"),
+            ]
+        }
+
+    catalog = await ConnectorCatalogService(
+        implicit_source_enabled=False,
+        cache_path=tmp_path / "connectors.json",
+        fetch_bootstrap=fetch,
+    ).resolve_catalog(_orchestrator())
+
+    assert catalog is not None
+    assert [connector.raw_id for connector in catalog.connectors] == [
+        "empty",
+        "legacy",
+        "mcp",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_connector_catalog_resolution_runs_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Connector validation and projection do not stall the caller's event loop."""
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    event_loop_thread = threading.get_ident()
+    resolution_threads: list[int] = []
+    resolve_catalog = connector_catalog._resolve_catalog
+
+    async def fetch(_base_url: str, _api_key: str) -> object:
+        return {"connectors": [_connector()]}
+
+    def record_resolution(
+        payload: object, provider_fingerprint: str
+    ) -> ResolvedConnectorCatalog:
+        resolution_threads.append(threading.get_ident())
+        return resolve_catalog(payload, provider_fingerprint)
+
+    monkeypatch.setattr(connector_catalog, "_resolve_catalog", record_resolution)
+    service = ConnectorCatalogService(
+        implicit_source_enabled=False,
+        cache_path=tmp_path / "connectors.json",
+        fetch_bootstrap=fetch,
+    )
+
+    # Do
+    catalog = await service.resolve_catalog(_orchestrator())
+
+    # Assert
+    assert catalog is not None
+    assert resolution_threads[0] != event_loop_thread
+
+
+@pytest.mark.asyncio
+async def test_connector_catalog_async_read_keeps_keyring_and_disk_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Opening the cached catalog does not perform blocking reads on the caller's loop."""
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    event_loop_thread = threading.get_ident()
+    provider_threads: list[int] = []
+    cache_threads: list[int] = []
+    resolve_provider = connector_catalog._resolve_provider
+
+    def record_provider(config: VibeConfigSchema):
+        provider_threads.append(threading.get_ident())
+        return resolve_provider(config)
+
+    def read_cache(_fingerprint: str, *, now: int):
+        del now
+        cache_threads.append(threading.get_ident())
+        return None
+
+    service = ConnectorCatalogService(
+        implicit_source_enabled=False, cache_path=tmp_path / "connectors.json"
+    )
+    monkeypatch.setattr(connector_catalog, "_resolve_provider", record_provider)
+    monkeypatch.setattr(service._cache, "read", read_cache)
+
+    # Do
+    result = await service._read_catalog_async(_orchestrator())
+
+    # Assert
+    assert result.catalog is None
+    assert provider_threads[0] != event_loop_thread
+    assert cache_threads[0] != event_loop_thread
 
 
 def _orchestrator(*, connectors: list[ConnectorConfig] | None = None):
@@ -462,6 +606,7 @@ async def test_successful_bootstrap_writes_redacted_bounded_v2(
         "diagnostics",
         "id",
         "name",
+        "protocol",
         "status",
         "tools",
     }

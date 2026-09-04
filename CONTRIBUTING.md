@@ -129,9 +129,12 @@ Run all tests:
 uv run pytest
 ```
 
-By default, pytest uses `max(1, ceil(available CPUs / 2) - 1)` workers to leave
-resources available for the rest of the machine. Set
-`PYTEST_XDIST_AUTO_NUM_WORKERS` to a positive integer to override that limit:
+By default, local runs use `max(1, ceil(available CPUs / 2) - 1)` workers to
+leave resources available for the rest of the machine. CI runners (detected via
+`BUILDKITE` or `GITHUB_ACTIONS`) use every available CPU so the full suite stays
+fast; the generic `CI` variable is deliberately ignored because it is often set
+in developer shells. Set `PYTEST_XDIST_AUTO_NUM_WORKERS` to a positive integer
+to override either default:
 
 ```bash
 PYTEST_XDIST_AUTO_NUM_WORKERS=4 uv run pytest

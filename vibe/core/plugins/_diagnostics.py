@@ -49,6 +49,7 @@ class PluginDiagnosticCode(StrEnum):
     CONNECTOR_TOOL_SCHEMA_INVALID = "plugin.connector.tool_schema_invalid"
     MCP_AUTHORIZATION_REQUIRED = "plugin.mcp.authorization_required"
     MCP_CONNECTION_FAILED = "plugin.mcp.connection_failed"
+    MCP_SERVER_SHADOWED = "plugin.mcp.server_shadowed"
     MCP_TOOL_SCHEMA_INVALID = "plugin.mcp.tool_schema_invalid"
     TOOL_NAME_COLLISION = "plugin.tool.name_collision"
     TOOL_OVERRIDE_UNUSED = "plugin.tool_override.unused"

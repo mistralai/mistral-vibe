@@ -50,27 +50,40 @@ class _VibeFileHandler(RotatingFileHandler):
     pass
 
 
+# The Unified Harness runtime logs under this top-level logger. It is not a child
+# of the "vibe" logger, so it propagates to the root logger -- which carries no Vibe
+# file handler -- and its diagnostics never reach vibe.log. Capture it alongside
+# Vibe's own logger so `--experimental-harness` sessions are observable.
+_HARNESS_LOGGER_NAME = "mistralai_vibe_local_harness"
+
+
 def init_file_logging(
     log_file: Path, *, target_logger: logging.Logger = logger
 ) -> None:
     resolved_log_file = log_file.expanduser().resolve()
-    for handler in target_logger.handlers:
-        if (
+    targets = [target_logger]
+    harness_logger = logging.getLogger(_HARNESS_LOGGER_NAME)
+    if harness_logger not in targets:
+        targets.append(harness_logger)
+
+    shared_handler: _VibeFileHandler | None = None
+    for candidate in targets:
+        if any(
             isinstance(handler, _VibeFileHandler)
             and Path(handler.baseFilename) == resolved_log_file
+            for handler in candidate.handlers
         ):
-            return
-
-    resolved_log_file.parent.mkdir(parents=True, exist_ok=True)
-    max_bytes = int(os.environ.get("LOG_MAX_BYTES", 10 * 1024 * 1024))
-
-    handler = _VibeFileHandler(
-        resolved_log_file, maxBytes=max_bytes, backupCount=0, encoding="utf-8"
-    )
-    handler.setFormatter(StructuredLogFormatter())
-    target_logger.setLevel(logging.DEBUG)
-    target_logger.addHandler(handler)
-    _log_level_state._apply_effective(target_logger)
+            continue
+        if shared_handler is None:
+            resolved_log_file.parent.mkdir(parents=True, exist_ok=True)
+            max_bytes = int(os.environ.get("LOG_MAX_BYTES", 10 * 1024 * 1024))
+            shared_handler = _VibeFileHandler(
+                resolved_log_file, maxBytes=max_bytes, backupCount=0, encoding="utf-8"
+            )
+            shared_handler.setFormatter(StructuredLogFormatter())
+        candidate.setLevel(logging.DEBUG)
+        candidate.addHandler(shared_handler)
+        _log_level_state._apply_effective(candidate)
 
 
 LOG_LEVELS: frozenset[str] = frozenset({

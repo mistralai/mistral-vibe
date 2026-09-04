@@ -17,7 +17,8 @@ from textual.worker import Worker
 
 from vibe.app_server.models import (
     EffectDetail,
-    FileEditEffectInput as FileEditInput,
+    FileEditEffectBatchInput as FileEditBatchInput,
+    FileEditEffectInput as SingleFileEditInput,
     FileEditEffectOutput as FileEditOutput,
     FileReadEffectInput as FileReadInput,
     FileReadEffectOutput as FileReadOutput,
@@ -38,6 +39,7 @@ from vibe.app_server.models import (
 from vibe.cli.textual_ui.widgets.diff_rendering import (
     DiffOccurrence,
     DiffView,
+    edit_diff_batch_inputs,
     edit_diff_inputs,
     language_for_path,
     render_edit_diff_async,
@@ -264,6 +266,9 @@ class WriteFileResultWidget(ToolResultWidget[FileWriteOutput]):
         yield from self._footer()
 
 
+type FileEditInput = SingleFileEditInput | FileEditBatchInput
+
+
 class EditApprovalWidget(ToolApprovalWidget[FileEditInput]):
     def __init__(self, args: FileEditInput) -> None:
         super().__init__(args)
@@ -279,17 +284,31 @@ class EditApprovalWidget(ToolApprovalWidget[FileEditInput]):
         yield NoMarkupStatic("")
         yield Vertical(self._diff_view, classes="diff-scroll")
 
-        if self.args.replace_all:
+        if isinstance(self.args, SingleFileEditInput) and self.args.replace_all:
             yield NoMarkupStatic("(replace_all)", classes="approval-description")
+        elif isinstance(self.args, FileEditBatchInput):
+            yield NoMarkupStatic(
+                f"({len(self.args.changes)} ordered changes)",
+                classes="approval-description",
+            )
 
     async def on_mount(self) -> None:
         # Approximate: queued edits ahead of this one may shift the real lines.
-        self._occurrences = await edit_diff_inputs(
-            self.args.file_path,
-            self.args.old_string,
-            self.args.new_string,
-            replace_all=self.args.replace_all,
-        )
+        if isinstance(self.args, FileEditBatchInput):
+            self._occurrences = await edit_diff_batch_inputs(
+                self.args.file_path,
+                [
+                    (change.old_string, change.new_string, change.replace_all)
+                    for change in self.args.changes
+                ],
+            )
+        else:
+            self._occurrences = await edit_diff_inputs(
+                self.args.file_path,
+                self.args.old_string,
+                self.args.new_string,
+                replace_all=self.args.replace_all,
+            )
         if self.is_attached:
             ansi, dark = self._requested_render_theme or (
                 self.app.native_ansi_color,
@@ -340,15 +359,19 @@ class EditResultWidget(ToolResultWidget[FileEditOutput]):
         self._diff_view = DiffView([], ansi=False, dark=True)
         self._requested_render_theme: tuple[bool, bool] | None = None
         self._render_worker: Worker[None] | None = None
-        self._occurrences = (
-            [
+        if result is None:
+            self._occurrences = []
+        elif result.occurrences:
+            self._occurrences = [
                 DiffOccurrence(item.start_line, item.old_text, item.new_text)
                 for item in result.occurrences
             ]
-            or [DiffOccurrence(None, result.old_string, result.new_string)]
-            if result
-            else []
-        )
+        elif result.old_string is not None and result.new_string is not None:
+            self._occurrences = [
+                DiffOccurrence(None, result.old_string, result.new_string)
+            ]
+        else:
+            self._occurrences = []
 
     def compose(self) -> ComposeResult:
         if not self.result:

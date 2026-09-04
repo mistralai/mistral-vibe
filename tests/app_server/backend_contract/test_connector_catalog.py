@@ -45,6 +45,7 @@ def _connector(
     connector_id: str,
     name: str,
     *,
+    protocol: str = "mcp",
     ready: bool = True,
     auth_action: str = "none",
     tools: tuple[str, ...] = ("search",),
@@ -52,6 +53,7 @@ def _connector(
     return {
         "id": connector_id,
         "name": name,
+        "protocol": protocol,
         "status": {"is_ready": ready},
         **({"auth_action": {"type": auth_action}} if auth_action != "none" else {}),
         "tools": [

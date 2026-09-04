@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from pathlib import Path
 import threading
 
 import pytest
 
-from tests.conftest import build_test_agent_loop
+from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.app_server import (
     attach_test_app_server_session,
@@ -19,13 +20,82 @@ from vibe.app_server.client import AppServerClient
 from vibe.app_server.events import (
     HistoryEntryAdded,
     SessionSnapshot,
+    SessionUpdated,
     StatsUpdated,
     TurnRetrying,
 )
 from vibe.app_server.models import PublicRetryCategory
 from vibe.app_server.transport import memory_transport_pair
+from vibe.core.config import SessionLoggingConfig
 from vibe.core.types import AssistantEvent, UserMessageEvent
 from vibe.core.utils import RetryReason
+
+
+@pytest.mark.asyncio
+async def test_background_title_keeps_runtime_non_quiescent_until_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generation_started = asyncio.Event()
+    finish_generation = asyncio.Event()
+
+    async def generate_title(*_args, **_kwargs) -> str:
+        generation_started.set()
+        await finish_generation.wait()
+        return "Generated title"
+
+    monkeypatch.setattr(
+        "vibe.core.session.title_model.generate_session_title", generate_title
+    )
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            save_dir=str(tmp_path / "sessions"), session_prefix="session", enabled=True
+        )
+    )
+    agent_loop = build_test_agent_loop(
+        config=config,
+        backend=FakeBackend([[mock_llm_chunk(content="done")]]),
+        auto_title_enabled=True,
+    )
+    client_transport, server_transport = memory_transport_pair()
+    server = build_test_app_server(agent_loop, server_transport)
+    session = await attach_test_app_server_session(
+        AppServerClient(client_transport, run_peer=server.serve)
+    )
+    turn_events = session.act("hello", auto_title="Deterministic")
+    background_events = session.events()
+
+    try:
+        during_turn = await asyncio.wait_for(_consume(turn_events), timeout=1)
+        await asyncio.wait_for(generation_started.wait(), timeout=1)
+
+        pending = [
+            event
+            for event in during_turn
+            if isinstance(event, SessionSnapshot) and event.state.is_quiescent is False
+        ]
+        assert len(pending) == 1
+        assert session.state.is_quiescent is False
+
+        finish_generation.set()
+        delivered: list[object] = []
+        while True:
+            event = await asyncio.wait_for(background_events.__anext__(), timeout=1)
+            delivered.append(event)
+            if isinstance(event, SessionSnapshot) and event.state.is_quiescent is True:
+                break
+
+        title_update = next(
+            event for event in delivered if isinstance(event, SessionUpdated)
+        )
+        assert title_update.session.title == "Generated title"
+        assert isinstance(delivered[-1], SessionSnapshot)
+        assert session.state.is_quiescent is True
+    finally:
+        finish_generation.set()
+        await background_events.aclose()
+        await turn_events.aclose()
+        await session.close()
+        await agent_loop.aclose()
 
 
 @pytest.mark.asyncio

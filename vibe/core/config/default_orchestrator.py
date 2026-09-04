@@ -27,7 +27,6 @@ async def build_default_orchestrator(
     data: dict[str, Any] | None = None,
     *,
     harness_files: HarnessFilesManager | None = None,
-    require_api_key: bool = True,
 ) -> ConfigOrchestrator[VibeConfigSchema]:
     """Build the CLI ConfigOrchestrator with the standard layer stack.
 
@@ -39,9 +38,8 @@ async def build_default_orchestrator(
     layers are installed together when
     their sources are enabled, so a trusted project config inherits unspecified
     values from the user config and both TOML layers override GrowthBook
-    assignments. The default persistence target is the project layer when one is
-    discovered and trusted, otherwise the user layer, otherwise an ephemeral
-    fallback.
+    assignments. The default persistence target is the user layer, otherwise a
+    trusted project layer, otherwise an ephemeral fallback.
     """
     manager = harness_files or get_harness_files_manager()
     user_layer = (
@@ -59,11 +57,12 @@ async def build_default_orchestrator(
     override_layer = OverridesLayer(data=data or {})
 
     def default_layer_resolver() -> ConfigLayer[RawConfig]:
-        if project_layer is not None and project_layer.is_trusted:
-            if project_layer.is_file_discovered or user_layer is None:
-                return project_layer
+        # User config wins by default: a project config discovered by walking up
+        # parents is rarely the scope the user meant in a monorepo.
         if user_layer is not None:
             return user_layer
+        if project_layer is not None and project_layer.is_trusted:
+            return project_layer
         return override_layer
 
     layers = [
@@ -85,7 +84,6 @@ async def build_default_orchestrator(
         schema=VibeConfigSchema,
         layers=layers,
         default_layer_resolver=default_layer_resolver,
-        validation_context={"require_api_key": require_api_key},
     )
     await asyncio.to_thread(
         configure_ssl_context,
@@ -103,5 +101,4 @@ async def build_user_config_orchestrator() -> ConfigOrchestrator[VibeConfigSchem
         schema=VibeConfigSchema,
         layers=[user_layer],
         default_layer_resolver=lambda: user_layer,
-        validation_context={"require_api_key": False},
     )

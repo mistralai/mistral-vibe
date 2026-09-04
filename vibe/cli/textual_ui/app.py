@@ -28,16 +28,11 @@ from textual.events import AppBlur, AppFocus, MouseScrollDown, MouseScrollUp, Mo
 from textual.screen import Screen
 from textual.widget import Widget
 from textual.widgets import Static
-from textual.worker import Worker, WorkerFailed, WorkerState
+from textual.worker import Worker, WorkerError, WorkerFailed, WorkerState
 
 from vibe import __version__ as CORE_VERSION
 from vibe.app_server import AppServerHost, AppServerSession, SessionExitSummary
-from vibe.app_server.config import (
-    THINKING_LEVELS,
-    ConfigView,
-    ModelConfigView,
-    ThinkingLevel,
-)
+from vibe.app_server.config import THINKING_LEVELS, ConfigView, ThinkingLevel
 from vibe.app_server.events import (
     AppServerEvent,
     CallbackRequested,
@@ -47,6 +42,7 @@ from vibe.app_server.events import (
     ServerWarning,
     StatsUpdated,
     TurnCompleted,
+    TurnQueueUpdated,
     TurnStarted,
 )
 from vibe.app_server.models import (
@@ -56,6 +52,7 @@ from vibe.app_server.models import (
     ApprovalCallbackOutput,
     ApprovalDecision,
     ApprovalDecisionType,
+    ConfigIssue,
     EffectDetail,
     ImageAttachment,
     MCPSourceKind,
@@ -67,6 +64,7 @@ from vibe.app_server.models import (
     PublicHistoryEntry,
     PublicMessageEntry,
     PublicNoticeEntry,
+    PublicQueuedTurn,
     PublicReasoningEntry,
     PublicSession,
     PublicTurnStatus,
@@ -127,7 +125,6 @@ from vibe.cli.textual_ui.mcp_commands import (
     parse_mcp_subcommand,
 )
 from vibe.cli.textual_ui.message_queue import (
-    MessageQueue,
     QueueController,
     QueuePorts,
     SideChannelController,
@@ -138,7 +135,6 @@ from vibe.cli.textual_ui.notifications import (
     NotificationPort,
     TextualNotificationAdapter,
 )
-from vibe.cli.textual_ui.queue_kinds import QueuedItemKind
 from vibe.cli.textual_ui.quit_manager import QuitManager
 from vibe.cli.textual_ui.scheduled_loop_runner import ScheduledLoopCommands
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
@@ -167,6 +163,8 @@ from vibe.cli.textual_ui.widgets.links import normalize_url
 from vibe.cli.textual_ui.widgets.load_more import HistoryLoadMoreRequested
 from vibe.cli.textual_ui.widgets.loading import (
     DEFAULT_LOADING_STATUS,
+    INITIALIZING_LOADING_STATUS,
+    INTERRUPTING_LOADING_STATUS,
     LoadingWidget,
     paused_timer,
 )
@@ -174,7 +172,6 @@ from vibe.cli.textual_ui.widgets.log_level_picker import LogLevelPickerApp
 from vibe.cli.textual_ui.widgets.messages import (
     VSCODE_EXTENSION_PROMO_WHATS_NEW_SUFFIX,
     AssistantMessage,
-    BashOutputMessage,
     CustomToolsDeprecationMessage,
     ErrorMessage,
     GreetingMessage,
@@ -199,6 +196,7 @@ from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.cli.textual_ui.widgets.rewind_app import RewindApp
 from vibe.cli.textual_ui.widgets.rewind_fork_message import RewindForkMessage
 from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
+from vibe.cli.textual_ui.widgets.skills_browser import SkillsBrowserApp
 from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
 from vibe.cli.textual_ui.widgets.theme_picker import ThemePickerApp, sorted_theme_names
 from vibe.cli.textual_ui.widgets.thinking_picker import ThinkingPickerApp
@@ -362,6 +360,7 @@ class BottomApp(StrEnum):
     Question = auto()
     ThemePicker = auto()
     ThinkingPicker = auto()
+    SkillsBrowser = auto()
     Rewind = auto()
     VibeCodeProjectPicker = auto()
     VibeCodeProjectCreate = auto()
@@ -608,6 +607,19 @@ def _noop_narrator_manager() -> NarratorManagerPort:
     return cast(NarratorManagerPort, _IdleNarratorManager())
 
 
+def _indicator_agent_name(profile: AgentSummary, bypass_tool_permissions: bool) -> str:
+    name = profile.display_name.lower()
+    if bypass_tool_permissions and profile.safety is not AgentSafety.YOLO:
+        return f"{name} · auto-approve"
+    return name
+
+
+def _indicator_safety(
+    profile: AgentSummary, bypass_tool_permissions: bool
+) -> AgentSafety:
+    return AgentSafety.YOLO if bypass_tool_permissions else profile.safety
+
+
 _REJECT_HINT_BUSY = "wait for the current job to finish."
 _REJECT_HINT_PAUSED = "clear the queue first or remove this input."
 
@@ -643,6 +655,8 @@ class VibeApp(App):  # noqa: PLR0904
     _greeting_message: GreetingMessage | None = None
     _tui_displayed_monotonic: float | None = None
     _startup_telemetry_sent: bool = False
+    _turn_ui_generation: int = 0
+    _turn_ui_mutex: asyncio.Lock | None = None
     _main_ui_mounted: bool = False
     _mount_first: bool = False
     _initial_config_response: ConfigReadResponse | None = None
@@ -695,8 +709,35 @@ class VibeApp(App):  # noqa: PLR0904
             default_title="Vibe",
         )
         self._interrupt_requested = False
+        # A locally submitted turn is "in flight" from the moment the user hits
+        # Enter until the server confirms it started (TurnStarted). The unified
+        # backend runs turns server-side (enqueue -> promote -> TurnStarted), so
+        # unlike the legacy local `_agent_task` there is a gap where nothing looks
+        # active. This flag bridges that gap so the spinner, busy-routing, and
+        # interruptibility all derive from one "turn in flight" notion; the event
+        # lets an interrupt fired during the gap wait for the turn to surface.
+        self._pending_turn = False
+        self._turn_started_event = asyncio.Event()
+        # An interrupt settles asynchronously: the server pauses the queue and
+        # completes the turn out-of-band, so a submit fired right after Escape
+        # would otherwise race that propagation and read stale queue state.
+        self._interrupt_pending = False
+        self._interrupt_settled = asyncio.Event()
+        self._interrupt_settled.set()
+        # Rebinding replaces the attached session and all presentation derived
+        # from it. Hold newly delivered events until that presentation reset is
+        # complete so the replacement session cannot render into the old UI.
+        self._resume_ui_ready = asyncio.Event()
+        self._resume_ui_ready.set()
+        # Deferred submits (those that waited out an interrupt) run in workers;
+        # this lock keeps them ordered so a fast double-Enter stays FIFO, and the
+        # counter routes later submits through the same lock until they drain.
+        self._deferred_submit_lock = asyncio.Lock()
+        self._deferred_submits = 0
         self._agent_task: asyncio.Task | None = None
         self._bash_task: asyncio.Task | None = None
+        self._app_server_events_worker: Worker[None] | None = None
+        self._app_server_event_handler_lock = asyncio.Lock()
         self._init_controllers()
 
         self._loading_widget: LoadingWidget | None = None
@@ -740,6 +781,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._cached_messages_area: Widget | None = None
         self._cached_chat: ChatScroll | None = None
         self._cached_loading_area: Widget | None = None
+        self._context_progress: ContextProgress | None = None
         self._debug_console: DebugConsole | None = None
         self._desired_agent: str | None = None
         self._agent_switch_active = False
@@ -827,12 +869,6 @@ class VibeApp(App):  # noqa: PLR0904
         # input box before app_server exists, so a submit awaits this instead of
         # crashing on the unbound property.
         self._session_ready = asyncio.Event()
-        # Set while the chat input (BottomApp.Input) is the active bottom app.
-        # Cleared when a picker/modal mounts via _switch_from_input; the queue
-        # drain awaits it after a queued command so a picker command (e.g. /mcp,
-        # /resume) blocks drainage until the user dismisses it.
-        self._input_app_ready = asyncio.Event()
-        self._input_app_ready.set()
         self._picker = _PickerState()
         # Guards against double-display of MCP/startup notices across the
         # readiness-watch and finish-resume-notices race; unrelated to picker preview.
@@ -846,25 +882,21 @@ class VibeApp(App):  # noqa: PLR0904
     def config(self) -> ConfigView:
         return self.app_server.resources.config.current
 
-    @property
-    def _input_queue(self) -> MessageQueue:
-        return self._queue.queue
-
     def _build_queue_ports(self) -> QueuePorts:
         return QueuePorts(
             mount_and_scroll=self._mount_and_scroll,
-            agent_running=self._agent_job_active,
-            bash_task=lambda: self._bash_task,
-            active_model=self._active_model_or_none,
-            remove_loading_widget=self._remove_loading_widget,
+            current_turn_queue=lambda: self.app_server.turn_queue,
+            enqueue_turn=self._enqueue_queued_turn,
+            replace_queued_turn=self._replace_queued_turn,
+            remove_queued_turn=lambda queue_item_id: self.app_server.remove_queued_turn(
+                queue_item_id
+            ),
+            resume_turn_queue=lambda: self.app_server.resume_turn_queue(),
+            steer_turn=self._steer_queue_prompts,
+            turn_has_started=self._queued_turn_has_started,
             set_loading_queue_count=self._set_loading_queue_count,
-            inject_queued_prompt=self._inject_queued_prompt,
-            start_agent_turn=self._start_queued_agent_turn,
-            await_agent_turn=self._await_agent_turn,
-            run_bash=self._start_queued_bash,
-            run_command=self._run_queued_command,
-            await_input_app=self._await_input_app,
             maybe_show_feedback_bar=self._maybe_show_feedback_bar,
+            send_mention_telemetry=self._send_mention_telemetry,
             send_skill_telemetry=self._send_skill_telemetry,
         )
 
@@ -873,59 +905,81 @@ class VibeApp(App):  # noqa: PLR0904
         self._side_channel = SideChannelController(
             SideChannelPorts(invoke_command=self._invoke_resolved_command)
         )
-        self._pending_theme: str | None = None
-        self._pending_model: str | None = None
-        self._pending_thinking: ThinkingLevel | None = None
-
-    @property
-    def _effective_theme(self) -> str:
-        return self._pending_theme or self.config.theme
-
-    @property
-    def _effective_model_alias(self) -> str:
-        return self._pending_model or self.config.active_model.alias
-
-    @property
-    def _effective_thinking(self) -> ThinkingLevel:
-        return self._pending_thinking or self.config.active_model.thinking
-
-    def _active_model_or_none(self) -> ModelConfigView | None:
-        return self.config.active_model
 
     def _model_pending(self) -> bool:
         return self.config.awaiting_experiment_model
 
     def _agent_job_active(self) -> bool:
+        if self._pending_turn:
+            return True
         if self._app_server is not None and self._app_server.turn_active:
             return True
         return self._agent_task is not None and not self._agent_task.done()
+
+    def _begin_pending_turn(self) -> None:
+        """Enter the 'turn in flight' state for a just-submitted idle prompt."""
+        self._pending_turn = True
+        self._turn_started_event.clear()
+
+    def _clear_pending_turn(self) -> None:
+        """Leave the in-flight state and wake anything waiting for turn start."""
+        self._pending_turn = False
+        self._turn_started_event.set()
 
     def _set_loading_queue_count(self, count: int) -> None:
         if self._loading_widget is not None:
             self._loading_widget.set_queue_count(count)
 
-    async def _inject_queued_prompt(
+    async def _enqueue_queued_turn(
         self,
         content: str,
         *,
         images: list[ImageAttachment] | None = None,
+        message_entry_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> PublicQueuedTurn:
+        return await self.app_server.enqueue(
+            content,
+            images=images,
+            message_entry_id=message_entry_id,
+            idempotency_key=idempotency_key,
+        )
+
+    async def _replace_queued_turn(
+        self,
+        queue_item_id: str,
+        content: str,
+        *,
+        images: list[ImageAttachment] | None = None,
+        message_entry_id: str | None = None,
+    ) -> PublicQueuedTurn | None:
+        return await self.app_server.replace_queued_turn(
+            queue_item_id, content, images=images, message_entry_id=message_entry_id
+        )
+
+    async def _steer_queue_prompts(
+        self,
+        content: str,
+        images: list[ImageAttachment] | None = None,
         client_message_id: str | None = None,
-        mention_stats: MentionStats | None = None,
     ) -> None:
-        events = await self.app_server.inject_user_context(
+        # Fail closed when the turn already ended: inject_user_context would
+        # otherwise write idle session context and steer_pending would drop the
+        # queue. Raising here re-enqueues the block as the next turn.
+        await self.app_server.inject_user_context(
             content,
             as_message=True,
             inject_invoked_skill=True,
             images=images,
             client_message_id=client_message_id,
-            mention_stats=mention_stats,
+            require_active_turn=True,
         )
-        for event in events:
-            self._track_narrator_event(event)
-            if self.event_handler:
-                await self.event_handler.handle_event(
-                    event, loading_widget=self._loading_widget
-                )
+
+    def _queued_turn_has_started(self, queue_item_id: str) -> bool:
+        return any(
+            turn.queue_item_id == queue_item_id
+            for turn in self.app_server.state.turns or []
+        )
 
     async def _maybe_show_feedback_bar(self) -> None:
         if await self.app_server.resources.feedback.should_show(
@@ -934,52 +988,15 @@ class VibeApp(App):  # noqa: PLR0904
             self._feedback_bar.show()
             await self.app_server.resources.feedback.record("asked")
 
-    def _start_queued_agent_turn(
-        self,
-        content: str,
-        *,
-        prepared_prompt: PreparedPrompt | None = None,
-        client_message_id: str | None = None,
-    ) -> asyncio.Task:
-        self._agent_task = asyncio.create_task(
-            self._handle_turn(
-                content,
-                prepared_prompt=prepared_prompt,
-                client_message_id=client_message_id,
-            )
-        )
-        return self._agent_task
-
-    async def _await_agent_turn(self) -> None:
-        agent_task = self._agent_task
-        if agent_task is None:
-            return
-        await agent_task
-
-    async def _await_input_app(self) -> None:
-        # Blocks while a picker/modal opened by a queued command is still on
-        # screen; returns immediately when the chat input is the active bottom
-        # app. See QueuePorts.await_input_app.
-        await self._input_app_ready.wait()
-
-    def _start_queued_bash(self, command: str) -> asyncio.Task:
-        self._bash_task = asyncio.create_task(
-            self._handle_bash_command(command, start_drain_on_finish=False)
-        )
-        return self._bash_task
-
-    async def _run_queued_command(
-        self, content: str, payload: Callable[[], Awaitable[None]] | None
+    async def _run_settings_update(
+        self, description: str, update: Callable[[], Awaitable[None]]
     ) -> None:
         try:
-            if payload is None:
-                await self._dispatch_idle_input(content)
-            else:
-                await payload()
+            await update()
         except Exception as exc:
-            logger.warning("Queued command failed: %s", content, exc_info=exc)
+            logger.warning("Settings update failed: %s", description, exc_info=exc)
             await self._mount_and_scroll(
-                ErrorMessage(f"Failed to apply: {content} — {exc}")
+                ErrorMessage(f"Failed to apply: {description} — {exc}")
             )
 
     def _build_command_registry(self) -> CommandRegistry:
@@ -988,7 +1005,8 @@ class VibeApp(App):  # noqa: PLR0904
     def _command_context(self) -> CommandContext:
         return CommandContext(
             vibe_code_enabled=self.app_server.resources.config.current.vibe_code_enabled,
-            plugins_enabled=self.app_server.resources.plugins.supported,
+            registry_skills_enabled=self.app_server.resources.config.current.experimental_enable_registry_skills,
+            experimental_harness=self.app_server.resources.runtime.experimental_harness,
         )
 
     def _refresh_command_registry(self) -> None:
@@ -1048,6 +1066,11 @@ class VibeApp(App):  # noqa: PLR0904
                     else (init.hooks_count if init else 0)
                 ),
                 model_pending=self._model_pending() if has_session else False,
+                experimental_harness=(
+                    self.app_server.resources.runtime.experimental_harness
+                    if has_session
+                    else False
+                ),
             )
             yield self._banner
             yield VerticalGroup(id="messages")
@@ -1065,12 +1088,18 @@ class VibeApp(App):  # noqa: PLR0904
                 command_registry=self.commands,
                 id="input-container",
                 safety=(
-                    self.app_server.resources.agents.active.safety
+                    _indicator_safety(
+                        self.app_server.resources.agents.active,
+                        self._bypass_tool_permissions,
+                    )
                     if has_session
                     else AgentSafety.NEUTRAL
                 ),
                 agent_name=(
-                    self.app_server.resources.agents.active.display_name.lower()
+                    _indicator_agent_name(
+                        self.app_server.resources.agents.active,
+                        self._bypass_tool_permissions,
+                    )
                     if has_session
                     else ""
                 ),
@@ -1078,7 +1107,7 @@ class VibeApp(App):  # noqa: PLR0904
                 file_watcher_for_autocomplete_getter=self._is_file_watcher_enabled,
                 voice_manager=self._voice_manager,
                 queue_edit_active_getter=self._is_queue_edit_active,
-                queue_items_getter=self._queue.queue_items,
+                queue_items_getter=self._queue.queue_item_texts,
                 queue_selected_index_getter=self._queue_selected_queue_index,
             )
 
@@ -1086,14 +1115,14 @@ class VibeApp(App):  # noqa: PLR0904
             yield PathDisplay(self.app_server.cwd if has_session else str(Path.cwd()))
             yield NoMarkupStatic(process_id_label(), id="process-title")
             yield NoMarkupStatic(id="spacer")
-            context_progress = ContextProgress()
+            self._context_progress = ContextProgress()
             if has_session:
                 stats = self.app_server.resources.runtime.stats
-                context_progress.tokens = TokenState(
+                self._context_progress.tokens = TokenState(
                     max_tokens=self.app_server.resources.runtime.context_window,
                     current_tokens=stats.context_tokens,
                 )
-            yield context_progress
+            yield self._context_progress
 
     @property
     def _messages_area(self) -> Widget:
@@ -1119,9 +1148,16 @@ class VibeApp(App):  # noqa: PLR0904
             initial_theme = init.config.theme if init is not None else FALLBACK_THEME
             await self._apply_theme(initial_theme)
             self.call_after_refresh(self._record_tui_displayed)
-            self.run_worker(self._bootstrap_session(), exclusive=False)
+            if init is not None and init.startup_issue is not None:
+                self._show_config_issue(init.startup_issue)
+                self.call_after_refresh(self._start_bootstrap_session)
+            else:
+                self._start_bootstrap_session()
             return
         await self._mount_after_session_ready()
+
+    def _start_bootstrap_session(self) -> None:
+        self.run_worker(self._bootstrap_session(), exclusive=False)
 
     async def _mount_after_session_ready(self) -> None:
         await self._apply_theme(self.config.theme)
@@ -1183,6 +1219,7 @@ class VibeApp(App):  # noqa: PLR0904
             self.run_worker(self._apply_theme(config.theme))
         set_config_log_level(config.log_level)
         self._refresh_banner()
+        self._refresh_context_progress()
 
     async def _complete_mount(self) -> None:
         self.event_handler = EventHandler(
@@ -1232,8 +1269,9 @@ class VibeApp(App):  # noqa: PLR0904
         gc.freeze()
 
     def _update_context_progress(self, event: StatsUpdated) -> None:
-        context_progress = self.query_one(ContextProgress)
-        context_progress.tokens = TokenState(
+        if self._context_progress is None:
+            return
+        self._context_progress.tokens = TokenState(
             max_tokens=event.params.context_window,
             current_tokens=event.params.stats.context_tokens,
         )
@@ -1245,25 +1283,9 @@ class VibeApp(App):  # noqa: PLR0904
         if self._tui_displayed_monotonic is None:
             self._tui_displayed_monotonic = time.monotonic()
 
-    async def _probe_plugin_catalog(self) -> None:
-        """Ask once whether this backend resolves plugins, and gate on the answer.
-
-        There is no flag to read: ``--experimental-harness`` is a CLI argument
-        the app server never sends back, and the same TUI talks to backends
-        that were never given one.
-        """
-        try:
-            await self.app_server.resources.plugins.read()
-        except Exception as exc:
-            logger.debug("Plugin catalogue probe failed: %s", exc)
-
     async def _complete_post_ready_startup(self) -> None:
         try:
-            await asyncio.gather(
-                self._refresh_account(),
-                self._refresh_identity(),
-                self._probe_plugin_catalog(),
-            )
+            await asyncio.gather(self._refresh_account(), self._refresh_identity())
         finally:
             self._refresh_command_registry()
             self._startup_command_availability_ready.set()
@@ -1296,21 +1318,26 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _show_config_issues(self) -> None:
         for issue in self.app_server.resources.runtime.issues:
-            self.notify(
-                f"{issue.file}\n{issue.message}",
-                severity="warning",
-                markup=False,
-                timeout=10,
-            )
+            self._show_config_issue(issue)
         for warning in self.app_server.resources.config.current.validation_warnings:
             self.notify(warning, severity="warning", markup=False, timeout=10)
+
+    def _show_config_issue(self, issue: ConfigIssue) -> None:
+        self.notify(
+            f"{issue.file}\n{issue.message}",
+            severity="warning",
+            markup=False,
+            timeout=10,
+        )
 
     async def _watch_init_completion(self) -> None:
         """Show 'Initializing' loading indicator until background init finishes."""
         init_widget = None
         try:
             if not self.app_server.resources.runtime.ready:
-                await self._ensure_loading_widget("Initializing", show_hint=False)
+                await self._ensure_loading_widget(
+                    INITIALIZING_LOADING_STATUS, show_hint=False
+                )
                 init_widget = self._loading_widget
             await self.app_server.resources.runtime.wait_until_ready()
             await self._show_post_init_notices_once()
@@ -1340,7 +1367,17 @@ class VibeApp(App):  # noqa: PLR0904
                 self._chat_input_container.display = False
             self._fatal_init_error = True
         finally:
-            if self._loading_widget is init_widget:
+            # A submit during init reuses this same widget as the turn spinner
+            # (via _ensure_loading_widget, which flips the label to "Generating"),
+            # so only tear it down if it is still the idle init indicator.
+            # Otherwise the turn lifecycle owns it now and removing it would drop
+            # the first-turn spinner. Checking the widget's own label keeps this
+            # path decoupled from turn state.
+            if (
+                init_widget is not None
+                and self._loading_widget is init_widget
+                and init_widget.base_status == INITIALIZING_LOADING_STATUS
+            ):
                 await self._remove_loading_widget()
             self._refresh_banner()
             try:
@@ -1361,6 +1398,7 @@ class VibeApp(App):  # noqa: PLR0904
             logger.exception("Failed to send startup telemetry")
         self._show_mcp_discovery_failures()
         await self._show_mcp_auth_required_notice()
+        await self._show_skill_updates_notice()
 
     def _is_cold_start(self) -> bool | None:
         """True if this process paid first-run startup cost (cold), False if it
@@ -1402,6 +1440,24 @@ class VibeApp(App):  # noqa: PLR0904
                 "prompt_for_workspace_trust": self._startup_prompt_for_workspace_trust,
                 "is_cold_start": self._is_cold_start(),  # None for frozen binaries; safe to ignore for python dist
             },
+        )
+
+    async def _show_skill_updates_notice(self) -> None:
+        """CTA when pinned skills have new versions since last session."""
+        if not self.app_server.resources.config.current.experimental_enable_registry_skills:
+            return
+        try:
+            updates = await self.app_server.resources.skills.updates()
+        except Exception:
+            return
+        if not updates:
+            return
+        names = ", ".join(u.name for u in updates)
+        self.notify(
+            f"New version available for skill(s): {names}. Run /skills to update.",
+            severity="information",
+            markup=False,
+            timeout=12,
         )
 
     def _show_mcp_discovery_failures(self) -> None:
@@ -1456,10 +1512,38 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_chat_input_container_submitted(
         self, event: ChatInputContainer.Submitted
     ) -> None:
-        value = event.value.strip()
+        await self._submit_or_defer(event.value)
+
+    async def _submit_or_defer(self, raw_value: str) -> None:
+        # A submit fired right after Escape must see the settled post-interrupt
+        # queue state (paused/idle), not the transient state mid-interrupt, so
+        # it resumes or starts a turn instead of being dropped or trapped. The
+        # settle path completes turn/queue UI on the message pump, so a pending
+        # interrupt is drained in a worker to keep this handler from blocking it.
+        # While any deferred submit is still draining, later submits take the
+        # same ordered path so a fast double-Enter cannot reorder ahead of it.
+        if self._interrupt_pending or self._deferred_submits:
+            self._deferred_submits += 1
+            self.run_worker(self._deferred_dispatch(raw_value), exclusive=False)
+            return
+        await self._dispatch_submitted_value(raw_value)
+
+    async def _deferred_dispatch(self, raw_value: str) -> None:
+        try:
+            async with self._deferred_submit_lock:
+                await self._await_interrupt_settled()
+                await self._dispatch_submitted_value(raw_value)
+        finally:
+            self._deferred_submits -= 1
+
+    async def _dispatch_submitted_value(self, raw_value: str) -> None:
+        value = raw_value.strip()
         input_widget = self.query_one(ChatInputContainer)
 
-        if not value and not self._input_queue.paused:
+        if not value and not self._queue.paused:
+            # Enter on an empty input steers queued messages into the running
+            # turn (same as Ctrl+Enter); otherwise it stays a no-op.
+            await self._steer_queued_now()
             return
 
         if self._banner:
@@ -1469,7 +1553,7 @@ class VibeApp(App):  # noqa: PLR0904
             await self._whats_new_message.remove()
             self._whats_new_message = None
 
-        if self._input_queue.paused:
+        if self._queue.paused:
             if not await self._try_side_channel_command(value, input_widget):
                 if not await self._handle_paused_submit(value):
                     self._restore_input_if_empty(input_widget, value)
@@ -1489,21 +1573,15 @@ class VibeApp(App):  # noqa: PLR0904
         self, event: ChatInputContainer.QueueEditSubmitted
     ) -> None:
         event.stop()
-        # Resolve the edited item by widget identity: the drain is FIFO, so
-        # older items being consumed shifts the edited item to a lower index
-        # while it is still alive — a cached index would either miss it (out
-        # of range) or hit the wrong slot.
+        # Resolve the edited item by widget identity: app-server promotion is
+        # FIFO, so an older item starting shifts this one to a lower index. A
+        # cached index could then miss it or update the wrong prompt.
         current_index = self._queue_selected_queue_index()
         if current_index is None:
-            # Consumed by the drain despite the body's guard (race): copy on write.
-            await self._enqueue_edited_copy(event.value, event.kind)
+            # Promoted despite the body's guard (race): copy on write.
+            await self._enqueue_edited_copy(event.value)
             return
         widget = self._queue_selected_widget
-        if isinstance(widget, BashOutputMessage):
-            await self._queue.update_item(
-                current_index, self._bash_command(event.value)
-            )
-            return
         prepared = await self._prepare_prompt_or_abort(event.value)
         if prepared is None:
             return
@@ -1511,49 +1589,35 @@ class VibeApp(App):  # noqa: PLR0904
         # identity), not the live highlight: the body returns to selection
         # mode before this await, so Up/Down/Esc can move ``_queue_selected_widget``
         # away from the edited item. Tracking the captured widget avoids writing
-        # the edit onto a different item; if the drain consumed it, copy-on-write.
+        # the edit onto a different item; if it was promoted, copy on write.
         current_index = self._queue_index_of_widget(widget)
         if current_index is None:
-            await self._enqueue_edited_copy(event.value, event.kind)
+            await self._enqueue_edited_copy(event.value)
             return
-        await self._queue.update_item(
+        updated = await self._queue.update_prompt(
             current_index, event.value, prepared_prompt=prepared
         )
+        if not updated:
+            await self._enqueue_edited_copy(event.value)
 
-    @staticmethod
-    def _bash_command(value: str) -> str:
-        """Strip the leading ``!`` mode prefix so the queue stores the raw command
-        the shell should run (not the display form the textarea holds it in).
-        """
-        return value[1:] if value.startswith("!") else value
-
-    async def _enqueue_edited_copy(self, value: str, kind: QueuedItemKind) -> None:
-        """Copy-on-write recovery for an edit whose target was consumed: queue
-        the edited text as a fresh item, preserving its kind (bash stays bash so
-        shell text is never sent to the model as a prompt).
-        """
-        if kind == QueuedItemKind.BASH:
-            await self._queue.enqueue_bash(
-                self._bash_command(value), self.app_server.cwd
-            )
-            return
+    async def _enqueue_edited_copy(self, value: str) -> None:
+        """Queue an edited prompt again if the original started meanwhile."""
         await self._enqueue_prompt_with_resources(value)
 
     async def on_chat_input_container_queue_edit_consumed(
         self, event: ChatInputContainer.QueueEditConsumed
     ) -> None:
         event.stop()
-        await self._enqueue_edited_copy(event.value, event.kind)
+        await self._enqueue_edited_copy(event.value)
 
     async def on_chat_input_container_queue_remove_requested(
         self, event: ChatInputContainer.QueueRemoveRequested
     ) -> None:
         event.stop()
-        # Resolve the target by widget identity, like the edit path: the drain
-        # is FIFO, so a cached index goes stale if an older item is popped
-        # between the body's resync and this handler, deleting the wrong
-        # (newer) item. ``_queue_selected_queue_index`` returns None once the
-        # highlighted widget is gone (already consumed) — nothing left to remove.
+        # Resolve the target by widget identity, like the edit path: a cached
+        # index goes stale if an older prompt starts between the body's resync
+        # and this handler. Once the highlighted widget is gone there is
+        # nothing left to remove.
         current_index = self._queue_selected_queue_index()
         if current_index is None:
             return
@@ -1580,8 +1644,8 @@ class VibeApp(App):  # noqa: PLR0904
     def _queue_selected_queue_index(self) -> int | None:
         """Live queue index of the highlighted widget, or None if consumed.
 
-        Used by the body to detect drain consumption by widget identity — the
-        cached queue_index is unreliable once older items shift on FIFO drain.
+        Used by the body to detect app-server promotion by widget identity. The
+        cached queue index is unreliable once older prompts start.
         """
         return self._queue_index_of_widget(self._queue_selected_widget)
 
@@ -1671,57 +1735,72 @@ class VibeApp(App):  # noqa: PLR0904
             value, reject_hint=_REJECT_HINT_PAUSED
         ):
             return False
-        self._queue.set_paused(False)
-        self._queue.start_drain_if_needed()
+        await self._queue.resume()
         return True
 
     async def _handle_queue_submit(self, value: str, *, reject_hint: str) -> bool:
-        match classify(
-            value, commands=self.commands, resolve_skill=self._resolve_skill
-        ):
-            case Teleport():
-                self._warn_not_queueable(f"Teleport cannot be queued — {reject_hint}")
-                return False
-            case SlashCommand():
-                resolved = self.commands.parse_command(value)
-                flushes = bool(resolved is not None and resolved[1].flushes_pending)
-                await self._queue.enqueue_command(value, flushes_pending=flushes)
-            case Skill(command=command, name=name):
-                return await self._enqueue_prompt_with_resources(
-                    command, skill_name=name
-                )
-            case Bash(command=command):
-                await self._queue.enqueue_bash(command, self.app_server.cwd)
-            case EmptyBash():
-                await self._empty_bash_error()
-            case Prompt(text=text):
-                return await self._enqueue_prompt_with_resources(text)
+        if self._bash_task is not None and not self._bash_task.done():
+            rejection = f"Input cannot be queued while a shell command is running — {reject_hint}"
+        else:
+            rejection = None
+            match classify(
+                value, commands=self.commands, resolve_skill=self._resolve_skill
+            ):
+                case Teleport():
+                    rejection = f"Teleport cannot be queued — {reject_hint}"
+                case SlashCommand():
+                    rejection = f"Slash commands cannot be queued — {reject_hint}"
+                case Skill(command=command, name=name):
+                    return await self._enqueue_prompt_with_resources(
+                        command, skill_name=name
+                    )
+                case Bash():
+                    rejection = f"Shell commands cannot be queued — {reject_hint}"
+                case EmptyBash():
+                    await self._empty_bash_error()
+                    return False
+                case Prompt(text=text):
+                    return await self._enqueue_prompt_with_resources(text)
+        if rejection is not None:
+            self._warn_not_queueable(rejection)
+            return False
         return True
 
     async def _enqueue_prompt_with_resources(
-        self, content: str, *, skill_name: str | None = None
+        self,
+        content: str,
+        *,
+        skill_name: str | None = None,
+        optimistic_start: bool = False,
     ) -> bool:
         prepared = await self._prepare_prompt_or_abort(content)
         if prepared is None:
             return False
-        await self._queue.enqueue_prompt(
-            content, skill_name=skill_name, prepared_prompt=prepared
-        )
+        try:
+            await self._queue.enqueue_prompt(
+                content,
+                skill_name=skill_name,
+                prepared_prompt=prepared,
+                optimistic_start=optimistic_start,
+            )
+        except AppServerResponseError as error:
+            await self._mount_and_scroll(
+                ErrorMessage(str(error), collapsed=self._tools_collapsed)
+            )
+            return False
         return True
 
     def _is_busy(self) -> bool:
         if self._agent_job_active():
             return True
-        if self._bash_task is not None and not self._bash_task.done():
+        if self._queue.has_server_work:
             return True
-        if self._queue.draining:
+        if self._bash_task is not None and not self._bash_task.done():
             return True
         return False
 
     def _is_queue_edit_active(self) -> bool:
         if not self._queue:
-            return False
-        if self._queue.draining:
             return False
         return self._agent_job_active() or (
             self._bash_task is not None and not self._bash_task.done()
@@ -1821,6 +1900,50 @@ class VibeApp(App):  # noqa: PLR0904
                 ErrorMessage(str(exc), collapsed=self._tools_collapsed)
             )
             return None
+
+    def _input_in_queue_mode(self) -> bool:
+        containers = self.query(ChatInputContainer)
+        if not containers:
+            return False
+        body = containers[0]._body
+        return body is not None and body.in_queue_mode
+
+    async def on_chat_text_area_steer_queue_requested(
+        self, _event: ChatTextArea.SteerQueueRequested
+    ) -> None:
+        # Ctrl+Enter is the same action as empty Enter, including the
+        # interrupt-settle gate. Steering immediately would remove the queued
+        # block and inject it into a turn that Escape is already cancelling.
+        await self._submit_or_defer("")
+
+    async def _steer_queued_now(self) -> bool:
+        """Send queued messages into the running turn as steering.
+
+        Returns True when a steer was sent. No-op (returns False) unless a turn
+        is actually running and there is a promotable queued block; otherwise
+        the queue promotes on its own as usual.
+        """
+        if self._input_in_queue_mode():
+            # Empty Enter while selecting/editing a queued item is an edit
+            # action, not a steer (Ctrl+Enter already skips queue mode).
+            return False
+        if not self._queue.has_removable or not self.app_server.turn_active:
+            return False
+        try:
+            return await self._queue.steer_pending()
+        except AppServerResponseError as error:
+            # The turn ended between remove and steer: steer_pending already
+            # put the block back on the queue so it can promote as the next
+            # turn. Do not flash that recovery as an error.
+            if error.error.code is ProtocolErrorCode.STALE_TURN or (
+                error.error.code is ProtocolErrorCode.CONFLICT
+                and error.error.message == "No active turn"
+            ):
+                return False
+            await self._mount_and_scroll(
+                ErrorMessage(str(error), collapsed=self._tools_collapsed)
+            )
+            return False
 
     def on_chat_text_area_clipboard_image_pasted(
         self, message: ChatTextArea.ClipboardImagePasted
@@ -1949,9 +2072,9 @@ class VibeApp(App):  # noqa: PLR0904
             or changes.get("narrator_enabled") is True
             else None
         )
-        await self._queue.enqueue_command(
+        await self._run_settings_update(
             "voice settings",
-            command_payload=partial(
+            partial(
                 self._persist_voice_settings,
                 changes,
                 previous_voice_enabled,
@@ -1971,23 +2094,14 @@ class VibeApp(App):  # noqa: PLR0904
             )
             await self._switch_to_input_app()
             return
-        self._pending_model = message.alias
-        await self._queue.enqueue_command(
-            f"model {message.alias}",
-            command_payload=partial(self._persist_model, message.alias),
-            on_discard=partial(self._discard_model),
+        await self._run_settings_update(
+            f"model {message.alias}", partial(self._persist_model, message.alias)
         )
         await self._switch_to_input_app()
 
     async def _persist_model(self, alias: str) -> None:
-        try:
-            await self.app_server.resources.config.update({"active_model": alias})
-            await self._reload_config()
-        finally:
-            self._pending_model = None
-
-    async def _discard_model(self) -> None:
-        self._pending_model = None
+        await self.app_server.resources.config.update({"active_model": alias})
+        await self._reload_config()
 
     async def on_model_picker_app_cancelled(
         self, _event: ModelPickerApp.Cancelled
@@ -2138,23 +2252,14 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_thinking_picker_app_thinking_selected(
         self, message: ThinkingPickerApp.ThinkingSelected
     ) -> None:
-        self._pending_thinking = message.level
-        await self._queue.enqueue_command(
-            f"thinking {message.level}",
-            command_payload=partial(self._persist_thinking, message.level),
-            on_discard=partial(self._discard_thinking),
+        await self._run_settings_update(
+            f"thinking {message.level}", partial(self._persist_thinking, message.level)
         )
         await self._switch_to_input_app()
 
     async def _persist_thinking(self, level: ThinkingLevel) -> None:
-        try:
-            await self.app_server.resources.config.set_thinking(level)
-            await self._reload_config()
-        finally:
-            self._pending_thinking = None
-
-    async def _discard_thinking(self) -> None:
-        self._pending_thinking = None
+        await self.app_server.resources.config.set_thinking(level)
+        await self._reload_config()
 
     async def on_thinking_picker_app_cancelled(
         self, _event: ThinkingPickerApp.Cancelled
@@ -2174,21 +2279,16 @@ class VibeApp(App):  # noqa: PLR0904
             if previous_chain.session:
                 parts.append("session override cleared")
         config_feedback: str | None = None
-        deferred = False
         try:
             if message.config_level:
-                deferred = await self._defer_or_run_log_level_config(
+                await self._persist_log_level_config(
                     level=message.config_level, clear=False
                 )
                 config_feedback = f"config.toml → {message.config_level}"
             elif message.config_cleared:
-                deferred = await self._defer_or_run_log_level_config(
-                    level=None, clear=True
-                )
+                await self._persist_log_level_config(level=None, clear=True)
                 config_feedback = "config.toml cleared"
         except Exception as exc:
-            # The inline (idle) write failed; the deferred (busy) path enqueues
-            # and surfaces its own error at drain time via _run_queued_command.
             logger.warning("Failed to persist log-level config", exc_info=exc)
             await self._switch_to_input_app()
             await self._mount_and_scroll(
@@ -2199,14 +2299,7 @@ class VibeApp(App):  # noqa: PLR0904
             )
             return
         if config_feedback is not None:
-            # A deferred write's outcome is unknown until it drains, so don't
-            # claim it's done; the session override (already shown) is the live
-            # effect meanwhile.
-            parts.append(
-                f"{config_feedback} (applies when idle)"
-                if deferred
-                else config_feedback
-            )
+            parts.append(config_feedback)
         chain = get_log_level_chain()
         feedback = (
             "  ".join(parts) + f"  (effective: {chain.effective})"
@@ -2216,33 +2309,9 @@ class VibeApp(App):  # noqa: PLR0904
         await self._switch_to_input_app()
         await self._mount_and_scroll(UserCommandMessage(feedback))
 
-    async def _defer_or_run_log_level_config(
-        self, *, level: str | None, clear: bool
-    ) -> bool:
-        # The session override above is instant and is the effective change for
-        # this session. The config.toml write is durability and requires idle
-        # (config/write rejects with CONFLICT while a turn is in flight), so when
-        # the picker was opened via the side channel while busy, defer the write
-        # to the main queue. No on_discard: a discarded durable write leaves the
-        # session override in place, which is the intended session-scoped effect.
-        # Returns True when the write was deferred (success unknown at call
-        # time), False when it ran inline and succeeded.
-        payload = partial(self._persist_log_level_config, level=level, clear=clear)
-        if self._is_busy() or self._queue:
-            await self._queue.enqueue_command(
-                "log-level config", command_payload=payload
-            )
-            return True
-        await self._persist_log_level_config(level=level, clear=clear)
-        return False
-
     async def _persist_log_level_config(
         self, *, level: str | None, clear: bool
     ) -> None:
-        # Propagates: when run via the queue, _run_queued_command mounts an
-        # ErrorMessage; when run directly (idle), the caller in
-        # on_log_level_picker_app_applied catches and surfaces it. Either way
-        # the user sees the failure instead of a premature success.
         if clear:
             await self._remove_config_field("log_level")
         else:
@@ -2257,11 +2326,8 @@ class VibeApp(App):  # noqa: PLR0904
         self, message: ThemePickerApp.ThemeSelected
     ) -> None:
         await self._apply_theme(message.theme)
-        self._pending_theme = message.theme
-        await self._queue.enqueue_command(
-            f"theme {message.theme}",
-            command_payload=partial(self._persist_theme, message.theme),
-            on_discard=partial(self._discard_theme, message.theme),
+        await self._run_settings_update(
+            f"theme {message.theme}", partial(self._persist_theme, message.theme)
         )
         await self._switch_to_input_app()
 
@@ -2273,15 +2339,6 @@ class VibeApp(App):  # noqa: PLR0904
             # visual theme that was applied speculatively at selection time.
             logger.exception("Failed to persist theme %s", theme)
             await self._apply_theme(self.config.theme)
-        finally:
-            self._pending_theme = None
-
-    async def _discard_theme(self, theme: str) -> None:
-        # The queued persist was discarded (e.g. Ctrl+C) before it could run,
-        # so the speculative apply must be reverted the same way a failed
-        # write reverts it.
-        self._pending_theme = None
-        await self._apply_theme(self.config.theme)
 
     async def on_theme_picker_app_cancelled(
         self, message: ThemePickerApp.Cancelled
@@ -2301,14 +2358,21 @@ class VibeApp(App):  # noqa: PLR0904
         await self._switch_to_input_app()
 
     async def on_mcpapp_mcptoggled(self, message: MCPApp.MCPToggled) -> None:
-        await self.app_server.resources.mcp.toggle(
-            name=message.name,
-            source=(
-                "connector" if message.kind == MCPSourceKind.CONNECTOR else "server"
-            ),
-            disabled=message.disabled,
-            tool_name=message.tool_name,
-        )
+        try:
+            await self.app_server.resources.mcp.toggle(
+                name=message.name,
+                source=(
+                    "connector" if message.kind == MCPSourceKind.CONNECTOR else "server"
+                ),
+                disabled=message.disabled,
+                tool_name=message.tool_name,
+            )
+        except AppServerResponseError as exc:
+            # Nothing above a message handler catches, so propagating takes the
+            # app down over one keypress. The row was flipped optimistically
+            # before the request; the refresh below reads the server over it.
+            logger.warning("MCP toggle for %r was rejected: %s", message.name, exc)
+            self.notify(str(exc), severity="warning", markup=False)
         self.query_one(_get_mcp_app_class()).refresh_index()
         self._refresh_banner()
 
@@ -2358,9 +2422,8 @@ class VibeApp(App):  # noqa: PLR0904
         if not message.saved:
             await self._mount_and_scroll(UserCommandMessage("Proxy setup cancelled."))
         else:
-            await self._queue.enqueue_command(
-                "proxy settings",
-                command_payload=partial(self._persist_proxy, message.changes),
+            await self._run_settings_update(
+                "proxy settings", partial(self._persist_proxy, message.changes)
             )
 
         await self._switch_to_input_app()
@@ -2426,9 +2489,22 @@ class VibeApp(App):  # noqa: PLR0904
             {"command": name.lstrip("/"), "command_type": "skill"},
         )
 
-    async def _handle_bash_command(
-        self, command: str, *, start_drain_on_finish: bool = True
+    def _send_mention_telemetry(
+        self, mentions: MentionStats, message_id: str | None
     ) -> None:
+        if mentions.count == 0:
+            return
+        self.app_server.resources.telemetry.record(
+            "vibe.at_mention_inserted",
+            {
+                "nb_mentions": mentions.count,
+                "context_types": mentions.context_types,
+                "file_extensions": mentions.file_extensions or None,
+                "message_id": message_id,
+            },
+        )
+
+    async def _handle_bash_command(self, command: str) -> None:
         try:
             await self._handle_bash_command_inner(command)
         finally:
@@ -2436,8 +2512,6 @@ class VibeApp(App):  # noqa: PLR0904
             if self._bash_task is current:
                 self._bash_task = None
             self._queue.notify_busy_changed()
-            if start_drain_on_finish:
-                self._queue.start_drain_if_needed()
 
     async def _handle_bash_command_inner(self, command: str) -> None:
         if not command:
@@ -2449,6 +2523,7 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         await self._ensure_loading_widget("Running command")
+        self._queue.notify_busy_changed()
         bash_loading_widget = self._loading_widget
 
         try:
@@ -2468,39 +2543,29 @@ class VibeApp(App):  # noqa: PLR0904
                 await self._remove_loading_widget()
 
     async def _handle_user_message(self, message: str) -> None:
-        # Not ready: _prepare_prompt_or_abort will block, so show the indicator
-        # first for immediate feedback. Ready path is untouched.
-        if not self._session_ready.is_set():
-            await self._ensure_loading_widget()
-        prepared = await self._prepare_prompt_or_abort(message)
-        if prepared is None:
-            input_widget = self.query_one(ChatInputContainer)
-            if not input_widget.value:
-                input_widget.value = message
-            return
-
-        message_id = str(uuid4())
-        user_message = UserMessage(
-            message, history_entry_id=message_id, images=prepared.images or None
-        )
-
-        messages_area = self._cached_messages_area or self.query_one("#messages")
-        last_child = messages_area.children[-1] if messages_area.children else None
-        if isinstance(last_child, UserMessage):
-            last_child.set_show_separator(False)
-            user_message.set_follows_previous(True)
-
-        await self._mount_and_scroll(user_message)
-        await self._maybe_show_feedback_bar()
-
-        if not self._agent_job_active():
-            await self._remove_loading_widget()
-            self._agent_task = asyncio.create_task(
-                self._handle_turn(
-                    message, prepared_prompt=prepared, client_message_id=message_id
-                )
-            )
-            self._queue.notify_busy_changed()
+        # Enter the "turn in flight" state: the unified backend runs the turn
+        # server-side, so nothing looks active until TurnStarted arrives. Marking
+        # it here (rather than waiting for the server) makes the spinner instant,
+        # keeps the prompt interruptible during the enqueue -> promote gap, and
+        # renders it as a normal message (not "queued") -- matching the legacy
+        # local-turn behavior. _begin_unsolicited_turn clears it on TurnStarted.
+        self._begin_pending_turn()
+        await self._ensure_loading_widget()
+        try:
+            if await self._enqueue_prompt_with_resources(
+                message, optimistic_start=True
+            ):
+                return
+        except BaseException:
+            self._clear_pending_turn()
+            raise
+        # Enqueue was rejected (e.g. prompt prep aborted): leave the in-flight
+        # state so the UI returns to idle instead of a stuck spinner.
+        self._clear_pending_turn()
+        await self._remove_loading_widget()
+        input_widget = self.query_one(ChatInputContainer)
+        if not input_widget.value:
+            input_widget.value = message
 
     def _reset_ui_state(self) -> None:
         self._windowing.reset()
@@ -2523,9 +2588,12 @@ class VibeApp(App):  # noqa: PLR0904
     async def _deferred_resume_and_start(self) -> None:
         try:
             await self._resume_history_from_messages()
+            await self._queue.sync_server_queue(self.app_server.turn_queue)
         finally:
             self._initial_history_loaded.set()
-        self.run_worker(self._listen_app_server_events(), exclusive=False)
+        self._app_server_events_worker = self.run_worker(
+            self._listen_app_server_events(), exclusive=False
+        )
 
     async def _resume_history_from_messages(self) -> None:
         messages_area = self._messages_area
@@ -2643,6 +2711,17 @@ class VibeApp(App):  # noqa: PLR0904
             return
         self._active_callback = callback
         try:
+            loading = self._loading_widget
+            if loading is None or loading.parent is None:
+                await self._ensure_loading_widget()
+                loading = self._loading_widget
+            if loading is not None:
+                status = (
+                    callback.detail.effect.display.status_text
+                    if isinstance(callback.detail, ApprovalCallbackDetail)
+                    else callback.title
+                )
+                loading.begin_action_required(status)
             await self._wait_for_typing_pause()
             self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
             match callback.detail:
@@ -2681,6 +2760,8 @@ class VibeApp(App):  # noqa: PLR0904
             if self._pending_callbacks:
                 await self._show_callback(self._pending_callbacks.popleft())
                 return
+            if self._loading_widget is not None:
+                self._loading_widget.end_action_required()
             await self._switch_to_input_app()
 
     async def _handle_turn_error(self, *, cancelled: bool = False) -> None:
@@ -2711,6 +2792,9 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _handle_turn_event(self, event: AppServerEvent) -> None:
         self._track_narrator_event(event)
+        if isinstance(event, TurnQueueUpdated):
+            await self._queue.sync_server_queue(event.queue)
+            return
         if isinstance(event, ServerWarning):
             self.notify(event.params.warning.message, severity="warning")
             return
@@ -2735,33 +2819,95 @@ class VibeApp(App):  # noqa: PLR0904
                 event, loading_widget=self._loading_widget
             )
 
+    async def _shutdown(self) -> None:
+        # Stop consuming app-server events before Textual tears down the DOM.
+        # An in-flight turn (e.g. a queued skill) can still be streaming effects
+        # that _listen_app_server_events mounts; Textual only cancels workers
+        # after _shutdown has closed the screen, so the worker would otherwise
+        # mount into a closing tree and raise MountError. This runs on every
+        # shutdown path (App.run_async and Pilot.run_test both call _shutdown).
+        await self._stop_app_server_event_listener()
+        await super()._shutdown()
+
+    async def _stop_app_server_event_listener(self) -> None:
+        worker = self._app_server_events_worker
+        if worker is None:
+            return
+        self._app_server_events_worker = None
+        async with self._app_server_event_handler_lock:
+            worker.cancel()
+            # wait() re-raises the cancellation (and any error) the worker unwound
+            # with; we only need it fully stopped before the DOM is torn down.
+            with suppress(WorkerError, asyncio.CancelledError):
+                await worker.wait()
+
     async def _listen_app_server_events(self) -> None:
         async with aclosing(self.app_server.events()) as events:
             async for event in events:
-                if isinstance(event, TurnStarted):
-                    await self._begin_unsolicited_turn()
-                await self._handle_turn_event(event)
-                if isinstance(event, TurnCompleted):
-                    await self._complete_unsolicited_turn(event)
+                await self._resume_ui_ready.wait()
+                async with self._app_server_event_handler_lock:
+                    if isinstance(event, TurnStarted):
+                        # The in-flight turn surfaced: leave the pending state and
+                        # wake any interrupt waiting for it.
+                        self._clear_pending_turn()
+                        await self._queue.turn_started(event.turn.queue_item_id)
+                        await self._begin_unsolicited_turn()
+                    await self._handle_turn_event(event)
+                    if isinstance(event, TurnCompleted):
+                        await self._complete_unsolicited_turn(event)
+                    self._maybe_settle_interrupt()
+
+    def _turn_ui_lock(self) -> asyncio.Lock:
+        if self._turn_ui_mutex is None:
+            self._turn_ui_mutex = asyncio.Lock()
+        return self._turn_ui_mutex
 
     async def _begin_unsolicited_turn(self) -> None:
-        self._queue.notify_busy_changed()
-        await self._remove_loading_widget()
-        await self._ensure_loading_widget()
-        self._narrator_manager.cancel()
-        self._narrator_manager.on_turn_start("")
+        async with self._turn_ui_lock():
+            self._turn_ui_generation += 1
+            self._narrator_manager.on_turn_end()
+            if self.event_handler:
+                await self.event_handler.finalize_streaming()
+                self.event_handler.escalate_unresolved_errors()
+            await self._remove_loading_widget()
+            # If Escape landed during the enqueue -> promote -> TurnStarted gap,
+            # an interrupt is already in flight; mount the fresh spinner as
+            # "Interrupting" so surfacing the turn does not clobber that feedback
+            # back to "Generating" (the remount races _interrupt_turn's own label).
+            await self._ensure_loading_widget(
+                INTERRUPTING_LOADING_STATUS
+                if self._interrupt_requested
+                else DEFAULT_LOADING_STATUS
+            )
+            self._queue.notify_busy_changed()
+            self._narrator_manager.cancel()
+            self._narrator_manager.on_turn_start("")
 
     async def _complete_unsolicited_turn(self, event: TurnCompleted) -> None:
+        retry_incomplete_stream = False
         if event.turn.status is PublicTurnStatus.FAILED:
             error = AppServerTurnError(event.turn.error)
             await self._handle_turn_error()
-            message = self._resolve_turn_error_message(error)
-            self._narrator_manager.on_turn_error(message)
-            await self._mount_turn_error(error, message)
+            retry_incomplete_stream = (
+                error.error.code == TurnErrorCode.INCOMPLETE_STREAM
+                and not self._queue.has_server_work
+            )
+            if retry_incomplete_stream:
+                if self.event_handler is not None:
+                    self.event_handler.offer_retry()
+            else:
+                message = self._resolve_turn_error_message(error)
+                self._narrator_manager.on_turn_error(message)
+                await self._mount_turn_error(error, message)
         elif event.turn.status is PublicTurnStatus.INTERRUPTED:
             await self._handle_turn_error(cancelled=True)
             self._narrator_manager.on_turn_cancel()
-        await self._finalize_turn_ui()
+        await self._finalize_turn_ui(notify_complete=not retry_incomplete_stream)
+        if retry_incomplete_stream:
+            self._agent_task = asyncio.create_task(
+                self._auto_retry_incomplete_stream(1)
+            )
+            self._queue.notify_busy_changed()
 
     def _track_narrator_event(self, event: AppServerEvent) -> None:
         match event:
@@ -2789,6 +2935,7 @@ class VibeApp(App):  # noqa: PLR0904
         injected: bool = False,
         incomplete_stream_retries: int = 0,
     ) -> None:
+        turn_ui_generation = self._turn_ui_generation
         await self._remove_loading_widget()
         retry_incomplete_stream = False
 
@@ -2842,6 +2989,7 @@ class VibeApp(App):  # noqa: PLR0904
                 isinstance(e, AppServerTurnError)
                 and e.error.code == TurnErrorCode.INCOMPLETE_STREAM
                 and incomplete_stream_retries < _MAX_INCOMPLETE_STREAM_RETRIES
+                and not self._queue.has_server_work
             )
             if retry_incomplete_stream:
                 # Auto-retry silently: don't surface the error while we retry.
@@ -2873,7 +3021,10 @@ class VibeApp(App):  # noqa: PLR0904
 
                 await self._mount_turn_error(e, message)
         finally:
-            await self._finalize_turn_ui(resume_queue=not retry_incomplete_stream)
+            await self._finalize_turn_ui(
+                notify_complete=not retry_incomplete_stream,
+                turn_ui_generation=turn_ui_generation,
+            )
 
         if retry_incomplete_stream:
             await self._auto_retry_incomplete_stream(incomplete_stream_retries + 1)
@@ -2881,12 +3032,6 @@ class VibeApp(App):  # noqa: PLR0904
     async def _auto_retry_incomplete_stream(
         self, incomplete_stream_retries: int
     ) -> None:
-        # Run the retry inside the current task rather than a detached one. When
-        # this turn was started by the queue drain, the drain is parked awaiting
-        # this task; a detached retry would let it complete, so the drain would
-        # resume and start the next queued prompt concurrently with the retry --
-        # hitting "A turn is already running" and dropping that prompt. Keeping
-        # the retry in this task makes the drain await the whole retry chain.
         if self.event_handler is None or not self.event_handler.begin_retry():
             return
         self._agent_task = asyncio.current_task()
@@ -2929,22 +3074,36 @@ class VibeApp(App):  # noqa: PLR0904
         )
         self._queue.notify_busy_changed()
 
-    async def _finalize_turn_ui(self, *, resume_queue: bool = True) -> None:
-        self._narrator_manager.on_turn_end()
-        self._interrupt_requested = False
-        self._agent_task = None
-        if self._loading_widget:
-            await self._loading_widget.remove()
-        self._loading_widget = None
-        if self.event_handler:
-            await self.event_handler.finalize_streaming()
-            self.event_handler.escalate_unresolved_errors()
-        self._queue.notify_busy_changed()
-        if not resume_queue:
-            return
-        self._queue.start_drain_if_needed()
-        await self._refresh_windowing_from_history()
-        self._terminal_notifier.notify(NotificationContext.COMPLETE)
+    async def _finalize_turn_ui(
+        self, *, notify_complete: bool = True, turn_ui_generation: int | None = None
+    ) -> None:
+        async with self._turn_ui_lock():
+            if (
+                turn_ui_generation is not None
+                and turn_ui_generation != self._turn_ui_generation
+            ):
+                self._interrupt_requested = False
+                self._agent_task = None
+                self._clear_pending_turn()
+                self._queue.notify_busy_changed()
+                self._maybe_settle_interrupt()
+                return
+            self._narrator_manager.on_turn_end()
+            self._interrupt_requested = False
+            self._agent_task = None
+            self._clear_pending_turn()
+            self._maybe_settle_interrupt()
+            if self._loading_widget:
+                await self._loading_widget.remove()
+            self._loading_widget = None
+            if self.event_handler:
+                await self.event_handler.finalize_streaming()
+                self.event_handler.escalate_unresolved_errors()
+            self._queue.notify_busy_changed()
+            if not notify_complete:
+                return
+            await self._refresh_windowing_from_history()
+            self._terminal_notifier.notify(NotificationContext.COMPLETE)
 
     def _resolve_turn_error_message(self, e: Exception) -> str:
         if not isinstance(e, AppServerTurnError):
@@ -3223,10 +3382,30 @@ class VibeApp(App):  # noqa: PLR0904
         return ok
 
     async def _interrupt_turn(self) -> None:
-        if not self._agent_job_active() or self._interrupt_requested:
+        if self._interrupt_requested:
+            return
+        if not self._agent_job_active():
+            # The turn finished before this worker ran, so there is nothing to
+            # interrupt. The Escape handler already opened the settle window via
+            # _begin_interrupt_settle; close it here (no turn/finalize event is
+            # coming to do it) so a racing submit resumes on current state
+            # instead of waiting out the full _await_interrupt_settled timeout.
+            # Settle unconditionally rather than via _maybe_settle_interrupt:
+            # this path never issues interrupt(), so no queue pause is coming,
+            # and _maybe_settle_interrupt would keep the window open while
+            # accepted-but-unpaused items exist -- waiting on a pause that a
+            # real interrupt would emit but this no-op never will.
+            self._settle_interrupt()
             return
 
         self._interrupt_requested = True
+
+        # Acknowledge the keypress immediately: the cancel below blocks until the
+        # in-flight turn unwinds (LLM stream, tool call, server ack), and only
+        # then does the spinner tear down. Flipping the status now, on the message
+        # pump, gives instant feedback instead of a spinner that keeps running.
+        if self._loading_widget is not None:
+            self._loading_widget.set_status(INTERRUPTING_LOADING_STATUS)
 
         self._active_callback = None
         self._pending_callbacks.clear()
@@ -3235,7 +3414,35 @@ class VibeApp(App):  # noqa: PLR0904
                 UserQuestionResult(answers=[], cancelled=True)
             )
 
+        # A just-submitted idle turn may still be promoting (enqueued, no
+        # TurnStarted yet). Wait briefly for it to surface so we interrupt the
+        # real turn instead of no-opping; _clear_pending_turn on TurnStarted or
+        # finalize wakes this. Bounded so a turn that never starts can't hang.
+        if (
+            self._pending_turn
+            and not self.app_server.turn_active
+            and (self._agent_task is None or self._agent_task.done())
+        ):
+            with suppress(TimeoutError):
+                await asyncio.wait_for(self._turn_started_event.wait(), timeout=30.0)
+            # The turn surfacing remounts the loading widget as "Generating";
+            # re-apply the interrupting label to the fresh one.
+            if self._loading_widget is not None:
+                self._loading_widget.set_status(INTERRUPTING_LOADING_STATUS)
+        self._clear_pending_turn()
+
+        # Invariant: a turn is driven EITHER by a client task (``_agent_task``,
+        # used for retry/auto-retry) OR by the server promoting an enqueued turn
+        # (``turn_active`` with no client task, the normal path for both the
+        # legacy and unified backends) -- never both at once. The two branches
+        # are therefore mutually exclusive by design. If that ever breaks (a turn
+        # live locally AND server-side), the server turn would not be interrupted
+        # here and the settle would wait out its full timeout; keep this an elif
+        # rather than two ifs so a late interrupt() cannot cancel a replacement
+        # turn a deferred submit promoted during the cancel await.
         if self._agent_task and not self._agent_task.done():
+            # Cancelling the client task tears down its act() stream, which
+            # interrupts the server turn -- no explicit interrupt() needed.
             self._agent_task.cancel()
             try:
                 await self._agent_task
@@ -3621,13 +3828,6 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> ConfigWriteResult:
         from vibe.cli.textual_ui.screens.config import ConfigWriteResult
 
-        if self._is_busy() or self._queue:
-            await self._queue.enqueue_command(
-                f"config patch ({reason})",
-                command_payload=partial(self._run_config_patch, ops, reason),
-            )
-            return ConfigWriteResult.DEFERRED
-
         response = await self.app_server.resources.config.write(ops, reason=reason)
         if response.rejected:
             return ConfigWriteResult.REJECTED
@@ -3671,6 +3871,36 @@ class VibeApp(App):  # noqa: PLR0904
         if self._current_bottom_app == BottomApp.ThemePicker:
             return
         await self._switch_to_theme_picker_app()
+
+    async def _show_skills(self, **kwargs: Any) -> None:
+        if self._current_bottom_app == BottomApp.SkillsBrowser:
+            return
+        await self._mount_and_scroll(UserCommandMessage("Skills browser opened."))
+        skills = self.app_server.resources.skills
+        await self._ensure_loading_widget("Loading skills", show_hint=False)
+        try:
+            installed = await skills.read_installed()
+            result = await skills.catalog()
+        finally:
+            await self._remove_loading_widget()
+        await self._switch_from_input(
+            SkillsBrowserApp(
+                actions=skills,
+                installed=installed,
+                catalog=list(result.skills),
+                updates=dict(result.updates),
+                on_changed=skills.read_installed,
+                project_available=result.project_available,
+                catalog_loaded=result.loaded,
+                authenticated=result.authenticated,
+            )
+        )
+
+    async def on_skills_browser_app_closed(
+        self, _message: SkillsBrowserApp.Closed
+    ) -> None:
+        await self._mount_and_scroll(UserCommandMessage("Skills browser closed."))
+        await self._switch_to_input_app()
 
     async def _show_proxy_setup(self, **kwargs: Any) -> None:
         if self._current_bottom_app == BottomApp.ProxySetup:
@@ -3745,6 +3975,9 @@ class VibeApp(App):  # noqa: PLR0904
                 await self._process_startup_prompt_when_available()
             return
 
+        if not picker.is_mounted:
+            # The picker was closed while sessions were loading.
+            return
         picker.load_sessions(
             local_sessions, {s.id: s.title or s.preview for s in local_sessions}
         )
@@ -3908,15 +4141,24 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _resume_local_session(self, session_id: str) -> None:
         self._picker.exit_preview()
-        await self.app_server.resume(session_id)
+        self._resume_ui_ready.clear()
+        try:
+            await self.app_server.resume(session_id)
+            await self._reset_presentation_after_resume()
+        finally:
+            # A failed resume leaves the attached session and its presentation
+            # untouched. Either way, release events that arrived during the RPC.
+            self._resume_ui_ready.set()
         if self._chat_input_container:
             self._chat_input_container.set_custom_border(None)
         self._refresh_profile_widgets()
+        self._refresh_banner()
         self._refresh_context_progress()
         # Rebuild the transcript from the resumed session instead of trusting the
         # picker preview, which may have been skipped, may have failed, or may show
         # a different session than the one that was confirmed.
         await self._rebuild_transcript_from_current_session()
+        await self._queue.sync_server_queue(self.app_server.turn_queue)
         await self._mount_and_scroll(
             UserCommandMessage(f"Resumed session `{session_id[:8]}`")
         )
@@ -3924,6 +4166,36 @@ class VibeApp(App):  # noqa: PLR0904
         # finishes, so defer post-init notices to the background until the
         # resumed runtime settles instead of racing incomplete state here.
         self.run_worker(self._finish_resume_notices(), exclusive=False)
+
+    async def _reset_presentation_after_resume(self) -> None:
+        """Discard presentation state owned by the previously attached session."""
+        async with self._turn_ui_lock():
+            self._turn_ui_generation += 1
+            self._interrupt_requested = False
+            self._settle_interrupt()
+            self._clear_pending_turn()
+
+            self._active_callback = None
+            self._pending_callbacks.clear()
+            if (
+                self._pending_local_question is not None
+                and not self._pending_local_question.done()
+            ):
+                self._pending_local_question.set_result(
+                    UserQuestionResult(answers=[], cancelled=True)
+                )
+
+            self._narrator_manager.on_turn_end()
+            self._narrator_manager.cancel()
+            if self.event_handler is not None:
+                await self.event_handler.finalize_streaming()
+                self.event_handler.stop_current_tool_call(cancelled=True)
+                self.event_handler.stop_current_compact()
+
+            await self._remove_loading_widget()
+            self._loading_widget = None
+            await self._queue.clear_server_queue()
+            self._queue.notify_busy_changed()
 
     async def _finish_resume_notices(self) -> None:
         """Wait for a resumed session's deferred init to settle, then show
@@ -4024,6 +4296,7 @@ class VibeApp(App):  # noqa: PLR0904
                 hooks_count=self.app_server.resources.runtime.hooks_count,
                 plan_description=plan_title(self.app_server.resources.account.current),
                 model_pending=self._model_pending(),
+                experimental_harness=self.app_server.resources.runtime.experimental_harness,
             )
         self._show_config_issues()
 
@@ -4097,6 +4370,12 @@ class VibeApp(App):  # noqa: PLR0904
         prompt = cmd_args.strip()
         try:
             await self.app_server.clear_history()
+            await self._queue.clear_server_queue()
+            # The gauge otherwise waits for the next `session/statsUpdated`, and
+            # the replacement session has nothing to report until its first model
+            # call -- so it would keep showing the context the clear discarded.
+            self._refresh_context_progress()
+            self._refresh_banner()
             await self._reset_message_widgets()
 
             await self._messages_area.mount(SlashCommandMessage("clear"))
@@ -4209,6 +4488,11 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         try:
             await self.app_server.compact(extra_instructions=extra_instructions)
+            await self._queue.clear_server_queue()
+            # Same reason as `/clear`: the summary that survives is unmeasured
+            # until the next model call, so nothing pushes the gauge down on its
+            # own and it would keep showing the context compaction replaced.
+            self._refresh_context_progress()
             compact_msg.set_complete()
 
         except asyncio.CancelledError:
@@ -4273,7 +4557,6 @@ class VibeApp(App):  # noqa: PLR0904
             self._current_bottom_app = BottomApp[
                 type(widget).__name__.removesuffix("App")
             ]
-            self._input_app_ready.clear()
             await bottom_container.mount(widget)
 
         self.call_after_refresh(widget.focus)
@@ -4314,7 +4597,6 @@ class VibeApp(App):  # noqa: PLR0904
             self._current_bottom_app = BottomApp[
                 type(widget).__name__.removesuffix("App")
             ]
-            self._input_app_ready.clear()
             await bottom_container.mount(widget)
             for old_widget in old_widgets:
                 await old_widget.remove()
@@ -4362,11 +4644,10 @@ class VibeApp(App):  # noqa: PLR0904
             ModelOption(alias=model.alias, display_name=model.display_name)
             for model in self.config.models
         ]
-        current_model = self._effective_model_alias
         await self._switch_from_input(
             ModelPickerApp(
                 models=models,
-                current_model=current_model,
+                current_model=self.config.active_model.alias,
                 is_pinned=self.config.active_model_pinned,
                 default_display_name=self.config.default_model_display_name,
             )
@@ -4376,10 +4657,10 @@ class VibeApp(App):  # noqa: PLR0904
         if self._current_bottom_app == BottomApp.ThinkingPicker:
             return
 
-        current_thinking = self._effective_thinking
         await self._switch_from_input(
             ThinkingPickerApp(
-                thinking_levels=THINKING_LEVELS, current_thinking=current_thinking
+                thinking_levels=THINKING_LEVELS,
+                current_thinking=self.config.active_model.thinking,
             )
         )
 
@@ -4394,7 +4675,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         await self._switch_from_input(
             ThemePickerApp(
-                theme_names=sorted_theme_names(), current_theme=self._effective_theme
+                theme_names=sorted_theme_names(), current_theme=self.config.theme
             )
         )
 
@@ -4444,7 +4725,6 @@ class VibeApp(App):  # noqa: PLR0904
             self._chat_input_container.display = True
             self._current_bottom_app = BottomApp.Input
             self._refresh_profile_widgets()
-        self._input_app_ready.set()
 
         for app in BottomApp:
             if app != BottomApp.Input:
@@ -4476,6 +4756,7 @@ class VibeApp(App):  # noqa: PLR0904
             BottomApp.MCPOAuth: _get_mcp_oauth_app_class(),
             BottomApp.Rewind: RewindApp,
             BottomApp.Voice: VoiceApp,
+            BottomApp.SkillsBrowser: SkillsBrowserApp,
         }
         try:
             if self._current_bottom_app == BottomApp.Input:
@@ -4580,13 +4861,17 @@ class VibeApp(App):  # noqa: PLR0904
     def _get_user_message_widgets(self) -> list[UserMessage]:
         """Return all UserMessage widgets currently visible in #messages.
 
-        Only includes messages with a public history id (i.e. real user
-        messages, not slash-command echo messages).
+        Only includes completed messages with a public history id (i.e. real
+        user messages, not queued prompts or slash-command echo messages).
         """
         return [
             child
             for child in self._messages_area.children
-            if isinstance(child, UserMessage) and child.history_entry_id is not None
+            if (
+                isinstance(child, UserMessage)
+                and child.history_entry_id is not None
+                and not child.pending
+            )
         ]
 
     def _start_rewind_mode(self, **kwargs: Any) -> None:
@@ -4662,18 +4947,24 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _select_rewind_widget(self, widget: UserMessage) -> None:
         """Highlight the given user message widget and show the rewind panel."""
+        entry_id = widget.history_entry_id
+        if entry_id is None or widget.pending:
+            return
+        try:
+            has_file_changes = await (
+                self.app_server.resources.sessions.rewind_has_file_changes(entry_id)
+            )
+        except AppServerResponseError as exc:
+            self.notify(exc.error.message, severity="error")
+            if self._rewind_highlighted_widget is None:
+                self._rewind_mode = False
+            return
+
         if self._rewind_highlighted_widget is not None:
             self._rewind_highlighted_widget.remove_class("rewind-selected")
 
         widget.add_class("rewind-selected")
         self._rewind_highlighted_widget = widget
-
-        entry_id = widget.history_entry_id
-        if entry_id is None:
-            return
-        has_file_changes = (
-            await self.app_server.resources.sessions.rewind_has_file_changes(entry_id)
-        )
 
         await self._switch_to_rewind_app(
             widget.get_content(), has_file_changes=has_file_changes
@@ -4760,6 +5051,7 @@ class VibeApp(App):  # noqa: PLR0904
             result = await self.app_server.resources.sessions.rewind(
                 entry_id, restore_files=restore_files, inplace=inplace
             )
+            await self._queue.clear_server_queue()
             await self.app_server.resources.refresh()
         except AppServerResponseError as exc:
             self.notify(exc.error.message, severity="error")
@@ -4806,7 +5098,52 @@ class VibeApp(App):  # noqa: PLR0904
         self.app_server.resources.telemetry.record(
             "vibe.user_cancelled_action", {"action": "interrupt_agent"}
         )
+        self._begin_interrupt_settle()
         self.run_worker(self._interrupt_turn(), exclusive=False)
+
+    def _begin_interrupt_settle(self) -> None:
+        """Open the interrupt window so a racing submit waits for fresh state.
+
+        A submit that lands before the server pauses the queue and completes the
+        turn would branch on stale ``paused``/``turn_active`` values, losing the
+        prompt or flashing it as queued. ``_maybe_settle_interrupt`` closes the
+        window once the queue reflects the interrupt.
+        """
+        if self._interrupt_pending:
+            return
+        self._interrupt_pending = True
+        self._interrupt_settled.clear()
+
+    def _settle_interrupt(self) -> None:
+        """Close the interrupt window, waking any submit deferred behind it."""
+        self._interrupt_pending = False
+        self._interrupt_settled.set()
+
+    def _maybe_settle_interrupt(self) -> None:
+        if not self._interrupt_pending:
+            return
+        if self._agent_job_active():
+            return
+        # Accepted server items that are not yet paused mean the interrupt's
+        # queue transition is still in flight: wait so a submit resumes cleanly
+        # instead of enqueuing into a queue that is about to pause. An empty
+        # queue (or one already paused) emits nothing more, so this settles.
+        # Reading the live queue rather than a snapshot avoids stalling when the
+        # server never pauses (e.g. in-flight enqueues or a turn that raced to a
+        # natural completion): those leave no accepted items to wait on.
+        if self._queue.has_removable and not self._queue.paused:
+            return
+        self._settle_interrupt()
+
+    async def _await_interrupt_settled(self) -> None:
+        if not self._interrupt_pending:
+            return
+        try:
+            await asyncio.wait_for(self._interrupt_settled.wait(), timeout=30.0)
+        except TimeoutError:
+            # Never wedge later submits on a window that failed to close: give up
+            # waiting and let this and future submits proceed on current state.
+            self._settle_interrupt()
 
     def _handle_bottom_app_close_escape(self, widget_type: type[Widget]) -> None:
         try:
@@ -4844,6 +5181,9 @@ class VibeApp(App):  # noqa: PLR0904
                 self._handle_vibe_code_project_picker_app_escape
             ),
             BottomApp.SessionPicker: self._handle_session_picker_app_escape,
+            BottomApp.SkillsBrowser: lambda: self._handle_bottom_app_close_escape(
+                SkillsBrowserApp
+            ),
         }
 
         if handler := handlers.get(self._current_bottom_app):
@@ -4904,12 +5244,6 @@ class VibeApp(App):  # noqa: PLR0904
             return True
 
         interrupted = self._try_interrupt_running_job()
-        if interrupted and self._input_queue:
-            self._queue.set_paused(True)
-
-        if not interrupted and self._input_queue:
-            self._queue.set_paused(True)
-            interrupted = True
 
         self._last_escape_time = time.monotonic()
         if self._chat_widget.is_at_bottom:
@@ -5017,8 +5351,10 @@ class VibeApp(App):  # noqa: PLR0904
         self._update_profile_widgets(self.app_server.resources.agents.active)
 
     def _refresh_context_progress(self) -> None:
+        if self._context_progress is None:
+            return
         runtime = self.app_server.resources.runtime
-        self.query_one(ContextProgress).tokens = TokenState(
+        self._context_progress.tokens = TokenState(
             max_tokens=runtime.context_window,
             current_tokens=runtime.stats.context_tokens,
         )
@@ -5071,13 +5407,22 @@ class VibeApp(App):  # noqa: PLR0904
                 hooks_count=self.app_server.resources.runtime.hooks_count,
                 plan_description=plan_title(self.app_server.resources.account.current),
                 model_pending=self._model_pending(),
+                experimental_harness=self.app_server.resources.runtime.experimental_harness,
             )
 
     def _update_profile_widgets(self, profile: AgentSummary) -> None:
         if self._chat_input_container:
-            self._chat_input_container.set_safety(profile.safety)
-            self._chat_input_container.set_agent_name(profile.display_name.lower())
+            self._chat_input_container.set_safety(
+                _indicator_safety(profile, self._bypass_tool_permissions)
+            )
+            self._chat_input_container.set_agent_name(
+                _indicator_agent_name(profile, self._bypass_tool_permissions)
+            )
             self._chat_input_container.set_custom_border(None)
+
+    @property
+    def _bypass_tool_permissions(self) -> bool:
+        return self.app_server.resources.runtime.bypass_tool_permissions
 
     def _request_next_agent(self) -> None:
         base = (
@@ -5109,6 +5454,7 @@ class VibeApp(App):  # noqa: PLR0904
             self._agent_switch_active = False
             if self._chat_input_container:
                 self._chat_input_container.switching_mode = False
+            self._refresh_profile_widgets()
 
     async def _switch_to_agent(self, target: str) -> None:
         spinner_timer = self.set_timer(
@@ -5156,7 +5502,7 @@ class VibeApp(App):  # noqa: PLR0904
             return
         if self._try_interrupt_no_job_steps():
             return
-        if self._input_queue:
+        if self._queue.has_removable:
             self.run_worker(self._queue.pop_last(), exclusive=False)
             return
         if self._try_interrupt_running_job():
@@ -5186,7 +5532,6 @@ class VibeApp(App):  # noqa: PLR0904
         )
 
     async def _begin_shutdown(self) -> None:
-        await self._queue.shutdown()
         await self._side_channel.shutdown()
 
     def _force_quit(self) -> None:
@@ -5440,6 +5785,8 @@ class VibeApp(App):  # noqa: PLR0904
                 await messages_area.mount(widget, before=pin_anchor)
             else:
                 await messages_area.mount(widget)
+            if not widget.is_mounted:
+                return
             if isinstance(widget, StreamingMessageBase):
                 await widget.write_initial_content()
 

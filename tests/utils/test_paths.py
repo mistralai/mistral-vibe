@@ -16,6 +16,24 @@ def on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        ("file:///C:/Users/acmedev/image%20one.png", r"C:\Users\acmedev\image one.png"),
+        ("file://server/share/image.png", r"\\server\share\image.png"),
+    ],
+)
+@pytest.mark.usefixtures("on_windows")
+def test_file_uri_to_path_uses_windows_paths(uri: str, expected: str) -> None:
+    assert paths.file_uri_to_path(uri) == expected
+
+
+def test_file_uri_to_path_decodes_posix_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(paths, "is_windows", lambda: False)
+
+    assert paths.file_uri_to_path("file:///tmp/image%20one.png") == "/tmp/image one.png"
+
+
+@pytest.mark.parametrize(
     ("raw", "expected"),
     [
         ("/c/Users/acmedev/test", "C:/Users/acmedev/test"),

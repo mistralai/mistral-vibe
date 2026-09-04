@@ -3,13 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum, auto
 from functools import cache
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import Field, JsonValue, TypeAdapter
+from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
 from vibe.agents import AgentSafety, AgentType
 from vibe.app_server._effect_models import (
     EffectDetail as EffectDetail,
+    FileEditEffectBatchInput as FileEditEffectBatchInput,
+    FileEditEffectChange as FileEditEffectChange,
     FileEditEffectDetail as FileEditEffectDetail,
     FileEditEffectInput as FileEditEffectInput,
     FileEditEffectOccurrence as FileEditEffectOccurrence,
@@ -197,6 +199,96 @@ ContentBlock = Annotated[
     TextContentBlock | ImageContentBlock | ResourceContentBlock,
     Field(discriminator="type"),
 ]
+
+
+class MessageAnnotations(ProtocolModel):
+    vibe_user_display_content: UserDisplayContent | None = Field(
+        default=None,
+        alias="vibe.userDisplayContent",
+        exclude_if=lambda value: value is None,
+    )
+
+
+class SessionTextContentBlock(ProtocolModel):
+    type: Literal["text"] = "text"
+    text: str = ""
+
+
+class SessionImageContentBlock(ProtocolModel):
+    type: Literal["image"] = "image"
+    uri: str
+    media_type: str | None = None
+    alt_text: str | None = None
+
+
+class SessionResourceLinkContentBlock(ProtocolModel):
+    type: Literal["resource_link"] = "resource_link"
+    uri: str
+    name: str | None = None
+    title: str | None = None
+    description: str | None = None
+    media_type: str | None = None
+    size: int | None = Field(default=None, ge=0)
+
+
+class SessionEmbeddedResourceContentBlock(ProtocolModel):
+    type: Literal["embedded_resource"] = "embedded_resource"
+    uri: str
+    media_type: str | None = None
+    text: str | None = None
+    blob: str | None = None
+
+    @model_validator(mode="after")
+    def validate_content(self) -> Self:
+        if (self.text is None) == (self.blob is None):
+            raise ValueError("Embedded resources require exactly one of text or blob")
+        return self
+
+
+SessionContentBlock = Annotated[
+    SessionTextContentBlock
+    | SessionImageContentBlock
+    | SessionResourceLinkContentBlock
+    | SessionEmbeddedResourceContentBlock,
+    Field(discriminator="type"),
+]
+
+
+class TurnContextInputEntry(ProtocolModel):
+    role: Literal["context"] = "context"
+    entry_id: str | None = None
+    content: list[SessionContentBlock] = Field(min_length=1)
+    annotations: MessageAnnotations = Field(default_factory=MessageAnnotations)
+
+    @property
+    def input(self) -> list[SessionContentBlock]:
+        return self.content
+
+
+class TurnUserInputEntry(ProtocolModel):
+    role: Literal["user"] = "user"
+    entry_id: str | None = None
+    content: list[SessionContentBlock] = Field(min_length=1)
+    annotations: MessageAnnotations = Field(default_factory=MessageAnnotations)
+
+    @property
+    def input(self) -> list[SessionContentBlock]:
+        return self.content
+
+
+TurnInputEntry = Annotated[
+    TurnContextInputEntry | TurnUserInputEntry, Field(discriminator="role")
+]
+
+
+def validate_turn_input_entries(entries: list[TurnInputEntry]) -> None:
+    user_positions = [
+        index for index, entry in enumerate(entries) if entry.role == "user"
+    ]
+    if len(user_positions) > 1:
+        raise ValueError("Turn input accepts at most one user entry")
+    if user_positions and user_positions[0] != len(entries) - 1:
+        raise ValueError("The user entry must be the final turn input entry")
 
 
 class ApprovalDecisionType(StrEnum):
@@ -486,12 +578,55 @@ class AgentSummary(ProtocolModel):
     agent_type: AgentType
 
 
+class RegistryRefView(ProtocolModel):
+    skill_id: str
+    version: int
+    alias: str | None = None
+
+
 class SkillSummary(ProtocolModel):
     name: str
     description: str
     prompt: str
     user_invocable: bool = True
     source: Literal["builtin", "local", "registry", "plugin"] = "local"
+    scope: Literal["builtin", "global", "project"] = "global"
+    registry: RegistryRefView | None = None
+
+
+class SkillCatalogEntry(ProtocolModel):
+    name: str
+    skill_id: str
+    description: str
+    latest_version: int
+    sharing_scope: str = ""
+
+
+class SkillVersionView(ProtocolModel):
+    version: int
+    aliases: list[str] = Field(default_factory=list)
+
+
+class SkillUpdateView(ProtocolModel):
+    name: str
+    current_version: int
+    latest_version: int
+
+
+class SkillDetailView(ProtocolModel):
+    name: str
+    skill_id: str
+    version: int
+    body: str
+    description: str = ""
+    created_by: str = ""
+    created_at: str = ""
+    last_modified_at: str = ""
+    sharing_scope: str = ""
+    latest_version: int = 0
+    version_created_at: str = ""
+    aliases: list[str] = Field(default_factory=list)
+    notes: str = ""
 
 
 class ToolSummary(ProtocolModel):
@@ -610,6 +745,7 @@ class MCPSourceSummary(ProtocolModel):
     status: MCPSourceStatus
     tools: list[MCPToolSummary] = Field(default_factory=list)
     error: str | None = None
+    plugin_name: str | None = None
 
 
 class MCPState(ProtocolModel):
@@ -687,6 +823,7 @@ class CompletedEffectState(ProtocolModel):
 class FailedEffectState(ProtocolModel):
     status: Literal["failed"] = "failed"
     error: PublicError
+    output: JsonValue = None
     output_text: str = ""
     duration_ms: float = 0.0
     display: EffectResultDisplay
@@ -966,6 +1103,28 @@ class PublicSession(ProtocolModel):
     model: str | None = None
     agent: AgentSummary | None = None
     token_usage: TokenUsage | None = None
+    context_usage: TokenUsage | None = None
+    harness: Literal["legacy", "unified"] | None = None
+
+
+class PublicQueuedTurn(ProtocolModel):
+    id: str
+    created_at: int
+    entries: list[TurnInputEntry] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_entries(self) -> Self:
+        validate_turn_input_entries(self.entries)
+        return self
+
+
+TURN_QUEUE_MAX_ITEMS = 32
+
+
+class PublicTurnQueue(ProtocolModel):
+    items: list[PublicQueuedTurn] = Field(default_factory=list)
+    paused: bool = False
+    max_items: int = Field(default=TURN_QUEUE_MAX_ITEMS, ge=1, strict=True)
 
 
 class PublicTurn(ProtocolModel):
@@ -976,16 +1135,19 @@ class PublicTurn(ProtocolModel):
     completed_at: int | None = None
     error: PublicError | None = None
     stop_reason: PublicTurnStopReason | None = None
+    queue_item_id: str | None = None
 
 
 class PublicSessionState(ProtocolModel):
     format: Literal["vibe.public-session-state/v1"] = "vibe.public-session-state/v1"
     event_id: int = Field(ge=0, strict=True)
     session: PublicSession
+    is_quiescent: bool | None = None
     history: list[PublicHistoryEntry] | None = None
     history_before_cursor: str | None = None
     turns: list[PublicTurn] | None = None
     active_callbacks: list[PublicCallbackEntry] = Field(default_factory=list)
+    turn_queue: PublicTurnQueue = Field(default_factory=PublicTurnQueue)
     retrying: PublicRetryState | None = None
 
     @property

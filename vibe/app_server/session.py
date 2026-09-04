@@ -4,11 +4,14 @@ import asyncio
 from collections.abc import AsyncGenerator, Callable
 from contextlib import suppress
 from dataclasses import dataclass
+import time
+from uuid import uuid4
 
 from pydantic import ValidationError
 
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._streaming import finish_event_queue
+from vibe.app_server._turn_input import session_content_blocks
 from vibe.app_server.client import AppServerClient, AppServerConnectionClosed
 from vibe.app_server.client_state import ClientBootstrap, ClientSessionState
 from vibe.app_server.client_tools import ClientToolHandler
@@ -38,7 +41,9 @@ from vibe.app_server.models import (
     PublicCallbackEntry,
     PublicError,
     PublicHistoryEntry,
+    PublicQueuedTurn,
     PublicSessionState,
+    PublicTurnQueue,
     PublicTurnStatus,
     ResourceContentBlock,
     TextContentBlock,
@@ -82,12 +87,24 @@ from vibe.app_server.protocol import (
     SessionStartResponse,
     SessionStopParams,
     SessionStopResponse,
+    TurnEnqueueParams,
+    TurnEnqueueResponse,
+    TurnInputEntry,
     TurnInterruptParams,
     TurnInterruptResponse,
+    TurnQueueReadParams,
+    TurnQueueReadResponse,
+    TurnQueueRemoveParams,
+    TurnQueueRemoveResponse,
+    TurnQueueReplaceParams,
+    TurnQueueReplaceResponse,
+    TurnQueueResumeParams,
+    TurnQueueResumeResponse,
     TurnStartParams,
     TurnStartResponse,
     TurnSteerParams,
     TurnSteerResponse,
+    TurnUserInputEntry,
 )
 from vibe.app_server.resources import AppServerResources
 from vibe.user_content import UserResource
@@ -98,7 +115,13 @@ class _StreamClosed:
     error: Exception | None = None
 
 
-type _QueuedEvent = AppServerEvent | _StreamClosed
+@dataclass(frozen=True, slots=True)
+class _PublishedEvent:
+    generation: int
+    event: AppServerEvent
+
+
+type _QueuedEvent = _PublishedEvent | _StreamClosed
 
 _EVENT_QUEUE_MAX_SIZE = 256
 
@@ -115,13 +138,14 @@ class SessionExitSummary:
     usage: TokenUsage
 
 
-class AppServerSession:
+class AppServerSession:  # noqa: PLR0904
     def __init__(
         self,
         client: AppServerClient,
         bootstrap: ClientBootstrap,
         client_info: ClientInfo,
         capabilities: ClientCapabilities,
+        session_options: SessionOptions,
         client_tool_handler: ClientToolHandler | None = None,
         client_factory: Callable[[], AppServerClient] | None = None,
     ) -> None:
@@ -133,12 +157,14 @@ class AppServerSession:
             self._state,
             client_info,
             capabilities,
+            session_options,
             client_factory=client_factory,
         )
         resource_connection = AppServerResourceConnection(
             self._connection, self._ensure_attached
         )
         self.resources = AppServerResources(resource_connection, self._state)
+        self._event_generation = 0
         self._consumed_turn_id: str | None = None
         self._starting_turn = False
         self._callback_sessions: dict[str, str] = {}
@@ -149,6 +175,7 @@ class AppServerSession:
             maxsize=_EVENT_QUEUE_MAX_SIZE
         )
         self._message_task: asyncio.Task[None] | None = None
+        self._closing = False
         self._client_tool_handler = client_tool_handler
         self._client_request_tasks: set[asyncio.Task[None]] = set()
 
@@ -231,6 +258,7 @@ class AppServerSession:
             bootstrap,
             client_info,
             capabilities,
+            agent_config,
             client_tool_handler,
             client_factory,
         )
@@ -256,6 +284,10 @@ class AppServerSession:
     @property
     def history(self) -> list[PublicHistoryEntry]:
         return self._state.projection.history
+
+    @property
+    def turn_queue(self) -> PublicTurnQueue:
+        return self.state.turn_queue
 
     @property
     def turn_active(self) -> bool:
@@ -322,13 +354,16 @@ class AppServerSession:
                     raise item.error or RuntimeError(
                         "App-server event stream closed unexpectedly"
                     )
-                if isinstance(item, TurnCompleted) and item.turn.id == turn.id:
+                if item.generation != self._event_generation:
+                    continue
+                event = item.event
+                if isinstance(event, TurnCompleted) and event.turn.id == turn.id:
                     self._consumed_turn_id = None
                     await self.resources.runtime.refresh()
-                    if item.turn.status is PublicTurnStatus.FAILED:
-                        raise AppServerTurnError(item.turn.error)
+                    if event.turn.status is PublicTurnStatus.FAILED:
+                        raise AppServerTurnError(event.turn.error)
                     return
-                yield item
+                yield event
         except asyncio.CancelledError:
             with suppress(Exception):
                 await self.interrupt()
@@ -345,7 +380,190 @@ class AppServerSession:
                 raise item.error or RuntimeError(
                     "App-server event stream closed unexpectedly"
                 )
-            yield item
+            if item.generation != self._event_generation:
+                continue
+            event = item.event
+            if isinstance(event, TurnCompleted):
+                await self.resources.runtime.refresh()
+                if item.generation != self._event_generation:
+                    continue
+            yield event
+
+    async def enqueue(
+        self,
+        message: str,
+        message_entry_id: str | None = None,
+        *,
+        idempotency_key: str | None = None,
+        images: list[ImageAttachment] | None = None,
+        resources: list[UserResource] | None = None,
+    ) -> PublicQueuedTurn:
+        return await self._queue_turn(
+            message,
+            message_entry_id,
+            idempotency_key=idempotency_key,
+            images=images,
+            resources=resources,
+        )
+
+    async def replace_queued_turn(
+        self,
+        queue_item_id: str,
+        message: str,
+        message_entry_id: str | None = None,
+        *,
+        idempotency_key: str | None = None,
+        images: list[ImageAttachment] | None = None,
+        resources: list[UserResource] | None = None,
+    ) -> PublicQueuedTurn | None:
+        try:
+            return await self._queue_turn(
+                message,
+                message_entry_id,
+                idempotency_key=idempotency_key,
+                images=images,
+                resources=resources,
+                queue_item_id=queue_item_id,
+            )
+        except AppServerResponseError as exc:
+            if exc.error.code is ProtocolErrorCode.NOT_FOUND:
+                return None
+            raise
+
+    async def _queue_turn(
+        self,
+        message: str,
+        message_entry_id: str | None,
+        *,
+        idempotency_key: str | None,
+        images: list[ImageAttachment] | None,
+        resources: list[UserResource] | None,
+        queue_item_id: str | None = None,
+    ) -> PublicQueuedTurn:
+        client = await self._ensure_attached()
+        entry_content = session_content_blocks(message, images, resources)
+        request_idempotency_key = idempotency_key
+        if request_idempotency_key is None:
+            request_idempotency_key = (
+                str(uuid4())
+                if queue_item_id is not None
+                else message_entry_id or str(uuid4())
+            )
+        request_session_id = self.session_id
+        entries: list[TurnInputEntry] = [
+            TurnUserInputEntry(entry_id=message_entry_id, content=entry_content)
+        ]
+        if queue_item_id is None:
+            response = validate_wire(
+                TurnEnqueueResponse,
+                await client.request(
+                    "app_server/session/turn/enqueue",
+                    TurnEnqueueParams(
+                        idempotency_key=request_idempotency_key,
+                        session_id=request_session_id,
+                        entries=entries,
+                    ),
+                ),
+            )
+        else:
+            response = validate_wire(
+                TurnQueueReplaceResponse,
+                await client.request(
+                    "app_server/session/turn/queue/replace",
+                    TurnQueueReplaceParams(
+                        idempotency_key=request_idempotency_key,
+                        session_id=request_session_id,
+                        queue_item_id=queue_item_id,
+                        entries=entries,
+                    ),
+                ),
+            )
+        if queue_item_id is not None and response.queue_item_id != queue_item_id:
+            raise RuntimeError("Queued turn replacement changed its identity")
+        existing = next(
+            (
+                item
+                for item in self.turn_queue.items
+                if item.id == response.queue_item_id
+            ),
+            None,
+        )
+        queued_turn = PublicQueuedTurn(
+            id=response.queue_item_id,
+            created_at=(
+                existing.created_at
+                if existing is not None
+                else time.time_ns() // 1_000_000
+            ),
+            entries=[entry.model_copy(deep=True) for entry in entries],
+        )
+        if queue_item_id is None:
+            self._state.projection.track_queued_turn(
+                queued_turn, session_id=request_session_id
+            )
+        else:
+            self._state.projection.replace_queued_turn(queued_turn)
+        return queued_turn
+
+    async def read_turn_queue(self) -> PublicTurnQueue:
+        client = await self._ensure_attached()
+        after_event_id = self._state.projection.last_event_id
+        response = validate_wire(
+            TurnQueueReadResponse,
+            await client.request(
+                "app_server/session/turn/queue/read",
+                TurnQueueReadParams(session_id=self.session_id),
+                wait_for_incoming=True,
+            ),
+        )
+        return self._state.projection.adopt_turn_queue(
+            response.queue, after_event_id=after_event_id
+        )
+
+    async def remove_queued_turn(self, queue_item_id: str) -> bool:
+        client = await self._ensure_attached()
+        was_queued = any(item.id == queue_item_id for item in self.turn_queue.items)
+        validate_wire(
+            TurnQueueRemoveResponse,
+            await client.request(
+                "app_server/session/turn/queue/remove",
+                TurnQueueRemoveParams(
+                    session_id=self.session_id, queue_item_id=queue_item_id
+                ),
+            ),
+        )
+        snapshot = validate_wire(
+            SessionReadResponse,
+            await client.request(
+                "session/read",
+                SessionReadParams(session_id=self.session_id),
+                wait_for_incoming=True,
+            ),
+        ).state
+        state = (
+            self.state
+            if self._state.projection.last_event_id > snapshot.event_id
+            else snapshot
+        )
+        was_promoted = any(
+            turn.queue_item_id == queue_item_id for turn in state.turns or []
+        )
+        return (
+            was_queued
+            and not was_promoted
+            and all(item.id != queue_item_id for item in state.turn_queue.items)
+        )
+
+    async def resume_turn_queue(self) -> PublicTurnQueue:
+        client = await self._ensure_attached()
+        validate_wire(
+            TurnQueueResumeResponse,
+            await client.request(
+                "app_server/session/turn/queue/resume",
+                TurnQueueResumeParams(session_id=self.session_id),
+            ),
+        )
+        return await self.read_turn_queue()
 
     async def inject_user_context(
         self,
@@ -357,6 +575,7 @@ class AppServerSession:
         resources: list[UserResource] | None = None,
         client_message_id: str | None = None,
         mention_stats: MentionStats | None = None,
+        require_active_turn: bool = False,
     ) -> list[HistoryEntryAdded]:
         client = await self._ensure_attached()
         blocks = _content_blocks(content, images, resources)
@@ -378,6 +597,10 @@ class AppServerSession:
                 ),
             )
             return []
+        if require_active_turn:
+            raise AppServerResponseError(
+                ProtocolError(code=ProtocolErrorCode.CONFLICT, message="No active turn")
+            )
         response = validate_wire(
             ContextInjectResponse,
             await client.request(
@@ -477,9 +700,17 @@ class AppServerSession:
         await self.respond_to_callback(callback.callback_id, output)
 
     async def resume(self, session_id: str) -> None:
-        await self.resources.sessions.resume(session_id)
+        await self.resources.sessions.resume(
+            session_id, on_adopt=self._advance_event_generation
+        )
         self.resources.vibe_code.reset()
         await self.resources.refresh()
+
+    def _advance_event_generation(self) -> None:
+        self._event_generation += 1
+        self._consumed_turn_id = None
+        self._starting_turn = False
+        self._callback_sessions.clear()
 
     async def compact(self, extra_instructions: str = "") -> str:
         summary = await self.resources.sessions.compact(extra_instructions)
@@ -492,6 +723,7 @@ class AppServerSession:
 
     async def close(self) -> None:
         await self.resources.telemetry.flush()
+        self._closing = True
         client = self._connection.current
         if client is not None:
             with suppress(Exception):
@@ -501,17 +733,17 @@ class AppServerSession:
                         "session/stop", SessionStopParams(session_id=self.session_id)
                     ),
                 )
+        await self._connection.close()
         if self._message_task is not None:
-            self._message_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._message_task
+            self._message_task = None
         client_request_tasks = list(self._client_request_tasks)
         for task in client_request_tasks:
             task.cancel()
         if client_request_tasks:
             await asyncio.gather(*client_request_tasks, return_exceptions=True)
             self._client_request_tasks.clear()
-        await self._connection.close()
         self._close_event_streams()
 
     async def _ensure_attached(self) -> AppServerClient:
@@ -541,8 +773,14 @@ class AppServerSession:
                 raise
             except Exception as exc:
                 error = exc
+            if self._closing:
+                self._close_event_streams(error)
+                return
             if not await self._connection.reconnect(client):
                 self._close_event_streams(error)
+                return
+            if self._closing:
+                self._close_event_streams()
                 return
             try:
                 await self._ensure_attached()
@@ -591,12 +829,23 @@ class AppServerSession:
         await self._publish_event(event)
 
     async def _resync(self, client: AppServerClient) -> None:
+        generation = self._state.projection.generation
         state = validate_wire(
             SessionReadResponse,
             await client.request(
                 "session/read", SessionReadParams(session_id=self.session_id)
             ),
         ).state
+        if self._state.projection.generation != generation:
+            # A response replaced the projection while this read was in flight
+            # — rewinding, compacting and clearing history all do, whether or
+            # not they change the session's id. The read answers for the
+            # conversation that was left behind, so applying it would put the
+            # projection back on it and replay its abandoned turns as freshly
+            # added entries. Whatever replaced it handed us a whole state to
+            # stand on, and the next event that does not follow from that state
+            # asks for another read.
+            return
         previous = self._state.projection.state
         self._state.projection.replace_state(state)
         await self._publish_snapshot(previous, state)
@@ -605,6 +854,10 @@ class AppServerSession:
         self, previous: PublicSessionState, current: PublicSessionState
     ) -> None:
         for event in reconcile_snapshot(previous, current):
+            # Snapshot resync emits SessionUpdated without the live path's
+            # active_agent assignment, so sync it here to match the live path.
+            if isinstance(event, SessionUpdated) and event.session.agent:
+                self._state.active_agent = event.session.agent
             await self._publish_event(event)
 
     async def _handle_request(self, request: ServerRequest) -> None:
@@ -728,12 +981,16 @@ class AppServerSession:
             finish_event_queue(queue, closed)
 
     async def _publish_event(self, event: AppServerEvent) -> None:
+        if isinstance(event, TurnCompleted) and event.turn.id == self._consumed_turn_id:
+            self._consumed_turn_id = None
+            await self._events.put(_PublishedEvent(self._event_generation, event))
+            return
         queue = (
             self._events
             if self._starting_turn or self._consumed_turn_id is not None
             else self._unsolicited_events
         )
-        await queue.put(event)
+        await queue.put(_PublishedEvent(self._event_generation, event))
 
 
 async def _read_bootstrap(

@@ -193,6 +193,9 @@ async def test_prune_keeps_active_drops_others() -> None:
 
     await _store.prune({("a", 2)})
 
+    # Extra versions of the active skill are trimmed...
     assert await _store.is_materialized("a", 2)
     assert not await _store.is_materialized("a", 1)
-    assert not await _store.is_materialized("b", 1)
+    # ...but a skill absent from the active set (e.g. another project's pin) is
+    # left untouched, since the global store is shared across projects.
+    assert await _store.is_materialized("b", 1)

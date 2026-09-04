@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from vibe.core.git.worktree.repository import (
+    SNAPSHOT_REF_PREFIX,
     LinkedWorktree,
     ManagedWorktree,
     PreparedWorktree,
@@ -12,6 +13,7 @@ from vibe.core.git.worktree.repository import (
 )
 
 __all__ = [
+    "SNAPSHOT_REF_PREFIX",
     "LinkedWorktree",
     "ManagedWorktree",
     "PreparedWorktree",

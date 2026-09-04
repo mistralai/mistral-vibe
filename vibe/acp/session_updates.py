@@ -40,6 +40,7 @@ from vibe.app_server.models import (
     CancelledEffectState,
     CompletedEffectState,
     FailedEffectState,
+    FileEditEffectBatchInput,
     FileEditEffectDetail,
     FileEditEffectInput,
     FileEditEffectOutput,
@@ -399,14 +400,25 @@ def _result_effect_content(
             return []
         case FileEditEffectDetail():
             if value := _effect_output(entry, FileEditEffectOutput):
-                content.append(
-                    FileEditToolCallContent(
-                        type="diff",
-                        path=value.file,
-                        old_text=value.old_string,
-                        new_text=value.new_string,
+                if value.occurrences:
+                    content.extend(
+                        FileEditToolCallContent(
+                            type="diff",
+                            path=value.file,
+                            old_text=occurrence.old_text,
+                            new_text=occurrence.new_text,
+                        )
+                        for occurrence in value.occurrences
                     )
-                )
+                elif value.old_string is not None and value.new_string is not None:
+                    content.append(
+                        FileEditToolCallContent(
+                            type="diff",
+                            path=value.file,
+                            old_text=value.old_string,
+                            new_text=value.new_string,
+                        )
+                    )
         case FileWriteEffectDetail():
             if value := _effect_output(entry, FileWriteEffectOutput):
                 content.append(
@@ -435,6 +447,16 @@ def _call_effect_content(
                     old_text=value.old_string,
                     new_text=value.new_string,
                 )
+            ]
+        case FileEditEffectDetail(input=FileEditEffectBatchInput() as value):
+            return [
+                FileEditToolCallContent(
+                    type="diff",
+                    path=value.file_path,
+                    old_text=change.old_string,
+                    new_text=change.new_string,
+                )
+                for change in value.changes
             ]
         case FileWriteEffectDetail(input=FileWriteEffectInput() as value):
             return [
@@ -617,6 +639,8 @@ def _raw_output(entry: PublicEffectEntry) -> JsonValue:
     if isinstance(state, CompletedEffectState):
         return state.output
     if isinstance(state, FailedEffectState):
+        if state.output is not None:
+            return state.output
         return state.error.model_dump(mode="json", by_alias=True)
     if isinstance(state, CancelledEffectState | SkippedEffectState):
         return state.reason

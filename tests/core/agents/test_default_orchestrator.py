@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 import tomllib
 
@@ -7,7 +8,13 @@ import pytest
 
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import MissingAPIKeyError, build_default_orchestrator
+from vibe.core.config import (
+    MissingAPIKeyError,
+    RawConfig,
+    VibeConfigSchema,
+    build_default_orchestrator,
+)
+from vibe.core.config.builder import ConfigBuilder
 from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.config.layers.discovered import DiscoveredConfigLayer
 from vibe.core.config.patch import AddOperationPatch
@@ -21,16 +28,41 @@ _DISCOVERED_LAYER_DISABLED = pytest.mark.skip(
 
 
 @pytest.mark.asyncio
-async def test_build_default_orchestrator_can_skip_api_key_validation(
+async def test_build_default_orchestrator_does_not_validate_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("MISTRAL_API_KEY")
 
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
+    await orchestrator.reload()
     assert orchestrator.config.get_active_provider().name == "mistral"
 
     with pytest.raises(MissingAPIKeyError):
-        await build_default_orchestrator()
+        orchestrator.config.require_active_provider_api_key()
+
+
+@pytest.mark.asyncio
+async def test_build_default_orchestrator_builds_layer_stack_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_calls = 0
+    original_build = ConfigBuilder.build
+
+    async def count_builds(
+        self: ConfigBuilder[VibeConfigSchema],
+        force_load: bool = False,
+        *,
+        layer_overrides: Mapping[str, RawConfig] | None = None,
+    ) -> VibeConfigSchema:
+        nonlocal build_calls
+        build_calls += 1
+        return await original_build(self, force_load, layer_overrides=layer_overrides)
+
+    monkeypatch.setattr(ConfigBuilder, "build", count_builds)
+
+    await build_default_orchestrator()
+
+    assert build_calls == 1
 
 
 async def _switch_profile_with_agent_layer(
@@ -85,10 +117,14 @@ ask_confirmation_on_exit = true
     result = await orchestrator.set_field("/displayed_workdir", "patched")
 
     assert result == []
-    with project_config_path.open("rb") as file:
-        assert tomllib.load(file)["displayed_workdir"] == "patched"
+    # The user layer is the default write target, so an untargeted write lands
+    # there and leaves the trusted project config untouched, even though that
+    # layer sits above the user layer for reads.
     with user_config_path.open("rb") as file:
-        assert tomllib.load(file)["displayed_workdir"] == "user-only"
+        assert tomllib.load(file)["displayed_workdir"] == "patched"
+    with project_config_path.open("rb") as file:
+        assert "displayed_workdir" not in tomllib.load(file)
+    assert orchestrator.config.displayed_workdir == "patched"
 
 
 @pytest.mark.asyncio
@@ -116,12 +152,7 @@ alias = "custom"
     orchestrator = await build_default_orchestrator()
 
     assert orchestrator.config.active_model == "custom"
-    assert set(orchestrator.config.models) >= {
-        "custom",
-        "mistral-medium-3.5",
-        "devstral-small",
-        "local",
-    }
+    assert set(orchestrator.config.models) >= {"custom", "mistral-medium-3.5", "local"}
 
 
 @pytest.mark.asyncio
@@ -163,6 +194,60 @@ thinking = "off"
         persisted = tomllib.load(file)
     entry = next(m for m in persisted["models"] if m["alias"] == "mistral-medium-3.5")
     assert entry == {"alias": "mistral-medium-3.5", "thinking": "off"}
+
+
+@pytest.mark.asyncio
+async def test_build_default_orchestrator_drops_sparse_leftover_devstral_small(
+    config_dir: Path,
+) -> None:
+    # A sparse leftover of the removed default has no name/provider. DefaultConfigLayer
+    # can no longer complete it, so the migration must drop it or load fails.
+    config_path = config_dir / "config.toml"
+    config_path.write_text(
+        'active_model = "devstral-small"\n\n'
+        "[[models]]\n"
+        'alias = "devstral-small"\n'
+        'thinking = "low"\n',
+        encoding="utf-8",
+    )
+
+    orchestrator = await build_default_orchestrator()
+
+    assert "devstral-small" not in orchestrator.config.models
+    assert orchestrator.config.active_model != "devstral-small"
+    assert orchestrator.config.get_active_model().alias in orchestrator.config.models
+
+    with config_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted.get("active_model", "") == ""
+    assert "devstral-small" not in {
+        model.get("alias")
+        for model in persisted.get("models", [])
+        if isinstance(model, dict)
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_default_orchestrator_keeps_complete_custom_devstral_small(
+    config_dir: Path,
+) -> None:
+    config_path = config_dir / "config.toml"
+    config_path.write_text(
+        'active_model = "devstral-small"\n\n'
+        "[[models]]\n"
+        'name = "devstral-small-latest"\n'
+        'provider = "mistral"\n'
+        'alias = "devstral-small"\n'
+        'thinking = "off"\n',
+        encoding="utf-8",
+    )
+
+    orchestrator = await build_default_orchestrator()
+
+    assert orchestrator.config.active_model == "devstral-small"
+    kept = orchestrator.config.models["devstral-small"]
+    assert kept.name == "devstral-small-latest"
+    assert kept.provider == "mistral"
 
 
 @pytest.mark.asyncio

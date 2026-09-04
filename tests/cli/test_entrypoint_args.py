@@ -89,7 +89,22 @@ def test_experimental_harness_factory_comes_from_harness_distribution(
     with pytest.raises(NotImplementedError, match="Harness stub selected"):
         _experimental_harness.create_experimental_harness_host()
 
-    assert imported_modules == ["mistralai_rust_harness.vibe"]
+    assert imported_modules == ["mistralai_vibe_local_harness.vibe"]
+
+
+def test_experimental_harness_factory_reports_unavailable_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(_module_name: str):
+        raise ModuleNotFoundError
+
+    monkeypatch.setattr(_experimental_harness, "import_module", unavailable)
+
+    with pytest.raises(
+        _experimental_harness.ExperimentalHarnessUnavailableError,
+        match="^The Unified Harness backend is not available$",
+    ):
+        _experimental_harness.create_experimental_harness_host()
 
 
 def test_worktree_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:

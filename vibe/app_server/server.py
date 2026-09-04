@@ -24,11 +24,14 @@ from vibe.app_server._session_backend_port import (
     SessionBackendEvent,
     SessionBackendEventDrain,
     SessionBackendExtension,
+    SessionBackendHistoryClearHost,
     SessionBackendHost,
     SessionBackendHostBackgroundTasks,
+    SessionBackendHostDelete,
     SessionBackendNotificationSink,
     SessionBackendOpenCallbacks,
     SessionBackendResult,
+    SessionBackendRewindForkHost,
     SessionBackendRuntimeView,
     SessionEventSubscription,
 )
@@ -75,17 +78,26 @@ from vibe.app_server.protocol import (
     SessionDeleteParams,
     SessionForkParams,
     SessionHandoffParams,
+    SessionHistoryClearParams,
+    SessionHistoryClearResponse,
     SessionListParams,
     SessionReadParams,
     SessionReadResponse,
     SessionResumeParams,
     SessionResumeResponse,
+    SessionRewindParams,
     SessionSettingsUpdateParams,
     SessionSnapshotParams,
     SessionStartParams,
     SessionStartResponse,
+    SessionTitleUpdateParams,
     TransportKind,
+    TurnEnqueueParams,
     TurnInterruptParams,
+    TurnQueueReadParams,
+    TurnQueueRemoveParams,
+    TurnQueueReplaceParams,
+    TurnQueueResumeParams,
     TurnStartParams,
     TurnSteerParams,
     validate_callback_acknowledgement,
@@ -109,11 +121,17 @@ class InitializationState(StrEnum):
 type SessionBackendHostFactory = Callable[[SessionBackendServices], SessionBackendHost]
 
 
+# Requests that can hand the connection a different session. Their answer is
+# what tells the client the session changed, so notifications raised while they
+# run are held back and flushed once it has been sent: an event naming the new
+# session ahead of the response reaches a client still projecting the old one.
 _SESSION_ATTACHMENT_CANDIDATES = frozenset({
     "session/fork",
     "session/start",
     "session/resume",
     "session/continue",
+    "session/rewind",
+    "session/history/clear",
 })
 
 _SESSION_BACKEND_HOST_LIFECYCLE_METHODS = frozenset({
@@ -122,7 +140,11 @@ _SESSION_BACKEND_HOST_LIFECYCLE_METHODS = frozenset({
     "session/continue",
 })
 
-_SESSION_OPTIONAL_METHODS = frozenset({"config/read", "workspace/trust/decision"})
+_SESSION_OPTIONAL_METHODS = frozenset({
+    "agents/list",
+    "config/read",
+    "workspace/trust/decision",
+})
 
 _SESSION_BACKEND_METHODS = frozenset({
     "callback/result",
@@ -132,6 +154,11 @@ _SESSION_BACKEND_METHODS = frozenset({
     "session/compact",
     "session/context/inject",
     "session/settings/update",
+    "app_server/session/turn/enqueue",
+    "app_server/session/turn/queue/read",
+    "app_server/session/turn/queue/remove",
+    "app_server/session/turn/queue/replace",
+    "app_server/session/turn/queue/resume",
     "turn/interrupt",
     "turn/start",
     "turn/steer",
@@ -155,6 +182,18 @@ class PendingClientRequest:
 class PendingNotification:
     method: str
     params: ProtocolModel
+
+
+def _consume_task_result(task: asyncio.Task[object]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+@dataclass(frozen=True, slots=True)
+class _ErrorDispatch:
+    error: ProtocolError
+    after_response: Callable[[], None] | None = None
+    on_response_abandoned: Callable[[], None] | None = None
 
 
 class AppServer:
@@ -536,10 +575,19 @@ class AppServer:
         if attachment_candidate:
             self._begin_attachment()
         outcome = await self._dispatch_or_error(request)
-        if isinstance(outcome, ProtocolError):
-            await self._send_error(request.id, outcome)
+        if isinstance(outcome, _ErrorDispatch):
+            try:
+                await self._send_error(request.id, outcome.error)
+            except BaseException:
+                if outcome.on_response_abandoned is not None:
+                    outcome.on_response_abandoned()
+                if attachment_candidate:
+                    await self._finish_attachment(was_attached)
+                raise
             if attachment_candidate:
                 await self._finish_attachment(was_attached)
+            if outcome.after_response is not None:
+                outcome.after_response()
             if request.method == "session/stop":
                 await self.close()
             return
@@ -550,6 +598,8 @@ class AppServer:
                 "result": outcome.response.model_dump(mode="json", by_alias=True),
             })
         except BaseException:
+            if outcome.on_response_abandoned is not None:
+                outcome.on_response_abandoned()
             if attachment_candidate:
                 await self._finish_attachment(was_attached)
             raise
@@ -578,7 +628,7 @@ class AppServer:
 
     async def _dispatch_or_error(
         self, request: ServerRequest
-    ) -> DispatchResult | ProtocolError:
+    ) -> DispatchResult | _ErrorDispatch:
         try:
             if request.method == "initialize":
                 return DispatchResult(self._initialize(request.params))
@@ -592,25 +642,37 @@ class AppServer:
                 self._validate_open_callback_capabilities()
             return dispatched
         except (RequestFailure, SessionBackendError) as exc:
-            return ProtocolError(code=exc.code, message=str(exc), data=exc.data)
+            return _ErrorDispatch(
+                ProtocolError(code=exc.code, message=str(exc), data=exc.data),
+                after_response=(
+                    exc.after_response if isinstance(exc, SessionBackendError) else None
+                ),
+                on_response_abandoned=(
+                    exc.on_response_abandoned
+                    if isinstance(exc, SessionBackendError)
+                    else None
+                ),
+            )
         except ValidationError as exc:
-            return ProtocolError(
-                code=ProtocolErrorCode.INVALID_PARAMS,
-                message="Invalid request parameters",
-                data=InvalidParamsData(
-                    error_count=exc.error_count(),
-                    issues=[
-                        InvalidParamsIssue(
-                            path=list(issue["loc"]), message=issue["msg"]
-                        )
-                        for issue in exc.errors()
-                    ],
-                ).model_dump(mode="json", by_alias=True),
+            return _ErrorDispatch(
+                ProtocolError(
+                    code=ProtocolErrorCode.INVALID_PARAMS,
+                    message="Invalid request parameters",
+                    data=InvalidParamsData(
+                        error_count=exc.error_count(),
+                        issues=[
+                            InvalidParamsIssue(
+                                path=list(issue["loc"]), message=issue["msg"]
+                            )
+                            for issue in exc.errors()
+                        ],
+                    ).model_dump(mode="json", by_alias=True),
+                )
             )
         except Exception as exc:
             logger.exception("Unhandled error dispatching %s", request.method)
-            return ProtocolError(
-                code=ProtocolErrorCode.INTERNAL_ERROR, message=str(exc)
+            return _ErrorDispatch(
+                ProtocolError(code=ProtocolErrorCode.INTERNAL_ERROR, message=str(exc))
             )
 
     async def _after_response(
@@ -710,6 +772,19 @@ class AppServer:
         references_child = isinstance(
             root, SessionBackendChildSessionIndex
         ) and root.references_child(params.session_id)
+        if isinstance(self._session_backend_host, SessionBackendHostDelete):
+            response = await self._session_backend_host.delete(params)
+            if is_root:
+                backend_events = self._backend_event_task
+                self._backend_event_task = None
+                self._backend_event_backend = None
+                if backend_events is not None:
+                    await cancel_tasks([backend_events], label="deleted session events")
+                self._root = None
+                self._callback_requests.clear()
+                if self._connector_catalog_service is not None:
+                    self._connector_catalog_service.discard_session(params.session_id)
+            return DispatchResult(response=response)
         if is_root or references_child:
             raise RequestFailure(
                 ProtocolErrorCode.CONFLICT, "Deleting a live session is not supported"
@@ -750,16 +825,26 @@ class AppServer:
                 ProtocolErrorCode.NOT_IMPLEMENTED,
                 f"The selected session backend does not support {method}",
             )
+        previous_session_id = root.session_id
         try:
             result = await root.dispatch_extension(method, raw_params)
         except SessionBackendError as exc:
             if exc.code is ProtocolErrorCode.NOT_FOUND and method in {
                 "session/read",
-                "session/rename",
                 "session/history/list",
             }:
                 return await self._host_handler.dispatch(method, raw_params)
             raise
+        if result.session_attached and root.session_id != previous_session_id:
+            subscription = await root.subscribe(
+                SessionReadParams(
+                    session_id=root.session_id, history=PageRequest(limit=200)
+                )
+            )
+            await self._replace_backend_event_task(root, subscription)
+            await self._replay_pending_backend_events(
+                root, subscription.snapshot.last_event_id
+            )
         await self._flush_backend_events(root)
         return result
 
@@ -776,6 +861,12 @@ class AppServer:
                 validate_wire(SessionReadParams, raw_params)
             )
             return DispatchResult(response)
+        if method == "session/rename":
+            params = validate_wire(SessionTitleUpdateParams, raw_params)
+            response = await self._session_backend_host.rename(params)
+            if self._root is not None and self._root.session_id == params.session_id:
+                await self._flush_backend_events(self._root)
+            return DispatchResult(response)
         if method == "session/fork":
             params = validate_wire(SessionForkParams, raw_params)
             result = await self._session_backend_host.fork(params)
@@ -790,8 +881,75 @@ class AppServer:
                         "last_event_id": snapshot.last_event_id,
                     }
                 )
-            return DispatchResult(response, session_attached=result.backend is not None)
+            return DispatchResult(
+                response,
+                after_response=result.after_response,
+                session_attached=result.backend is not None,
+            )
+        if handoff := await self._dispatch_backend_host_handoff(method, raw_params):
+            return handoff
         return await self._dispatch_backend_host_lifecycle(method, raw_params)
+
+    async def _dispatch_backend_host_handoff(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult | None:
+        """Route the Host operations that hand the connection a new session.
+
+        Both replace the attached backend rather than mutate it, so both run
+        under a lifecycle transition and answer with the session re-attached.
+        """
+        if rewound := await self._dispatch_rewind_fork(method, raw_params):
+            return rewound
+        return await self._dispatch_history_clear(method, raw_params)
+
+    async def _dispatch_history_clear(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult | None:
+        if method != "session/history/clear":
+            return None
+        if not isinstance(self._session_backend_host, SessionBackendHistoryClearHost):
+            return None
+        root = self._require_root()
+        params = validate_wire(SessionHistoryClearParams, raw_params)
+        async with self._lifecycle_transition():
+            result = await self._session_backend_host.clear_history(root, params)
+            await self._activate_backend(result.backend, 200)
+        return DispatchResult(
+            SessionHistoryClearResponse(
+                state=result.state, session_log=result.session_log
+            ),
+            after_response=result.after_response,
+            session_attached=True,
+            runtime_updated=True,
+        )
+
+    async def _dispatch_rewind_fork(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult | None:
+        """Route the fork half of ``session/rewind`` to the Host, if it owns it.
+
+        Only the fork half: an in-place rewind never changes session identity,
+        so it stays on the attached backend. A Host without this capability —
+        or a request arriving before a session is attached — falls through to
+        the backend's own ``session/rewind``.
+        """
+        if method != "session/rewind" or self._root is None:
+            return None
+        if not isinstance(self._session_backend_host, SessionBackendRewindForkHost):
+            return None
+        params = validate_wire(SessionRewindParams, raw_params)
+        if params.inplace:
+            return None
+        async with self._lifecycle_transition():
+            root = self._require_root()
+            result = await self._session_backend_host.rewind_fork(root, params)
+            await self._activate_backend(result.backend, 200)
+        return DispatchResult(
+            result.response,
+            after_response=result.after_response,
+            session_attached=True,
+            runtime_updated=True,
+        )
 
     async def _dispatch_backend_host_lifecycle(
         self, method: str, raw_params: dict[str, Any]
@@ -860,6 +1018,8 @@ class AppServer:
     async def _dispatch_backend_operation(
         self, root: SessionBackend, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult | None:
+        if method.startswith("app_server/session/turn/"):
+            return await self._dispatch_backend_turn(root, method, raw_params)
         match method.partition("/")[0]:
             case "session":
                 return await self._dispatch_backend_session(root, method, raw_params)
@@ -896,14 +1056,38 @@ class AppServer:
             return DispatchResult(result.response, after_response=result.after_response)
         if method == "session/compact":
             result = await root.compact(validate_wire(SessionCompactParams, raw_params))
-            return DispatchResult(result.response, after_response=result.after_response)
+            return DispatchResult(
+                result.response,
+                after_response=result.after_response,
+                on_response_abandoned=result.on_response_abandoned,
+            )
         return None
 
     @staticmethod
     async def _dispatch_backend_turn(
         root: SessionBackend, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult | None:
-        if method == "turn/start":
+        if method == "app_server/session/turn/enqueue":
+            result = await root.enqueue_turn(
+                validate_wire(TurnEnqueueParams, raw_params)
+            )
+        elif method == "app_server/session/turn/queue/read":
+            result = await root.read_turn_queue(
+                validate_wire(TurnQueueReadParams, raw_params)
+            )
+        elif method == "app_server/session/turn/queue/remove":
+            result = await root.remove_queued_turn(
+                validate_wire(TurnQueueRemoveParams, raw_params)
+            )
+        elif method == "app_server/session/turn/queue/replace":
+            result = await root.replace_queued_turn(
+                validate_wire(TurnQueueReplaceParams, raw_params)
+            )
+        elif method == "app_server/session/turn/queue/resume":
+            result = await root.resume_turn_queue(
+                validate_wire(TurnQueueResumeParams, raw_params)
+            )
+        elif method == "turn/start":
             result = await root.start_turn(validate_wire(TurnStartParams, raw_params))
         elif method == "turn/steer":
             result = await root.steer_turn(validate_wire(TurnSteerParams, raw_params))
@@ -913,7 +1097,11 @@ class AppServer:
             )
         else:
             return None
-        return DispatchResult(result.response, after_response=result.after_response)
+        return DispatchResult(
+            result.response,
+            after_response=result.after_response,
+            runtime_updated=result.runtime_updated,
+        )
 
     async def _dispatch_backend_config(
         self, root: SessionBackend, method: str, raw_params: dict[str, Any]

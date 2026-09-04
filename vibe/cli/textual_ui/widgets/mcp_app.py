@@ -26,6 +26,7 @@ from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionLis
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
 
+_REFRESHING_LABEL = "refreshing"
 _LIST_VIEW_HELP_TOOLS = (
     f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Show tools  "
     f"{shortcut('d')} Disable  {shortcut('e')} Enable  {shortcut('Esc')} Close"
@@ -157,7 +158,6 @@ class MCPApp(Container):
         self._refresh_view(self._viewing_name)
         self.query_one(OptionList).focus()
         if self._refresh_callback is not None:
-            self._start_refresh()
             self.set_interval(_BACKGROUND_REFRESH_INTERVAL_SECONDS, self._start_refresh)
 
     def refresh_index(self) -> None:
@@ -243,7 +243,13 @@ class MCPApp(Container):
         if self._refresh_callback is None or self._refreshing:
             return
         self._refreshing = True
-        self.run_worker(self._run_refresh(), exclusive=True, group="refresh")
+        if self.is_attached and self._viewing_name is None:
+            self._rebuild_preserving_scroll()
+        # The callback owns loop-bound app-server state. Its blocking discovery
+        # setup is offloaded at the app-server and Runtime I/O boundaries.
+        self.run_worker(
+            self._run_refresh(), exclusive=True, group="refresh", exit_on_error=False
+        )
 
     async def _run_refresh(self) -> None:
         if self._refresh_callback is not None:
@@ -257,25 +263,52 @@ class MCPApp(Container):
             self.refresh_index()
 
     def _set_highlighted_disabled(self, *, disabled: bool) -> None:
+        """Toggle the highlighted source, painting only what the UI can know.
+
+        Disabling always takes effect, so the row can go straight to
+        ``DISABLED``. Enabling only clears the config flag: whether the source
+        then connects depends on discovery and auth, so painting ``ENABLED``
+        here reports success the UI has not observed. A server that is failing
+        discovery, or a connector that was never linked, would flash as enabled
+        and revert to its real status on the next repaint. Leave the status to
+        the authoritative refresh that follows the toggle.
+        """
         if self._viewing_name is not None and self._viewing_kind is not None:
             self._set_highlighted_tool_disabled(disabled=disabled)
             return
         target = self._highlighted_source()
         if target is None:
             return
-        target.status = (
-            MCPSourceStatus.DISABLED if disabled else MCPSourceStatus.ENABLED
-        )
+        if self._reject_plugin_toggle(target):
+            return
+        if disabled:
+            target.status = MCPSourceStatus.DISABLED
         self.post_message(
             self.MCPToggled(name=target.name, kind=target.kind, disabled=disabled)
         )
         self._rebuild_preserving_scroll()
+
+    def _reject_plugin_toggle(self, source: MCPSourceSummary) -> bool:
+        # Guards the server row and the tool rows under it alike: a toggle is
+        # written to that server's ``[[mcp_servers]]`` entry, and a plugin
+        # server has none, so the catalog would reject the request.
+        if source.plugin_name is None:
+            return False
+        self.notify(
+            f"{source.name} is managed by the {source.plugin_name} plugin and "
+            "cannot be toggled here.",
+            severity="warning",
+            markup=False,
+        )
+        return True
 
     def _set_highlighted_tool_disabled(self, *, disabled: bool) -> None:
         source = self._viewing_source()
         option_list = self.query_one(OptionList)
         highlighted = option_list.highlighted
         if source is None or highlighted is None:
+            return
+        if self._reject_plugin_toggle(source):
             return
         option_id = option_list.get_option_at_index(highlighted).id or ""
         if not option_id.startswith("tool:"):
@@ -328,8 +361,9 @@ class MCPApp(Container):
         all_connectors = self._sources(MCPSourceKind.CONNECTOR)
         servers = _filter_sources(all_servers, self._query)
         connectors = _filter_sources(all_connectors, self._query)
+        title = "MCP Servers & Connectors" if all_connectors else "MCP Servers"
         self.query_one("#mcp-title", NoMarkupStatic).update(
-            "MCP Servers & Connectors" if all_connectors else "MCP Servers"
+            f"{title}  ({_REFRESHING_LABEL})" if self._refreshing else title
         )
         self._set_help_text(_LIST_VIEW_HELP_TOOLS)
         if servers:
@@ -377,11 +411,21 @@ class MCPApp(Container):
             else:
                 tool_labels[source.name] = _tool_count_text(enabled, total)
         max_tools = max(len(label) for label in tool_labels.values())
+        # Only claim a column when something in this group is plugin-owned.
+        owner_tags = {
+            source.name: ""
+            if source.plugin_name is None
+            else f"[plugin:{source.plugin_name}]"
+            for source in sources
+        }
+        max_owner = max(len(tag) for tag in owner_tags.values())
         for source in sources:
             label = Text(no_wrap=True)
             type_tag = f"[{source.transport}]"
             label.append(f"  {source.name:<{max_name}}")
             label.append(f"  {type_tag:<{max_transport}}", style="dim")
+            if max_owner:
+                label.append(f"  {owner_tags[source.name]:<{max_owner}}", style="dim")
             label.append(f"  {tool_labels[source.name]:<{max_tools}}", style="dim")
             symbol, style, status = _source_status(source)
             _append_status(label, symbol, style, status)

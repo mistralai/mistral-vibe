@@ -87,7 +87,13 @@ class SignInTargetScreen(OnboardingScreen):
             self._disarm_override_confirm()
             self.app.switch_screen("custom_domain")
             return
-        configured_domain = self.onboarding_app.configured_custom_domain
+        # A default-console split-horizon config has no custom browser domain
+        # but still carries a connector API base that the Mistral default would
+        # clear, so fall back to it to arm the warning in that case too.
+        configured_domain = (
+            self.onboarding_app.configured_custom_domain
+            or self.onboarding_app.configured_custom_api_base
+        )
         if configured_domain is not None and not self._override_confirm_armed:
             self._arm_override_confirm(configured_domain)
             return

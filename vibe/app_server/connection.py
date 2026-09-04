@@ -12,6 +12,7 @@ from vibe.app_server.models import PublicSessionState
 from vibe.app_server.protocol import (
     ClientCapabilities,
     ClientInfo,
+    SessionOptions,
     SessionResumeParams,
     SessionResumeResponse,
 )
@@ -30,12 +31,14 @@ class AppServerConnection:
         state: ClientSessionState,
         client_info: ClientInfo,
         capabilities: ClientCapabilities,
+        session_options: SessionOptions,
         client_factory: Callable[[], AppServerClient] | None = None,
     ) -> None:
         self._client: AppServerClient | None = client
         self._state = state
         self._client_info = client_info
         self._capabilities = capabilities
+        self._session_options = session_options
         self._client_factory = client_factory
         self._initialized = False
         self._attached_session_id: str | None = None
@@ -67,7 +70,7 @@ class AppServerConnection:
                 response = validate_wire(
                     SessionResumeResponse,
                     await client.request(
-                        "session/resume", SessionResumeParams(session_id=session_id)
+                        "session/resume", self.resume_params(session_id)
                     ),
                 )
                 current = response.state
@@ -75,6 +78,11 @@ class AppServerConnection:
                 self._snapshot = ConnectionSnapshot(previous, current)
                 self._attached_session_id = self._state.session_id
             return client
+
+    def resume_params(self, session_id: str) -> SessionResumeParams:
+        return SessionResumeParams(
+            session_id=session_id, agent_config=self._session_options
+        )
 
     def mark_session_attached(self) -> None:
         self._attached_session_id = self._state.session_id
@@ -123,3 +131,6 @@ class AppServerResourceConnection:
 
     def mark_session_attached(self) -> None:
         self._connection.mark_session_attached()
+
+    def resume_params(self, session_id: str) -> SessionResumeParams:
+        return self._connection.resume_params(session_id)

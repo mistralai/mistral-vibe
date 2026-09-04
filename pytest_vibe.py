@@ -19,6 +19,20 @@ def _available_cpu_count() -> int:
     return os.cpu_count() or 1
 
 
+# Runner-specific signals, not the generic ``CI`` variable. ``CI`` is routinely
+# exported in developer shells (and inherited by every child process), so keying
+# off it would unthrottle local runs and saturate the machine. Dedicated CI
+# runners set one of these instead.
+_CI_RUNNER_ENV_VARS = ("BUILDKITE", "GITHUB_ACTIONS")
+
+
+def _is_ci() -> bool:
+    return any(
+        os.environ.get(var, "").lower() in {"1", "true", "yes"}
+        for var in _CI_RUNNER_ENV_VARS
+    )
+
+
 def _default_worker_count(cpu_count: int) -> int:
     return max(1, math.ceil(cpu_count / 2) - 1)
 
@@ -40,4 +54,9 @@ def pytest_xdist_auto_num_workers() -> int:
             stacklevel=2,
         )
 
-    return _default_worker_count(_available_cpu_count())
+    cpu_count = _available_cpu_count()
+    # Only throttle interactive/local runs to keep developer machines usable.
+    # CI runs the full suite and needs every available core for parallelism.
+    if _is_ci():
+        return cpu_count
+    return _default_worker_count(cpu_count)

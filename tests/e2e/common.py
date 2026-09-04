@@ -22,7 +22,9 @@ def ansi_tolerant_pattern(text: str) -> re.Pattern[str]:
     return re.compile(ansi.join(re.escape(char) for char in text))
 
 
-def write_e2e_config(vibe_home: Path, api_base: str) -> None:
+def write_e2e_config(
+    vibe_home: Path, api_base: str, *, provider_name: str = "mock-provider"
+) -> None:
     vibe_home.mkdir(parents=True, exist_ok=True)
     (vibe_home / "config.toml").write_text(
         "\n".join([
@@ -31,14 +33,14 @@ def write_e2e_config(vibe_home: Path, api_base: str) -> None:
             "disable_welcome_banner_animation = true",
             "",
             "[[providers]]",
-            'name = "mock-provider"',
+            f'name = "{provider_name}"',
             f'api_base = "{api_base}"',
             'api_key_env_var = "MISTRAL_API_KEY"',
             'backend = "generic"',
             "",
             "[[models]]",
             'name = "mock-model"',
-            'provider = "mock-provider"',
+            f'provider = "{provider_name}"',
             'alias = "mock-model"',
         ]),
         encoding="utf-8",

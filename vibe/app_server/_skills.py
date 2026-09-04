@@ -29,7 +29,7 @@ from vibe.core.skills.models import SkillInfo
 from vibe.core.tools.builtins.skill import render_skill_result, sample_skill_files
 
 if TYPE_CHECKING:
-    from mistralai_rust_harness.protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
         RustPluginContextDefinition,
         RustSkillDefinition,
     )
@@ -200,7 +200,7 @@ def _render_builtin_skill(skill: SkillInfo) -> str:
 def _accept_skill(
     name: str, *, description: str, path: Path
 ) -> RustSkillDefinition | None:
-    from mistralai_rust_harness.protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
         RustSkillDefinition,
     )
 

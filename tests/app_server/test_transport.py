@@ -6,6 +6,7 @@ from io import BytesIO
 import json
 import socket
 from threading import Event
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -242,6 +243,11 @@ async def test_stdio_transport_close_is_idempotent() -> None:
 @pytest.mark.asyncio
 async def test_stdio_server_uses_the_same_json_rpc_lifecycle() -> None:
     agent_loop = build_test_agent_loop()
+    client_socket, server_socket = socket.socketpair()
+    client_reader = client_socket.makefile("rb")
+    client_writer = client_socket.makefile("wb")
+    server_reader = server_socket.makefile("rb")
+    server_writer = server_socket.makefile("wb")
 
     async def open_root(_request: RootOpenRequest):
         return agent_loop
@@ -270,18 +276,48 @@ async def test_stdio_server_uses_the_same_json_rpc_lifecycle() -> None:
             "params": {"sessionId": agent_loop.session_id},
         },
     ]
-    reader = BytesIO(
-        b"".join(json.dumps(message).encode() + b"\n" for message in input_messages)
-    )
-    output = BytesIO()
-
-    await create_legacy_app_server(
-        StdioJsonRpcTransport(reader, output),
+    server = create_legacy_app_server(
+        StdioJsonRpcTransport(server_reader, server_writer),
         open_root=open_root,
         transport_kind="stdio",
-    ).serve()
+    )
+    serve_task = asyncio.create_task(server.serve())
 
-    responses = [json.loads(line) for line in output.getvalue().splitlines()]
+    async def send(message: dict[str, object]) -> None:
+        await asyncio.to_thread(
+            client_writer.write, json.dumps(message).encode() + b"\n"
+        )
+        await asyncio.to_thread(client_writer.flush)
+
+    async def receive() -> dict[str, Any]:
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(client_reader.readline), timeout=2
+        )
+        return json.loads(raw)
+
+    try:
+        await send(input_messages[0])
+        responses = [await receive()]
+        await send(input_messages[1])
+        await send(input_messages[2])
+        responses.append(await receive())
+        await send(input_messages[3])
+        responses.append(await receive())
+        client_socket.shutdown(socket.SHUT_WR)
+        await asyncio.wait_for(serve_task, timeout=2)
+    finally:
+        if not serve_task.done():
+            serve_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await serve_task
+        for sock in (client_socket, server_socket):
+            with suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+        for stream in (client_reader, client_writer, server_reader, server_writer):
+            stream.close()
+        client_socket.close()
+        server_socket.close()
+
     assert responses[0]["result"] == {
         "serverInfo": {
             "name": "vibe-app-server",

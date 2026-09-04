@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import uuid4
 
-from vibe.app_server._model import validate_wire
+from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._streaming import (
     BoundedEventQueue,
     finish_event_queue,
@@ -23,6 +23,9 @@ from vibe.app_server.models import (
     MCPToolSummary,
     PluginCatalogState,
     PublicError,
+    SkillSummary,
+    SkillUpdateView,
+    SkillVersionView,
     TeleportComplete,
     TeleportEvent,
     TeleportFailed,
@@ -57,7 +60,25 @@ from vibe.app_server.protocol import (
     PluginReloadParams,
     PluginReloadResponse,
     ProtocolErrorCode,
+    RuntimeMutationResponse,
     RuntimeSnapshot,
+    SkillsCatalogParams,
+    SkillsCatalogResponse,
+    SkillsConvertLocalParams,
+    SkillsConvertResponse,
+    SkillsDetailParams,
+    SkillsDetailResponse,
+    SkillsImportParams,
+    SkillsInstalledParams,
+    SkillsInstalledResponse,
+    SkillsRemoveParams,
+    SkillsSetAliasParams,
+    SkillsSetLatestParams,
+    SkillsSetVersionParams,
+    SkillsUpdatesParams,
+    SkillsUpdatesResponse,
+    SkillsVersionsParams,
+    SkillsVersionsResponse,
     TeleportCancelParams,
     TeleportCancelResponse,
     TeleportEventParams,
@@ -117,6 +138,164 @@ def _connector_sources(
         )
         for source in response.session.sources
     ]
+
+
+class SkillsResource:
+    """Client projection for registry skills browse/import/manage.
+
+    Reads go through dedicated methods; mutations round-trip to the server (where
+    the real config + SkillManager live), which rebuilds discovery + the system
+    prompt and returns a fresh runtime snapshot we apply locally.
+    """
+
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+
+    @property
+    def installed(self) -> list[SkillSummary]:
+        return self._state.skills
+
+    async def read_installed(self) -> list[SkillSummary]:
+        client = await self._connection.connect()
+        response = validate_wire(
+            SkillsInstalledResponse,
+            await client.request(
+                "skills/installed",
+                SkillsInstalledParams(session_id=self._state.session_id),
+            ),
+        )
+        return response.skills
+
+    async def catalog(self) -> SkillsCatalogResponse:
+        client = await self._connection.connect()
+        return validate_wire(
+            SkillsCatalogResponse,
+            await client.request(
+                "skills/catalog", SkillsCatalogParams(session_id=self._state.session_id)
+            ),
+        )
+
+    async def updates(self) -> list[SkillUpdateView]:
+        client = await self._connection.connect()
+        response = validate_wire(
+            SkillsUpdatesResponse,
+            await client.request(
+                "skills/updates", SkillsUpdatesParams(session_id=self._state.session_id)
+            ),
+        )
+        return response.updates
+
+    async def versions(self, skill_id: str) -> list[SkillVersionView]:
+        client = await self._connection.connect()
+        response = validate_wire(
+            SkillsVersionsResponse,
+            await client.request(
+                "skills/versions",
+                SkillsVersionsParams(
+                    session_id=self._state.session_id, skill_id=skill_id
+                ),
+            ),
+        )
+        return response.versions
+
+    async def detail(
+        self, skill_id: str, *, version: int | None = None
+    ) -> SkillsDetailResponse:
+        client = await self._connection.connect()
+        return validate_wire(
+            SkillsDetailResponse,
+            await client.request(
+                "skills/detail",
+                SkillsDetailParams(
+                    session_id=self._state.session_id,
+                    skill_id=skill_id,
+                    version=version,
+                ),
+            ),
+        )
+
+    async def _mutate(self, method: str, params: ProtocolModel) -> list[SkillSummary]:
+        client = await self._connection.connect()
+        response = validate_wire(
+            RuntimeMutationResponse, await client.request(method, params)
+        )
+        self._state.apply_runtime(response.runtime)
+        return await self.read_installed()
+
+    async def import_skill(
+        self,
+        skill_id: str,
+        *,
+        version: int | None = None,
+        alias: str | None = None,
+        scope: str = "global",
+    ) -> list[SkillSummary]:
+        return await self._mutate(
+            "skills/import",
+            SkillsImportParams(
+                session_id=self._state.session_id,
+                skill_id=skill_id,
+                version=version,
+                alias=alias,
+                scope=scope,
+            ),
+        )
+
+    async def set_version(
+        self, name: str, version: int, scope: str = "global"
+    ) -> list[SkillSummary]:
+        return await self._mutate(
+            "skills/setVersion",
+            SkillsSetVersionParams(
+                session_id=self._state.session_id,
+                name=name,
+                version=version,
+                scope=scope,
+            ),
+        )
+
+    async def set_latest(self, name: str, scope: str = "global") -> list[SkillSummary]:
+        return await self._mutate(
+            "skills/setLatest",
+            SkillsSetLatestParams(
+                session_id=self._state.session_id, name=name, scope=scope
+            ),
+        )
+
+    async def set_alias(
+        self, name: str, alias: str, scope: str = "global"
+    ) -> list[SkillSummary]:
+        return await self._mutate(
+            "skills/setAlias",
+            SkillsSetAliasParams(
+                session_id=self._state.session_id, name=name, alias=alias, scope=scope
+            ),
+        )
+
+    async def remove(self, name: str, scope: str = "global") -> list[SkillSummary]:
+        return await self._mutate(
+            "skills/remove",
+            SkillsRemoveParams(
+                session_id=self._state.session_id, name=name, scope=scope
+            ),
+        )
+
+    async def convert_local(self, name: str, scope: str = "global") -> bool:
+        client = await self._connection.connect()
+        response = validate_wire(
+            SkillsConvertResponse,
+            await client.request(
+                "skills/convertLocal",
+                SkillsConvertLocalParams(
+                    session_id=self._state.session_id, name=name, scope=scope
+                ),
+            ),
+        )
+        self._state.apply_runtime(response.runtime)
+        return response.converted
 
 
 class MCPResource:
@@ -379,25 +558,13 @@ def _plugin_changes(
 
 
 class PluginCatalogResource:
-    """The session's plugin catalogue, and the one command that re-pins it.
-
-    Whether a backend resolves plugins at all is discovered rather than
-    configured: ``--experimental-harness`` is a CLI argument that never reaches
-    a client, and a client talking to ``vibe-app-server`` was never given one.
-    So the first read answers the question and ``supported`` remembers it.
-    """
+    """The session's plugin catalogue, and the one command that re-pins it."""
 
     def __init__(
         self, connection: AppServerResourceConnection, state: ClientSessionState
     ) -> None:
         self._connection = connection
         self._state = state
-        self._supported = False
-
-    @property
-    def supported(self) -> bool:
-        """Whether a read has found a backend that resolves plugins."""
-        return self._supported
 
     async def read(self) -> PluginCatalogState | None:
         """The catalogue, or ``None`` from a backend that resolves no plugins."""
@@ -413,9 +580,7 @@ class PluginCatalogResource:
         except AppServerResponseError as exc:
             if exc.error.code not in _NO_PLUGIN_BACKEND:
                 raise
-            self._supported = False
             return None
-        self._supported = True
         return response.plugins
 
     async def reload(self) -> PluginCatalogDiff | None:

@@ -186,6 +186,7 @@ async def test_create_builds_config() -> None:
         schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
     )
     assert orch.config.model_dump() == {"value": "hello"}
+    assert orch.config.origin_of("value") == "test"
 
 
 @pytest.mark.asyncio
@@ -393,6 +394,34 @@ async def test_apply_patch_preflight_rejection_prevents_persistence() -> None:
         await orch.set_field("/value", "updated", preflight=reject)
 
     assert layer._data == {"value": "original"}
+    assert orch.config.value == "original"
+
+
+@pytest.mark.asyncio
+async def test_reload_preflight_rejection_keeps_the_previous_snapshot() -> None:
+    """*Prepare*: A loaded config whose backing layer changes to a rejected value.
+    *Do*: Reload with a preflight that rejects the rebuilt candidate.
+    *Assert*: The orchestrator keeps serving the previously accepted snapshot.
+    """
+
+    class RejectedCandidate(Exception):
+        pass
+
+    # Prepare
+    layer = RawWritableLayer(name="user-toml", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    layer._data = {"value": "rejected"}
+
+    async def reject(candidate: SimpleSchema) -> None:
+        assert candidate.value == "rejected"
+        raise RejectedCandidate
+
+    # Do / Assert
+    with pytest.raises(RejectedCandidate):
+        await orch.reload(preflight=reject)
+
     assert orch.config.value == "original"
 
 

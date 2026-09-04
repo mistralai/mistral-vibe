@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -14,9 +15,16 @@ from vibe.app_server.models import (
     MCPState,
     MCPToolSummary,
 )
+from vibe.app_server.protocol import (
+    AppServerResponseError,
+    ProtocolError,
+    ProtocolErrorCode,
+)
+from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.mcp_app import (
     _LIST_VIEW_HELP_AUTH,
     _LIST_VIEW_HELP_TOOLS,
+    _REFRESHING_LABEL,
     MCPApp,
     MCPOptionList,
     _filter_sources,
@@ -435,6 +443,20 @@ def test_start_refresh_dispatches_one_worker() -> None:
 
     assert app._refreshing is True
     app.run_worker.assert_called_once()
+    assert app.run_worker.call_args.kwargs["exit_on_error"] is False
+
+
+def test_mount_waits_for_interval_before_refreshing() -> None:
+    app = MCPApp(_state(), refresh_callback=AsyncMock(return_value="Refreshed"))
+    app._refresh_view = MagicMock()
+    app.query_one = MagicMock(return_value=MagicMock())
+    app._start_refresh = MagicMock()
+    app.set_interval = MagicMock()
+
+    app.on_mount()
+
+    app._start_refresh.assert_not_called()
+    app.set_interval.assert_called_once_with(60.0, app._start_refresh)
 
 
 def test_finished_refresh_rebuilds_only_while_attached() -> None:
@@ -551,3 +573,204 @@ def test_detail_view_connected_server_shows_no_tools_discovered() -> None:
 
     calls = option_list.add_option.call_args_list
     assert "No tools discovered" in calls[0].args[0].prompt
+
+
+def test_a_plugin_owned_server_says_which_plugin_declared_it() -> None:
+    plugin_owned = _source("figma", status=MCPSourceStatus.NEEDS_AUTH)
+    plugin_owned.plugin_name = "figma"
+    configured = _source("local")
+    app = MCPApp(_state(plugin_owned, configured))
+    option_list = MagicMock()
+
+    app._add_source_group(option_list, "Local MCP Servers", [plugin_owned, configured])
+
+    rows = [call.args[0].prompt.plain for call in option_list.add_option.call_args_list]
+    assert "[plugin:figma]" in rows[1]
+    assert "[plugin:" not in rows[2]
+
+
+def test_a_group_of_configured_servers_claims_no_owner_column() -> None:
+    source = _source("local")
+    app = MCPApp(_state(source))
+    option_list = MagicMock()
+
+    app._add_source_group(option_list, "Local MCP Servers", [source])
+
+    row = option_list.add_option.call_args_list[1].args[0].prompt.plain
+    assert row == "  local  [stdio]  no tools  ● connected"
+
+
+def test_a_plugin_owned_server_refuses_the_toggle_instead_of_posting_it() -> None:
+    source = _source("figma")
+    source.plugin_name = "figma"
+    app = MCPApp(_state(source))
+    app._highlighted_source = MagicMock(return_value=source)
+    app._rebuild_preserving_scroll = MagicMock()
+    app.post_message = MagicMock()
+    app.notify = MagicMock()
+
+    app._set_highlighted_disabled(disabled=True)
+
+    app.post_message.assert_not_called()
+    assert source.status is MCPSourceStatus.CONNECTED
+    assert "managed by the figma plugin" in app.notify.call_args.args[0]
+
+
+def test_a_plugin_owned_tool_row_refuses_the_toggle_instead_of_posting_it() -> None:
+    # Prepare
+    source = _source(
+        "figma", tools=[MCPToolSummary(name="get_metadata", description="Metadata")]
+    )
+    source.plugin_name = "figma"
+    app = MCPApp(_state(source))
+    app._viewing_name = "figma"
+    app._viewing_kind = MCPSourceKind.SERVER
+    option_list = MagicMock(highlighted=0)
+    option_list.get_option_at_index.return_value.id = "tool:get_metadata"
+    app.query_one = MagicMock(return_value=option_list)
+    app._rebuild_preserving_scroll = MagicMock()
+    app.post_message = MagicMock()
+    app.notify = MagicMock()
+
+    # Do
+    app._set_highlighted_disabled(disabled=True)
+
+    # Assert
+    app.post_message.assert_not_called()
+    assert app._state.sources[0].tools[0].enabled is True
+    assert "managed by the figma plugin" in app.notify.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_toggle_is_shown_to_the_user_rather_than_raised() -> None:
+    # Prepare
+    app = MagicMock()
+    rejection = AppServerResponseError(
+        ProtocolError(
+            code=ProtocolErrorCode.INVALID_PARAMS,
+            message=(
+                "MCP server 'linear-plugin' is managed by the 'linear-probe' "
+                "plugin and cannot be toggled or removed from the MCP catalog."
+            ),
+        )
+    )
+    app.app_server.resources.mcp.toggle = AsyncMock(side_effect=rejection)
+    message = MCPApp.MCPToggled(
+        name="linear-plugin", kind=MCPSourceKind.SERVER, disabled=True
+    )
+
+    # Do
+    await VibeApp.on_mcpapp_mcptoggled(app, message)
+
+    # Assert
+    assert "managed by the 'linear-probe' plugin" in app.notify.call_args.args[0]
+    app.query_one.return_value.refresh_index.assert_called_once_with()
+    app._refresh_banner.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_enabling_a_failing_server_does_not_paint_it_enabled() -> None:
+    app = MCPAppHarness(
+        _state(
+            _source("sentry", status=MCPSourceStatus.UNAVAILABLE),
+            _source("linear", status=MCPSourceStatus.UNAVAILABLE),
+        )
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.press("e")
+        await pilot.pause()
+
+        statuses = {
+            source.name: source.status
+            for source in app.query_one(MCPApp)._state.sources
+        }
+        assert statuses == {
+            "sentry": MCPSourceStatus.UNAVAILABLE,
+            "linear": MCPSourceStatus.UNAVAILABLE,
+        }
+
+
+def test_enabling_still_reports_the_toggle_to_the_host() -> None:
+    source = _source("local", status=MCPSourceStatus.DISABLED)
+    app = MCPApp(_state(source))
+    app._highlighted_source = MagicMock(return_value=source)
+    app._rebuild_preserving_scroll = MagicMock()
+    app.post_message = MagicMock()
+
+    app._set_highlighted_disabled(disabled=False)
+
+    message = app.post_message.call_args.args[0]
+    assert isinstance(message, MCPApp.MCPToggled)
+    assert message.name == "local"
+    assert message.disabled is False
+
+
+@pytest.mark.asyncio
+async def test_list_title_marks_an_in_flight_refresh() -> None:
+    release = asyncio.Event()
+    state = _state(_source("sentry", status=MCPSourceStatus.UNAVAILABLE))
+
+    async def refresh() -> str:
+        await release.wait()
+        return "Refreshed."
+
+    class Harness(App[None]):
+        def compose(self) -> ComposeResult:
+            yield MCPApp(state, state_getter=lambda: state, refresh_callback=refresh)
+
+    app = Harness()
+    async with app.run_test() as pilot:
+        title = app.query_one("#mcp-title", NoMarkupStatic)
+        assert _REFRESHING_LABEL not in str(title.content)
+
+        app.query_one(MCPApp)._start_refresh()
+        await pilot.pause()
+        assert _REFRESHING_LABEL in str(title.content)
+
+        release.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert _REFRESHING_LABEL not in str(title.content)
+
+
+@pytest.mark.asyncio
+async def test_starting_a_refresh_does_not_repost_a_detail_auth_request() -> None:
+    state = _state(_source("sentry", status=MCPSourceStatus.NEEDS_AUTH))
+    release = asyncio.Event()
+
+    async def refresh() -> str:
+        await release.wait()
+        return "Refreshed."
+
+    class Harness(App[None]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.auth_requests: list[str] = []
+
+        def compose(self) -> ComposeResult:
+            yield MCPApp(
+                state,
+                initial_source="sentry",
+                state_getter=lambda: state,
+                refresh_callback=refresh,
+            )
+
+        async def on_mcpapp_mcpoauth_requested(
+            self, message: MCPApp.MCPOAuthRequested
+        ) -> None:
+            self.auth_requests.append(message.server_name)
+
+    app = Harness()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.auth_requests == ["sentry"]
+
+        app.query_one(MCPApp)._start_refresh()
+        await pilot.pause()
+
+        assert app.auth_requests == ["sentry"]
+
+        release.set()
+        await pilot.pause()

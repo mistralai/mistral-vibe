@@ -101,6 +101,14 @@ class SessionLogger:  # noqa: PLR0904
     def persisted(self) -> bool:
         return self._persisted
 
+    @property
+    def active_model(self) -> str | None:
+        metadata = self.session_metadata
+        if metadata is None or metadata.config is None:
+            return None
+        active_model = metadata.config.get("active_model")
+        return active_model if isinstance(active_model, str) and active_model else None
+
     def _get_session_info(self) -> tuple[Path, SessionMetadata] | None:
         if (
             not self.enabled
@@ -449,12 +457,13 @@ class SessionLogger:  # noqa: PLR0904
         # Serialization and fsync are too slow for the UI thread, so snapshot
         # here and hand off to a worker thread.
         messages_snapshot = list(messages)
+        config_snapshot = config.model_dump(mode="json")
         async with self._save_lock:
+            session_metadata.config = config_snapshot
             await asyncio.to_thread(
                 self._save_interaction_sync,
                 messages_snapshot,
                 stats,
-                config,
                 tool_manager,
                 agent_profile,
                 session_dir,
@@ -467,7 +476,6 @@ class SessionLogger:  # noqa: PLR0904
         self,
         messages: list[LLMMessage],
         stats: AgentStats,
-        config: VibeConfigSchema,
         tool_manager: ToolManager,
         agent_profile: AgentProfile,
         session_dir: Path,
@@ -556,7 +564,6 @@ class SessionLogger:  # noqa: PLR0904
                 "total_messages": len(non_system_messages),
                 "last_message_fingerprint": last_message_fingerprint,
                 "tools_available": tools_available,
-                "config": config.model_dump(mode="json"),
                 "agent_profile": {
                     "name": agent_profile.name,
                     "overrides": agent_profile.overrides,
@@ -569,6 +576,35 @@ class SessionLogger:  # noqa: PLR0904
             raise RuntimeError(f"Failed to save session to {session_dir}: {e}") from e
         finally:
             self.maybe_cleanup_tmp_files()
+
+    async def persist_active_model(self, active_model: str) -> bool:
+        """Persist a changed model alias and report whether storage was updated."""
+        async with self._save_lock:
+            session_info = self._get_session_info()
+            if session_info is None:
+                return False
+            session_dir, session_metadata = session_info
+            if self.active_model == active_model:
+                return False
+            config = dict(session_metadata.config or {})
+            config["active_model"] = active_model
+            metadata_path = session_dir / METADATA_FILENAME
+            if metadata_path.exists():
+                try:
+                    raw = (await read_safe_async(metadata_path)).text
+                    metadata = json.loads(raw)
+                except (OSError, json.JSONDecodeError) as e:
+                    raise RuntimeError(
+                        f"Failed to read session metadata at {metadata_path}: {e}"
+                    ) from e
+                persisted_config = metadata.get("config")
+                if not isinstance(persisted_config, dict):
+                    persisted_config = {}
+                persisted_config["active_model"] = active_model
+                metadata["config"] = persisted_config
+                await SessionLogger.persist_metadata(metadata, session_dir)
+            session_metadata.config = config
+            return True
 
     async def persist_loops(self) -> None:
         session_info = self._get_session_info()

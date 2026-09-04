@@ -10,6 +10,11 @@ from tests.conftest import build_test_agent_loop, build_test_vibe_app
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.app_server.models import PublicCheckpointEntry
+from vibe.app_server.protocol import (
+    AppServerResponseError,
+    ProtocolError,
+    ProtocolErrorCode,
+)
 from vibe.cli.textual_ui.app import BottomApp, VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
 from vibe.cli.textual_ui.widgets.messages import UserMessage
@@ -73,6 +78,39 @@ async def test_rewind_highlights_last_user_message() -> None:
 
         assert app._rewind_highlighted_widget is not None
         assert app._rewind_highlighted_widget.get_content() == "world"
+
+
+@pytest.mark.asyncio
+async def test_rewind_preview_error_does_not_fail_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _make_app()
+    async with app.run_test() as pilot:
+        await _send_messages(pilot, ["hello"])
+
+        async def fail_preview(_entry_id: str) -> bool:
+            raise AppServerResponseError(
+                ProtocolError(
+                    code=ProtocolErrorCode.NOT_FOUND,
+                    message="Rewindable history entry not found: stale",
+                )
+            )
+
+        monkeypatch.setattr(
+            app.app_server.resources.sessions, "rewind_has_file_changes", fail_preview
+        )
+
+        await pilot.press("escape", "escape")
+        await _wait_until(
+            pilot,
+            lambda: any(
+                notification.message == "Rewindable history entry not found: stale"
+                for notification in app._notifications
+            ),
+        )
+
+        assert app._rewind_mode is False
+        assert app._rewind_highlighted_widget is None
 
 
 @pytest.mark.asyncio

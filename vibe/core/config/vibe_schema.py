@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 import tomllib
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
 from dotenv import dotenv_values
 from pydantic import (
@@ -14,14 +14,16 @@ from pydantic import (
     Field,
     PrivateAttr,
     ValidationError,
-    ValidationInfo,
     model_validator,
 )
 
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config._defaults import (
+    DEFAULT_API_CONNECT_TIMEOUT,
+    DEFAULT_API_POOL_TIMEOUT,
     DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
     DEFAULT_API_TIMEOUT,
+    DEFAULT_API_WRITE_TIMEOUT,
     DEFAULT_AUTO_COMPACT_THRESHOLD,
     DEFAULT_CONSOLE_BASE_URL,
     DEFAULT_MISTRAL_API_ENV_KEY,
@@ -36,6 +38,7 @@ from vibe.core.config._defaults import (
 # (vibe_schema.py imports from vibe.observability.logging). The constant
 # lives in vibe.config_values.
 from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.models import (
     ConnectorConfig,
     ExperimentsConfig,
@@ -72,8 +75,16 @@ from vibe.core.utils.matching import name_matches
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key
 
+# Every shell tool scopes a grant with ``build_session_pattern``, which appends
+# " *" to mean "any arguments". Allowlists are matched by prefix equality rather
+# than as globs, so the wildcard has to come back off before it is persisted or
+# the stored entry matches nothing and the next session prompts again. Windows
+# spells the shell ``powershell``/``git_bash``, so keying this on ``bash`` alone
+# left permanent approvals silently inert there.
+_SESSION_PATTERN_WILDCARD_TOOLS = frozenset({"bash", "git_bash", "powershell"})
 
-def _strip_bash_pattern_wildcard(pattern: str) -> str:
+
+def _strip_session_pattern_wildcard(pattern: str) -> str:
     if pattern.endswith(" *"):
         return pattern[:-2]
     return pattern
@@ -128,15 +139,6 @@ DEFAULT_ACTIVE_MODEL_CONFIG = ModelConfig(
 
 DEFAULT_MODELS = [
     DEFAULT_ACTIVE_MODEL_CONFIG,
-    ModelConfig(
-        name="devstral-small-latest",
-        provider="mistral",
-        alias="devstral-small",
-        display_name="Devstral Small",
-        input_price=0.1,
-        output_price=0.3,
-        cached_input_price=0.01,
-    ),
     ModelConfig(
         name="devstral",
         provider="llamacpp",
@@ -286,6 +288,21 @@ class VibeConfigSchema(ConfigSchema):
     def validation_warnings(self) -> tuple[str, ...]:
         return tuple(self._validation_warnings)
 
+    @classmethod
+    def validate_merged(cls, data: dict[str, Any], *, origins: dict[str, str]) -> Self:
+        config = super().validate_merged(data, origins=origins)
+        if config.origin_of("auto_compact_threshold") != AdminConfigLayer.NAME:
+            return config
+
+        models = {
+            alias: model.model_copy(
+                update={"auto_compact_threshold": config.auto_compact_threshold}
+            )
+            for alias, model in config.models.items()
+        }
+        object.__setattr__(config, "models", models)
+        return config
+
     # Models
     active_model: Annotated[str, WithReplaceMerge()] = UNPINNED_ACTIVE_MODEL
     # Experiment-routed default model alias, populated at runtime by the
@@ -326,8 +343,12 @@ class VibeConfigSchema(ConfigSchema):
         ),
     )
     compaction_model: Annotated[ModelConfig | None, WithReplaceMerge()] = None
-    auto_compact_threshold: Annotated[int, WithReplaceMerge()] = (
-        DEFAULT_AUTO_COMPACT_THRESHOLD
+    auto_compact_threshold: Annotated[int, WithReplaceMerge()] = Field(
+        default=DEFAULT_AUTO_COMPACT_THRESHOLD,
+        description=(
+            "Fallback token count before automatic compaction for models that "
+            "do not define their own threshold."
+        ),
     )
     active_transcribe_model: Annotated[str, WithReplaceMerge()] = (
         DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG.alias
@@ -465,7 +486,7 @@ class VibeConfigSchema(ConfigSchema):
     experimental_enable_registry_skills: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
         description=(
-            "Experimental: pull workspace skills from the Mistral AI Registry"
+            "Experimental: pull shared workspace skills from Mistral"
             " (api.mistral.ai) and make them available alongside local skills."
             " Requires a Mistral provider and API key. Local and builtin skills take"
             " precedence on name collision."
@@ -539,6 +560,11 @@ class VibeConfigSchema(ConfigSchema):
     api_retry_max_elapsed_time: Annotated[float, WithReplaceMerge()] = (
         DEFAULT_API_RETRY_MAX_ELAPSED_TIME
     )
+    api_connect_timeout: Annotated[float, WithReplaceMerge()] = (
+        DEFAULT_API_CONNECT_TIMEOUT
+    )
+    api_write_timeout: Annotated[float, WithReplaceMerge()] = DEFAULT_API_WRITE_TIMEOUT
+    api_pool_timeout: Annotated[float, WithReplaceMerge()] = DEFAULT_API_POOL_TIMEOUT
     vibe_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_VIBE_BASE_URL
     vibe_code_sessions_base_url: Annotated[str, WithReplaceMerge()] = (
         "https://chat.mistral.ai"
@@ -621,6 +647,15 @@ class VibeConfigSchema(ConfigSchema):
     def get_active_provider(self) -> ProviderConfig:
         return self.get_provider_for_model(self.get_active_model())
 
+    def require_active_provider_api_key(self) -> None:
+        try:
+            provider = self.get_active_provider()
+        except ValueError:
+            return
+        api_key_env = provider.api_key_env_var
+        if api_key_env and not resolve_api_key(api_key_env):
+            raise MissingAPIKeyError(api_key_env, provider.name)
+
     def get_mistral_provider(self) -> ProviderConfig | None:
         try:
             active_provider = self.get_active_provider()
@@ -692,8 +727,8 @@ class VibeConfigSchema(ConfigSchema):
         persist the returned payload; the in-memory config is kept current so
         repeated calls merge from fresh state.
         """
-        if tool_name == "bash":
-            patterns = [_strip_bash_pattern_wildcard(p) for p in patterns]
+        if tool_name in _SESSION_PATTERN_WILDCARD_TOOLS:
+            patterns = [_strip_session_pattern_wildcard(p) for p in patterns]
         allowlist: list[str] = list(
             current_allowlist
             if current_allowlist is not None
@@ -787,17 +822,18 @@ class VibeConfigSchema(ConfigSchema):
         # and resolves to a configured model at read time (get_active_model).
         if self.active_model and self.active_model not in self.models:
             unknown = self.active_model
-            fallback = next(iter(self.models))
+            fallback = self.resolve_default_model_alias()
             logger.warning(
-                "Active model '%s' is not in your configured models; defaulting to '%s'.",
+                "Active model '%s' is not in your configured models; "
+                "falling back to default model '%s'.",
                 unknown,
                 fallback,
             )
             self._validation_warnings.append(
                 f"Active model '{unknown}' is not in your configured models "
-                f"— defaulting to '{fallback}'."
+                f"— falling back to default model '{fallback}'."
             )
-            object.__setattr__(self, "active_model", fallback)
+            object.__setattr__(self, "active_model", UNPINNED_ACTIVE_MODEL)
         return self
 
     @model_validator(mode="after")
@@ -831,19 +867,6 @@ class VibeConfigSchema(ConfigSchema):
                 f"'{compaction_provider.name}' but active model uses provider "
                 f"'{active_provider.name}'. They must share the same provider."
             )
-        return self
-
-    @model_validator(mode="after")
-    def _check_api_key(self, info: ValidationInfo) -> VibeConfigSchema:
-        if info.context is not None and not info.context.get("require_api_key", True):
-            return self
-        try:
-            provider = self.get_provider_for_model(self.get_active_model())
-            api_key_env = provider.api_key_env_var
-            if api_key_env and not resolve_api_key(api_key_env):
-                raise MissingAPIKeyError(api_key_env, provider.name)
-        except ValueError:
-            pass
         return self
 
     @model_validator(mode="after")

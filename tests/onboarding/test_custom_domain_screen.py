@@ -9,18 +9,33 @@ from vibe.setup.onboarding.screens.custom_domain import CustomDomainScreen
 
 
 class _Harness(App[None]):
+    def __init__(
+        self,
+        *,
+        configured_custom_domain: str | None = None,
+        configured_custom_api_base: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._configured_custom_domain = configured_custom_domain
+        self._configured_custom_api_base = configured_custom_api_base
+
     @property
     def configured_custom_domain(self) -> str | None:
-        return None
+        return self._configured_custom_domain
+
+    @property
+    def configured_custom_api_base(self) -> str | None:
+        return self._configured_custom_api_base
 
     def get_default_screen(self) -> CustomDomainScreen:
         return CustomDomainScreen()
 
 
 @pytest.mark.asyncio
-async def test_screen_has_no_auth_api_base_input() -> None:
+async def test_screen_has_optional_api_base_input() -> None:
     async with _Harness().run_test() as pilot:
-        assert not pilot.app.query("#auth-api-base")
+        api_base = pilot.app.query_one("#api-base", Input)
+        assert api_base.value == ""
 
 
 @pytest.mark.asyncio
@@ -29,6 +44,30 @@ async def test_domain_input_starts_empty_with_placeholder() -> None:
         domain = pilot.app.query_one("#domain", Input)
         assert domain.value == ""
         assert domain.placeholder == "console.mistral.ai"
+
+
+@pytest.mark.asyncio
+async def test_api_base_input_seeds_from_configured_split_horizon_base() -> None:
+    api_base = "https://connector.internal.example:443/api"
+    async with _Harness(
+        configured_custom_domain="https://console.internal.example",
+        configured_custom_api_base=api_base,
+    ).run_test() as pilot:
+        api_base_input = pilot.app.query_one("#api-base", Input)
+        assert api_base_input.value == api_base
+
+
+@pytest.mark.asyncio
+async def test_invalid_api_base_marks_box_invalid() -> None:
+    async with _Harness().run_test() as pilot:
+        api_base_input = pilot.app.query_one("#api-base", Input)
+        api_base_input.value = "ftp://example.com"
+        await pilot.pause()
+
+        box = pilot.app.query_one("#api-base-box")
+        feedback = pilot.app.query_one("#feedback", NoMarkupStatic)
+        assert box.has_class("invalid")
+        assert feedback.has_class("error")
 
 
 @pytest.mark.asyncio

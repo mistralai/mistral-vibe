@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable, Generator
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any
 
 import keyring
@@ -434,6 +435,17 @@ def _prepare_test_config_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     kwargs.setdefault("include_project_context", False)
     kwargs.setdefault("include_prompt_detail", False)
     return kwargs
+
+
+async def wait_until(
+    pilot: Any, predicate: Callable[[], bool], timeout: float = 2.0
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await pilot.pause(0.05)
+    return predicate()
 
 
 def build_test_vibe_config(

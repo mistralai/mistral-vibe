@@ -206,6 +206,9 @@ class SessionMetadata(BaseModel):
     # re-resolved from the user-scoped whoami/identity cache on every session, so
     # resuming never reports a stale plan.
     experiments: EvalResponse | None = None
+    # Session-scoped config snapshot. New sessions pin ``active_model`` to its
+    # resolved alias before their first user turn; older snapshots remain valid.
+    config: dict[str, JsonValue] | None = None
     import_provenance: dict[str, JsonValue] | None = None
     created_worktree: WorktreeContext | None = None
 
@@ -635,6 +638,13 @@ class ContextClearedEvent(BaseEvent):
 
 class SessionTitleUpdatedEvent(BaseEvent):
     title: str
+    session_id: str
+
+
+class BackgroundWorkEvent(BaseEvent):
+    work_id: str
+    kind: Literal["session_title"]
+    phase: Literal["started", "finished"]
     session_id: str
 
 

@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+import sys
+
+if sys.argv[1:2] == ["--internal-posix-pty-helper"]:
+    from mistralai_vibe_local_harness.vibe._processes._posix_helper import (  # pyright: ignore[reportMissingImports]
+        main as _pty_helper_main,
+    )
+
+    raise SystemExit(_pty_helper_main(sys.argv[2:]))
+
 # isort: off
 # Capture the process-start monotonic timestamp as early as possible (before
 # any heavier imports below) so the vibe.startup metric measures from true
@@ -10,7 +19,6 @@ from vibe.cli.process_start import PROCESS_START_MONOTONIC as PROCESS_START_MONO
 import argparse
 import os
 from pathlib import Path
-import sys
 from typing import TYPE_CHECKING
 
 from vibe import __version__
@@ -30,6 +38,7 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Commands:\n"
+            "  update         Check for a Vibe update now (same as --check-upgrade).\n"
             "  mcp            Manage MCP server configuration (vibe mcp --help).\n\n"
             "Environment variables:\n"
             "  VIBE_HOME       Override the Vibe home directory (default: ~/.vibe)\n"
@@ -183,7 +192,10 @@ def parse_arguments() -> argparse.Namespace:
         metavar="SESSION_ID",
         help="Resume a session. Without SESSION_ID, shows an interactive picker.",
     )
-    return parser.parse_args()
+    cli_args = sys.argv[1:]
+    if cli_args[:1] == ["update"]:
+        cli_args[0] = "--check-upgrade"
+    return parser.parse_args(cli_args)
 
 
 def _enter_worktree(args: argparse.Namespace) -> PreparedWorktree:

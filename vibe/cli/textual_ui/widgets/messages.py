@@ -540,15 +540,12 @@ class BashOutputMessage(ClickWithoutDragMixin, SpinnerMixin, Static):
         self._output = output.rstrip("\n")
         self._exit_code = exit_code
         self._pending = pending
-        self._queued = False
         self._output_widget: NoMarkupStatic | None = None
         self._overflow_widget: NoMarkupStatic | None = None
         self._section: OverflowCollapsibleSection | None = None
         self._output_container: Horizontal | None = None
         self._prompt_widget: NonSelectableStatic | None = None
         self._indicator_widget: Static | None = None
-
-    QUEUED_PROMPT = "! "
 
     def _clean_lines(self) -> list[str]:
         # Sanitize captured output (ANSI escapes, \r redraws, control bytes)
@@ -575,43 +572,18 @@ class BashOutputMessage(ClickWithoutDragMixin, SpinnerMixin, Static):
             self._section.set_collapsed_label(lines_label(count, prefix="+"))
 
     def _update_spinner_frame(self) -> None:
-        if not self._is_spinning or not self._prompt_widget or self._queued:
+        if not self._is_spinning or not self._prompt_widget:
             return
         # Frames are all the same size, so skip the relayout.
         self._prompt_widget.update(f"{self._spinner.next_frame()} ", layout=False)
 
     def on_mount(self) -> None:
-        if self._pending and not self._queued:
-            self.start_spinner_timer()
-
-    def set_queued(self, queued: bool) -> None:
-        if queued == self._queued:
-            return
-        self._queued = queued
-        if queued:
-            self.add_class("queued")
-            self.stop_spinning()
-            if self._prompt_widget is not None:
-                self._prompt_widget.update(self.QUEUED_PROMPT)
-            return
-        self.remove_class("queued")
         if self._pending:
-            if self._prompt_widget is not None:
-                self._prompt_widget.update(f"{self._spinner.current_frame()} ")
-            self._is_spinning = True
             self.start_spinner_timer()
 
     @property
     def pending(self) -> bool:
         return self._pending
-
-    def update_command(self, command: str) -> None:
-        """Refresh the displayed command for an in-place queue edit."""
-        self._command = command
-        try:
-            self.query_one(".bash-command", NoMarkupStatic).update(command)
-        except Exception:
-            pass
 
     def compose(self) -> ComposeResult:
         if self._pending:
@@ -621,9 +593,7 @@ class BashOutputMessage(ClickWithoutDragMixin, SpinnerMixin, Static):
         else:
             status_class = "bash-success"
         self.add_class(status_class)
-        if self._queued:
-            prompt_text = self.QUEUED_PROMPT
-        elif self._pending:
+        if self._pending:
             prompt_text = f"{self._spinner.current_frame()} "
         else:
             prompt_text = "$ "

@@ -47,6 +47,7 @@ class LegacyCommittedHistory:
     reference: LegacySessionReference
     store_revision: str
     history: list[dict[str, JsonValue]]
+    active_model: str | None = None
 
     @property
     def session_id(self) -> str:
@@ -131,8 +132,19 @@ def export_legacy_committed_history(
             f"Legacy session history is invalid: {session_id}: {exc}"
         ) from exc
     return LegacyCommittedHistory(
-        reference=reference, store_revision=revision, history=history
+        reference=reference,
+        store_revision=revision,
+        history=history,
+        active_model=_active_model_from_metadata(metadata),
     )
+
+
+def _active_model_from_metadata(metadata: dict[str, Any]) -> str | None:
+    config = metadata.get("config")
+    if not isinstance(config, dict):
+        return None
+    active_model = config.get("active_model")
+    return active_model if isinstance(active_model, str) and active_model else None
 
 
 def import_unified_committed_history(

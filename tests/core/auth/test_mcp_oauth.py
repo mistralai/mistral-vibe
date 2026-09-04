@@ -869,6 +869,17 @@ class TestUnwrapOAuthRefreshError:
         assert unwrap_oauth_refresh_error(excinfo.value) is raised
 
 
+class _RaisingStream:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def __aenter__(self) -> None:
+        raise self._error
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
 class TestPerformOAuthLogin:
     @pytest.mark.asyncio
     async def test_oauth_flow_error_becomes_login_failed(
@@ -891,8 +902,8 @@ class TestPerformOAuthLogin:
             ) -> None:
                 pass
 
-            async def get(self, _url: str) -> None:
-                raise OAuthFlowError("cancelled")
+            def stream(self, *_args: object, **_kwargs: object) -> _RaisingStream:
+                return _RaisingStream(OAuthFlowError("cancelled"))
 
         async def on_url(_url: str) -> None:
             pass
@@ -916,7 +927,7 @@ class TestPerformOAuthLogin:
             )
         errors.append(
             httpx.ConnectError(
-                "connection refused", request=httpx.Request("GET", srv.url)
+                "connection refused", request=httpx.Request("POST", srv.url)
             )
         )
 
@@ -935,8 +946,8 @@ class TestPerformOAuthLogin:
             ) -> None:
                 pass
 
-            async def get(self, _url: str) -> None:
-                raise errors.pop(0)
+            def stream(self, *_args: object, **_kwargs: object) -> _RaisingStream:
+                return _RaisingStream(errors.pop(0))
 
         async def on_url(_url: str) -> None:
             pass
@@ -970,7 +981,7 @@ class TestPerformOAuthLogin:
             asyncio.get_event_loop().create_task(fire())
 
         async with respx.mock(assert_all_called=False) as router:
-            router.get(server_url).mock(side_effect=_mcp_responses())
+            router.post(server_url).mock(side_effect=_mcp_responses())
             router.get(
                 "https://mcp.example.com/.well-known/oauth-protected-resource"
             ).mock(
@@ -1035,6 +1046,87 @@ class TestPerformOAuthLogin:
         fp = await Fingerprint.load("demo")
         assert fp is not None
         assert fp == Fingerprint.compute(srv)
+
+    @pytest.mark.asyncio
+    async def test_a_server_that_refuses_get_is_still_challenged_into_oauth(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        # Prepare
+        server_url = "https://mcp.example.com/mcp"
+        srv = _oauth_server(name="demo", url=server_url, scopes=["read"])
+        discovered = False
+
+        async def on_url(_url: str) -> None:
+            pass
+
+        def _resource_metadata(_request: httpx.Request) -> httpx.Response:
+            nonlocal discovered
+            discovered = True
+            raise httpx.ConnectError("stop here")
+
+        # Do
+        async with respx.mock(assert_all_called=False) as router:
+            get_route = router.get(server_url).mock(
+                return_value=httpx.Response(405, text="Method Not Allowed")
+            )
+            post_route = router.post(server_url).mock(
+                return_value=httpx.Response(
+                    401,
+                    headers={
+                        "WWW-Authenticate": (
+                            "Bearer resource_metadata="
+                            '"https://mcp.example.com'
+                            '/.well-known/oauth-protected-resource"'
+                        )
+                    },
+                )
+            )
+            router.get(
+                "https://mcp.example.com/.well-known/oauth-protected-resource"
+            ).mock(side_effect=_resource_metadata)
+
+            with pytest.raises(MCPOAuthLoginFailed):
+                await perform_oauth_login(srv, on_url=on_url)
+
+        # Assert
+        assert not get_route.called
+        assert post_route.called
+        request = post_route.calls.last.request
+        assert json.loads(request.content)["method"] == "initialize"
+        assert request.headers["accept"] == "application/json, text/event-stream"
+        assert discovered
+        assert await Fingerprint.load("demo") is None
+
+    @pytest.mark.asyncio
+    async def test_the_challenge_carries_the_headers_the_server_was_declared_with(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        # Prepare
+        server_url = "https://mcp.example.com/mcp"
+        srv = _oauth_server(name="demo", url=server_url, scopes=["read"])
+
+        async def on_url(_url: str) -> None:
+            pass
+
+        # Do
+        async with respx.mock(assert_all_called=False) as router:
+            post_route = router.post(server_url).mock(
+                side_effect=httpx.ConnectError(
+                    "stop here", request=httpx.Request("POST", server_url)
+                )
+            )
+            with pytest.raises(MCPOAuthLoginFailed):
+                await perform_oauth_login(
+                    srv,
+                    on_url=on_url,
+                    headers={"X-Figma-Plugin-Bundle": "figma_prod@2_2_96"},
+                )
+
+        # Assert
+        request = post_route.calls.last.request
+        assert request.headers["x-figma-plugin-bundle"] == "figma_prod@2_2_96"
+        # Never surrendered to a declaration: the transport routes on it.
+        assert request.headers["accept"] == "application/json, text/event-stream"
 
 
 def _mcp_responses() -> Callable[[httpx.Request], httpx.Response]:

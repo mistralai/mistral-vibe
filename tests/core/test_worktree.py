@@ -14,6 +14,7 @@ import pytest
 from vibe.core.git.errors import GitError
 import vibe.core.git.repo as git_repo_module
 from vibe.core.git.worktree import (
+    SNAPSHOT_REF_PREFIX,
     LinkedWorktree,
     ManagedWorktree,
     PreparedWorktree,
@@ -361,7 +362,11 @@ def test_release_removes_a_clean_worktree_and_its_branch(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("dirt", ["uncommitted", "untracked", "commit"])
-def test_release_keeps_a_worktree_holding_work(tmp_path: Path, dirt: str) -> None:
+def test_release_saves_the_work_before_removing_a_worktree(
+    tmp_path: Path, dirt: str
+) -> None:
+    # Work left behind is a reason to save it, not to keep the directory: the
+    # old rule kept the worktree and nothing ever collected it.
     repo = _init_repo(tmp_path)
     worktree = _prepare_auto(tmp_path)
     _hold(worktree.root, "session-a")
@@ -378,11 +383,60 @@ def test_release_keeps_a_worktree_holding_work(tmp_path: Path, dirt: str) -> Non
 
     release = _release(worktree.root, "session-a")
 
+    assert release.outcome is WorktreeReleaseOutcome.REMOVED
+    assert not worktree.root.exists()
+    assert _claim(repo, worktree.name).read() is None
+
+    # The whole point of removing it anyway: the work is still reachable.
+    assert release.snapshot_ref is not None
+    saved = repo.commit(release.snapshot_ref)
+    match dirt:
+        case "uncommitted":
+            assert saved.tree["file.txt"].data_stream.read() == b"changed\n"
+        case "untracked":
+            assert saved.tree["new.txt"].data_stream.read() == b"new\n"
+        case "commit":
+            # `git branch -D` orphaned it; the ref is what keeps it reachable.
+            assert saved.parents[0].message.strip() == "change"
+
+
+def test_release_keeps_a_worktree_whose_work_could_not_be_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A failed snapshot is the one remaining reason to keep: removing then
+    # would be the data loss the snapshot exists to prevent.
+    repo = _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path)
+    _hold(worktree.root, "session-a")
+    (worktree.root / "new.txt").write_text("new\n")
+
+    def _fail(self: PreparedWorktree) -> str:
+        raise WorktreeError("no room on device")
+
+    monkeypatch.setattr(PreparedWorktree, "snapshot", _fail)
+
+    release = _release(worktree.root, "session-a")
+
     assert release.outcome is WorktreeReleaseOutcome.KEPT_DIRTY
     assert release.reasons
     assert worktree.root.is_dir()
     assert worktree.branch in (head.name for head in repo.heads)
     assert _claim(repo, worktree.name).read() is not None
+
+
+def test_release_leaves_no_snapshot_for_a_worktree_nothing_happened_in(
+    tmp_path: Path,
+) -> None:
+    # None rather than a ref, so a caller can tell "nothing to recover" from
+    # "recover here" without reading the commit.
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path)
+    _hold(worktree.root, "session-a")
+
+    release = _release(worktree.root, "session-a")
+
+    assert release.outcome is WorktreeReleaseOutcome.REMOVED
+    assert release.snapshot_ref is None
 
 
 def test_release_keeps_a_worktree_another_session_still_holds(tmp_path: Path) -> None:
@@ -469,26 +523,63 @@ def _age_claim(claim: WorktreeClaim, minutes: int) -> None:
     )
 
 
-def test_sweep_keeps_an_abandoned_clean_worktree(tmp_path: Path) -> None:
+def test_sweep_keeps_the_worktree_of_a_session_that_can_still_resume(
+    tmp_path: Path,
+) -> None:
     repo = _init_repo(tmp_path)
     worktree = _prepare_auto(tmp_path)
     _age_claim(_claim(repo, worktree.name), 30)
 
-    WorktreeRepository.sweep_claims(tmp_path)
+    # Closing a session drops its hold and leaves it on disk, so an unheld
+    # worktree is not an abandoned one. Naming it here is what says otherwise.
+    WorktreeRepository.sweep_claims(tmp_path, in_use=[worktree.root])
 
-    # An app-server that died leaves no way to know the session was finished
-    # with, and its session is still on disk and resumable. Only the user
-    # deleting the session removes a worktree that exists.
     assert worktree.root.is_dir()
     assert worktree.branch in (head.name for head in repo.heads)
     assert _claim(repo, worktree.name).read() is not None
+
+
+def test_sweep_keeps_a_worktree_a_session_resumes_into_below_its_root(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    package = tmp_path / "packages" / "app"
+    package.mkdir(parents=True)
+    (package / "main.py").write_text("run()\n")
+    repo.index.add(["packages/app/main.py"])
+    repo.index.commit("add a package")
+    worktree = _prepare_auto(package)
+    _age_claim(_claim(repo, worktree.name), 30)
+
+    # A session opened in a subdirectory lands in the matching subdirectory of
+    # the worktree, so the cwd resume records is never the root itself.
+    assert worktree.path != worktree.root
+    WorktreeRepository.sweep_claims(package, in_use=[worktree.path])
+
+    assert worktree.root.is_dir()
+    assert worktree.branch in (head.name for head in repo.heads)
+    assert _claim(repo, worktree.name).read() is not None
+
+
+def test_sweep_reaps_a_worktree_no_session_resumes_into(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path)
+    _age_claim(_claim(repo, worktree.name), 30)
+
+    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
+
+    # Nothing was ever done in it: the release gate proves that before this
+    # runs, so what is lost is an empty checkout and the branch made with it.
+    assert not worktree.root.exists()
+    assert worktree.branch not in (head.name for head in repo.heads)
+    assert _claim(repo, worktree.name).read() is None
 
 
 def test_sweep_spares_a_claim_inside_the_grace_period(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     worktree = _prepare_auto(tmp_path)
 
-    WorktreeRepository.sweep_claims(tmp_path)
+    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
 
     # A session that finished `git worktree add` has no holder until it
     # attaches; sweeping here would delete the worktree it is starting in.
@@ -502,21 +593,26 @@ def test_sweep_spares_a_held_worktree(tmp_path: Path) -> None:
     _hold(worktree.root, "session-a")
     _age_claim(_claim(repo, worktree.name), 30)
 
-    WorktreeRepository.sweep_claims(tmp_path)
+    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
 
     assert worktree.root.is_dir()
 
 
-def test_sweep_spares_an_abandoned_worktree_holding_work(tmp_path: Path) -> None:
+def test_sweep_saves_the_work_of_an_abandoned_worktree_and_removes_it(
+    tmp_path: Path,
+) -> None:
+    # The pile-up this replaced: a session deleted after writing one untracked
+    # file left a worktree no sweep would ever collect.
     repo = _init_repo(tmp_path)
     worktree = _prepare_auto(tmp_path)
     (worktree.root / "unsaved.txt").write_text("work\n")
     _age_claim(_claim(repo, worktree.name), 30)
 
-    WorktreeRepository.sweep_claims(tmp_path)
+    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
 
-    assert worktree.root.is_dir()
-    assert worktree.branch in (head.name for head in repo.heads)
+    assert not worktree.root.exists()
+    saved = repo.commit(f"{SNAPSHOT_REF_PREFIX}/{worktree.name}")
+    assert saved.tree["unsaved.txt"].data_stream.read() == b"work\n"
 
 
 def test_sweep_never_touches_a_directory_without_a_claim(tmp_path: Path) -> None:
@@ -524,7 +620,7 @@ def test_sweep_never_touches_a_directory_without_a_claim(tmp_path: Path) -> None
     worktree = _prepare_auto(tmp_path)
     shutil.rmtree(worktree_module.WORKTREES_DIR.path / ".claims")
 
-    WorktreeRepository.sweep_claims(tmp_path)
+    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
 
     # This is the live mkdir reservation case too: no claim means not ours.
     assert worktree.root.is_dir()
@@ -558,7 +654,7 @@ def test_sweep_discards_a_reservation_that_never_became_a_worktree(
     )
     _age_claim(_claim(repo, "stranded"), 30)
 
-    WorktreeRepository.sweep_claims(tmp_path)
+    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
 
     assert not reservation.exists()
     assert _claim(repo, "stranded").read() is None
@@ -581,7 +677,7 @@ def test_sweep_keeps_a_populated_worktree_whose_claim_has_no_base_commit(
         )
     )
 
-    WorktreeRepository.sweep_claims(tmp_path)
+    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
 
     # Discarding here would rmdir-fail on the populated directory and drop the
     # record, orphaning the worktree for good.
@@ -613,7 +709,7 @@ def test_release_keeps_a_worktree_claimed_while_it_was_inspected(
 
 
 def test_sweep_ignores_a_non_git_path(tmp_path: Path) -> None:
-    WorktreeRepository.sweep_claims(tmp_path)
+    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
 
 
 def test_remove_worktree_does_not_change_the_process_directory(
@@ -1041,7 +1137,7 @@ def test_sweep_reclaims_a_named_reservation_whose_add_never_landed(
         _prepare("feature", tmp_path)
     _age_claim(_claim(repo, "feature"), 30)
 
-    WorktreeRepository.sweep_claims(tmp_path)
+    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
 
     # The sweep judges a reservation by whether its path is an empty directory,
     # so a claim naming a path that was never created reads as populated, and
@@ -1460,3 +1556,31 @@ def test_fetch_does_not_use_the_timeout_windows_rejects() -> None:
     _fetch_with(git)
 
     assert "kill_after_timeout" not in git.fetch_kwargs
+
+
+def test_inspecting_a_worktree_does_not_execute_a_malicious_fsmonitor_hook(
+    tmp_path: Path,
+) -> None:
+    """The same RCE `vibe.core.system_prompt` already guards against, here.
+
+    `core.fsmonitor` is a command git runs to ask what changed, and a
+    repository's own config can name any command. Reading a worktree is
+    reading somebody else's repository, so without `-c core.fsmonitor=` the
+    hook runs with the user's privileges.
+
+    It matters more since the reaper started sweeping on every session attach
+    rather than only on an explicit delete: the read is no longer something the
+    user asked for.
+    """
+    repo = _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, prompt="inspect me")
+    payload = tmp_path / "PWNED"
+    # On the repository, not the worktree: a linked worktree shares its
+    # config, which is exactly why one repository can poison every checkout.
+    with repo.config_writer() as config:
+        config.set_value("core", "fsmonitor", f"touch {payload}")
+
+    worktree.inspect_for_cleanup()
+
+    assert not payload.exists(), "the worktree's fsmonitor hook was executed"
+    assert repo.working_dir is not None

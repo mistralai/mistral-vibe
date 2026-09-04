@@ -90,6 +90,33 @@ def _response_forcing_managed_shell(variant: str) -> EvalResponse:
     })
 
 
+def _response_forcing_registry_skills(variant: str) -> EvalResponse:
+    return EvalResponse.model_validate({
+        "features": {
+            ExperimentName.REGISTRY_SKILLS.value: {
+                "defaultValue": "off",
+                "rules": [
+                    {
+                        "force": variant,
+                        "tracks": [
+                            {
+                                "experiment": {
+                                    "key": ExperimentName.REGISTRY_SKILLS.value
+                                },
+                                "result": {
+                                    "key": "1",
+                                    "variationId": 1,
+                                    "inExperiment": True,
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    })
+
+
 def _response_forcing_without_tracks(variant: str) -> EvalResponse:
     return EvalResponse.model_validate({
         "features": {
@@ -222,6 +249,12 @@ def _manager_with_managed_shell_variant(variant: str) -> ExperimentManager:
     return manager
 
 
+def _manager_with_registry_skills_variant(variant: str) -> ExperimentManager:
+    manager = ExperimentManager(client=_StubClient(None))
+    manager.hydrate(_response_forcing_registry_skills(variant))
+    return manager
+
+
 def _manager_with_forced_variant_without_tracks(variant: str) -> ExperimentManager:
     manager = ExperimentManager(client=_StubClient(None))
     manager.hydrate(_response_forcing_without_tracks(variant))
@@ -291,6 +324,26 @@ async def test_maps_managed_shell_experiment_to_config_field() -> None:
 
 
 @pytest.mark.asyncio
+async def test_maps_registry_skills_experiment_to_config_field() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants(_manager_with_registry_skills_variant("on").config_variants())
+
+    data = await layer.load()
+
+    assert data.model_dump() == {"experimental_enable_registry_skills": True}
+
+
+@pytest.mark.asyncio
+async def test_ignores_registry_skills_off_variant() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants(_manager_with_registry_skills_variant("off").config_variants())
+
+    data = await layer.load()
+
+    assert data.model_dump() == {}
+
+
+@pytest.mark.asyncio
 async def test_maps_forced_system_prompt_without_tracks_to_config_field() -> None:
     layer = GrowthbookLayer()
     layer.set_variants(
@@ -338,7 +391,7 @@ async def test_ignores_growthbook_default_value_without_forced_rule() -> None:
 
 @pytest.mark.asyncio
 async def test_default_orchestrator_applies_growthbook_layer() -> None:
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(_manager_with_variant("tests").config_variants())
 
@@ -351,7 +404,7 @@ async def test_default_orchestrator_applies_growthbook_layer() -> None:
 async def test_selected_toml_wins_over_growthbook_layer(config_dir: Path) -> None:
     config_path = config_dir / "config.toml"
     config_path.write_text('system_prompt_id = "lean"\n', encoding="utf-8")
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(_manager_with_variant("tests").config_variants())
 
@@ -366,7 +419,7 @@ async def test_selected_toml_disables_growthbook_managed_shell(
 ) -> None:
     config_path = config_dir / "config.toml"
     config_path.write_text("managed_shell_tools_enabled = false\n", encoding="utf-8")
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(_manager_with_managed_shell_variant("managed").config_variants())
 
@@ -381,7 +434,7 @@ async def test_forced_growthbook_variant_without_tracks_loses_to_selected_toml(
 ) -> None:
     config_path = config_dir / "config.toml"
     config_path.write_text('system_prompt_id = "lean"\n', encoding="utf-8")
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(
         _manager_with_forced_variant_without_tracks("tests").config_variants()
@@ -398,7 +451,7 @@ async def test_forced_growthbook_variant_not_in_experiment_loses_to_selected_tom
 ) -> None:
     config_path = config_dir / "config.toml"
     config_path.write_text('system_prompt_id = "lean"\n', encoding="utf-8")
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(
         _manager_with_forced_variant_not_in_experiment("tests").config_variants()
@@ -415,7 +468,7 @@ async def test_growthbook_default_value_does_not_override_selected_toml(
 ) -> None:
     config_path = config_dir / "config.toml"
     config_path.write_text('system_prompt_id = "lean"\n', encoding="utf-8")
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(_manager_with_default_value("cli").config_variants())
 
@@ -426,7 +479,7 @@ async def test_growthbook_default_value_does_not_override_selected_toml(
 
 @pytest.mark.asyncio
 async def test_unknown_system_prompt_variant_does_not_break_reload() -> None:
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(
         _manager_with_variant("removed_after_graduation_2025_07").config_variants()
@@ -439,9 +492,7 @@ async def test_unknown_system_prompt_variant_does_not_break_reload() -> None:
 
 @pytest.mark.asyncio
 async def test_runtime_overrides_win_over_growthbook_layer() -> None:
-    orchestrator = await build_default_orchestrator(
-        {"system_prompt_id": "lean"}, require_api_key=False
-    )
+    orchestrator = await build_default_orchestrator({"system_prompt_id": "lean"})
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(_manager_with_variant("tests").config_variants())
 
@@ -517,7 +568,7 @@ async def test_routing_experiment_sets_default_for_unpinned_user(
     config_dir: Path,
 ) -> None:
     (config_dir / "config.toml").write_text("", encoding="utf-8")
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(
         _manager_with_routing({
@@ -542,8 +593,8 @@ async def test_routing_experiment_does_not_override_pinned_model(
     config_dir: Path,
 ) -> None:
     config_path = config_dir / "config.toml"
-    config_path.write_text('active_model = "devstral-small"\n', encoding="utf-8")
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    config_path.write_text('active_model = "local"\n', encoding="utf-8")
+    orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(
         _manager_with_routing({
@@ -555,8 +606,8 @@ async def test_routing_experiment_does_not_override_pinned_model(
     await orchestrator.reload()
 
     config = orchestrator.config
-    assert config.active_model == "devstral-small"
-    assert config.get_active_model().alias == "devstral-small"
+    assert config.active_model == "local"
+    assert config.get_active_model().alias == "local"
     assert _ROUTED_TEST_ALIAS in config.models
 
 
@@ -566,7 +617,7 @@ async def test_routing_experiment_honors_manual_selection_of_routed_model(
 ) -> None:
     config_path = config_dir / "config.toml"
     config_path.write_text(f'active_model = "{_ROUTED_TEST_ALIAS}"\n', encoding="utf-8")
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(
         _manager_with_routing({
@@ -624,12 +675,68 @@ async def test_ignores_extra_models_payload_without_models() -> None:
     assert data.model_dump() == {}
 
 
+@pytest.mark.parametrize(
+    ("experiment", "payload"),
+    [
+        (
+            ExperimentName.CLI_MODEL_ROUTING,
+            {"active_model": "incomplete", "model_config": {"alias": "incomplete"}},
+        ),
+        (ExperimentName.CLI_EXTRA_MODELS, [{"alias": "incomplete"}]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_incomplete_growthbook_model_does_not_break_reload(
+    experiment: ExperimentName, payload: object
+) -> None:
+    orchestrator = await build_default_orchestrator()
+    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
+    default_alias = orchestrator.config.get_active_model().alias
+    layer.set_variants({experiment.value: json.dumps(payload)})
+
+    await orchestrator.reload()
+
+    assert "incomplete" not in orchestrator.config.models
+    assert orchestrator.config.get_active_model().alias == default_alias
+
+
+@pytest.mark.parametrize(
+    ("experiment", "payload"),
+    [
+        (
+            ExperimentName.CLI_MODEL_ROUTING,
+            {
+                "active_model": "",
+                "model_config": {"name": "empty", "provider": "mistral", "alias": ""},
+            },
+        ),
+        (
+            ExperimentName.CLI_EXTRA_MODELS,
+            [{"name": "empty", "provider": "mistral", "alias": ""}],
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_empty_alias_growthbook_model_does_not_break_reload(
+    experiment: ExperimentName, payload: object
+) -> None:
+    orchestrator = await build_default_orchestrator()
+    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
+    default_alias = orchestrator.config.get_active_model().alias
+    layer.set_variants({experiment.value: json.dumps(payload)})
+
+    await orchestrator.reload()
+
+    assert "" not in orchestrator.config.models
+    assert orchestrator.config.get_active_model().alias == default_alias
+
+
 @pytest.mark.asyncio
 async def test_extra_models_experiment_adds_to_dropdown_without_default(
     config_dir: Path,
 ) -> None:
     (config_dir / "config.toml").write_text("", encoding="utf-8")
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     default_before = orchestrator.config.resolve_default_model_alias()
     layer.set_variants(
@@ -651,7 +758,7 @@ async def test_extra_models_experiment_adds_to_dropdown_without_default(
 
 @pytest.mark.asyncio
 async def test_copied_orchestrator_keeps_growthbook_variant_after_reload() -> None:
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     layer.set_variants(_manager_with_variant("tests").config_variants())
     await orchestrator.reload()

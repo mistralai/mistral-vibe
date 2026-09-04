@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import os
 from pathlib import Path
 import shutil
@@ -33,6 +34,19 @@ def _skill_root(skill_id: str) -> Path:
     if not skill_id or skill_id in {".", ".."} or Path(skill_id).name != skill_id:
         raise ValueError(f"unsafe registry skill id: {skill_id!r}")
     return store_root().resolve() / skill_id
+
+
+def is_safe_skill_id(skill_id: str) -> bool:
+    """Whether ``skill_id`` is a usable single path segment (see ``_skill_root``).
+
+    Lets callers skip an unsafe id from a committed manifest instead of letting
+    the ValueError from the path helpers crash them.
+    """
+    try:
+        _skill_root(skill_id)
+    except ValueError:
+        return False
+    return True
 
 
 def skill_dir(skill_id: str, version: int) -> Path:
@@ -84,12 +98,9 @@ def _materialize(item: RegistrySkillItem, name: str) -> Path | None:
     body = _strip_frontmatter(item.skill.skill_body).strip()
     if not body:
         logger.debug("Skipping registry skill '%s' with empty body", name)
-        # Drop any prior cache so is_materialized doesn't report a stale hit.
         shutil.rmtree(dest, ignore_errors=True)
         return None
 
-    # Build the whole version in a staging dir first, so a failed write never
-    # leaves a partial cache.
     dest.parent.mkdir(parents=True, exist_ok=True)
     suffix = uuid.uuid4().hex
     staging = dest.parent / f".{dest.name}.tmp-{suffix}"
@@ -104,8 +115,6 @@ def _materialize(item: RegistrySkillItem, name: str) -> Path | None:
         shutil.rmtree(staging, ignore_errors=True)
         raise
 
-    # Swap in atomically: move the old version aside, move the new one in, then
-    # drop the old. If the swap fails, restore the previous cache.
     had_previous = dest.exists()
     if had_previous:
         os.replace(dest, backup)
@@ -122,9 +131,7 @@ def _materialize(item: RegistrySkillItem, name: str) -> Path | None:
 
 
 def _build_skill_markdown(name: str, item: RegistrySkillItem, body: str) -> str:
-    description = (
-        item.resolved_description or f"Workspace skill '{name}' from the AI Registry."
-    )
+    description = item.resolved_description or f"Shared workspace skill '{name}'."
     extra = {
         "source": _REGISTRY_SOURCE,
         "skill_id": item.skill_id,
@@ -165,8 +172,6 @@ def _write_assets(dest: Path, item: RegistrySkillItem) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
         if asset.is_executable:
-            # Owner-execute only: registry content is external, so don't make it
-            # group- or world-executable.
             target.chmod(target.stat().st_mode | stat.S_IXUSR)
 
 
@@ -175,11 +180,8 @@ def _safe_dest(base: Path, raw_path: str) -> Path | None:
     if not cleaned:
         return None
     target = (base / cleaned).resolve()
-    # Must land strictly inside the skill dir (reject the dir itself + traversal).
     if target == base or base not in target.parents:
         return None
-    # Reject entrypoint names post-normalization so e.g. "sub/../SKILL.md" can't
-    # slip past and overwrite the generated SKILL.md.
     if target.parent == base and target.name.casefold() in _RESERVED_ENTRYPOINTS:
         return None
     return target
@@ -200,7 +202,7 @@ def _export_local(skill_id: str, version: int, target: Path) -> None:
     try:
         frontmatter, body = parse_skill_markdown(read_safe(skill_file).text)
     except SkillParseError:
-        return  # leave the copy untouched; it already carries valid frontmatter
+        return
     front = yaml.safe_dump(
         {
             "name": frontmatter.get("name") or target.name,
@@ -213,17 +215,38 @@ def _export_local(skill_id: str, version: int, target: Path) -> None:
     skill_file.write_text(f"---\n{front}---\n\n{body.strip()}\n", encoding="utf-8")
 
 
-async def prune(active: set[tuple[str, int]]) -> None:
-    """Remove store entries that are not in the active (skill_id, version) set."""
-    await asyncio.to_thread(_prune, active)
+async def prune(
+    active: set[tuple[str, int]],
+    recheck: Callable[[], set[tuple[str, int]]] | None = None,
+) -> None:
+    """Remove store entries that are not in the active (skill_id, version) set.
+
+    ``recheck`` re-reads the active set just before the first delete, so a
+    version another process claimed after ``active`` was computed is kept.
+    """
+    await asyncio.to_thread(_prune, active, recheck)
 
 
-def _prune(active: set[tuple[str, int]]) -> None:
+def _prune(
+    active: set[tuple[str, int]],
+    recheck: Callable[[], set[tuple[str, int]]] | None = None,
+) -> None:
     root = store_root()
     if not root.is_dir():
         return
+    claimed: set[tuple[str, int]] | None = None
+
+    def is_claimed(target: tuple[str, int]) -> bool:
+        nonlocal claimed
+        if recheck is None:
+            return False
+        if claimed is None:
+            claimed = recheck()
+        return target in claimed
+
+    active_ids = {sid for sid, _ in active}
     for id_dir in root.iterdir():
-        if not id_dir.is_dir():
+        if not id_dir.is_dir() or id_dir.name not in active_ids:
             continue
         for version_dir in id_dir.iterdir():
             if not version_dir.is_dir():
@@ -232,10 +255,23 @@ def _prune(active: set[tuple[str, int]]) -> None:
                 version = int(version_dir.name)
             except ValueError:
                 continue
-            if (id_dir.name, version) not in active:
+            target = (id_dir.name, version)
+            if target not in active and not is_claimed(target):
                 shutil.rmtree(version_dir, ignore_errors=True)
         if id_dir.is_dir() and not any(id_dir.iterdir()):
             try:
                 id_dir.rmdir()
             except OSError:
                 pass
+
+
+def is_materialized_sync(skill_id: str, version: int) -> bool:
+    return _is_materialized(skill_id, version)
+
+
+def latest_materialized_sync(skill_id: str) -> int | None:
+    return _latest_materialized(skill_id)
+
+
+def export_local_sync(skill_id: str, version: int, target: Path) -> None:
+    _export_local(skill_id, version, target)

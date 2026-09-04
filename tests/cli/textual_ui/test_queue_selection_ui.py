@@ -1,19 +1,42 @@
 from __future__ import annotations
 
+import asyncio
 import time
+from weakref import WeakKeyDictionary
 
 import pytest
 
-from tests.conftest import build_test_vibe_app
+from tests.conftest import build_test_agent_loop, build_test_vibe_app
+from tests.mock.utils import mock_llm_chunk
+from tests.stubs.fake_backend import FakeBackend
 from vibe.cli.textual_ui.app import VibeApp
-from vibe.cli.textual_ui.queue_kinds import QueuedItemKind
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
-from vibe.cli.textual_ui.widgets.messages import BashOutputMessage
+
+
+class _BlockingBackend(FakeBackend):
+    def __init__(self) -> None:
+        super().__init__([[mock_llm_chunk(content="done")]] * 8)
+        self.started = [asyncio.Event() for _ in range(8)]
+        self.release = [asyncio.Event() for _ in range(8)]
+        self.calls = 0
+
+    async def complete(self, **kwargs):
+        index = self.calls
+        self.calls += 1
+        self.started[index].set()
+        await self.release[index].wait()
+        return await super().complete(**kwargs)
+
+
+_BACKENDS: WeakKeyDictionary[VibeApp, _BlockingBackend] = WeakKeyDictionary()
 
 
 @pytest.fixture
 def vibe_app() -> VibeApp:
-    return build_test_vibe_app()
+    backend = _BlockingBackend()
+    app = build_test_vibe_app(agent_loop=build_test_agent_loop(backend=backend))
+    _BACKENDS[app] = backend
+    return app
 
 
 async def _wait_until(pilot, predicate, timeout: float = 2.0) -> bool:
@@ -34,11 +57,9 @@ async def _enqueue_prompt(pilot, app: VibeApp, text: str) -> None:
 
 async def _start_bash_and_wait_busy(pilot, app: VibeApp) -> None:
     chat_input = app.query_one(ChatInputContainer)
-    # Keep the command alive beyond the longest interaction in this module so
-    # its final stats update cannot race the test app's screen teardown.
-    chat_input.value = "!sleep 30"
+    chat_input.value = "keep the turn active"
     await pilot.press("enter")
-    assert await _wait_until(pilot, lambda: app._bash_task is not None, timeout=2.0)
+    assert await _wait_until(pilot, _BACKENDS[app].started[0].is_set, timeout=2.0)
 
 
 @pytest.mark.asyncio
@@ -207,6 +228,48 @@ async def test_enter_in_edit_mode_updates_queued_item(vibe_app: VibeApp) -> None
 
         items = vibe_app._queue.queue_item_texts()
         assert any("edited text" == content for _, content in items)
+
+
+@pytest.mark.asyncio
+async def test_edit_keeps_target_when_an_earlier_item_leaves_queue(
+    vibe_app: VibeApp,
+) -> None:
+    async with vibe_app.run_test() as pilot:
+        await _start_bash_and_wait_busy(pilot, vibe_app)
+        await _enqueue_prompt(pilot, vibe_app, "oldest")
+        await _enqueue_prompt(pilot, vibe_app, "target")
+        await _enqueue_prompt(pilot, vibe_app, "newest")
+
+        body = vibe_app.query_one(ChatInputContainer)._body
+        assert body is not None
+
+        await pilot.press("up")
+        await pilot.pause(0.1)
+        await pilot.press("up")
+        await pilot.pause(0.1)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+
+        assert body._queue_in_edit_mode
+        assert body.input_widget is not None
+        assert body.input_widget.text == "target"
+
+        # Simulate FIFO drain removing an older item while this one is edited.
+        assert await vibe_app._queue.pop_at(0)
+        assert [content for _, content in vibe_app._queue.queue_item_texts()] == [
+            "target",
+            "newest",
+        ]
+
+        body.input_widget.clear_text()
+        body.input_widget.load_text("target edited")
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+
+        assert [content for _, content in vibe_app._queue.queue_item_texts()] == [
+            "target edited",
+            "newest",
+        ]
 
 
 @pytest.mark.asyncio
@@ -472,56 +535,6 @@ async def test_input_unlocked_after_exit(vibe_app: VibeApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_edit_bash_item_updates_displayed_command(vibe_app: VibeApp) -> None:
-    async with vibe_app.run_test() as pilot:
-        await _start_bash_and_wait_busy(pilot, vibe_app)
-        chat_input = vibe_app.query_one(ChatInputContainer)
-        chat_input.value = "!ls"
-        await pilot.press("enter")
-        await pilot.pause(0.05)
-
-        body = vibe_app.query_one(ChatInputContainer)._body
-        assert body is not None
-
-        await pilot.press("up")
-        await pilot.pause(0.1)
-        await pilot.press("enter")
-        await pilot.pause(0.1)
-        assert body._queue_in_edit_mode
-
-        assert body.input_widget is not None
-        body.input_widget.clear_text()
-        body.input_widget.load_text("!ls -la")
-        await pilot.pause(0.05)
-
-        await pilot.press("enter")
-        await pilot.pause(0.1)
-
-        items = vibe_app._queue.queue_items()
-        assert any(
-            content == "ls -la" and kind == QueuedItemKind.BASH
-            for _, kind, content in items
-        ), items
-
-
-@pytest.mark.asyncio
-async def test_bash_item_shows_highlight_on_selection(vibe_app: VibeApp) -> None:
-    async with vibe_app.run_test() as pilot:
-        await _start_bash_and_wait_busy(pilot, vibe_app)
-        chat_input = vibe_app.query_one(ChatInputContainer)
-        chat_input.value = "!ls"
-        await pilot.press("enter")
-        await pilot.pause(0.05)
-
-        await pilot.press("up")
-        await pilot.pause(0.1)
-
-        selected = [w for w in vibe_app._queue.widgets if w.has_class("queue-selected")]
-        assert len(selected) == 1
-        assert isinstance(selected[0], BashOutputMessage)
-
-
-@pytest.mark.asyncio
 async def test_delete_keeps_later_indices_correct(vibe_app: VibeApp) -> None:
     async with vibe_app.run_test() as pilot:
         await _start_bash_and_wait_busy(pilot, vibe_app)
@@ -588,16 +601,8 @@ async def test_edit_mode_hint_persists_until_exit(vibe_app: VibeApp) -> None:
 @pytest.mark.asyncio
 async def test_selection_exits_when_queue_drained_empty(vibe_app: VibeApp) -> None:
     async with vibe_app.run_test() as pilot:
-        chat_input = vibe_app.query_one(ChatInputContainer)
-        chat_input.value = "!sleep 2"
-        await pilot.press("enter")
-        assert await _wait_until(
-            pilot, lambda: vibe_app._bash_task is not None, timeout=2.0
-        )
-
-        chat_input.value = "!echo queued"
-        await pilot.press("enter")
-        await pilot.pause(0.05)
+        await _start_bash_and_wait_busy(pilot, vibe_app)
+        await _enqueue_prompt(pilot, vibe_app, "queued")
         assert len(vibe_app._queue) == 1
 
         body = vibe_app.query_one(ChatInputContainer)._body
@@ -607,8 +612,12 @@ async def test_selection_exits_when_queue_drained_empty(vibe_app: VibeApp) -> No
         await pilot.pause(0.1)
         assert body._queue_cursor >= 0
 
-        # Blocking bash finishes, drain consumes the queued bash -> queue empty.
-        assert await _wait_until(pilot, lambda: len(vibe_app._queue) == 0, timeout=6.0)
+        backend = _BACKENDS[vibe_app]
+        backend.release[0].set()
+        assert await _wait_until(pilot, backend.started[1].is_set, timeout=2.0)
+        # The drain reaches the client queue a few event-loop hops after the next
+        # turn starts, so wait for it rather than asserting point-in-time.
+        assert await _wait_until(pilot, lambda: len(vibe_app._queue) == 0)
 
         # Next navigation re-syncs against the empty queue and exits selection.
         await pilot.press("up")
@@ -617,94 +626,31 @@ async def test_selection_exits_when_queue_drained_empty(vibe_app: VibeApp) -> No
 
 
 @pytest.mark.asyncio
-async def test_backspace_after_drain_consumed_highlighted_targets_next_item(
-    vibe_app: VibeApp,
-) -> None:
-    # If the drain consumes the highlighted item while in selection mode, the
-    # cursor is clamped onto the next item but the app's _queue_selected_widget
-    # must re-sync — otherwise a following Backspace resolves to the removed
-    # widget and no-ops instead of deleting the next item. Use queued bash
-    # items so the drain consumes them by running the shell (no LLM turn).
-    async with vibe_app.run_test() as pilot:
-        chat_input = vibe_app.query_one(ChatInputContainer)
-        chat_input.value = "!sleep 2"
-        await pilot.press("enter")
-        assert await _wait_until(
-            pilot, lambda: vibe_app._bash_task is not None, timeout=2.0
-        )
-
-        chat_input.value = "!sleep 1"
-        await pilot.press("enter")
-        await pilot.pause(0.05)
-        chat_input.value = "!echo newest"
-        await pilot.press("enter")
-        await pilot.pause(0.05)
-        assert len(vibe_app._queue) == 2
-
-        body = vibe_app.query_one(ChatInputContainer)._body
-        assert body is not None
-
-        # Highlight the OLDEST item (the one the drain consumes first, FIFO).
-        # newest-first list: cursor 0 = newest, cursor 1 = oldest.
-        await pilot.press("up")
-        await pilot.pause(0.1)
-        await pilot.press("up")
-        await pilot.pause(0.1)
-        assert body._queue_cursor == 1
-        assert vibe_app._queue_selected_widget is not None
-
-        # Blocking bash finishes, drain consumes the highlighted oldest bash
-        # (FIFO) — the highlighted widget is removed but _queue_selected_widget
-        # still points at it until the next resync re-posts the scroll.
-        assert await _wait_until(pilot, lambda: len(vibe_app._queue) == 1, timeout=6.0)
-        # Re-sync via navigation hits the clamp branch (highlighted widget gone);
-        # the fix re-posts the scroll so _queue_selected_widget re-points at the
-        # surviving newest item. Without it, Backspace below no-ops.
-        await pilot.press("up")
-        await pilot.pause(0.2)
-        assert vibe_app._queue_selected_widget is not None
-        assert len(vibe_app._queue) == 1
-
-        # Backspace deletes the surviving item (not a no-op on the consumed one).
-        await pilot.press("backspace")
-        await pilot.pause(0.15)
-        assert len(vibe_app._queue) == 0
-
-
-@pytest.mark.asyncio
-async def test_consumed_bash_edit_copy_on_write_requeues_as_bash(
+async def test_consumed_prompt_edit_copy_on_write_requeues_as_prompt(
     vibe_app: VibeApp,
 ) -> None:
     async with vibe_app.run_test() as pilot:
-        chat_input = vibe_app.query_one(ChatInputContainer)
-        chat_input.value = "!sleep 2"
-        await pilot.press("enter")
-        assert await _wait_until(
-            pilot, lambda: vibe_app._bash_task is not None, timeout=2.0
-        )
-
-        chat_input.value = "!echo queued"
-        await pilot.press("enter")
-        await pilot.pause(0.05)
+        await _start_bash_and_wait_busy(pilot, vibe_app)
+        await _enqueue_prompt(pilot, vibe_app, "queued")
         assert len(vibe_app._queue) == 1
 
         body = vibe_app.query_one(ChatInputContainer)._body
         assert body is not None
 
-        # Enter edit mode on the bash item while the app is still busy.
         await pilot.press("up")
         await pilot.pause(0.1)
         await pilot.press("enter")
         await pilot.pause(0.1)
         assert body._queue_in_edit_mode
-        assert body._queue_edit_kind == QueuedItemKind.BASH
 
-        # Wait for the drain to consume the queued bash item.
-        assert await _wait_until(pilot, lambda: len(vibe_app._queue) == 0, timeout=6.0)
+        backend = _BACKENDS[vibe_app]
+        backend.release[0].set()
+        assert await _wait_until(pilot, backend.started[1].is_set, timeout=2.0)
+        assert await _wait_until(pilot, lambda: len(vibe_app._queue) == 0)
 
         assert body.input_widget is not None
         body.input_widget.clear_text()
-        body.input_widget.load_text("!ls -la")
+        body.input_widget.load_text("edited prompt")
         await pilot.pause(0.05)
 
         # First Enter: item was consumed -> copy-on-write notice, stays in edit.
@@ -717,8 +663,8 @@ async def test_consumed_bash_edit_copy_on_write_requeues_as_bash(
         await pilot.press("enter")
         await pilot.pause(0.15)
 
-        # The re-enqueued copy must actually drain (the agent is idle once the
-        # original bash finished), not sit in the queue forever.
-        assert await _wait_until(pilot, lambda: len(vibe_app._queue) == 0, timeout=6.0)
-        # The consumed notice must clear once the edit is resolved, not linger.
+        assert [content for _, content in vibe_app._queue.queue_item_texts()] == [
+            "edited prompt"
+        ]
         assert not vibe_app._inline_notice.display
+        backend.release[1].set()

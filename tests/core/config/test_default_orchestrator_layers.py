@@ -49,7 +49,26 @@ class TestBothTomlLayersInstalled:
         orch = await build_default_orchestrator()
 
         assert orch.config.theme == "project-theme"
-        assert orch.writable_layer_name == "project-toml"
+        # Project still wins the merge, but writes default to the user config.
+        assert orch.writable_layer_name == "user-toml"
+
+    @pytest.mark.asyncio
+    async def test_discovered_project_config_does_not_capture_writes(
+        self, config_dir: Path, tmp_working_directory: Path
+    ) -> None:
+        _write_user_config(config_dir, {"theme": "user-theme"})
+        project_config = _write_project_config(
+            tmp_working_directory, {"theme": "project-theme"}
+        )
+        trusted_folders_manager.add_trusted(_project_vibe_dir(tmp_working_directory))
+
+        orch = await build_default_orchestrator()
+        assert await orch.set_field("/enable_connectors", False) == []
+
+        with project_config.open("rb") as f:
+            assert "enable_connectors" not in tomllib.load(f)
+        with (config_dir / "config.toml").open("rb") as f:
+            assert tomllib.load(f)["enable_connectors"] is False
 
     @pytest.mark.asyncio
     async def test_user_only_field_survives_when_project_absent(
@@ -151,7 +170,7 @@ class TestBothTomlLayersInstalled:
         reset_harness_files_manager()
         init_harness_files_manager()
         try:
-            orch = await build_default_orchestrator(require_api_key=False)
+            orch = await build_default_orchestrator()
 
             assert orch.writable_layer_name == "overrides"
             failures = await orch.set_field("/theme", "runtime-theme")

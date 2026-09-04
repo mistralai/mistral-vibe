@@ -51,11 +51,31 @@ layer still contributes.
 
 The default write target is selected from the installed layers:
 
-- a discovered and trusted project layer is the default write target;
+- `~/.vibe/config.toml` is the default write target whenever the user source is
+  enabled, including when a trusted project config is discovered: project
+  discovery walks up parent directories, so in a monorepo the closest project
+  file is rarely the scope the writer meant;
 - project-only composition uses the project layer, creating
   `.vibe/config.toml` on first write when absent;
-- otherwise `~/.vibe/config.toml` is selected when the user source is enabled;
 - composition without a persistent source uses the runtime override layer.
+
+`active_model` uses the same write-target resolution as every other field.
+When a session already has a pinned model, the app server additionally mirrors
+an implicit `active_model` write into the runtime override layer; this does not
+change the target of the original write. An explicit persistent target,
+including one selected through `/config`, changes only that layer. A write
+explicitly targeting the session override changes that override directly.
+Session metadata is synchronized from the effective model only when the next
+user turn starts or is enqueued.
+
+An `active_model` alias absent from the merged model catalog is normalized to
+the empty, unpinned sentinel. Normal default resolution then applies, including
+the routed default and `allowed_models`; the invalid source value is left
+untouched and reported as a validation warning.
+
+Clients that let a user pick a scope (the `/config` screen) offer the default
+target, the trusted project layer, and the session override layer, in that
+order; each write op names its target layer explicitly.
 
 An untrusted project layer loads empty and is skipped by the merge builder.
 When the user source is enabled, implicit writes fall back to the user layer.

@@ -228,7 +228,7 @@ async def test_plugin_reload_re_pins_between_the_two_reads() -> None:
     "code", [ProtocolErrorCode.NOT_IMPLEMENTED, ProtocolErrorCode.METHOD_NOT_FOUND]
 )
 @pytest.mark.asyncio
-async def test_a_backend_that_resolves_no_plugins_leaves_the_commands_unavailable(
+async def test_a_backend_that_resolves_no_plugins_returns_no_catalog(
     code: ProtocolErrorCode,
 ) -> None:
     # A build without the service answers method-not-found; a session backend
@@ -237,7 +237,6 @@ async def test_a_backend_that_resolves_no_plugins_leaves_the_commands_unavailabl
 
     assert await resource.read() is None
     assert await resource.reload() is None
-    assert resource.supported is False
 
 
 @pytest.mark.asyncio
@@ -248,12 +247,3 @@ async def test_a_read_that_fails_for_another_reason_is_not_mistaken_for_no_plugi
 
     with pytest.raises(AppServerResponseError):
         await resource.read()
-
-
-@pytest.mark.asyncio
-async def test_a_read_that_answers_marks_the_catalogue_supported() -> None:
-    resource = _plugin_resource(PluginClient(_catalog(productivity="0bbb23a0")))
-
-    assert resource.supported is False
-    assert await resource.read() is not None
-    assert resource.supported is True

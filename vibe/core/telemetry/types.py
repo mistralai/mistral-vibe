@@ -5,6 +5,7 @@ from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict
 
+from vibe.core.experiments.active import ExperimentSurface
 from vibe.utils import AgentEntrypoint
 from vibe.utils.terminal import TerminalEmulator
 
@@ -67,6 +68,7 @@ class TelemetryBaseMetadata(BaseModel):
     client_name: str | None = None
     client_version: str | None = None
     os: str | None = None
+    arch: str | None = None
     os_version: str | None = None
     version: str | None = None
     terminal_emulator: TerminalEmulator | None = None
@@ -86,11 +88,16 @@ class TelemetryBaseMetadata(BaseModel):
     # verify the randomization unit (userId). Keeps GrowthBook's own attribute
     # names. Distinct from ``user_plan``, a display label from the account panel.
     experiment_attributes: dict[str, Any] | None = None
+    # The backend that produced the event: "legacy" (AgentLoop) or "unified"
+    # (harness). Set statically per client so it rides every event regardless of
+    # Mistral key / experiments state, unlike ``experiment_attributes.harness``.
+    harness_backend: ExperimentSurface | None = None
 
 
 class TelemetryRequestMetadata(TelemetryBaseMetadata):
     call_type: TelemetryCallType
     call_source: str = "vibe_code"
+    host_kind: Literal["local"] = "local"
     message_id: str | None = None
 
 

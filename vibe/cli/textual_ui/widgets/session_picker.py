@@ -93,12 +93,30 @@ def _build_header_text(cwd: str | None) -> Text:
     return text
 
 
+def _session_harness_tag(session: _PickerSession) -> str | None:
+    """Return the harness provenance tag for a session, or ``None``.
+
+    Only ``PublicSession`` carries a ``harness`` field; legacy
+    ``SavedSessionSummary`` rows never have one.
+    """
+    if isinstance(session, PublicSession):
+        return session.harness
+    return None
+
+
 def _build_option_text(session: _PickerSession, message: str) -> Content:
     time_str = _format_relative_time(_session_updated_at(session))
     session_id = _session_id(session)[:8]
-    return Content.assemble(
-        (f"{time_str:10}", "dim"), "  ", (f"{session_id}  ", "dim"), message
-    )
+    parts: list[tuple[str, str] | str] = [
+        (f"{time_str:10}", "dim"),
+        "  ",
+        (f"{session_id}  ", "dim"),
+    ]
+    harness = _session_harness_tag(session)
+    if harness is not None:
+        parts.append((f"[{harness}]  ", "dim"))
+    parts.append(message)
+    return Content.assemble(*parts)
 
 
 class SessionPickerApp(Container):
@@ -315,6 +333,8 @@ class SessionPickerApp(Container):
         self, sessions: list[PublicSession], latest_messages: dict[str, str]
     ) -> None:
         """Populate the picker after initial mount. Highlights current session if present."""
+        if not self.is_mounted:
+            return
         self.add_sessions(sessions, latest_messages)
         option_list = self._option_list()
         if option_list.highlighted is not None:

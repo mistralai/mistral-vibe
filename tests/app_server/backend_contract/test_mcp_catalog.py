@@ -58,6 +58,11 @@ def echo(value: str) -> str:
     return value
 
 
+@mcp.tool(description="Summarize a document.\\n\\nUsage notes the UI must not show.")
+def summarize(value: str) -> str:
+    return value
+
+
 if __name__ == "__main__":
     mcp.run()
 """
@@ -127,7 +132,14 @@ async def test_mcp_catalog_read_refresh_toggle_remove_and_compatibility_aliases(
     assert compatibility_read == canonical_read
     healthy = _source(canonical_read, _HEALTHY_SERVER)
     assert healthy.status is MCPSourceStatus.ENABLED
-    assert [(tool.name, tool.enabled) for tool in healthy.tools] == [("echo", True)]
+    assert sorted((tool.name, tool.enabled) for tool in healthy.tools) == [
+        ("echo", True),
+        ("summarize", True),
+    ]
+    # The `/mcp` detail view renders one non-wrapping row per tool, so every
+    # backend must collapse free-form remote descriptions to a single line.
+    descriptions = {tool.name: tool.description for tool in healthy.tools}
+    assert descriptions["summarize"] == "Summarize a document."
     assert _source(canonical_read, _OAUTH_SERVER).status is MCPSourceStatus.DISABLED
 
     canonical_refresh = MCPCatalogMutationResponse.model_validate(
@@ -200,11 +212,19 @@ async def test_mcp_catalog_add_login_logout_aliases_and_notification_order(
         del args, kwargs
         return await backend.read_mcp()
 
-    async def login(service: MCPAuthenticationService, name: str, *, on_url) -> str:
+    async def login(
+        service: MCPAuthenticationService,
+        name: str,
+        *,
+        on_url,
+        owner: object | None = None,
+    ) -> str:
         await on_url("https://auth.example.test/authorize")
         return service.descriptor_revision(name)
 
-    async def logout(service: MCPAuthenticationService, name: str) -> str:
+    async def logout(
+        service: MCPAuthenticationService, name: str, *, owner: object | None = None
+    ) -> str:
         return service.descriptor_revision(name)
 
     monkeypatch.setattr(backend_type, "reconfigure_mcp", keep_current_state)
@@ -359,7 +379,13 @@ async def test_mcp_login_for_disabled_source_performs_no_runtime_authorization(
     resolve_calls: list[str] = []
     original_resolve = MCPAuthenticationService.resolve
 
-    async def login(service: MCPAuthenticationService, name: str, *, on_url) -> str:
+    async def login(
+        service: MCPAuthenticationService,
+        name: str,
+        *,
+        on_url,
+        owner: object | None = None,
+    ) -> str:
         await on_url("https://auth.example.test/disabled")
         return "descriptor-after-login"
 
@@ -398,11 +424,19 @@ async def test_sessionless_mcp_mutations_do_not_build_a_session_runtime_and_boot
         build_calls += 1
         return await original_build(*args, **kwargs)
 
-    async def login(service: MCPAuthenticationService, name: str, *, on_url) -> str:
+    async def login(
+        service: MCPAuthenticationService,
+        name: str,
+        *,
+        on_url,
+        owner: object | None = None,
+    ) -> str:
         await on_url("https://auth.example.test/sessionless")
         return service.descriptor_revision(name)
 
-    async def logout(service: MCPAuthenticationService, name: str) -> str:
+    async def logout(
+        service: MCPAuthenticationService, name: str, *, owner: object | None = None
+    ) -> str:
         return service.descriptor_revision(name)
 
     monkeypatch.setattr(process, build_name, tracked_build)

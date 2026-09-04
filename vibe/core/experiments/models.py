@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import platform
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.telemetry.types import AgentEntrypoint, TerminalEmulator
 
 
@@ -20,10 +22,14 @@ class ExperimentAttributes(BaseModel):
 
     userId: str | None = None
     entrypoint: AgentEntrypoint
+    # Required, not defaulted: a default would let a new backend silently report
+    # someone else's surface.
+    harness: ExperimentSurface
     agent_version: str
     client_name: str | None = None
     client_version: str | None = None
     os: Literal["darwin", "linux", "windows"] | str
+    arch: str = platform.machine().lower()
     terminal_emulator: TerminalEmulator | None = None
     custom_system_prompt: bool = False
     organizationId: str | None = None

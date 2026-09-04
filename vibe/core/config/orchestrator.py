@@ -113,10 +113,9 @@ class ConfigOrchestrator[S: ConfigSchema]:
         layers: list[ConfigLayer[RawConfig]],
         default_layer_resolver: DefaultLayerResolver,
         bus: EventBus | None = None,
-        validation_context: dict[str, Any] | None = None,
     ) -> ConfigOrchestrator[S]:
         """Build an orchestrator from a schema and an ordered list of layers."""
-        builder = ConfigBuilder[S](schema, validation_context=validation_context)
+        builder = ConfigBuilder[S](schema)
         builder.add_layers(layers)
         config = await builder.build()
         instance = cls(builder, config, default_layer_resolver, bus)
@@ -179,9 +178,20 @@ class ConfigOrchestrator[S: ConfigSchema]:
         value = getattr(data, "active_model", "")
         return value if isinstance(value, str) else ""
 
-    async def reload(self) -> None:
+    async def reload(
+        self, *, preflight: Callable[[S], Awaitable[None]] | None = None
+    ) -> None:
         """Force-reload all layers and atomically replace the config snapshot."""
-        self._config = await self._builder.build(force_load=True)
+        async with self._mutation_lock:
+            await self._reload_locked(preflight=preflight)
+
+    async def _reload_locked(
+        self, *, preflight: Callable[[S], Awaitable[None]] | None = None
+    ) -> None:
+        candidate = await self._builder.build(force_load=True)
+        if preflight is not None:
+            await preflight(candidate)
+        self._config = candidate
 
     async def set_field(
         self,
@@ -320,7 +330,7 @@ class ConfigOrchestrator[S: ConfigSchema]:
         failures = [r for r in results if isinstance(r, BaseException)]
         has_success = any(not isinstance(r, BaseException) for r in results)
 
-        await self.reload()
+        await self._reload_locked()
         after = self._config.model_dump(mode="json")
         changed_keys = _changed_keys_between(before, after)
         if has_success and changed_keys:

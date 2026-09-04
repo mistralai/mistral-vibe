@@ -9,7 +9,12 @@ import pytest
 
 from vibe.core.config._migration import migrate_config_layers
 from vibe.core.config.fingerprint import create_file_fingerprint
-from vibe.core.config.layer import LayerImplementationError, LayerNotLoadedError
+from vibe.core.config.layer import (
+    ConfigStorageError,
+    LayerImplementationError,
+    LayerNotLoadedError,
+)
+from vibe.core.config.layers import _base
 from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.patch import (
     AddOperationPatch,
@@ -120,6 +125,64 @@ deprecated_setting = true
     assert cached_data is not None
     assert cached_data.model_extra == expected_data
     assert layer.fingerprint != fingerprint
+
+
+@pytest.mark.asyncio
+async def test_apply_raises_config_storage_error_when_write_fails(
+    tmp_working_directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A read-only config.toml (e.g. symlinked read-only from the Nix store)
+    # makes the atomic write raise OSError. It must surface as a typed
+    # ConfigStorageError, not an uncaught traceback. chmod is unreliable under
+    # root, so raise the OSError from the write path directly.
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('active_model = "old"\n')
+    layer = UserConfigLayer(path=path)
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
+    def deny_write(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(_base.tempfile, "NamedTemporaryFile", deny_write)
+
+    with pytest.raises(ConfigStorageError) as excinfo:
+        await layer.apply(
+            ConfigPatch(
+                ReplaceOperationPatch(path="/active_model", value="new"),
+                fingerprint=fingerprint,
+            )
+        )
+
+    assert excinfo.value.path == path
+    assert excinfo.value.operation == "write"
+    assert isinstance(excinfo.value.__cause__, PermissionError)
+
+
+@pytest.mark.asyncio
+async def test_load_raises_config_storage_error_when_read_fails(
+    tmp_working_directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('active_model = "old"\n')
+    layer = UserConfigLayer(path=path)
+
+    original_open = Path.open
+
+    def deny_open(self: Path, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        if self == path:
+            raise PermissionError(13, "Permission denied", str(path))
+        return original_open(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "open", deny_open)
+
+    with pytest.raises(ConfigStorageError) as excinfo:
+        await layer.load()
+
+    assert excinfo.value.path == path
+    assert excinfo.value.operation == "read"
+    assert isinstance(excinfo.value.__cause__, PermissionError)
 
 
 @pytest.mark.asyncio
@@ -384,6 +447,50 @@ provider = "mistral"
 
 
 @pytest.mark.asyncio
+async def test_migrate_config_layers_drops_sparse_leftover_devstral_small(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text(
+        'active_model = "devstral-small"\n\n'
+        "[[models]]\n"
+        'alias = "devstral-small"\n'
+        'thinking = "low"\n'
+    )
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted.get("active_model", "") == ""
+    assert "models" not in persisted
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_keeps_complete_devstral_small(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text(
+        'active_model = "devstral-small"\n\n'
+        "[[models]]\n"
+        'name = "devstral-small-latest"\n'
+        'provider = "mistral"\n'
+        'alias = "devstral-small"\n'
+        'thinking = "off"\n'
+    )
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["active_model"] == "devstral-small"
+    assert persisted["models"][0]["alias"] == "devstral-small"
+
+
+@pytest.mark.asyncio
 async def test_migrate_config_layers_renames_default_agent_to_ask(
     tmp_working_directory: Path,
 ) -> None:
@@ -508,6 +615,26 @@ async def test_migrate_config_layers_is_noop_when_config_is_current(
     path = tmp_working_directory / random_config_file_name()
     path.write_text('active_model = "current"\n')
 
+    layer = UserConfigLayer(path=path)
+    before = path.read_bytes()
+
+    await migrate_config_layers([layer])
+
+    assert path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_is_noop_when_models_lack_devstral_small(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text(
+        'active_model = "local"\n\n'
+        "[[models]]\n"
+        'name = "local-model"\n'
+        'alias = "local"\n'
+        'provider = "openai"\n'
+    )
     layer = UserConfigLayer(path=path)
     before = path.read_bytes()
 

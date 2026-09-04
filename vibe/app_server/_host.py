@@ -21,7 +21,12 @@ from vibe.app_server._project_links import (
     ProjectLinksInternalError,
     ProjectLinksInvalidRequest,
 )
-from vibe.app_server._projection import project_config_view, project_message_history
+from vibe.app_server._projection import (
+    project_agent_summaries,
+    project_config_view,
+    project_message_history,
+)
+from vibe.app_server._session_model import active_model_is_pinned
 from vibe.app_server._state import build_stored_public_state, history_page
 from vibe.app_server._utils import now_ms
 from vibe.app_server._workspace import (
@@ -30,8 +35,10 @@ from vibe.app_server._workspace import (
     read_untrusted_config_dirs,
     read_workspace_trust,
 )
-from vibe.app_server.models import IdleSessionStatus, PublicSession
+from vibe.app_server.models import ConfigIssue, IdleSessionStatus, PublicSession
 from vibe.app_server.protocol import (
+    AgentsListParams,
+    AgentsListResponse,
     ConfigReadParams,
     ConfigReadResponse,
     ConfigSchemaReadParams,
@@ -81,6 +88,7 @@ from vibe.app_server.protocol import (
     WorkspaceWorktreeRemoveResponse,
     WorktreeRemoveOutcome,
 )
+from vibe.core.agents.manager import AgentManager
 from vibe.core.config import VibeConfigSchema, build_default_orchestrator
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -114,6 +122,7 @@ from vibe.core.types import LLMMessage, SessionMetadata
 from vibe.observability.logging import logger
 
 _HOST_METHODS = frozenset({
+    "agents/list",
     "config/read",
     "config/schema",
     "projectLinks/create",
@@ -144,8 +153,13 @@ _HOST_METHODS = frozenset({
 
 
 class HostRequestHandler:
-    def __init__(self, harness_files: HarnessFilesManager) -> None:
+    def __init__(
+        self,
+        harness_files: HarnessFilesManager,
+        startup_issue: ConfigIssue | None = None,
+    ) -> None:
         self._harness_files = harness_files
+        self._startup_issue = startup_issue
         self._project_links = ProjectLinksController()
 
     def handles(self, method: str) -> bool:
@@ -179,10 +193,30 @@ class HostRequestHandler:
                 response = await self._read_config(
                     validate_wire(ConfigReadParams, raw_params)
                 )
+            case "agents/list":
+                response = await self._list_agents(
+                    validate_wire(AgentsListParams, raw_params)
+                )
+            case _ if method.startswith("session/"):
+                response = await self._dispatch_session(method, raw_params)
+            case _ if method.startswith("workspace/"):
+                response = await self._dispatch_workspace(method, raw_params)
+            case _ if method.startswith("projectLinks/"):
+                response = await self._dispatch_project_links(method, raw_params)
+            case _:
+                raise method_not_found(method)
+        return response
+
+    async def _dispatch_session(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> ProtocolModel:
+        match method:
             case "session/list":
                 params = validate_wire(SessionListParams, raw_params)
                 config = await self._load_config(params.cwd)
-                response = await asyncio.to_thread(project_session_list, config, params)
+                response: ProtocolModel = await asyncio.to_thread(
+                    project_session_list, config, params
+                )
             case "session/read":
                 params = validate_wire(SessionReadParams, raw_params)
                 config = await self._load_config(None)
@@ -228,13 +262,25 @@ class HostRequestHandler:
                 response = await asyncio.to_thread(
                     self._get_session_history, params, config
                 )
-            case _ if method.startswith("workspace/"):
-                response = await self._dispatch_workspace(method, raw_params)
-            case _ if method.startswith("projectLinks/"):
-                response = await self._dispatch_project_links(method, raw_params)
             case _:
                 raise method_not_found(method)
         return response
+
+    async def _list_agents(self, params: AgentsListParams) -> AgentsListResponse:
+        if params.session_id is not None:
+            raise RequestFailure(
+                ProtocolErrorCode.NOT_FOUND, f"Session not found: {params.session_id}"
+            )
+        orchestrator = await self._load_orchestrator(None)
+        agents = AgentManager(
+            orchestrator,
+            orchestrator.config.default_agent,
+            harness_files=self._harness_files.for_session(self._cwd(None)),
+        )
+        active, available = project_agent_summaries(
+            agents.active_profile, agents.available_agents.values()
+        )
+        return AgentsListResponse(active=active, agents=available)
 
     async def _read_config(self, params: ConfigReadParams) -> ConfigReadResponse:
         if params.session_id is not None:
@@ -244,7 +290,7 @@ class HostRequestHandler:
         orchestrator = await self._load_orchestrator(params.cwd)
         config = orchestrator.config
         view = project_config_view(
-            config, active_model_pinned=bool(orchestrator.persisted_active_model())
+            config, active_model_pinned=active_model_is_pinned(orchestrator)
         )
         session_files = self._harness_files.for_session(self._cwd(params.cwd))
 
@@ -264,6 +310,7 @@ class HostRequestHandler:
 
         return ConfigReadResponse(
             config=view,
+            startup_issue=self._startup_issue,
             skills_count=skills_count,
             hooks_count=hooks_count,
             mcp_servers_total=mcp_servers_total,
@@ -501,9 +548,7 @@ class HostRequestHandler:
         self, cwd: str | None
     ) -> ConfigOrchestrator[VibeConfigSchema]:
         session_files = self._harness_files.for_session(self._cwd(cwd))
-        return await build_default_orchestrator(
-            harness_files=session_files, require_api_key=False
-        )
+        return await build_default_orchestrator(harness_files=session_files)
 
     @staticmethod
     def _cwd(value: str | None) -> Path:

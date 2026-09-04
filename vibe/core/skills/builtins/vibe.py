@@ -86,8 +86,9 @@ Vibe never updates silently. With `enable_update_checks = true` (default), it
 polls PyPI for `mistral-vibe` daily and prompts on the next launch when a
 newer release exists; accepting runs `uv tool upgrade mistral-vibe`, then
 `brew upgrade mistral-vibe` as a fallback. Disable via `enable_update_checks
-= false`. Run `vibe --check-upgrade` to check immediately, prompt to install a newer
-version if one exists, and exit. Initial install: `uv tool install mistral-vibe`.
+= false`. Run `vibe update` (equivalent to `vibe --check-upgrade`) to check
+immediately, prompt to install a newer version if one exists, and exit. Initial
+install: `uv tool install mistral-vibe`.
 
 ### Version
 
@@ -134,6 +135,15 @@ folders to see a different set. The explicit `--resume <SESSION_ID>` form is
 **not** folder-scoped: it resolves the session by id regardless of which folder
 it ran in.
 
+The first user message pins the resolved model alias to the session. Resuming
+keeps that model even if the configured default changes. `/model` uses the same
+config persistence target as other settings and also updates an existing
+session override immediately; the session file is synchronized when the next
+user message is sent. An explicit persistent target selected through `/config`
+changes only that layer. `/clear` starts an unpinned conversation that follows
+the current config again. If a selected model is no longer configured, Vibe
+falls back to the current default model.
+
 ## Configuration (config.toml)
 
 The configuration file uses TOML format. When it does not exist, Vibe uses its
@@ -176,7 +186,7 @@ enable_notifications = true
 enable_system_trust_store = false  # Use OS trust store for outbound HTTPS
 api_timeout = 720.0               # API request timeout in seconds
 api_retry_max_elapsed_time = 300.0  # Retry budget for retryable API failures in seconds
-auto_compact_threshold = 200000   # Token count before auto-compaction
+auto_compact_threshold = 200000   # Fallback for models without their own threshold
 
 # Git commit behavior
 include_commit_signature = true   # Add "Co-Authored-By" to commits
@@ -248,14 +258,6 @@ cached_input_price = 0.15         # per million cached input tokens; omit to bil
 thinking = "high"                 # "off", "low", "medium", "high", "max"
 auto_compact_threshold = 200000
 supports_images = true            # vision-capable; allows @-mentioned images
-
-[[models]]
-name = "devstral-small-latest"
-provider = "mistral"
-alias = "devstral-small"
-input_price = 0.1
-output_price = 0.3
-cached_input_price = 0.01
 
 [[models]]
 name = "devstral"
@@ -496,6 +498,28 @@ browser_auth_base_url = "https://console.mistral.ai"
 browser_auth_api_base_url = "https://console.mistral.ai/api"
 ```
 
+Split-horizon deployments (e.g. behind an SAP Cloud Connector) expose the
+console under a virtual host the CLI reaches but the server does not know about,
+so it returns sign-in/poll URLs on its own public host. Set
+`browser_auth_allow_origin_rewrite = true` on the provider to re-home the
+returned URLs onto the configured `browser_auth_base_url` /
+`browser_auth_api_base_url` origins instead of rejecting them for an origin
+mismatch (path traversal is still rejected). Only the origin (scheme, host,
+port) is rewritten; the returned URL's path must already sit under the
+configured base path, so the connector must preserve the server's path prefix.
+Point `browser_auth_base_url` at the browser-reachable console and
+`browser_auth_api_base_url` at the CLI-reachable API host. The interactive
+onboarding wizard's custom-domain screen also accepts an optional browser-auth
+API base URL and auto-enables this rewrite when its origin differs from the
+console origin:
+
+```toml
+[[providers]]
+browser_auth_base_url = "https://console.internal.example"
+browser_auth_api_base_url = "https://connector.internal.example:443/api"
+browser_auth_allow_origin_rewrite = true
+```
+
 Self-hosted deployments can point Vibe CLI upgrade and API-key links to their
 Le Chat web deployment, where the Vibe API key is managed:
 
@@ -707,7 +731,7 @@ vibe -c / --continue                # Continue most recent session in this termi
 vibe --resume [SESSION_ID]          # Resume a specific session
 vibe -v / --version                 # Show version
 vibe --setup                        # Run onboarding/setup
-vibe --check-upgrade                # Check for a Vibe update now, prompt to install it, and exit
+vibe update / vibe --check-upgrade  # Check for a Vibe update now, prompt to install it, and exit
 vibe --max-turns N                  # Max assistant turns (programmatic mode)
 vibe --max-price DOLLARS            # Max cost limit (programmatic mode)
 vibe --max-tokens N                 # Max total session tokens (programmatic mode)
@@ -744,8 +768,12 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 ## Built-in Slash Commands
 
 - `/help` - Show help message
-- `/config` - Full-screen settings browser. Fields show their value and origin layer (default / TOML / env / override). Type to filter, arrows to move, Enter to edit; booleans toggle, closed-set fields (theme, models) pick from a list, scalars edit inline, complex fields open a JSON editor. The edit modal shows an inspector of the layers setting the field; edits persist to the TOML layer by default, `Tab` targets the ephemeral session override (until restart), and `Ctrl+R` clears the field one writable layer at a time toward the default. The `tools` field opens a grouped tool list with a per-tool config editor (permission, allow/deny lists, `Ctrl+E` for raw JSON). Enabling/disabling whole MCP servers or connectors stays in `/mcp`.
+- `/config` - Full-screen settings browser. Fields show their value and origin layer (default / TOML / env / override). Type to filter, arrows to move, Enter to edit; booleans toggle, closed-set fields (theme, models) pick from a list, scalars edit inline, complex fields open a JSON editor. The edit modal shows an inspector of the layers setting the field; edits persist to the user config (`~/.vibe/config.toml`) by default, `Tab` cycles the save target through the project config (`.vibe/config.toml`, when the project layer is active) and the ephemeral session override (until restart), and `Ctrl+R` clears the field one writable layer at a time toward the default. The `tools` field opens a grouped tool list with a per-tool config editor (permission, allow/deny lists, `Ctrl+E` for raw JSON). Enabling/disabling whole MCP servers or connectors stays in `/mcp`.
 - `/model` - Select active model
+- `/skills` - Browse and manage the skills available to this session. Lists the
+  installed ones alongside the shared skills you can add, and can import a
+  skill, pin it to a version or alias, convert it to a local copy, or remove it.
+  Registered only when `experimental_enable_registry_skills` is set.
 - `/thinking` - Select thinking level
 - `/theme` - Select Textual UI theme; `auto` follows terminal/OS appearance (persisted in config)
 - `/reload` - Reload configuration, agent instructions, and skills from disk
@@ -769,6 +797,9 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
   hint at this command.
 - `/status` - Display agent statistics
 - `/whoami` - Display the Mistral signed-in user, workspace, and plan
+- `/copy` - Copy the last agent message to the clipboard
+- `/paste-image` - Paste an image from the OS clipboard into the prompt.
+  **macOS only** — the command is not registered on Linux or Windows.
 - `/voice` - Configure voice settings
 - `/mcp` (or `/connectors`) - Display MCP servers and connector status. The
   browser opens on the first item; press Up or Left to move into the fuzzy-search
@@ -801,12 +832,13 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
     (no catch-up); `next_fire_at` advances to `now + interval`.
   - Loops are persisted in the session metadata (`loops` field of `meta.json`)
     and restored on `--resume`/`--continue`.
-- `/terminal-setup` - Configure Shift+Enter for newlines
 - `/proxy-setup` - Configure proxy and SSL certificate settings
 - `/leanstall` - Install the Lean 4 agent (leanstral)
 - `/unleanstall` - Uninstall the Lean 4 agent
 - `/data-retention` - Show data retention information
 - `/teleport` - Teleport session to Vibe Code Web (only available when Vibe Code is enabled)
+- `/remote-project` - Select the Vibe Code Web project for this repository (only
+  available when Vibe Code is enabled)
 - `/exit` - Exit the application
 
 ## File Mentions (`@`)
@@ -860,31 +892,32 @@ Image attachments:
 
 ## Input Queue
 
-Messages submitted while the agent or a `!`-bash command is running are
-queued instead of cancelling the in-flight work, and drain in FIFO order
-once the job finishes. Prompts (plain, `/skill ...`, `@`-mentions),
-`!bash` commands, and non-side-channel slash commands can be queued;
-`&teleport` is rejected with a toast. **Ctrl+C** pops the last queued
-item (LIFO); **Esc** interrupts the running job and pauses the queue;
-pressing Enter (empty or not) on a paused queue resumes draining.
+Prompts submitted while the agent is running are accepted by the app server
+and merged into a single follow-up turn, so everything queued during one
+generation is delivered to the agent together (not one turn per prompt) once
+it finishes. Each queued prompt keeps its own message so it stays individually
+editable and removable. This includes plain prompts, `/skill ...`
+prompts, and prompts with `@` mentions. `!bash`, non-side-channel slash
+commands, and `&teleport` require an idle session and are rejected with a toast
+while busy. **Ctrl+C** removes the newest queued prompt (LIFO); **Esc**
+interrupts the active turn and pauses the remaining queue; pressing Enter
+(empty or not) on a paused queue resumes it.
 
 Allowlisted slash commands (`side_channel=True`) run immediately via a
-side channel while the agent or bash is busy — they open pickers,
-display info, or apply visual changes without waiting. Only one
-side-channel command runs at a time. Commands that persist config
-changes (theme, model, thinking, voice, proxy) enqueue the persist
-step on the main queue as a `COMMAND` item with a callable payload;
-the queue drains when idle, so config writes never conflict.
+side channel while the agent or bash is busy. Only one side-channel command
+runs at a time. Commands that persist config changes (theme, model, thinking,
+voice, proxy) require idle, then write through the app server directly after
+the user confirms the picker.
 
 Commands not on the side-channel allowlist (e.g. `/clear`, `/compact`,
 `/rewind`, `/resume`, `/reload`, `/leanstall`, `/unleanstall`, `/teleport`,
-`/remote-project`, `/retry`) are enqueued on the main queue and execute
-when the session is idle.
+`/remote-project`, `/retry`) are rejected while busy and can be retried when
+the session is idle.
 
 While the queue is non-empty and the agent is busy, pressing **Up**
 enters queue selection mode: the last queued item is highlighted and
 the input is locked (no cursor, no typing). **Up/Down** navigate
-between queued items, **Enter** loads the selected item into the input
+between queued prompts, **Enter** loads the selected prompt into the input
 for editing (press Enter again to update it in-place), **Backspace**
 or **Delete** removes the selected item and moves selection to the
 next, and **Esc** exits selection mode and restores the original

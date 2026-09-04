@@ -32,6 +32,7 @@ class BannerState:
     skills_count: int = 0
     hooks_count: int = 0
     plan_description: str | None = None
+    experimental_harness: bool = False
 
 
 class Banner(Static):
@@ -49,6 +50,7 @@ class Banner(Static):
         connectors_total: int | None = None,
         hooks_count: int = 0,
         model_pending: bool = False,
+        experimental_harness: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -64,6 +66,7 @@ class Banner(Static):
             hooks_count=hooks_count,
             plan_description=None,
             model_pending=model_pending,
+            experimental_harness=experimental_harness,
         )
         self._animated = not (config is None or config.disable_welcome_banner_animation)
 
@@ -105,7 +108,7 @@ class Banner(Static):
         if self._animated:
             self.query_one(PetitChat).freeze_animation()
 
-    def set_state(
+    def set_state(  # noqa: PLR0913
         self,
         config: ConfigView | None,
         skills_count: int,
@@ -118,6 +121,7 @@ class Banner(Static):
         hooks_count: int = 0,
         plan_description: str | None = None,
         model_pending: bool = False,
+        experimental_harness: bool = False,
     ) -> None:
         self.state = self._build_state(
             config=config,
@@ -130,10 +134,11 @@ class Banner(Static):
             hooks_count=hooks_count,
             plan_description=plan_description,
             model_pending=model_pending,
+            experimental_harness=experimental_harness,
         )
 
     @staticmethod
-    def _build_state(
+    def _build_state(  # noqa: PLR0913
         config: ConfigView | None,
         skills_count: int,
         mcp: MCPState | None = None,
@@ -145,6 +150,7 @@ class Banner(Static):
         hooks_count: int = 0,
         plan_description: str | None = None,
         model_pending: bool = False,
+        experimental_harness: bool = False,
     ) -> BannerState:
         if config is None:
             return BannerState()
@@ -163,8 +169,9 @@ class Banner(Static):
             mcp_enabled = mcp_servers_enabled
             mcp_total = mcp_servers_total
         active_model = config.active_model
+        suffix = " · unified harness" if experimental_harness else ""
         return BannerState(
-            active_model=f"{active_model.display_name}[{active_model.thinking}]",
+            active_model=f"{active_model.display_name}[{active_model.thinking}]{suffix}",
             model_pending=model_pending,
             models_count=len(config.models),
             mcp_servers_enabled=mcp_enabled,
@@ -174,6 +181,7 @@ class Banner(Static):
             skills_count=skills_count,
             hooks_count=hooks_count,
             plan_description=plan_description,
+            experimental_harness=experimental_harness,
         )
 
     def _format_meta_counts(self) -> str:

@@ -20,6 +20,8 @@ from tests.constants import (
     CONNECTORS_BOOTSTRAP_PATH,
     MISTRAL_BASE_URL,
 )
+from vibe.app_server._account import AccountGateway
+from vibe.app_server._identity import IdentityGateway
 from vibe.app_server._runtime import create_harness_server
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.host import AppServerHost
@@ -53,12 +55,16 @@ async def connect_backend_contract_host(
     *,
     session_options: SessionOptions,
     capabilities: ClientCapabilities,
+    account_gateway: AccountGateway | None = None,
+    identity_gateway: IdentityGateway | None = None,
 ) -> BackendContractConnection:
     client_transport, server_transport = memory_transport_pair()
     harness = await create_harness_server(
         server_transport,
         transport_kind="in_process",
         experimental_harness=experimental_harness,
+        account_gateway=account_gateway,
+        identity_gateway=identity_gateway,
     )
     client = AppServerClient(client_transport, run_peer=harness.serve)
     host = await AppServerHost.connect(

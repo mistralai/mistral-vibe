@@ -109,6 +109,7 @@ def _build_onboarding_config(
     api_key_env_var: str = "MISTRAL_API_KEY",
     browser_auth_base_url: str | None = None,
     browser_auth_api_base_url: str | None = None,
+    browser_auth_allow_origin_rewrite: bool = False,
     vibe_base_url: str = "https://chat.mistral.ai",
 ) -> VibeConfigSchema:
     provider = ProviderConfig(
@@ -117,6 +118,7 @@ def _build_onboarding_config(
         api_key_env_var=api_key_env_var,
         browser_auth_base_url=browser_auth_base_url,
         browser_auth_api_base_url=browser_auth_api_base_url,
+        browser_auth_allow_origin_rewrite=browser_auth_allow_origin_rewrite,
         backend=backend,
     )
     model = ModelConfig(
@@ -164,7 +166,13 @@ def _patch_failing_browser_sign_in_service(
     monkeypatch: pytest.MonkeyPatch, captured_base_urls: list[tuple[str, str]]
 ) -> None:
     class FakeGateway:
-        def __init__(self, browser_base_url: str, api_base_url: str) -> None:
+        def __init__(
+            self,
+            browser_base_url: str,
+            api_base_url: str,
+            *,
+            allow_origin_rewrite: bool = False,
+        ) -> None:
             captured_base_urls.append((browser_base_url, api_base_url))
 
     class FakeService:
@@ -458,6 +466,64 @@ async def test_ui_custom_domain_submit_derives_api_base_from_domain() -> None:
 
     assert app._provider.browser_auth_base_url == "https://example.com"
     assert app._provider.browser_auth_api_base_url == "https://example.com/api"
+    assert app._provider.browser_auth_allow_origin_rewrite is False
+
+
+@pytest.mark.asyncio
+async def test_ui_custom_domain_submit_with_split_api_base_enables_rewrite() -> None:
+    app = _build_browser_onboarding_app()
+
+    async with app.run_test() as pilot:
+        await _show_custom_domain(pilot)
+        app.screen.query_one(
+            "#domain", Input
+        ).value = "https://console.internal.example"
+        app.screen.query_one(
+            "#api-base", Input
+        ).value = "https://connector.internal.example:443/api"
+        await pilot.pause()
+        await pilot.press("enter")
+        await _wait_for(lambda: isinstance(app.screen, BrowserSignInScreen), pilot)
+
+    assert app._provider.browser_auth_base_url == "https://console.internal.example"
+    assert (
+        app._provider.browser_auth_api_base_url
+        == "https://connector.internal.example:443/api"
+    )
+    assert app._provider.browser_auth_allow_origin_rewrite is True
+
+
+@pytest.mark.asyncio
+async def test_ui_custom_domain_seeds_configured_split_horizon_api_base() -> None:
+    app = OnboardingApp(
+        config=_build_onboarding_config(
+            browser_auth_base_url="https://console.internal.example",
+            browser_auth_api_base_url="https://connector.internal.example/api",
+        )
+    )
+
+    async with app.run_test() as pilot:
+        await _show_custom_domain(pilot)
+        api_base = app.screen.query_one("#api-base", Input)
+        assert api_base.value == "https://connector.internal.example/api"
+
+
+@pytest.mark.asyncio
+async def test_ui_mistral_default_clears_origin_rewrite() -> None:
+    app = OnboardingApp(
+        config=_build_onboarding_config(
+            browser_auth_base_url="https://console.internal.example",
+            browser_auth_api_base_url="https://connector.internal.example/api",
+        )
+    )
+
+    async with app.run_test() as pilot:
+        await _show_sign_in_target(pilot)
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await _wait_for(lambda: isinstance(app.screen, BrowserSignInScreen), pilot)
+
+    assert app._provider.browser_auth_allow_origin_rewrite is False
 
 
 @pytest.mark.asyncio
@@ -507,6 +573,37 @@ async def test_ui_mistral_option_warns_before_overriding_configured_custom_domai
         await pilot.press("enter")
         assert isinstance(app.screen, SignInTargetScreen)
         assert CONFIGURED_CUSTOM_DOMAIN in _sign_in_target_warning(app.screen)
+
+        await pilot.press("enter")
+        await _wait_for(lambda: isinstance(app.screen, BrowserSignInScreen), pilot)
+
+
+CONFIGURED_CONNECTOR_API_BASE = "https://connector.internal.example/api"
+
+
+def _build_default_console_split_horizon_app() -> OnboardingApp:
+    # Default Mistral console for the browser, but a distinct CLI-reachable
+    # connector API base with origin rewrite on (split-horizon on the default
+    # host). There is no custom browser domain, yet the connector mapping must
+    # not be cleared without warning.
+    return OnboardingApp(
+        config=_build_onboarding_config(
+            browser_auth_base_url=DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
+            browser_auth_api_base_url=CONFIGURED_CONNECTOR_API_BASE,
+            browser_auth_allow_origin_rewrite=True,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_ui_mistral_option_warns_for_default_console_split_horizon() -> None:
+    app = _build_default_console_split_horizon_app()
+
+    async with app.run_test() as pilot:
+        await _show_sign_in_target(pilot)
+        await pilot.press("enter")
+        assert isinstance(app.screen, SignInTargetScreen)
+        assert CONFIGURED_CONNECTOR_API_BASE in _sign_in_target_warning(app.screen)
 
         await pilot.press("enter")
         await _wait_for(lambda: isinstance(app.screen, BrowserSignInScreen), pilot)

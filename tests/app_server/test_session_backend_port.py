@@ -36,12 +36,17 @@ from vibe.app_server.transport import memory_transport_pair
 def test_session_backend_contract_covers_the_complete_session_lifecycle() -> None:
     assert _protocol_members(SessionBackend) == {
         "compact",
+        "enqueue_turn",
         "guard_request",
         "inject_context",
         "interrupt_turn",
         "read",
+        "read_turn_queue",
         "reload_config",
+        "remove_queued_turn",
+        "replace_queued_turn",
         "respond_to_callback",
+        "resume_turn_queue",
         "session_id",
         "shutdown",
         "start_turn",
@@ -60,6 +65,11 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "session/compact",
         "session/context/inject",
         "session/settings/update",
+        "app_server/session/turn/enqueue",
+        "app_server/session/turn/queue/read",
+        "app_server/session/turn/queue/remove",
+        "app_server/session/turn/queue/replace",
+        "app_server/session/turn/queue/resume",
         "turn/interrupt",
         "turn/start",
         "turn/steer",
@@ -73,6 +83,7 @@ def test_session_backend_host_contract_owns_session_selection() -> None:
         "harness_kind",
         "list",
         "read",
+        "rename",
         "resume",
         "shutdown",
         "start",
@@ -116,6 +127,43 @@ def test_app_server_rejects_empty_session_backend_host_factory_result() -> None:
 
     with pytest.raises(TypeError, match="must return a SessionBackendHost"):
         AppServer(server_transport, session_backend_host_factory=empty_factory)
+
+
+@pytest.mark.asyncio
+async def test_app_server_shutdown_waits_for_host_cleanup() -> None:
+    """*Prepare*: A Session Host whose shutdown remains active.
+    *Do*: Close the App Server before allowing Host cleanup to finish.
+    *Assert*: App Server shutdown waits until Host cleanup is complete.
+    """
+    # Prepare
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    class SlowShutdownHost:
+        async def shutdown(self) -> None:
+            entered.set()
+            await release.wait()
+            finished.set()
+
+    _, server_transport = memory_transport_pair()
+    host = SlowShutdownHost()
+    server = AppServer(
+        server_transport,
+        session_backend_host_factory=lambda _services: cast(SessionBackendHost, host),
+    )
+
+    # Do
+    closing = asyncio.create_task(server._close_root())
+    await entered.wait()
+    await asyncio.sleep(0)
+
+    # Assert
+    assert not closing.done()
+    assert not finished.is_set()
+    release.set()
+    await asyncio.wait_for(closing, timeout=1)
+    assert finished.is_set()
 
 
 @pytest.mark.asyncio

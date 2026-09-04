@@ -13,6 +13,7 @@ from vibe.app_server.protocol import ProtocolErrorCode
 class DispatchResult:
     response: ProtocolModel
     after_response: Callable[[], None] | None = None
+    on_response_abandoned: Callable[[], None] | None = None
     runtime_updated: bool = False
     session_attached: bool = False
 

@@ -1,138 +1,97 @@
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
-from vibe.app_server.models import PreparedPrompt
-from vibe.cli.textual_ui.message_queue import MessageQueue, QueueController, QueuePorts
-from vibe.cli.textual_ui.queue_kinds import QueuedItemKind
-from vibe.cli.textual_ui.widgets.messages import BashOutputMessage
+from vibe.app_server.models import PreparedPrompt, PublicQueuedTurn, PublicTurnQueue
+from vibe.app_server.protocol import SessionTextContentBlock, TurnUserInputEntry
+from vibe.cli.textual_ui.message_queue import QueueController, QueuePorts
+from vibe.cli.textual_ui.widgets.messages import UserMessage
 
 
 def _make_controller() -> QueueController:
-    async def noop(*args, **kwargs):
-        pass
+    turn_queue = PublicTurnQueue()
 
-    def noop_task(*args, **kwargs):
-        return asyncio.create_task(noop())
+    async def noop(*_args, **_kwargs) -> None:
+        return None
+
+    async def enqueue_turn(content: str, **kwargs) -> PublicQueuedTurn:
+        nonlocal turn_queue
+        queued_turn = PublicQueuedTurn(
+            id=f"queue-{len(turn_queue.items)}",
+            created_at=1,
+            entries=[
+                TurnUserInputEntry(
+                    entry_id=kwargs.get("message_entry_id"),
+                    content=[SessionTextContentBlock(text=content)],
+                )
+            ],
+        )
+        turn_queue = turn_queue.model_copy(
+            update={"items": [*turn_queue.items, queued_turn]}
+        )
+        return queued_turn
+
+    async def replace_queued_turn(
+        queue_item_id: str, content: str, **kwargs
+    ) -> PublicQueuedTurn | None:
+        nonlocal turn_queue
+        updated_items: list[PublicQueuedTurn] = []
+        replaced: PublicQueuedTurn | None = None
+        for item in turn_queue.items:
+            if item.id != queue_item_id:
+                updated_items.append(item)
+                continue
+            replaced = item.model_copy(
+                update={
+                    "entries": [
+                        TurnUserInputEntry(
+                            entry_id=kwargs.get("message_entry_id"),
+                            content=[SessionTextContentBlock(text=content)],
+                        )
+                    ]
+                }
+            )
+            updated_items.append(replaced)
+        if replaced is None:
+            return None
+        turn_queue = turn_queue.model_copy(update={"items": updated_items})
+        return replaced
+
+    async def remove_queued_turn(queue_item_id: str) -> bool:
+        nonlocal turn_queue
+        remaining = [item for item in turn_queue.items if item.id != queue_item_id]
+        if len(remaining) == len(turn_queue.items):
+            return False
+        turn_queue = turn_queue.model_copy(update={"items": remaining})
+        return True
+
+    async def resume_turn_queue() -> PublicTurnQueue:
+        return turn_queue
 
     return QueueController(
         QueuePorts(
             mount_and_scroll=noop,
-            agent_running=lambda: False,
-            bash_task=lambda: None,
-            active_model=lambda: None,
-            remove_loading_widget=noop,
-            set_loading_queue_count=lambda count: None,
-            inject_queued_prompt=noop,
-            start_agent_turn=noop_task,
-            await_agent_turn=noop,
-            run_bash=noop_task,
-            run_command=noop,
+            current_turn_queue=lambda: turn_queue,
+            enqueue_turn=enqueue_turn,
+            replace_queued_turn=replace_queued_turn,
+            remove_queued_turn=remove_queued_turn,
+            resume_turn_queue=resume_turn_queue,
+            steer_turn=noop,
+            turn_has_started=lambda _queue_item_id: False,
+            set_loading_queue_count=lambda _count: None,
             maybe_show_feedback_bar=noop,
-            send_skill_telemetry=lambda name: None,
+            send_mention_telemetry=lambda _mentions, _message_id: None,
+            send_skill_telemetry=lambda _name: None,
         )
     )
 
 
-def test_update_prompt_item_replaces_content() -> None:
-    queue = MessageQueue()
-    queue.append_prompt("hello")
-    queue.update_prompt_item(0, "world")
-    assert queue.items[0].content == "world"
-    assert queue.items[0].kind == QueuedItemKind.PROMPT
+@pytest.fixture(autouse=True)
+def unmounted_widget_remove(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def noop_remove(_self: object) -> None:
+        return None
 
-
-def test_update_prompt_item_preserves_kind_and_skill() -> None:
-    queue = MessageQueue()
-    queue.append_prompt("hello", skill_name="my-skill")
-    queue.update_prompt_item(0, "edited")
-    item = queue.items[0]
-    assert item.content == "edited"
-    assert item.skill_name == "my-skill"
-    assert item.kind == QueuedItemKind.PROMPT
-
-
-def test_update_prompt_item_only_affects_target_index() -> None:
-    queue = MessageQueue()
-    queue.append_prompt("a")
-    queue.append_prompt("b")
-    queue.append_prompt("c")
-    queue.update_prompt_item(1, "edited")
-    assert queue.items[0].content == "a"
-    assert queue.items[1].content == "edited"
-    assert queue.items[2].content == "c"
-
-
-def test_prompt_item_texts_returns_only_prompts_with_indices() -> None:
-    controller = _make_controller()
-    controller._queue.append_prompt("first")
-    controller._queue.append_bash("ls")
-    controller._queue.append_prompt("second")
-
-    texts = controller.prompt_item_texts()
-    assert texts == [(0, "first"), (2, "second")]
-
-
-def test_prompt_item_texts_empty_queue() -> None:
-    controller = _make_controller()
-    assert controller.prompt_item_texts() == []
-
-
-def test_update_prompt_item_updates_prepared_prompt() -> None:
-    queue = MessageQueue()
-    queue.append_prompt("hello")
-    assert queue.items[0].prepared_prompt is None
-    prepared = PreparedPrompt(display_text="d", prompt_text="p")
-    queue.update_prompt_item(0, "hello", prepared_prompt=prepared)
-    assert queue.items[0].prepared_prompt is prepared
-
-
-def test_pop_at_removes_item_at_index() -> None:
-    queue = MessageQueue()
-    queue.append_prompt("a")
-    queue.append_prompt("b")
-    queue.append_prompt("c")
-    popped = queue.pop_at(1)
-    assert popped is not None
-    assert popped.content == "b"
-    assert [item.content for item in queue.items] == ["a", "c"]
-
-
-def test_pop_at_first_item() -> None:
-    queue = MessageQueue()
-    queue.append_prompt("a")
-    queue.append_prompt("b")
-    popped = queue.pop_at(0)
-    assert popped is not None
-    assert popped.content == "a"
-    assert [item.content for item in queue.items] == ["b"]
-
-
-def test_pop_at_last_item_clears_paused() -> None:
-    queue = MessageQueue()
-    queue.append_prompt("a")
-    queue.pause()
-    queue.pop_at(0)
-    assert not queue.paused
-
-
-def test_pop_at_out_of_range_returns_none() -> None:
-    queue = MessageQueue()
-    queue.append_prompt("a")
-    assert queue.pop_at(1) is None
-    assert queue.pop_at(-1) is None
-
-
-def test_queue_item_texts_returns_all_items() -> None:
-    controller = _make_controller()
-    controller._queue.append_prompt("first")
-    controller._queue.append_bash("ls")
-    controller._queue.append_prompt("second")
-
-    texts = controller.queue_item_texts()
-    assert texts == [(0, "first"), (1, "ls"), (2, "second")]
+    monkeypatch.setattr(UserMessage, "remove", noop_remove)
 
 
 def test_queue_item_texts_empty_queue() -> None:
@@ -142,77 +101,63 @@ def test_queue_item_texts_empty_queue() -> None:
 
 def test_controller_widgets_returns_copy() -> None:
     controller = _make_controller()
-    widgets1 = controller.widgets
-    widgets2 = controller.widgets
-    assert widgets1 is not widgets2
-    assert widgets1 == widgets2
-
-
-def test_queue_items_returns_index_kind_content() -> None:
-    controller = _make_controller()
-    controller._queue.append_prompt("first")
-    controller._queue.append_bash("ls")
-    controller._queue.append_prompt("second")
-
-    items = controller.queue_items()
-    assert items == [
-        (0, QueuedItemKind.PROMPT, "first"),
-        (1, QueuedItemKind.BASH, "ls"),
-        (2, QueuedItemKind.PROMPT, "second"),
-    ]
-
-
-def test_queue_items_empty_queue() -> None:
-    controller = _make_controller()
-    assert controller.queue_items() == []
+    assert controller.widgets is not controller.widgets
+    assert controller.widgets == controller.widgets
 
 
 @pytest.mark.asyncio
-async def test_update_item_bash_updates_command_and_kind() -> None:
-    controller = _make_controller()
-    await controller.enqueue_bash("ls", "/tmp")
-
-    await controller.update_item(0, "ls -la")
-
-    item = controller._queue.items[0]
-    assert item.content == "ls -la"
-    assert item.kind == QueuedItemKind.BASH
-    widget = controller.widgets[0]
-    assert isinstance(widget, BashOutputMessage)
-    assert widget._command == "ls -la"
-
-
-@pytest.mark.asyncio
-async def test_update_item_prompt_preserves_kind_with_prepared() -> None:
+async def test_update_prompt_updates_prepared_prompt() -> None:
     controller = _make_controller()
     await controller.enqueue_prompt("hello")
 
-    prepared = PreparedPrompt(display_text="d", prompt_text="p")
-    await controller.update_item(0, "edited", prepared_prompt=prepared)
+    prepared = PreparedPrompt(display_text="display", prompt_text="rendered")
+    assert await controller.update_prompt(0, "edited", prepared_prompt=prepared)
 
-    item = controller._queue.items[0]
-    assert item.content == "edited"
-    assert item.kind == QueuedItemKind.PROMPT
-    assert item.prepared_prompt is prepared
+    assert controller._merged is not None
+    entry = controller._merged.entries[0]
+    assert entry.prompt.content == "edited"
+    assert entry.prompt.prepared_prompt is prepared
 
 
 @pytest.mark.asyncio
-async def test_queued_bash_prompt_shows_bang_not_spinner() -> None:
-    # A bash item queued before mount must render the "!" prompt, not the
-    # PULSE spinner square glyph (set_queued runs before compose, so compose
-    # must honor _queued over _pending).
-    from textual.app import App, ComposeResult
+async def test_update_prompt_preserves_server_fifo_order() -> None:
+    controller = _make_controller()
+    await controller.enqueue_prompt("A")
+    await controller.enqueue_prompt("B")
+    await controller.enqueue_prompt("C")
+    original_ids = [item.id for item in controller._server_queue.items]
 
-    from vibe.cli.textual_ui.widgets.messages import NonSelectableStatic
+    assert await controller.update_prompt(0, "A-edited")
 
-    class _MountApp(App):
-        def compose(self) -> ComposeResult:
-            widget = BashOutputMessage("pwd", "/tmp", pending=True)
-            widget.set_queued(True)
-            yield widget
+    assert [content for _, content in controller.queue_item_texts()] == [
+        "A-edited",
+        "B",
+        "C",
+    ]
+    assert [item.id for item in controller._server_queue.items] == original_ids
+    assert [widget.get_content() for widget in controller.widgets] == [
+        "A-edited",
+        "B",
+        "C",
+    ]
 
-    app = _MountApp()
-    async with app.run_test() as pilot:
-        await pilot.pause(0.05)
-        prompt = app.query_one(".bash-prompt", NonSelectableStatic)
-        assert str(prompt.content) == "! "
+
+@pytest.mark.asyncio
+async def test_pop_at_removes_server_prompt() -> None:
+    controller = _make_controller()
+    await controller.enqueue_prompt("A")
+    await controller.enqueue_prompt("B")
+    await controller.enqueue_prompt("C")
+
+    assert await controller.pop_at(1)
+    assert [content for _, content in controller.queue_item_texts()] == ["A", "C"]
+
+
+@pytest.mark.asyncio
+async def test_pop_at_rejects_out_of_range_index() -> None:
+    controller = _make_controller()
+    await controller.enqueue_prompt("A")
+
+    assert not await controller.pop_at(-1)
+    assert not await controller.pop_at(1)
+    assert controller.queue_item_texts() == [(0, "A")]

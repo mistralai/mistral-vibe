@@ -493,6 +493,7 @@ def _make_connector_payload(
     *,
     connector_id: str = "conn-1",
     name: str = "wiki",
+    protocol: str = "mcp",
     is_ready: bool = True,
     tools: list[dict[str, Any]] | None = None,
     bootstrap_errors: list[str] | None = None,
@@ -501,6 +502,7 @@ def _make_connector_payload(
     return {
         "id": connector_id,
         "name": name,
+        "protocol": protocol,
         "display_name": name,
         "description": name,
         "status": {"is_ready": is_ready},
@@ -558,6 +560,27 @@ class TestBootstrapDiscovery:
         assert not any("broken" in name for name in tools)
         assert not registry.is_connected("broken")
         assert registry.is_connected("healthy")
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_skips_http_connectors(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                name="shared", protocol="http", tools=[_make_tool_payload("request")]
+            ),
+            _make_connector_payload(
+                name="shared", tools=[_make_tool_payload("search")]
+            ),
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        tools = await registry.get_tools_async()
+
+        assert "connector_shared_search" in tools
+        assert "connector_shared_2_search" not in tools
+        assert "connector_shared_request" not in tools
+        assert registry.get_connector_names() == ["shared"]
 
     @respx.mock
     @pytest.mark.asyncio
@@ -715,6 +738,40 @@ class TestBootstrapDiscovery:
         assert not route.called
 
     @pytest.mark.asyncio
+    async def test_bootstrap_cache_without_protocol_uses_legacy_mcp(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        cached_payload = _make_bootstrap_response([
+            _make_connector_payload(tools=[_make_tool_payload("cached")])
+        ])
+        with (
+            patch.object(connector_registry_module.time, "time", return_value=1_000),
+            respx.mock,
+        ):
+            respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=cached_payload)
+            )
+            await ConnectorRegistry(api_key="test-key").get_tools_async()
+
+        cache_path = tmp_path / _BOOTSTRAP_CACHE_FILE_NAME
+        cache = json.loads(cache_path.read_text())
+        next(iter(cache.values()))["payload"]["connectors"][0].pop("protocol")
+        cache_path.write_text(json.dumps(cache))
+
+        with (
+            patch.object(connector_registry_module.time, "time", return_value=1_100),
+            respx.mock,
+        ):
+            route = respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(500, text="should not be called")
+            )
+            tools = await ConnectorRegistry(api_key="test-key").get_tools_async()
+
+        assert not route.called
+        assert "connector_wiki_cached" in tools
+
+    @pytest.mark.asyncio
     async def test_stale_bootstrap_cache_falls_back_to_http(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
@@ -862,6 +919,7 @@ class TestBootstrapDiscovery:
         assert set(connector) == {
             "id",
             "name",
+            "protocol",
             "status",
             "tools",
             "auth_action",
@@ -1124,6 +1182,7 @@ class TestAuthActionablediscovery:
         assert route.called
         called_url = str(route.calls.last.request.url)
         assert "include_auth_actionable_connectors=true" in called_url
+        assert "builtin_connectors=web_search" in called_url
 
     @respx.mock
     @pytest.mark.asyncio

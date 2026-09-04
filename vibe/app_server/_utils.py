@@ -52,10 +52,18 @@ def decode_input(
     *,
     session_dir: Path | None,
 ) -> DecodedInput:
+    return decode_content_blocks(params.input, session_dir=session_dir)
+
+
+def decode_content_blocks(
+    content: list[TextContentBlock | ImageContentBlock | ResourceContentBlock],
+    *,
+    session_dir: Path | None,
+) -> DecodedInput:
     text: list[str] = []
     images: list[ImageAttachment] = []
     resources: list[UserResource] = []
-    for block in params.input:
+    for block in content:
         match block:
             case TextContentBlock():
                 text.append(block.text)

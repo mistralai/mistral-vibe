@@ -121,6 +121,14 @@ class ChatTextArea(TextArea):
     class QueueEditCancelled(Message):
         """Message sent when the user cancels queue-edit mode (Escape)."""
 
+    class SteerQueueRequested(Message):
+        """Flush queued prompts into the active turn as steering.
+
+        Posted on ctrl+enter (and super+enter) while the input is empty, so the
+        user can promote everything waiting in the queue into the running turn
+        instead of waiting for it to finish.
+        """
+
     class ModeChanged(Message):
         """Message sent when the input mode changes (>, !, /, &)."""
 
@@ -608,6 +616,17 @@ class ChatTextArea(TextArea):
                     event.stop()
                     self.post_message(self.Submitted(self.get_full_text().strip()))
                     return
+
+        if event.key in {"ctrl+enter", "super+enter"}:
+            event.prevent_default()
+            event.stop()
+            if (
+                not self._queue_selection_active
+                and not self._queue_edit_active
+                and not self.get_full_text().strip()
+            ):
+                self.post_message(self.SteerQueueRequested())
+            return
 
         if event.key == "enter":
             event.prevent_default()

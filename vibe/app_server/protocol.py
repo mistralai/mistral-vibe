@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import StrEnum, auto
 from functools import cache
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     Field,
@@ -47,6 +47,7 @@ from vibe.app_server.models import (
     JsonPatchOperation,
     MCPState,
     MentionStats,
+    MessageAnnotations as MessageAnnotations,
     PluginCatalogComponent as PluginCatalogComponent,
     PluginCatalogDropped as PluginCatalogDropped,
     PluginCatalogEntry as PluginCatalogEntry,
@@ -62,11 +63,24 @@ from vibe.app_server.models import (
     PublicSession,
     PublicSessionState,
     PublicTurn,
+    PublicTurnQueue,
     ScheduledLoop,
+    SessionContentBlock,
+    SessionEmbeddedResourceContentBlock as SessionEmbeddedResourceContentBlock,
+    SessionImageContentBlock as SessionImageContentBlock,
     SessionLogSummary,
+    SessionResourceLinkContentBlock as SessionResourceLinkContentBlock,
+    SessionTextContentBlock as SessionTextContentBlock,
+    SkillCatalogEntry,
+    SkillDetailView,
     SkillSummary,
+    SkillUpdateView,
+    SkillVersionView,
     TeleportEvent,
     ToolSummary,
+    TurnContextInputEntry as TurnContextInputEntry,
+    TurnInputEntry,
+    TurnUserInputEntry,
     UserDisplayContent,
     VibeCodePickerPurpose,
     VibeCodePickerView,
@@ -74,6 +88,7 @@ from vibe.app_server.models import (
     WorkspaceTrustDecision,
     WorkspaceTrustDetails,
     WorkspaceTrustStatus,
+    validate_turn_input_entries,
 )
 from vibe.app_server.review import (
     ReviewFile,
@@ -172,11 +187,30 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/shellCommand",
     "session/start",
     "session/stop",
+    "session/title/update",
     "session/turns/list",
+    "shell/interrupt",
+    "shell/run",
+    "skills/catalog",
+    "skills/convertLocal",
+    "skills/detail",
+    "skills/import",
+    "skills/installed",
     "skills/list",
+    "skills/remove",
+    "skills/setAlias",
+    "skills/setLatest",
+    "skills/setVersion",
+    "skills/updates",
+    "skills/versions",
     "stats/read",
     "telemetry/record",
     "tools/list",
+    "app_server/session/turn/enqueue",
+    "app_server/session/turn/queue/read",
+    "app_server/session/turn/queue/remove",
+    "app_server/session/turn/queue/replace",
+    "app_server/session/turn/queue/resume",
     "turn/interrupt",
     "turn/start",
     "turn/steer",
@@ -699,7 +733,7 @@ class ConfigProxyWriteParams(ProtocolModel):
 
 
 class AgentsListParams(ProtocolModel):
-    session_id: str
+    session_id: str | None = None
 
 
 class AgentsListResponse(ProtocolModel):
@@ -739,6 +773,8 @@ class RuntimeSnapshot(ProtocolModel):
     hooks_count: int
     connectors: ConnectorCounts
     mcp: MCPState
+    bypass_tool_permissions: bool = False
+    experimental_harness: bool = False
 
 
 class PluginInfoParams(ProtocolModel):
@@ -825,8 +861,6 @@ class ConfigFieldWire(ProtocolModel):
     path: str
     popular: bool = False
     enum_choices: list[str] = Field(default_factory=list)
-    # Display labels for specific raw values, e.g. {"": "default (currently …)"}.
-    # Used for the value column and choice picker; the stored value is unchanged.
     value_labels: dict[str, str] = Field(default_factory=dict)
     layer_values: list[ConfigLayerValueWire] = Field(default_factory=list)
 
@@ -870,6 +904,7 @@ class ConfigReadParams(ProtocolModel):
 
 class ConfigReadResponse(ProtocolModel):
     config: ConfigView
+    startup_issue: ConfigIssue | None = None
     stripped_history_images: int = 0
     skills_count: int = 0
     hooks_count: int = 0
@@ -888,6 +923,101 @@ class SkillsListParams(ProtocolModel):
 
 class SkillsListResponse(ProtocolModel):
     skills: list[SkillSummary]
+
+
+SkillScopeArg = str
+
+
+class SkillsInstalledParams(ProtocolModel):
+    session_id: str
+
+
+class SkillsInstalledResponse(ProtocolModel):
+    skills: list[SkillSummary]
+
+
+class SkillsCatalogParams(ProtocolModel):
+    session_id: str
+
+
+class SkillsCatalogResponse(ProtocolModel):
+    skills: list[SkillCatalogEntry]
+    updates: dict[str, int] = Field(default_factory=dict)
+    loaded: bool = False
+    project_available: bool = False
+    authenticated: bool = True
+
+
+class SkillsVersionsParams(ProtocolModel):
+    session_id: str
+    skill_id: str
+
+
+class SkillsVersionsResponse(ProtocolModel):
+    versions: list[SkillVersionView]
+
+
+class SkillsUpdatesParams(ProtocolModel):
+    session_id: str
+
+
+class SkillsUpdatesResponse(ProtocolModel):
+    updates: list[SkillUpdateView]
+
+
+class SkillsDetailParams(ProtocolModel):
+    session_id: str
+    skill_id: str
+    version: int | None = None
+
+
+class SkillsDetailResponse(ProtocolModel):
+    detail: SkillDetailView | None = None
+    body: str | None = None
+
+
+class SkillsImportParams(ProtocolModel):
+    session_id: str
+    skill_id: str
+    version: int | None = None
+    alias: str | None = None
+    scope: SkillScopeArg = "global"
+
+
+class SkillsSetVersionParams(ProtocolModel):
+    session_id: str
+    name: str
+    version: int
+    scope: SkillScopeArg = "global"
+
+
+class SkillsSetLatestParams(ProtocolModel):
+    session_id: str
+    name: str
+    scope: SkillScopeArg = "global"
+
+
+class SkillsSetAliasParams(ProtocolModel):
+    session_id: str
+    name: str
+    alias: str
+    scope: SkillScopeArg = "global"
+
+
+class SkillsRemoveParams(ProtocolModel):
+    session_id: str
+    name: str
+    scope: SkillScopeArg = "global"
+
+
+class SkillsConvertLocalParams(ProtocolModel):
+    session_id: str
+    name: str
+    scope: SkillScopeArg = "global"
+
+
+class SkillsConvertResponse(RuntimeMutationResponse):
+    converted: bool = False
 
 
 class ToolsListParams(ProtocolModel):
@@ -1598,6 +1728,80 @@ class FeedbackRecordParams(ProtocolModel):
     action: Literal["asked", "given", "snoozed"]
 
 
+class _TurnQueueInputParams(ProtocolModel):
+    idempotency_key: str | None = None
+    session_id: str
+    entries: list[TurnInputEntry] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_entries(self) -> Self:
+        validate_turn_input_entries(self.entries)
+        return self
+
+    @property
+    def input(self) -> list[SessionContentBlock]:
+        return [block for entry in self.entries for block in entry.content]
+
+    @property
+    def user_entry(self) -> TurnUserInputEntry | None:
+        return next(
+            (entry for entry in reversed(self.entries) if entry.role == "user"), None
+        )
+
+    @property
+    def message_entry_id(self) -> str | None:
+        user_entry = self.user_entry
+        return user_entry.entry_id if user_entry is not None else None
+
+
+class TurnEnqueueParams(_TurnQueueInputParams):
+    pass
+
+
+class TurnEnqueueResponse(ProtocolModel):
+    queue_item_id: str
+
+
+class TurnQueueReplaceParams(_TurnQueueInputParams):
+    queue_item_id: str
+
+    def as_enqueue_params(self) -> TurnEnqueueParams:
+        return TurnEnqueueParams(
+            idempotency_key=self.idempotency_key,
+            session_id=self.session_id,
+            entries=self.entries,
+        )
+
+
+class TurnQueueReplaceResponse(ProtocolModel):
+    queue_item_id: str
+
+
+class TurnQueueReadParams(ProtocolModel):
+    session_id: str
+
+
+class TurnQueueReadResponse(ProtocolModel):
+    queue: PublicTurnQueue
+
+
+class TurnQueueRemoveParams(ProtocolModel):
+    session_id: str
+    queue_item_id: str
+
+
+class TurnQueueRemoveResponse(ProtocolModel):
+    pass
+
+
+class TurnQueueResumeParams(ProtocolModel):
+    session_id: str
+
+
+class TurnQueueResumeResponse(ProtocolModel):
+    pass
+
+
 class TurnStartParams(ProtocolModel):
     idempotency_key: str | None = None
     session_id: str
@@ -1758,6 +1962,10 @@ class SessionContextClearedParams(SessionHandoffParams):
 
 class SessionUpdatedParams(EventNotificationParams):
     patch: list[JsonPatchOperation]
+
+
+class TurnQueueUpdatedParams(EventNotificationParams):
+    queue: PublicTurnQueue
 
 
 class TurnStartedParams(EventNotificationParams):

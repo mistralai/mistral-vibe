@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Protocol, TypeGuard, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, runtime_checkable
 
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._mcp_auth import MCPAuthenticationService
@@ -63,6 +63,15 @@ from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.types import ConcurrencyConflictError
 from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.tools.mcp_settings import persist_mcp_toggle
+from vibe.utils.mcp import format_tool_display_description
+
+if TYPE_CHECKING:
+    from vibe.app_server._plugin_mcp import (
+        PluginMCPCatalog,
+        PluginMCPServerEntry,
+        PluginMCPSource,
+        PluginMCPStatus,
+    )
 
 type Notify = Callable[[str, ProtocolModel], Awaitable[None]]
 type SessionlessCatalogFactory = Callable[
@@ -78,11 +87,21 @@ _ALIASES = {
     "mcp/logout": "mcp_catalog/logout",
 }
 
+# Not ``None``, which already means something here: that the caller has no
+# owner to name and wants the slot every sessionless one shares.
+_OWNED_BY_ORCHESTRATOR = object()
+
 
 @runtime_checkable
 class SessionMCPCatalogBinding(Protocol):
     @property
     def mcp_config_orchestrator(self) -> ConfigOrchestrator[VibeConfigSchema]: ...
+
+
+@runtime_checkable
+class SessionPluginMCPBinding(Protocol):
+    @property
+    def plugin_mcp_catalog(self) -> PluginMCPCatalog: ...
 
 
 @runtime_checkable
@@ -113,9 +132,18 @@ class MCPCatalogService:
         return self._authentication
 
     async def resolve_catalog(
-        self, orchestrator: ConfigOrchestrator[VibeConfigSchema]
+        self,
+        orchestrator: ConfigOrchestrator[VibeConfigSchema],
+        *,
+        owner: object | None = _OWNED_BY_ORCHESTRATOR,
     ) -> ResolvedMCPCatalog:
-        return await self._resolved(orchestrator)
+        # The orchestrator stands for the session by default, which is what a
+        # caller reading its own config wants. One whose orchestrator it does
+        # not keep -- the session's is handed on as a copy -- says so instead
+        # and names something it holds: the authentication service files the
+        # binding under it weakly and would otherwise drop it mid-session.
+        key = orchestrator if owner is _OWNED_BY_ORCHESTRATOR else owner
+        return await self._resolved(orchestrator, owner=key)
 
     async def sessionless_orchestrator(self) -> ConfigOrchestrator[VibeConfigSchema]:
         if self._sessionless_catalog_factory is None:
@@ -156,7 +184,7 @@ class MCPCatalogService:
         if key in self._auth_required_seen:
             return None
         self._auth_required_seen.add(key)
-        context = _CatalogContext(root.mcp_config_orchestrator, root, root)
+        context = _CatalogContext.for_session(root)
         self._runtime(
             context, self._project(context, state), preserve_auth_required=key
         )
@@ -169,10 +197,14 @@ class MCPCatalogService:
             root, SessionMCPControl
         ):
             return None
-        context = _CatalogContext(root.mcp_config_orchestrator, root, root)
-        previous = await self._resolved(context.orchestrator)
+        context = _CatalogContext.for_session(root)
+        previous = await self._resolved(
+            context.orchestrator, owner=context.catalog_owner
+        )
         await context.orchestrator.reload()
-        candidate = await self._resolved(context.orchestrator)
+        candidate = await self._resolved(
+            context.orchestrator, owner=context.catalog_owner
+        )
         restrictive = await self._suspend_restrictive_changes(
             context, previous, candidate
         )
@@ -187,8 +219,10 @@ class MCPCatalogService:
             or not isinstance(root, SessionMCPControl)
         ):
             return None
-        context = _CatalogContext(root.mcp_config_orchestrator, root, root)
-        candidate = await self._resolved(context.orchestrator)
+        context = _CatalogContext.for_session(root)
+        candidate = await self._resolved(
+            context.orchestrator, owner=context.catalog_owner
+        )
         restrictive = await self._suspend_restrictive_changes(
             context, plan.previous, candidate
         )
@@ -214,7 +248,7 @@ class MCPCatalogService:
             root, SessionMCPControl
         ):
             return
-        context = _CatalogContext(root.mcp_config_orchestrator, root, root)
+        context = _CatalogContext.for_session(root)
         await self._restore_after_restrictive_failure(
             context, plan.previous, affected_names=plan.restrictive_names
         )
@@ -251,6 +285,8 @@ class MCPCatalogService:
                 )
                 if state is None:
                     raise RuntimeError("A targeted MCP refresh did not converge")
+                if context.plugin_mcp is not None:
+                    await context.plugin_mcp.refresh_all()
                 response = MCPCatalogMutationResponse(
                     runtime=self._runtime(context, self._project(context, state))
                 )
@@ -319,8 +355,9 @@ class MCPCatalogService:
                 "Connector-owned MCP sources are not part of the MCP catalog",
             )
         context = await self._mutation_target(params.session_id, root)
+        _reject_plugin_mutation(context, params.name)
         original = (
-            await self._resolved(context.orchestrator)
+            await self._resolved(context.orchestrator, owner=context.catalog_owner)
             if context.control is not None and params.disabled
             else None
         )
@@ -362,9 +399,10 @@ class MCPCatalogService:
         self, params: MCPRemoveParams, root: SessionBackend | None
     ) -> tuple[MCPRemoveResponse, bool]:
         context = await self._mutation_target(params.session_id, root)
+        _reject_plugin_mutation(context, params.name)
         configured = _server_named(context.orchestrator, params.name)
         original = (
-            await self._resolved(context.orchestrator)
+            await self._resolved(context.orchestrator, owner=context.catalog_owner)
             if context.control is not None
             else None
         )
@@ -378,6 +416,7 @@ class MCPCatalogService:
                 context.orchestrator,
                 configured=configured,
                 name=params.name,
+                owner=context.catalog_owner,
             )
         except ConcurrencyConflictError as exc:
             await self._restore_after_restrictive_failure(
@@ -415,7 +454,14 @@ class MCPCatalogService:
         self, params: MCPLoginParams, root: SessionBackend | None, notify: Notify
     ) -> tuple[MCPCatalogMutationResponse, bool]:
         context = await self._mutation_target(params.session_id, root)
-        await self._authentication.bind_catalog(context.orchestrator.config.mcp_servers)
+        plugin_owned = context.plugin_entry(params.name) is not None
+        # The catalog this session means by the name, handed to the service so
+        # it does not decide ownership again over every session's bindings.
+        owner = context.plugin_mcp if plugin_owned else context.catalog_owner
+        if not plugin_owned:
+            await self._authentication.bind_catalog(
+                context.orchestrator.config.mcp_servers, owner=owner
+            )
 
         async def publish_url(url: str) -> None:
             payload = MCPAuthUrlParams(name=params.name, url=url)
@@ -424,10 +470,12 @@ class MCPCatalogService:
 
         try:
             descriptor_revision = await self._authentication.login(
-                params.name, on_url=publish_url
+                params.name, on_url=publish_url, owner=owner
             )
         except (MCPOAuthError, ValueError) as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
+        if plugin_owned:
+            return await self._plugin_authorization_changed(context, params.name)
         state = None
         if context.control is not None:
             try:
@@ -449,23 +497,32 @@ class MCPCatalogService:
         self, params: MCPLogoutParams, root: SessionBackend | None
     ) -> tuple[MCPCatalogMutationResponse, bool]:
         context = await self._mutation_target(params.session_id, root)
-        await self._authentication.bind_catalog(context.orchestrator.config.mcp_servers)
+        plugin_owned = context.plugin_entry(params.name) is not None
+        owner = context.plugin_mcp if plugin_owned else context.catalog_owner
+        if not plugin_owned:
+            await self._authentication.bind_catalog(
+                context.orchestrator.config.mcp_servers, owner=owner
+            )
         original = (
-            await self._resolved(context.orchestrator)
-            if context.control is not None
+            await self._resolved(context.orchestrator, owner=context.catalog_owner)
+            if context.control is not None and not plugin_owned
             else None
         )
-        if context.control is not None:
+        if context.control is not None and not plugin_owned:
             await context.control.suspend_mcp(
                 name=params.name, tool_name=None, reason="logout"
             )
         try:
-            descriptor_revision = await self._authentication.logout(params.name)
+            descriptor_revision = await self._authentication.logout(
+                params.name, owner=owner
+            )
         except (MCPOAuthError, ValueError) as exc:
             await self._restore_after_restrictive_failure(
                 context, original, affected_names=frozenset({params.name})
             )
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
+        if plugin_owned:
+            return await self._plugin_authorization_changed(context, params.name)
         state = None
         if context.control is not None:
             try:
@@ -483,6 +540,23 @@ class MCPCatalogService:
         )
         return MCPCatalogMutationResponse(runtime=runtime), state is not None
 
+    async def _plugin_authorization_changed(
+        self, context: _CatalogContext, name: str
+    ) -> tuple[MCPCatalogMutationResponse, bool]:
+        # Convergence stops here rather than going through the MCP control
+        # port: that port routes by config-owned name, and a plugin's source id
+        # names nothing it could suspend. State is read only to reproject with.
+        if context.plugin_mcp is None or context.control is None:
+            return MCPCatalogMutationResponse(runtime=None), False
+        await context.plugin_mcp.refresh(name)
+        state = await context.control.read_mcp()
+        return (
+            MCPCatalogMutationResponse(
+                runtime=self._runtime(context, self._project(context, state))
+            ),
+            True,
+        )
+
     async def _converge(
         self,
         context: _CatalogContext,
@@ -490,7 +564,9 @@ class MCPCatalogService:
         force_remote_discovery: bool,
         affected_names: frozenset[str],
     ) -> SessionMCPState | None:
-        configuration = await self._resolved(context.orchestrator)
+        configuration = await self._resolved(
+            context.orchestrator, owner=context.catalog_owner
+        )
         if context.control is None:
             return None
         try:
@@ -572,10 +648,13 @@ class MCPCatalogService:
             self._convergence_errors.pop((context.root.session_id, name), None)
 
     async def _resolved(
-        self, orchestrator: ConfigOrchestrator[VibeConfigSchema]
+        self,
+        orchestrator: ConfigOrchestrator[VibeConfigSchema],
+        *,
+        owner: object | None,
     ) -> ResolvedMCPCatalog:
         servers = orchestrator.config.mcp_servers
-        await self._authentication.bind_catalog(servers)
+        await self._authentication.bind_catalog(servers, owner=owner)
         resolved = tuple(self._resolve_server(server) for server in servers)
         payload = [
             {
@@ -649,14 +728,7 @@ class MCPCatalogService:
             raise RequestFailure(
                 ProtocolErrorCode.NOT_FOUND, f"Session not found: {session_id}"
             )
-        if not isinstance(root, SessionMCPCatalogBinding) or not isinstance(
-            root, SessionMCPControl
-        ):
-            raise RequestFailure(
-                ProtocolErrorCode.NOT_IMPLEMENTED,
-                "The selected session backend does not support MCP catalog control",
-            )
-        return _CatalogContext(root.mcp_config_orchestrator, root, root)
+        return _CatalogContext.for_session(root)
 
     async def _mutation_target(
         self, session_id: str | None, root: SessionBackend | None
@@ -684,27 +756,19 @@ class MCPCatalogService:
             for source in current_mcp.sources
             if source.kind is MCPSourceKind.CONNECTOR
         ]
-        states = {source.name: source for source in state.sources}
-        sources = [
-            _project_source(
-                server,
-                states.get(server.name),
-                convergence_failed=(session_id, server.name)
-                in self._convergence_errors,
-            )
-            for server in orchestrator.config.mcp_servers
-        ]
-        errors = dict(state.discovery_errors)
-        for server in orchestrator.config.mcp_servers:
-            if not server.disabled and server.name not in states:
-                errors.setdefault(
-                    server.name,
-                    "MCP source configuration is not active in this session",
-                )
-            if session_id is not None and (
-                error := self._convergence_errors.get((session_id, server.name))
-            ):
-                errors[server.name] = error
+        convergence_errors = {
+            name: error
+            for (failed_session_id, name), error in self._convergence_errors.items()
+            if failed_session_id == session_id
+        }
+        sources, errors = project_mcp_sources(
+            orchestrator,
+            state,
+            convergence_errors=convergence_errors,
+            plugin_sources=(
+                () if context.plugin_mcp is None else context.plugin_mcp.sources()
+            ),
+        )
         return MCPState(
             sources=[*sources, *connector_sources],
             discovery_errors=errors,
@@ -789,7 +853,11 @@ class SessionlessMCPCatalog:
         await self._service.authentication.bind_catalog(orchestrator.config.mcp_servers)
         try:
             return await _remove_server_with_credentials(
-                self._service.authentication, orchestrator, configured=server, name=name
+                self._service.authentication,
+                orchestrator,
+                configured=server,
+                name=name,
+                owner=None,
             )
         except (MCPOAuthError, ValueError) as exc:
             raise MCPServerRemoveError(
@@ -815,15 +883,57 @@ class _CatalogContext:
         orchestrator: ConfigOrchestrator[VibeConfigSchema],
         control: SessionMCPControl | None,
         root: SessionBackend | None,
+        plugin_mcp: PluginMCPCatalog | None = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.control = control
         self.root = root
+        self.plugin_mcp = plugin_mcp
+
+    @classmethod
+    def for_session(cls, root: SessionBackend) -> _CatalogContext:
+        if not isinstance(root, SessionMCPCatalogBinding) or not isinstance(
+            root, SessionMCPControl
+        ):
+            raise RequestFailure(
+                ProtocolErrorCode.NOT_IMPLEMENTED,
+                "The selected session backend does not support MCP catalog control",
+            )
+        return cls(
+            root.mcp_config_orchestrator,
+            root,
+            root,
+            root.plugin_mcp_catalog
+            if isinstance(root, SessionPluginMCPBinding)
+            else None,
+        )
 
     def require_control(self) -> SessionMCPControl:
         if self.control is None:
             raise RuntimeError("A targeted MCP catalog operation has no control port")
         return self.control
+
+    @property
+    def catalog_owner(self) -> object | None:
+        # What the authentication service files this session's configured
+        # servers under. None for a sessionless mutation: its orchestrator is
+        # built fresh per call, so keying on it would file the binding under
+        # something nothing holds, and it has no session to be confused with.
+        return self.orchestrator if self.root is not None else None
+
+    def plugin_entry(self, name: str) -> PluginMCPServerEntry | None:
+        # A configured server owns the name outright, which is the answer
+        # projection and ``_bound_server`` already give. Plugin resolution drops
+        # a shadowed source id, but only the next time it runs, and no command
+        # in a running session runs it; reading the entry as plugin-owned until
+        # then would route a login away from the row /mcp shows and reject a
+        # toggle of it.
+        if (
+            self.plugin_mcp is None
+            or _server_named(self.orchestrator, name) is not None
+        ):
+            return None
+        return self.plugin_mcp.entry(name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -855,10 +965,94 @@ def _project_source(
     )
 
 
+def project_mcp_sources(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    state: SessionMCPState,
+    *,
+    convergence_errors: Mapping[str, str] | None = None,
+    plugin_sources: Sequence[PluginMCPSource] = (),
+) -> tuple[list[MCPSourceSummary], dict[str, str]]:
+    convergence_errors = convergence_errors or {}
+    states = {source.name: source for source in state.sources}
+    sources = [
+        _project_source(
+            server,
+            states.get(server.name),
+            convergence_failed=server.name in convergence_errors,
+        )
+        for server in orchestrator.config.mcp_servers
+    ]
+    errors = dict(state.discovery_errors)
+    for server in orchestrator.config.mcp_servers:
+        if not server.disabled and server.name not in states:
+            errors.setdefault(
+                server.name, "MCP source configuration is not active in this session"
+            )
+        if error := convergence_errors.get(server.name):
+            errors[server.name] = error
+    configured = {server.name for server in orchestrator.config.mcp_servers}
+    # Plugin resolution drops a source id a configured server already holds;
+    # this covers the window before a config change is resolved against, where
+    # projecting both would put two rows under one name.
+    for plugin_source in plugin_sources:
+        if plugin_source.name in configured:
+            continue
+        sources.append(_project_plugin_source(plugin_source))
+        if plugin_source.error is not None:
+            errors.setdefault(plugin_source.name, plugin_source.error)
+    return sources, errors
+
+
+_PLUGIN_SOURCE_STATUS: dict[PluginMCPStatus, MCPSourceStatus] = {
+    "connected": MCPSourceStatus.CONNECTED,
+    "needs_auth": MCPSourceStatus.NEEDS_AUTH,
+    "unavailable": MCPSourceStatus.UNAVAILABLE,
+}
+
+
+def _project_plugin_source(source: PluginMCPSource) -> MCPSourceSummary:
+    # Deliberately the same kind as a configured server: only ``plugin_name``
+    # says where it came from. Nothing here is toggleable.
+    return MCPSourceSummary(
+        name=source.name,
+        kind=MCPSourceKind.SERVER,
+        transport=source.transport,
+        status=_PLUGIN_SOURCE_STATUS[source.status],
+        tools=[
+            MCPToolSummary(
+                name=tool.name,
+                # No source name to strip: the ``[alias] `` prefix comes from
+                # the legacy backend's tool classes, never from a descriptor.
+                description=format_tool_display_description(tool.description),
+            )
+            for tool in source.tools
+        ],
+        plugin_name=source.plugin_name,
+    )
+
+
+def _reject_plugin_mutation(context: _CatalogContext, name: str) -> None:
+    # No ``[[mcp_servers]]`` entry backs a plugin's server, so a toggle or a
+    # remove would not edit it -- it would write a config-owned entry shadowing
+    # the plugin's under the same name.
+    entry = context.plugin_entry(name)
+    if entry is None:
+        return
+    raise RequestFailure(
+        ProtocolErrorCode.INVALID_PARAMS,
+        f"MCP server '{name}' is managed by the '{entry.plugin_name}' plugin and "
+        "cannot be toggled or removed from the MCP catalog.",
+    )
+
+
 def _project_tools(state: SessionMCPSourceState) -> list[MCPToolSummary]:
     return [
         MCPToolSummary(
-            name=tool.remote_name, description=tool.description, enabled=tool.enabled
+            name=tool.remote_name,
+            description=format_tool_display_description(
+                tool.description, source_name=state.name
+            ),
+            enabled=tool.enabled,
         )
         for tool in state.tools
     ]
@@ -885,10 +1079,11 @@ async def _remove_server_with_credentials(
     *,
     configured: MCPServer | None,
     name: str,
+    owner: object | None,
 ) -> RemovedMCPServerResult:
     if not _is_oauth(configured):
         return await remove_mcp_server(orchestrator, name)
-    async with authentication.credential_removal(configured.name):
+    async with authentication.credential_removal(configured.name, owner=owner):
         return await remove_mcp_server(orchestrator, name)
 
 
@@ -896,6 +1091,8 @@ __all__ = [
     "MCPCatalogService",
     "SessionMCPCatalogBinding",
     "SessionMCPProjectionSink",
+    "SessionPluginMCPBinding",
     "SessionlessMCPCatalog",
     "create_sessionless_mcp_catalog",
+    "project_mcp_sources",
 ]

@@ -18,6 +18,14 @@ semantic presentation categories, not a registry of tool names. Arbitrary MCP,
 connector, custom, and future tools use the generic effect projection without
 adding app-server dispatch code.
 
+A backend whose source protocol intentionally carries tool facts without Vibe
+presentation may translate a closed set of product-owned built-ins into these
+existing semantic categories at its app-server adapter boundary. That mapping
+must remain centralized in one projector, must preserve unknown or malformed
+tools through the generic effect path, and must not be repeated in Textual,
+ACP, or session reducers. This exception supplies Vibe presentation; it does
+not make arbitrary tools require registration.
+
 Tools that support client-hosted filesystem or terminal operations use
 `ToolIOPort`, and the app server sends typed `clientTool/*` requests. The server
 still owns tool validation, permissions, lifecycle, public effects, and
@@ -38,7 +46,9 @@ Tools are the highest-risk extension point. Typed contracts make LLM calls, vali
 - Prefer core tool semantics in `vibe/core/tools`; put ACP or UI adaptation in surface-specific layers.
 - Keep tool output bounded and safe for LLM context, logs, and session transcripts.
 - Extend the tool presentation contract for a genuinely new semantic renderer;
-  do not add switches on individual tool names in the app server or TUI.
+  do not add switches on arbitrary tool names in the app server or TUI. A
+  presentation-neutral backend adapter may use one closed mapping for
+  product-owned built-ins as described above.
 - Project approvals as typed callback entries related to the same effect. Do
   not install UI callbacks on tools or the agent loop.
 

@@ -35,8 +35,12 @@ from vibe.app_server.models import (
     EffectCallDisplay,
     EffectResultDisplay,
     FailedEffectState,
+    FileEditEffectBatchInput,
+    FileEditEffectChange,
     FileEditEffectDetail,
     FileEditEffectInput,
+    FileEditEffectOccurrence,
+    FileEditEffectOutput,
     FileReadEffectDetail,
     FileReadEffectInput,
     FileReadEffectOutput,
@@ -699,6 +703,62 @@ def test_file_effects_and_todos_keep_rich_acp_semantics() -> None:
     assert [entry.content for entry in todo_updates[1].entries] == ["Implement"]
 
 
+def test_batched_file_edit_emits_ordered_call_and_result_diffs() -> None:
+    running = PublicEffectEntry(
+        **_entry_fields("batch-edit", PublicEntryGenerationStatus.IN_PROGRESS),
+        title="Edit",
+        detail=FileEditEffectDetail(
+            tool_name="file_system.search_replace",
+            input=FileEditEffectBatchInput(
+                file_path="app.py",
+                changes=[
+                    FileEditEffectChange(old_string="one", new_string="two"),
+                    FileEditEffectChange(old_string="two", new_string="three"),
+                ],
+            ),
+            display=_display("Editing app.py"),
+        ),
+        state=RunningEffectState(),
+    )
+    completed = running.model_copy(
+        update={
+            "generation_status": PublicEntryGenerationStatus.COMPLETED,
+            "state": CompletedEffectState(
+                output=FileEditEffectOutput(
+                    file="/workspace/app.py",
+                    occurrences=[
+                        FileEditEffectOccurrence(
+                            start_line=1, old_text="one", new_text="two"
+                        ),
+                        FileEditEffectOccurrence(
+                            start_line=1, old_text="two", new_text="three"
+                        ),
+                    ],
+                ).model_dump(mode="json", by_alias=True),
+                display=EffectResultDisplay(success=True, message="Edited app.py"),
+            ),
+        }
+    )
+
+    call = replay_history_entry(running)[0]
+    result = replay_history_entry(completed)[0]
+
+    assert isinstance(call, ToolCallStart)
+    assert call.content is not None
+    assert [
+        item.old_text
+        for item in call.content
+        if isinstance(item, FileEditToolCallContent)
+    ] == ["one", "two"]
+    assert isinstance(result, ToolCallStart)
+    assert result.content is not None
+    assert [
+        (item.path, item.old_text, item.new_text)
+        for item in result.content
+        if isinstance(item, FileEditToolCallContent)
+    ] == [("/workspace/app.py", "one", "two"), ("/workspace/app.py", "two", "three")]
+
+
 def test_file_search_projects_query_and_result_match_locations() -> None:
     running = PublicEffectEntry(
         **_entry_fields("search-effect", PublicEntryGenerationStatus.IN_PROGRESS),
@@ -793,9 +853,22 @@ def test_file_read_locations_describe_the_actual_range() -> None:
             ),
         }
     )
+    unbounded = whole_file.model_copy(
+        update={
+            "id": "read-unbounded",
+            "detail": whole_file.detail.model_copy(
+                update={
+                    "input": FileReadEffectInput(
+                        file_path="README.md", offset=5, limit=None
+                    )
+                }
+            ),
+        }
+    )
 
     whole_location = replay_history_entry(whole_file)[0].locations
     bounded_location = replay_history_entry(bounded)[0].locations
+    unbounded_location = replay_history_entry(unbounded)[0].locations
     result_location = replay_history_entry(truncated)[0].locations
 
     assert whole_location is not None
@@ -806,6 +879,12 @@ def test_file_read_locations_describe_the_actual_range() -> None:
         "type": "file_range",
         "offset": 10,
         "limit": 50,
+    }
+    assert unbounded_location is not None
+    assert unbounded_location[0].field_meta == {
+        "type": "file_range",
+        "offset": 5,
+        "limit": None,
     }
     assert result_location is not None
     assert result_location[0].field_meta == {

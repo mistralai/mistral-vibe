@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vibe.app_server.models import AccountPlanKind
+from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
@@ -65,6 +66,7 @@ async def test_initialize_returns_false_when_telemetry_disabled(
     manager = ExperimentManager(client=_StubClient(None))
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(enable_telemetry=False),
         manager=manager,
         session_logger=session_logger,
@@ -106,6 +108,7 @@ async def test_initialize_fetches_telemetry_but_skips_growthbook_when_experiment
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(enable_experiments=False),
         manager=manager,
         session_logger=session_logger,
@@ -145,6 +148,7 @@ async def test_initialize_returns_no_plan_data_when_no_mistral_provider(
     manager = ExperimentManager(client=_StubClient(None))
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=config,
         manager=manager,
         session_logger=session_logger,
@@ -181,6 +185,7 @@ async def test_initialize_returns_none_when_mistral_provider_but_no_api_key(
     manager = ExperimentManager(client=_StubClient(None))
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=config,
         manager=manager,
         session_logger=session_logger,
@@ -224,6 +229,7 @@ async def test_initialize_fetches_plan_when_mistral_key_but_non_mistral_active(
     manager = ExperimentManager(client=_StubClient(None))
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=config,
         manager=manager,
         session_logger=session_logger,
@@ -253,7 +259,11 @@ async def test_initialize_returns_false_when_remote_eval_fails(
     monkeypatch.setattr(
         "vibe.core.experiments.session._build_attributes",
         lambda *_args, **_kwargs: ExperimentAttributes(
-            userId="x", entrypoint="cli", agent_version="0", os="darwin"
+            userId="x",
+            entrypoint="cli",
+            harness=ExperimentSurface.LEGACY,
+            agent_version="0",
+            os="darwin",
         ),
     )
     persist = AsyncMock()
@@ -262,6 +272,7 @@ async def test_initialize_returns_false_when_remote_eval_fails(
     manager = ExperimentManager(client=_StubClient(None))
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
@@ -286,7 +297,11 @@ async def test_initialize_returns_true_and_persists_when_remote_eval_succeeds(
     monkeypatch.setattr(
         "vibe.core.experiments.session._build_attributes",
         lambda *_args, **_kwargs: ExperimentAttributes(
-            userId="x", entrypoint="cli", agent_version="0", os="darwin"
+            userId="x",
+            entrypoint="cli",
+            harness=ExperimentSurface.LEGACY,
+            agent_version="0",
+            os="darwin",
         ),
     )
     persist = AsyncMock()
@@ -298,6 +313,7 @@ async def test_initialize_returns_true_and_persists_when_remote_eval_succeeds(
     manager = ExperimentManager(client=_StubClient(response))
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
@@ -326,6 +342,7 @@ async def test_initialize_uses_provided_terminal_emulator(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
@@ -369,6 +386,7 @@ async def test_initialize_includes_organization_id_from_identity(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
@@ -400,6 +418,7 @@ async def test_initialize_omits_organization_id_when_identity_unavailable(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
@@ -459,6 +478,7 @@ async def test_initialize_includes_organization_kind_from_whoami(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
@@ -498,6 +518,7 @@ async def test_initialize_includes_plan_from_whoami(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
@@ -529,6 +550,7 @@ async def test_initialize_omits_plan_when_whoami_unavailable(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
@@ -559,6 +581,7 @@ async def test_initialize_omits_organization_kind_when_whoami_unavailable(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
@@ -596,6 +619,7 @@ async def test_initialize_includes_workspace_id_from_identity(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
@@ -631,6 +655,7 @@ async def test_initialize_uses_resolve_whoami_override(
     manager = ExperimentManager(client=client)
 
     await initialize_experiments(
+        harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
@@ -729,7 +754,10 @@ async def test_resolve_plan_attributes_fetches_whoami_without_rebucketing(
     manager = ExperimentManager(client=_StubClient(None))
 
     user_plan = await resolve_plan_attributes(
-        config=_make_config(), manager=manager, launch_context=None
+        harness=ExperimentSurface.LEGACY,
+        config=_make_config(),
+        manager=manager,
+        launch_context=None,
     )
 
     assert user_plan == "Code Enterprise"
@@ -754,7 +782,10 @@ async def test_resolve_plan_attributes_returns_sentinel_when_no_mistral_provider
     manager = ExperimentManager(client=_StubClient(None))
 
     user_plan = await resolve_plan_attributes(
-        config=config, manager=manager, launch_context=None
+        harness=ExperimentSurface.LEGACY,
+        config=config,
+        manager=manager,
+        launch_context=None,
     )
 
     assert user_plan == "NO_PLAN_DATA"
@@ -784,7 +815,10 @@ async def test_resolve_plan_attributes_null_on_whoami_failure(
     manager = ExperimentManager(client=_StubClient(None))
 
     user_plan = await resolve_plan_attributes(
-        config=_make_config(), manager=manager, launch_context=None
+        harness=ExperimentSurface.LEGACY,
+        config=_make_config(),
+        manager=manager,
+        launch_context=None,
     )
 
     assert user_plan is None
@@ -792,3 +826,106 @@ async def test_resolve_plan_attributes_null_on_whoami_failure(
     assert attrs is not None
     assert attrs.planName is None
     assert attrs.planType is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("harness", list(ExperimentSurface))
+async def test_initialize_reports_the_serving_backend_to_growthbook(
+    monkeypatch: pytest.MonkeyPatch, harness: ExperimentSurface
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    client = _StubClient(EvalResponse.model_validate({"features": {}}))
+    manager = ExperimentManager(client=client)
+
+    await initialize_experiments(
+        harness=harness,
+        config=_make_config(),
+        manager=manager,
+        session_logger=MagicMock(persist_experiments=AsyncMock()),
+        launch_context=None,
+    )
+
+    assert client.attributes is not None
+    assert client.attributes.harness is harness
+
+
+@pytest.mark.asyncio
+async def test_initialize_caches_the_eval_response_once_bucketing_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    monkeypatch.setattr(
+        "vibe.core.experiments.session._build_attributes",
+        lambda *_args, **_kwargs: ExperimentAttributes(
+            userId="user-1",
+            entrypoint="cli",
+            harness=ExperimentSurface.UNIFIED,
+            agent_version="0",
+            os="darwin",
+        ),
+    )
+    stored: list[EvalResponse] = []
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.store_cached_eval_response",
+        lambda _config, response: stored.append(response),
+    )
+    response = EvalResponse.model_validate({
+        "features": {"vibe_cli_system_prompt": {"defaultValue": "cli"}}
+    })
+    manager = ExperimentManager(client=_StubClient(response))
+
+    await initialize_experiments(
+        harness=ExperimentSurface.UNIFIED,
+        config=_make_config(),
+        manager=manager,
+        session_logger=MagicMock(persist_experiments=AsyncMock()),
+        launch_context=None,
+    )
+
+    assert stored == [response]
+
+
+@pytest.mark.asyncio
+async def test_initialize_keeps_the_cache_when_bucketing_never_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Without the hash attribute the response carries no assignment, and caching
+    # it would overwrite a good entry.
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    monkeypatch.setattr(
+        "vibe.core.experiments.session._build_attributes",
+        lambda *_args, **_kwargs: ExperimentAttributes(
+            userId=None,
+            entrypoint="cli",
+            harness=ExperimentSurface.UNIFIED,
+            agent_version="0",
+            os="darwin",
+        ),
+    )
+    stored: list[EvalResponse] = []
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.store_cached_eval_response",
+        lambda _config, response: stored.append(response),
+    )
+    manager = ExperimentManager(
+        client=_StubClient(EvalResponse.model_validate({"features": {}}))
+    )
+
+    await initialize_experiments(
+        harness=ExperimentSurface.UNIFIED,
+        config=_make_config(),
+        manager=manager,
+        session_logger=MagicMock(persist_experiments=AsyncMock()),
+        launch_context=None,
+    )
+
+    assert stored == []

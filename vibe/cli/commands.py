@@ -10,10 +10,8 @@ from vibe.cli.constants import CLIPBOARD_IMAGE_PASTE_SUPPORTED_SYSTEM
 @dataclass(frozen=True)
 class CommandContext:
     vibe_code_enabled: bool = False
-    # Whether the backend answered a plugin catalogue read. Only the Unified
-    # Harness resolves plugins, and without one there is nothing to list and
-    # nothing a reload could re-pin.
-    plugins_enabled: bool = False
+    registry_skills_enabled: bool = False
+    experimental_harness: bool = False
 
 
 CommandAvailability = Callable[[CommandContext], bool]
@@ -26,11 +24,6 @@ class Command:
     handler: str
     exits: bool = False
     side_channel: bool = False
-    # A command that resets the conversation (e.g. /clear) supersedes any
-    # prompts queued before it: at drain time the queue drops those pending
-    # prompts instead of running an LLM turn on the widgets the command is
-    # about to tear down.
-    flushes_pending: bool = False
     is_available: CommandAvailability | None = None
 
 
@@ -58,19 +51,22 @@ class CommandRegistry:
                 aliases=frozenset(["/config"]),
                 description="Edit config settings",
                 handler="_show_config",
-                side_channel=True,
             ),
             "model": Command(
                 aliases=frozenset(["/model"]),
                 description="Select active model",
                 handler="_show_model",
-                side_channel=True,
+            ),
+            "skills": Command(
+                aliases=frozenset(["/skills"]),
+                description="Browse, import, and manage skills",
+                handler="_show_skills",
+                is_available=lambda ctx: ctx.registry_skills_enabled,
             ),
             "thinking": Command(
                 aliases=frozenset(["/thinking"]),
                 description="Select thinking level",
                 handler="_show_thinking",
-                side_channel=True,
             ),
             "reload": Command(
                 aliases=frozenset(["/reload"]),
@@ -83,7 +79,6 @@ class CommandRegistry:
                     "Start a new conversation. Optionally pass a prompt to seed it."
                 ),
                 handler="_clear_history",
-                flushes_pending=True,
             ),
             "copy": Command(
                 aliases=frozenset(["/copy"]),
@@ -112,7 +107,6 @@ class CommandRegistry:
                     "Change the log level for this session or persist it to config.toml."
                 ),
                 handler="_log_level_command",
-                side_channel=True,
             ),
             "debug": Command(
                 aliases=frozenset(["/debug"]),
@@ -148,7 +142,9 @@ class CommandRegistry:
                 aliases=frozenset(["/teleport"]),
                 description="Teleport session to Vibe Code Web",
                 handler="_teleport_command",
-                is_available=lambda ctx: ctx.vibe_code_enabled,
+                is_available=lambda ctx: (
+                    ctx.vibe_code_enabled and not ctx.experimental_harness
+                ),
             ),
             "remote-project": Command(
                 aliases=frozenset(["/remote-project"]),
@@ -160,7 +156,6 @@ class CommandRegistry:
                 aliases=frozenset(["/proxy-setup"]),
                 description="Configure proxy and SSL certificate settings",
                 handler="_show_proxy_setup",
-                side_channel=True,
             ),
             "resume": Command(
                 aliases=frozenset(["/resume", "/continue"]),
@@ -183,26 +178,25 @@ class CommandRegistry:
                 ),
                 handler="_show_mcp",
             ),
-            # Withheld from this release: the handlers, the catalogue probe and
-            # the `PluginsApp` behind them all stay wired, only the two entry
-            # points are unregistered. Restore both entries to bring them back.
+            # Withheld from this release: the handlers and `PluginsApp` behind
+            # them stay wired, only the two entry points are unregistered.
+            # Restore both entries to bring them back.
             # "plugins": Command(
             #     aliases=frozenset(["/plugins"]),
             #     description="Display the plugins this session is running",
             #     handler="_show_plugins",
-            #     is_available=lambda ctx: ctx.plugins_enabled,
+            #     is_available=lambda ctx: ctx.experimental_harness,
             # ),
             # "reload-plugins": Command(
             #     aliases=frozenset(["/reload-plugins"]),
             #     description="Re-pin this session's plugins and report what changed",
             #     handler="_reload_plugins",
-            #     is_available=lambda ctx: ctx.plugins_enabled,
+            #     is_available=lambda ctx: ctx.experimental_harness,
             # ),
             "voice": Command(
                 aliases=frozenset(["/voice"]),
                 description="Configure voice settings",
                 handler="_show_voice_settings",
-                side_channel=True,
             ),
             "leanstall": Command(
                 aliases=frozenset(["/leanstall"]),
@@ -245,7 +239,6 @@ class CommandRegistry:
                 aliases=frozenset(["/theme"]),
                 description="Select theme",
                 handler="_show_theme",
-                side_channel=True,
             ),
         }
 
@@ -294,8 +287,6 @@ class CommandRegistry:
         if cmd_name is None:
             return None
 
-        # Bare aliases (e.g. `exit`) match only as the whole input, else a
-        # message starting with one would be swallowed instead of sent.
         if not cmd_word.startswith("/") and cmd_args:
             return None
 

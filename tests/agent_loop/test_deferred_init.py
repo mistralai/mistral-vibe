@@ -937,3 +937,78 @@ async def test_direct_new_session_emit_consumes_deferred_flag(
         send.assert_called_once()
     finally:
         await loop.aclose()
+
+
+# --- cancelled init must not emit a half-initialized new_session (root fix) ---
+
+
+@pytest.mark.asyncio
+async def test_cancelled_experiments_task_skips_new_session_emit() -> None:
+    # Rapid start/stop cancels the experiments task mid-init; wait_until_ready
+    # must NOT emit vibe.new_session against the half-initialized session.
+    loop = build_test_agent_loop()
+    calls: list[int] = []
+    with patch.object(loop, "emit_new_session_telemetry", lambda: calls.append(1)):
+
+        async def _never() -> None:
+            await asyncio.sleep(3600)
+
+        task = asyncio.create_task(_never())
+        loop._experiments_task = task
+        loop._pending_new_session_telemetry = True
+        task.cancel()
+        try:
+            await loop.wait_until_ready()
+        finally:
+            await loop.aclose()
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_experiments_task_skips_ready_emit() -> None:
+    # A cancelled init must emit neither new_session nor a lone vibe.ready: a ready
+    # without a matching new_session carries the same missing segmentation the skip
+    # is meant to avoid, and the init duration must stay unrecorded.
+    loop = build_test_agent_loop()
+    ready_calls: list[int] = []
+    new_session_calls: list[int] = []
+    with (
+        patch.object(loop, "emit_ready_telemetry", lambda d: ready_calls.append(d)),
+        patch.object(
+            loop, "emit_new_session_telemetry", lambda: new_session_calls.append(1)
+        ),
+    ):
+
+        async def _never() -> None:
+            await asyncio.sleep(3600)
+
+        task = asyncio.create_task(_never())
+        loop._experiments_task = task
+        loop._pending_new_session_telemetry = True
+        loop._ready_telemetry_pending = True
+        task.cancel()
+        try:
+            await loop.wait_until_ready()
+        finally:
+            await loop.aclose()
+    assert ready_calls == []
+    assert new_session_calls == []
+    assert loop._last_init_duration_ms is None
+
+
+@pytest.mark.asyncio
+async def test_completed_experiments_task_emits_new_session() -> None:
+    loop = build_test_agent_loop()
+    calls: list[int] = []
+    with patch.object(loop, "emit_new_session_telemetry", lambda: calls.append(1)):
+
+        async def _done() -> None:
+            return None
+
+        loop._experiments_task = asyncio.create_task(_done())
+        loop._pending_new_session_telemetry = True
+        try:
+            await loop.wait_until_ready()
+        finally:
+            await loop.aclose()
+    assert calls == [1]

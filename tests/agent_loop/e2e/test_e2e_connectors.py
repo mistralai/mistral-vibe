@@ -17,6 +17,7 @@ def _connector(
     *,
     connector_id: str = "conn-1",
     name: str = "wiki",
+    protocol: str = "mcp",
     is_ready: bool = True,
     tools: list[dict[str, Any]] | None = None,
     auth_action: dict[str, Any] | None = None,
@@ -24,6 +25,7 @@ def _connector(
     return {
         "id": connector_id,
         "name": name,
+        "protocol": protocol,
         "status": {"is_ready": is_ready},
         "tools": tools or [],
         "auth_action": auth_action,

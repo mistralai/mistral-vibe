@@ -24,6 +24,7 @@ from acp import (
 )
 from acp.helpers import ContentBlock
 from acp.schema import (
+    AcceptElicitationResponse,
     AcpMcpServer,
     AgentCapabilities,
     AllowedOutcome,
@@ -32,6 +33,14 @@ from acp.schema import (
     CloseSessionResponse,
     ConfigOptionUpdate,
     Cost,
+    ElicitationBooleanPropertySchema,
+    ElicitationFormSessionMode,
+    ElicitationIntegerPropertySchema,
+    ElicitationMultiSelectPropertySchema,
+    ElicitationNumberPropertySchema,
+    ElicitationSchema,
+    ElicitationStringPropertySchema,
+    EnumOption,
     EnvVarAuthMethod,
     ForkSessionResponse,
     HttpMcpServer,
@@ -52,6 +61,7 @@ from acp.schema import (
     SetSessionConfigOptionResponse,
     SseMcpServer,
     TerminalAuthMethod,
+    TitledMultiSelectItems,
     ToolCallUpdate,
     Usage,
     UsageUpdate,
@@ -82,6 +92,12 @@ from vibe.acp.exceptions import (
 )
 from vibe.acp.models import (
     ConfigSchemaResponse,
+    ConnectorAuthUrlResponse,
+    ConnectorRequest,
+    ConnectorsListRequest,
+    ConnectorsListResponse,
+    ConnectorsRefreshRequest,
+    ConnectorsToggleRequest,
     ProjectLinksCreateRequest,
     ProjectLinksLinkRequest,
     ProjectLinksListRequest,
@@ -105,6 +121,7 @@ from vibe.acp.utils import (
     is_jetbrains_client,
     make_thinking_response,
 )
+from vibe.app_server._integration_resources import MCPResource
 from vibe.app_server._project_links import (
     ProjectLinksAuthError,
     ProjectLinksController,
@@ -114,6 +131,7 @@ from vibe.app_server._project_links import (
 from vibe.app_server.events import (
     AppServerEvent,
     CallbackRequested,
+    SessionUpdated,
     StatsUpdated,
     TurnCompleted,
     TurnRetrying,
@@ -138,9 +156,13 @@ from vibe.app_server.models import (
     PublicTurnStatus,
     PublicTurnStopReason,
     TurnErrorCode,
+    UserInputCallbackDetail,
+    UserInputCallbackOutput,
 )
 from vibe.app_server.protocol import (
     AppServerResponseError,
+    CallbackKind,
+    CallbackResultError,
     ClientCapabilities as AppServerClientCapabilities,
     ClientInfo,
     ClientToolCapability,
@@ -158,11 +180,103 @@ from vibe.app_server.protocol import (
 from vibe.app_server.session import AppServerSession, AppServerTurnError
 from vibe.observability.logging import logger
 from vibe.observability.sentry import capture_sentry_exception
+from vibe.questions import UserAnswer, UserQuestionRequest, UserQuestionResult
 from vibe.user_content import UserDisplayContent, UserResource
 
-NON_INTERACTIVE_DISABLED_TOOLS = ("ask_user_question", "exit_plan_mode")
+NON_INTERACTIVE_DISABLED_TOOLS: tuple[str, ...] = (
+    "ask_user_question",
+    "exit_plan_mode",
+)
+
+
+def _session_agent_changed(event: SessionUpdated) -> bool:
+    previous = event.previous.agent
+    current = event.session.agent
+    if not current:
+        return False
+    return not previous or previous.name != current.name
+
+
 INITIAL_AVAILABLE_COMMANDS_DELAY_SECONDS = 0.1
 type SessionStarter = Callable[[LocalHarnessOptions], Awaitable[AppServerSession]]
+
+
+type _ElicitationProperty = (
+    ElicitationStringPropertySchema
+    | ElicitationNumberPropertySchema
+    | ElicitationIntegerPropertySchema
+    | ElicitationBooleanPropertySchema
+    | ElicitationMultiSelectPropertySchema
+)
+
+
+def _build_elicitation_schema(request: UserQuestionRequest) -> ElicitationSchema:
+    properties: dict[str, _ElicitationProperty] = {}
+    for index, question in enumerate(request.questions):
+        # ACP has no "enum with type your answer option" property
+        # We do not enforce enum matching on response so client can add that option everywhere
+        # Alternative is adding custom sentinel values
+        key = f"q{index}"
+        options = [
+            EnumOption(const=opt.label, title=opt.label) for opt in question.options
+        ]
+        if question.multi_select:
+            properties[key] = ElicitationMultiSelectPropertySchema(
+                type="array",
+                title=question.header or None,
+                description=question.question,
+                items=TitledMultiSelectItems(any_of=options),
+            )
+        else:
+            properties[key] = ElicitationStringPropertySchema(
+                type="string",
+                title=question.header or None,
+                description=question.question,
+                one_of=options,
+            )
+    return ElicitationSchema(
+        properties=properties,
+        required=list(properties),
+        description=request.footer_note,
+    )
+
+
+def _elicit_user_answers(
+    schema: ElicitationSchema, request: UserQuestionRequest, content: dict[str, Any]
+) -> list[UserAnswer]:
+    answers: list[UserAnswer] = []
+    for key, question in zip(schema.properties or {}, request.questions, strict=True):
+        labels = {opt.label for opt in question.options}
+        raw = content.get(key)
+        if question.multi_select:
+            if not isinstance(raw, list):
+                raise InvalidRequestError(
+                    f"Elicitation response for {key} must be an array"
+                )
+            if not raw:
+                raise InvalidRequestError(
+                    f"Elicitation response for {key} is an empty array"
+                )
+            joined = ", ".join(str(item) for item in raw)
+            is_other = any(str(item) not in labels for item in raw)
+            answers.append(
+                UserAnswer(question=question.question, answer=joined, is_other=is_other)
+            )
+        else:
+            if not isinstance(raw, str):
+                raise InvalidRequestError(
+                    f"Elicitation response for {key} must be a string"
+                )
+            if not raw:
+                raise InvalidRequestError(
+                    f"Elicitation response for {key} is an empty string"
+                )
+            answers.append(
+                UserAnswer(
+                    question=question.question, answer=raw, is_other=raw not in labels
+                )
+            )
+    return answers
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,13 +550,18 @@ class VibeAcpAgent(AcpAgent):
     ) -> AcpSession:
         client_tool_handler = AcpClientToolHandler(self.client)
         try:
+            disabled_tools = (
+                []
+                if self._supports_user_input()
+                else list(NON_INTERACTIVE_DISABLED_TOOLS)
+            )
             app_server = await self._start_session(
                 LocalHarnessOptions(
                     client=self._client_descriptor(),
                     session_options=SessionOptions(
                         cwd=str(cwd),
                         workspace_roots=workspace_roots or [],
-                        disabled_tools=list(NON_INTERACTIVE_DISABLED_TOOLS),
+                        disabled_tools=disabled_tools,
                         mcp_servers=_project_acp_mcp_servers(mcp_servers or []),
                     ),
                     session=intent,
@@ -488,6 +607,12 @@ class VibeAcpAgent(AcpAgent):
             if not page.data:
                 raise RuntimeError("History pagination did not advance")
 
+    def _supports_user_input(self) -> bool:
+        capabilities = self.client_capabilities
+        return bool(
+            capabilities and capabilities.elicitation and capabilities.elicitation.form
+        )
+
     def _client_descriptor(self) -> ClientDescriptor:
         info = self.client_info
         capabilities = self.client_capabilities
@@ -499,6 +624,9 @@ class VibeAcpAgent(AcpAgent):
                 client_tools.append("filesystem/write")
         if capabilities is not None and capabilities.terminal:
             client_tools.append("terminal")
+        callback_kinds: list[CallbackKind] = ["approval"]
+        if self._supports_user_input():
+            callback_kinds.append("user_input")
         return ClientDescriptor(
             info=ClientInfo(
                 name=info.name if info is not None else "vibe_acp_client",
@@ -507,7 +635,7 @@ class VibeAcpAgent(AcpAgent):
                 entrypoint="acp",
             ),
             capabilities=AppServerClientCapabilities(
-                callback_kinds=["approval"], client_tools=client_tools
+                callback_kinds=callback_kinds, client_tools=client_tools
             ),
         )
 
@@ -548,6 +676,14 @@ class VibeAcpAgent(AcpAgent):
         if isinstance(event, TurnRetrying):
             await self._send_retrying(session, event)
             return
+        # An autonomous profile switch (e.g. exit_plan_mode accepting the plan)
+        # patches the session's `agent`. The mode is otherwise only carried on the
+        # load/new session response, so external ACP clients would keep showing
+        # the stale mode. `SessionUpdated` is processed after the client state's
+        # active agent is flipped, so re-pushing the full config options here
+        # reflects the new profile (mode + model + thinking) on the selector.
+        if isinstance(event, SessionUpdated) and _session_agent_changed(event):
+            await self._send_config_options(session)
         for update in session_updates_for_event(event):
             await self.client.session_update(session_id=session.id, update=update)
         if isinstance(event, StatsUpdated):
@@ -671,16 +807,19 @@ class VibeAcpAgent(AcpAgent):
     async def _answer_callback(
         self, session: AcpSession, callback: PublicCallbackEntry
     ) -> None:
-        if not isinstance(callback.detail, ApprovalCallbackDetail):
+        detail = callback.detail
+        if isinstance(detail, UserInputCallbackDetail):
+            await self._answer_user_input(session, callback, detail)
+            return
+        if not isinstance(detail, ApprovalCallbackDetail):
             await session.app_server.deny_callback(callback)
             return
         response = await self.client.request_permission(
             session_id=session.id,
             tool_call=ToolCallUpdate(
-                tool_call_id=callback.detail.related_entry_id
-                or callback.detail.effect.tool_name
+                tool_call_id=detail.related_entry_id or detail.effect.tool_name
             ),
-            options=build_permission_options(callback.detail.required_permissions),
+            options=build_permission_options(detail.required_permissions),
         )
         decision = ApprovalDecisionType.DENY
         feedback: str | None = None
@@ -704,6 +843,37 @@ class VibeAcpAgent(AcpAgent):
             ApprovalCallbackOutput(
                 decision=ApprovalDecision(type=decision), feedback=feedback
             ),
+        )
+
+    async def _answer_user_input(
+        self,
+        session: AcpSession,
+        callback: PublicCallbackEntry,
+        detail: UserInputCallbackDetail,
+    ) -> None:
+        request = detail.request
+        schema = _build_elicitation_schema(request)
+        response = await self.client.create_elicitation(
+            message="User input required",
+            mode=ElicitationFormSessionMode(
+                session_id=session.id,
+                tool_call_id=detail.related_entry_id,
+                requested_schema=schema,
+            ),
+        )
+        if not isinstance(response, AcceptElicitationResponse) or not response.content:
+            await session.app_server.deny_callback(callback)
+            return
+        try:
+            answers = _elicit_user_answers(schema, request, response.content)
+        except InvalidRequestError as exc:
+            await session.app_server.reject_callback(
+                callback.callback_id, CallbackResultError(message=str(exc))
+            )
+            return
+        await session.app_server.respond_to_callback(
+            callback.callback_id,
+            UserInputCallbackOutput(result=UserQuestionResult(answers=answers)),
         )
 
     @override
@@ -952,6 +1122,8 @@ class VibeAcpAgent(AcpAgent):
                 | "review/revert"
             ):
                 result = await self._review_extension(method, params)
+            case _ if method.startswith("connectors/"):
+                result = await self._connectors_extension(method, params)
             case _ if method.startswith("projectLinks/"):
                 result = await self._project_links_extension(method, params)
             case _:
@@ -1206,6 +1378,66 @@ class VibeAcpAgent(AcpAgent):
         except ValidationError as exc:
             raise InvalidRequestError(f"Invalid ACP {method} request: {exc}") from exc
         return response.model_dump(mode="json", by_alias=True)
+
+    # -- connectors ------------------------------------------------------------
+
+    @staticmethod
+    def _connectors_request[RequestT: BaseModel](
+        model: type[RequestT], params: dict
+    ) -> RequestT:
+        try:
+            return model.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(f"Invalid ACP connectors request: {exc}") from exc
+
+    # Mutations answer with the recomputed list, so clients never re-read it.
+    async def _connectors_extension(self, method: str, params: dict[str, Any]) -> dict:
+        response: BaseModel
+        try:
+            match method:
+                case "connectors/list":
+                    listing = self._connectors_request(ConnectorsListRequest, params)
+                    response = ConnectorsListResponse.from_state(
+                        await self._connectors_resource(listing.session_id).read()
+                    )
+                case "connectors/authUrl":
+                    auth = self._connectors_request(ConnectorRequest, params)
+                    response = ConnectorAuthUrlResponse(
+                        url=await self._connectors_resource(
+                            auth.session_id
+                        ).connector_auth_url(auth.name)
+                    )
+                case "connectors/refresh":
+                    refresh = self._connectors_request(ConnectorsRefreshRequest, params)
+                    resource = self._connectors_resource(refresh.session_id)
+                    # Each answers with a tool count, so read the state back once.
+                    failures: list[AppServerResponseError] = []
+                    for name in refresh.names:
+                        try:
+                            await resource.refresh_connector(name)
+                        except AppServerResponseError as exc:
+                            failures.append(exc)
+                    if len(failures) == len(refresh.names):
+                        raise failures[0]
+                    response = ConnectorsListResponse.from_state(resource.state)
+                case "connectors/toggle":
+                    toggle = self._connectors_request(ConnectorsToggleRequest, params)
+                    response = ConnectorsListResponse.from_state(
+                        await self._connectors_resource(toggle.session_id).toggle(
+                            toggle.name,
+                            source="connector",
+                            disabled=toggle.disabled,
+                            tool_name=toggle.tool_name,
+                        )
+                    )
+                case _:
+                    raise NotImplementedMethodError(method)
+        except AppServerResponseError as exc:
+            raise InvalidRequestError(exc.error.message) from exc
+        return response.model_dump(mode="json")
+
+    def _connectors_resource(self, session_id: str) -> MCPResource:
+        return self._get_session(session_id).app_server.resources.mcp
 
     async def _trust_meta(self, session: AcpSession, cwd: str) -> dict[str, Any]:
         response = await session.app_server.resources.workspace.trust_status(cwd)

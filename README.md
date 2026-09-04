@@ -239,6 +239,7 @@ Simply run `vibe` to enter the interactive chat loop.
 - **Todo View Toggle**: Press `Ctrl+T` to toggle the todo list view.
 - **Debug Console**: Press `Ctrl+\` to toggle the debug console.
 - **Agent Selection**: Press `Shift+Tab` to cycle through agents (ask, plan, ...).
+- **Queueing**: Prompts submitted while the agent is working are queued by the app server and run later as separate FIFO turns. Shell commands and non-side-channel slash commands require an idle session. `Ctrl+C` removes the newest queued prompt, `Escape` interrupts the active turn and pauses remaining prompts, and an empty `Enter` resumes them.
 - **Exit**: Type `/exit`, `exit`, `quit`, `:q`, or `:quit` in the input box, or press `Ctrl+C` / `Ctrl+D` twice within ~1 second. Set `ask_confirmation_on_exit = false` (or toggle it in `/config`) to make `Ctrl+D` quit on the first press; `Ctrl+C` always requires confirmation.
 
 ### Copying & Text Selection
@@ -857,6 +858,15 @@ vibe --resume abc123
 ```
 
 Session logging must be enabled in your configuration for these features to work.
+
+The first user message pins the resolved model to that session. Resuming keeps
+the pinned model even if your configured default changes. `/model` uses the
+normal config persistence target and updates an existing session override
+immediately; the session file is synchronized when the next user message is
+sent. An explicit persistent target selected through `/config` changes only
+that layer. `/clear` starts a new, unpinned conversation that follows the
+current config. If a selected model is no longer configured, Vibe falls back
+to the current default model.
 
 #### Working Directory Control
 

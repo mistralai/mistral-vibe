@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from tests.conftest import build_test_vibe_config
 from vibe import __version__
-from vibe.core.experiments.active import ExperimentName
+from vibe.core.experiments.active import ExperimentName, ExperimentSurface
 from vibe.core.experiments.models import ExperimentAttributes
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import ExperimentAssignment
@@ -15,6 +15,7 @@ def _build_attributes(
     return ExperimentAttributes(
         userId="user-123",
         entrypoint="cli",
+        harness=ExperimentSurface.LEGACY,
         agent_version=__version__,
         os=get_platform_id(),
         planType=plan_type,

@@ -3,6 +3,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from vibe.core.config import ProviderConfig
+from vibe.core.config._defaults import (
+    DEFAULT_API_CONNECT_TIMEOUT,
+    DEFAULT_API_POOL_TIMEOUT,
+    DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
+    DEFAULT_API_TIMEOUT,
+    DEFAULT_API_WRITE_TIMEOUT,
+)
 from vibe.core.types import Backend
 
 if TYPE_CHECKING:
@@ -36,17 +43,30 @@ BACKEND_FACTORY: dict[Backend, Callable[..., BackendLike]] = {
 def create_backend(
     *,
     provider: ProviderConfig,
-    timeout: float = 720.0,
-    retry_max_elapsed_time: float = 300.0,
+    timeout: float = DEFAULT_API_TIMEOUT,
+    retry_max_elapsed_time: float = DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
+    connect_timeout: float = DEFAULT_API_CONNECT_TIMEOUT,
+    write_timeout: float = DEFAULT_API_WRITE_TIMEOUT,
+    pool_timeout: float = DEFAULT_API_POOL_TIMEOUT,
     enable_otel: bool = False,
     on_retry: RetryObserver | None = None,
 ) -> BackendLike:
     backend = Backend(provider.backend)
     factory = BACKEND_FACTORY[backend]
+    transport_timeouts: dict[str, float] = (
+        {
+            "connect_timeout": connect_timeout,
+            "write_timeout": write_timeout,
+            "pool_timeout": pool_timeout,
+        }
+        if backend is Backend.MISTRAL
+        else {}
+    )
     return factory(
         provider=provider,
         timeout=timeout,
         retry_max_elapsed_time=retry_max_elapsed_time,
         enable_otel=enable_otel,
         on_retry=on_retry,
+        **transport_timeouts,
     )

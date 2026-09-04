@@ -18,6 +18,10 @@ from vibe.app_server.protocol import (
     SessionListParams,
     SessionListResponse,
     SessionOptions,
+    SessionReadParams,
+    SessionReadResponse,
+    SessionTitleUpdateParams,
+    SessionTitleUpdateResponse,
 )
 
 
@@ -26,6 +30,40 @@ async def test_passive_host_lifecycle_uses_the_selected_backend(
     backend_contract_host: AppServerHost,
 ) -> None:
     assert await backend_contract_host.list_sessions() == []
+
+
+@pytest.mark.asyncio
+async def test_host_renames_the_attached_session(
+    backend_contract_connection: BackendContractConnection,
+) -> None:
+    """*Prepare*: A session is attached to either supported backend.
+    *Do*: Rename it through the public app-server route.
+    *Assert*: The response and subsequent read expose the new title.
+    """
+    # Prepare
+    session = await backend_contract_connection.host.open_session()
+
+    try:
+        # Do
+        response = SessionTitleUpdateResponse.model_validate(
+            await backend_contract_connection.client.request(
+                "session/rename",
+                SessionTitleUpdateParams(
+                    session_id=session.session_id, title="  Renamed session  "
+                ),
+            )
+        )
+        snapshot = SessionReadResponse.model_validate(
+            await backend_contract_connection.client.request(
+                "session/read", SessionReadParams(session_id=session.session_id)
+            )
+        ).state
+    finally:
+        await session.close()
+
+    # Assert
+    assert response.title == "Renamed session"
+    assert snapshot.session.title == "Renamed session"
 
 
 @pytest.mark.asyncio

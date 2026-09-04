@@ -131,13 +131,18 @@ class ConfigResource:
         return response
 
     async def update(
-        self, changes: Mapping[str, object], *, reload_runtime: bool = False
+        self,
+        changes: Mapping[str, object],
+        *,
+        target_layer: str | None = None,
+        reload_runtime: bool = False,
     ) -> None:
         ops = [
             ConfigWriteOpWire.model_validate({
                 "op": "set",
                 "path": f"/{key}",
                 "value": value,
+                "target_layer": target_layer,
             })
             for key, value in changes.items()
         ]
@@ -368,6 +373,14 @@ class RuntimeResource:
     @property
     def hooks_count(self) -> int:
         return self._state.hooks_count
+
+    @property
+    def bypass_tool_permissions(self) -> bool:
+        return self._state.bypass_tool_permissions
+
+    @property
+    def experimental_harness(self) -> bool:
+        return self._state.experimental_harness
 
     @property
     def connectors(self) -> ConnectorCounts:

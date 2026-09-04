@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import posixpath
 import types
 from typing import Any, Literal, TypedDict, cast
-from urllib.parse import SplitResult, unquote, urlsplit
+from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
 import httpx
 
@@ -16,6 +16,7 @@ from vibe.setup.auth.browser_sign_in_gateway import (
     BrowserSignInGateway,
     BrowserSignInPollResult,
     BrowserSignInProcess,
+    normalize_url_origin,
 )
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
@@ -38,7 +39,6 @@ class ExchangePayload(TypedDict, total=False):
 
 
 HTTP_GONE = 410
-_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 class HttpBrowserSignInGateway(BrowserSignInGateway):
@@ -47,10 +47,12 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
         browser_base_url: str,
         api_base_url: str,
         *,
+        allow_origin_rewrite: bool = False,
         client: VibeAsyncHTTPClient | None = None,
     ) -> None:
         self._browser_base_url = browser_base_url.rstrip("/")
         self._api_base_url = api_base_url.rstrip("/")
+        self._allow_origin_rewrite = allow_origin_rewrite
         self._client = client
         self._should_manage_client = client is None
 
@@ -109,12 +111,14 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
                     base_url=self._browser_base_url,
                     message=message,
                     code=code,
+                    allow_origin_rewrite=self._allow_origin_rewrite,
                 ),
                 poll_url=_validate_url_against_base_url(
                     data["poll_url"],
                     base_url=self._api_base_url,
                     message=message,
                     code=code,
+                    allow_origin_rewrite=self._allow_origin_rewrite,
                 ),
                 expires_at=_parse_expires_at(data["expires_at"]),
             )
@@ -149,7 +153,11 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
         message = "Browser sign-in status could not be retrieved."
         code = BrowserSignInErrorCode.POLL_FAILED
         validated_poll_url = _validate_url_against_base_url(
-            poll_url, base_url=self._api_base_url, message=message, code=code
+            poll_url,
+            base_url=self._api_base_url,
+            message=message,
+            code=code,
+            allow_origin_rewrite=self._allow_origin_rewrite,
         )
         try:
             response = await self._ensure_client().get(validated_poll_url)
@@ -226,14 +234,19 @@ def _parse_expires_at(value: str) -> datetime:
 
 
 def _validate_url_against_base_url(
-    value: str, *, base_url: str, message: str, code: BrowserSignInErrorCode
+    value: str,
+    *,
+    base_url: str,
+    message: str,
+    code: BrowserSignInErrorCode,
+    allow_origin_rewrite: bool = False,
 ) -> str:
     current_url = urlsplit(value)
     base = urlsplit(base_url)
     safe_url_details = _build_safe_url_log_details(value)
     try:
-        current_origin = _normalized_origin(current_url)
-        base_origin = _normalized_origin(base)
+        current_origin = normalize_url_origin(current_url)
+        base_origin = normalize_url_origin(base)
     except ValueError as err:
         logger.warning(
             "Browser sign-in URL origin validation failed for returned_url=%s expected_base_url=%s",
@@ -242,7 +255,8 @@ def _validate_url_against_base_url(
             exc_info=True,
         )
         raise BrowserSignInError(message, code=code) from err
-    if current_origin != base_origin:
+    origin_matches = current_origin == base_origin
+    if not origin_matches and not allow_origin_rewrite:
         logger.warning(
             "Browser sign-in URL host validation failed for returned_url=%s expected_base_url=%s",
             safe_url_details,
@@ -256,7 +270,14 @@ def _validate_url_against_base_url(
             base_url,
         )
         raise BrowserSignInError(message, code=code)
-    return value
+    if origin_matches:
+        return value
+    logger.info(
+        "Browser sign-in URL origin rewritten to configured base for returned_url=%s base_url=%s",
+        safe_url_details,
+        base_url,
+    )
+    return urlunsplit(current_url._replace(scheme=base.scheme, netloc=base.netloc))
 
 
 def _is_path_under_base_path(path: str, base_path: str) -> bool:
@@ -267,18 +288,6 @@ def _is_path_under_base_path(path: str, base_path: str) -> bool:
     if normalized_path == normalized_base_path:
         return True
     return normalized_path.startswith(f"{normalized_base_path}/")
-
-
-def _normalized_origin(parsed: SplitResult) -> tuple[str, str | None, int | None]:
-    scheme = parsed.scheme.lower()
-    port = parsed.port
-    return scheme, parsed.hostname, _effective_port(scheme, port)
-
-
-def _effective_port(scheme: str, port: int | None) -> int | None:
-    if port is not None:
-        return port
-    return _DEFAULT_PORTS.get(scheme)
 
 
 def _normalize_url_path(path: str) -> str:

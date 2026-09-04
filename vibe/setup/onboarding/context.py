@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import os
 import tomllib
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, HttpUrl, TypeAdapter, ValidationError
 
@@ -22,6 +22,7 @@ from vibe.core.config import (
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.models import normalize_model_configs
 from vibe.observability.logging import logger
+from vibe.setup.auth.browser_sign_in_gateway import normalize_url_origin
 
 _ONBOARDING_LIST_ADAPTER = TypeAdapter(list[Any])
 
@@ -50,10 +51,54 @@ def is_valid_custom_domain(value: str) -> bool:
     return True
 
 
-def resolve_browser_auth_urls(domain: str) -> tuple[str, str]:
+def resolve_browser_auth_urls(
+    domain: str, api_base_url: str | None = None
+) -> tuple[str, str]:
     base = _normalize_origin(domain)
-    api = f"{base}/api"
-    return base, api
+    if api_base_url:
+        return base, _normalize_origin(api_base_url)
+    return base, f"{base}/api"
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin_key(value: str) -> tuple[str, str | None, int | None]:
+    parsed = urlsplit(_normalize_origin(value))
+    # A malformed port in hand-edited config must not crash callers like the
+    # onboarding screen; treat it as "no port" and let the HTTP gateway reject
+    # the bad URL later. The shared normalize_url_origin raises on bad ports;
+    # we swallow it here (UI seeding) but the gateway does not.
+    try:
+        return normalize_url_origin(parsed)
+    except ValueError:
+        scheme = parsed.scheme.lower()
+        return scheme, parsed.hostname, _DEFAULT_PORTS.get(scheme)
+
+
+def browser_auth_requires_origin_rewrite(
+    browser_base_url: str, api_base_url: str
+) -> bool:
+    return _origin_key(browser_base_url) != _origin_key(api_base_url)
+
+
+def browser_auth_account_base(browser_base_url: str, api_base_url: str | None) -> str:
+    """CLI-reachable base for account calls (/whoami, plan lookups).
+
+    In a split-horizon deployment the browser console host is not reachable by
+    the CLI, but the connector API base is: use the API base's origin so account
+    calls hit the host the CLI can actually reach. In the common single-host
+    case (no API base, or one that shares the browser base's origin) return the
+    browser base verbatim — path included — so a console mounted under a path
+    prefix keeps it and /whoami still resolves under `{browser_base}/api/...`.
+    """
+    browser_base = _normalize_origin(browser_base_url)
+    if not api_base_url or not browser_auth_requires_origin_rewrite(
+        browser_base_url, api_base_url
+    ):
+        return browser_base
+    parsed = urlsplit(_normalize_origin(api_base_url))
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def is_likely_mistral_private_cloud_domain(domain: str) -> bool:
@@ -63,7 +108,7 @@ def is_likely_mistral_private_cloud_domain(domain: str) -> bool:
     Vibe CLI browser sign-in for Mistral-hosted accounts uses `console.mistral.ai`.
     Surfacing this lets the wizard warn users who paste their Studio URL.
     """
-    host = urlparse(_normalize_origin(domain)).hostname or ""
+    host = urlsplit(_normalize_origin(domain)).hostname or ""
     return (
         host != "console.mistral.ai"
         and host.startswith("console.")
@@ -268,8 +313,17 @@ class OnboardingContext:
 
     @classmethod
     def from_config(cls, config: VibeConfigSchema) -> OnboardingContext:
+        try:
+            provider = config.get_active_provider()
+        except ValueError:
+            logger.warning(
+                "Onboarding config could not resolve an active provider; "
+                "falling back to the default provider so setup can open.",
+                exc_info=True,
+            )
+            provider = DEFAULT_PROVIDERS[0]
         return cls(
-            provider=config.get_active_provider(),
+            provider=provider,
             vibe_base_url=config.vibe_base_url,
             console_base_url=config.console_base_url,
             theme=config.theme,

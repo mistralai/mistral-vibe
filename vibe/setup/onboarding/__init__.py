@@ -30,7 +30,12 @@ from vibe.setup.auth.api_key_persistence import (
     resolve_api_key_provider,
 )
 from vibe.setup.auth.whoami import resolve_tenant_domains
-from vibe.setup.onboarding.context import OnboardingContext, resolve_browser_auth_urls
+from vibe.setup.onboarding.context import (
+    OnboardingContext,
+    browser_auth_account_base,
+    browser_auth_requires_origin_rewrite,
+    resolve_browser_auth_urls,
+)
 from vibe.setup.onboarding.screens import (
     ApiKeyScreen,
     AuthMethodScreen,
@@ -135,24 +140,48 @@ class OnboardingApp(App[str | None]):
             return None
         return base_url
 
-    def apply_custom_domain(self, domain: str) -> None:
-        browser_base_url, browser_api_base_url = resolve_browser_auth_urls(domain)
+    @property
+    def configured_custom_api_base(self) -> str | None:
+        provider = self._config.provider
+        browser_base_url = provider.browser_auth_base_url
+        api_base_url = provider.browser_auth_api_base_url
+        if not browser_base_url or not api_base_url:
+            return None
+        # Only surface a distinct split-horizon API base; a same-origin
+        # `domain/api` is the derived default and would just clutter the field.
+        if not browser_auth_requires_origin_rewrite(browser_base_url, api_base_url):
+            return None
+        return api_base_url
+
+    def apply_custom_domain(self, domain: str, api_base_url: str | None = None) -> None:
+        browser_base_url, browser_api_base_url = resolve_browser_auth_urls(
+            domain, api_base_url
+        )
         self._provider = self._provider.model_copy(
             update={
                 "browser_auth_base_url": browser_base_url,
                 "browser_auth_api_base_url": browser_api_base_url,
+                "browser_auth_allow_origin_rewrite": (
+                    browser_auth_requires_origin_rewrite(
+                        browser_base_url, browser_api_base_url
+                    )
+                ),
             }
         )
         # Keep the top-level console URL (used for /whoami, plan lookups) in sync
-        # with the provider's browser auth host — otherwise on-prem users sign in
-        # against their tenant but every account call still hits console.mistral.ai.
-        self._console_base_url = browser_base_url
+        # with the CLI-reachable auth host. In a split-horizon setup the browser
+        # console origin is not reachable by the CLI, so account calls must go to
+        # the connector API base origin instead; single-host setups are unchanged.
+        self._console_base_url = browser_auth_account_base(
+            browser_base_url, browser_api_base_url
+        )
 
     def apply_mistral_default_domain(self) -> None:
         self._provider = self._provider.model_copy(
             update={
                 "browser_auth_base_url": DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
                 "browser_auth_api_base_url": DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
+                "browser_auth_allow_origin_rewrite": False,
                 "api_base": f"{DEFAULT_MISTRAL_SERVER_URL}/v1",
             }
         )
@@ -219,7 +248,9 @@ class OnboardingApp(App[str | None]):
                 raise AssertionError(msg)
             return BrowserSignInService(
                 HttpBrowserSignInGateway(
-                    browser_base_url=browser_base_url, api_base_url=api_base_url
+                    browser_base_url=browser_base_url,
+                    api_base_url=api_base_url,
+                    allow_origin_rewrite=self._provider.browser_auth_allow_origin_rewrite,
                 )
             )
 
@@ -241,9 +272,19 @@ class OnboardingApp(App[str | None]):
 
 
 def run_onboarding(
-    app: App | None = None, *, launch_context: LaunchContext | None = None
+    app: App | None = None,
+    *,
+    launch_context: LaunchContext | None = None,
+    orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None,
 ) -> ConfigOrchestrator[VibeConfigSchema]:
-    onboarding_app = app or OnboardingApp(launch_context=launch_context)
+    resolved_orchestrator = orchestrator
+    if resolved_orchestrator is None:
+        resolved_orchestrator = asyncio.run(build_default_orchestrator())
+    onboarding_app = app
+    if onboarding_app is None:
+        onboarding_app = OnboardingApp(
+            config=resolved_orchestrator.config, launch_context=launch_context
+        )
     result = onboarding_app.run()
     match result:
         case None:
@@ -284,7 +325,9 @@ def run_onboarding(
         if isinstance(onboarding_app, OnboardingApp)
         else onboarding_app.theme
     )
-    orchestrator = asyncio.run(build_default_orchestrator())
+    asyncio.run(resolved_orchestrator.reload())
     if theme is not None:
-        asyncio.run(orchestrator.set_field("/theme", theme, reason="onboarding"))
-    return orchestrator
+        asyncio.run(
+            resolved_orchestrator.set_field("/theme", theme, reason="onboarding")
+        )
+    return resolved_orchestrator

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from textual.widgets import OptionList
 
-from tests.conftest import build_test_vibe_app, build_test_vibe_config
+from tests.conftest import build_test_vibe_app, build_test_vibe_config, wait_until
 from vibe.app_server.config import THINKING_LEVELS
 from vibe.app_server.protocol import (
     ConfigFieldKind,
@@ -14,6 +14,7 @@ from vibe.app_server.protocol import (
     ConfigLayerValueWire,
 )
 from vibe.cli.textual_ui.app import BottomApp
+from vibe.cli.textual_ui.widgets.context_progress import ContextProgress
 from vibe.cli.textual_ui.widgets.model_picker import ModelPickerApp
 from vibe.cli.textual_ui.widgets.thinking_picker import ThinkingPickerApp
 from vibe.core.config import ModelConfig
@@ -38,6 +39,16 @@ def _make_unpinned_config(**kwargs):
     return build_test_vibe_config(models=_model_configs(), active_model="", **kwargs)
 
 
+async def _open_model_picker(pilot, app) -> ModelPickerApp:
+    # The picker focuses its option list from a deferred callback, so a key press
+    # sent before that lands would reach the chat input instead.
+    await app._show_model()
+    await wait_until(pilot, lambda: bool(app.query(ModelPickerApp)))
+    picker = app.query_one(ModelPickerApp)
+    await wait_until(pilot, lambda: picker.query_one(OptionList).has_focus)
+    return picker
+
+
 # --- /model command ---
 
 
@@ -56,8 +67,7 @@ async def test_model_opens_model_picker() -> None:
     app = build_test_vibe_app(config=_make_config_with_models())
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_model()
-        await pilot.pause(0.2)
+        await _open_model_picker(pilot, app)
 
         assert app._current_bottom_app == BottomApp.ModelPicker
         assert len(app.query(ModelPickerApp)) == 1
@@ -68,8 +78,7 @@ async def test_model_picker_shows_all_models() -> None:
     app = build_test_vibe_app(config=_make_config_with_models())
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_model()
-        await pilot.pause(0.2)
+        await _open_model_picker(pilot, app)
 
         picker = app.query_one(ModelPickerApp)
         assert [model.alias for model in picker._models] == ["alpha", "beta", "gamma"]
@@ -91,8 +100,7 @@ async def test_model_picker_shows_display_name_but_persists_alias() -> None:
     app = build_test_vibe_app(config=config)
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_model()
-        await pilot.pause(0.2)
+        await _open_model_picker(pilot, app)
 
         picker = app.query_one(ModelPickerApp)
         assert [model.display_name for model in picker._models] == [
@@ -108,7 +116,7 @@ async def test_model_picker_shows_display_name_but_persists_alias() -> None:
         # Selecting it still persists the alias, not the label.
         await pilot.press("down")
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await wait_until(pilot, lambda: app.config.active_model.alias == "glm-5-2")
 
         assert app.config.active_model.alias == "glm-5-2"
 
@@ -118,8 +126,7 @@ async def test_model_picker_escape_returns_to_input() -> None:
     app = build_test_vibe_app(config=_make_config_with_models())
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_model()
-        await pilot.pause(0.2)
+        await _open_model_picker(pilot, app)
 
         await pilot.press("escape")
         await pilot.pause(0.2)
@@ -133,8 +140,7 @@ async def test_model_picker_escape_does_not_save() -> None:
     app = build_test_vibe_app(config=_make_config_with_models())
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_model()
-        await pilot.pause(0.2)
+        await _open_model_picker(pilot, app)
 
         with patch.object(
             app.app_server.resources.config, "update", new=AsyncMock()
@@ -150,13 +156,12 @@ async def test_model_picker_select_model() -> None:
     app = build_test_vibe_app(config=_make_config_with_models())
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_model()
-        await pilot.pause(0.2)
+        await _open_model_picker(pilot, app)
 
         # Navigate down to "beta" and select
         await pilot.press("down")
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await wait_until(pilot, lambda: app.config.active_model.alias == "beta")
 
         assert app.config.active_model.alias == "beta"
         assert app._current_bottom_app == BottomApp.Input
@@ -169,8 +174,7 @@ async def test_model_picker_select_current_model() -> None:
     app = build_test_vibe_app(config=_make_config_with_models())
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_model()
-        await pilot.pause(0.2)
+        await _open_model_picker(pilot, app)
 
         await pilot.press("enter")
         await pilot.pause(0.2)
@@ -184,8 +188,7 @@ async def test_model_picker_blocked_when_active_model_enforced() -> None:
     app = build_test_vibe_app(config=_make_config_with_models())
     async with app.run_test(notifications=True) as pilot:
         await pilot.pause(0.1)
-        await app._show_model()
-        await pilot.pause(0.2)
+        await _open_model_picker(pilot, app)
 
         enforced_response = ConfigFieldsReadResponse(
             fields=[
@@ -221,8 +224,7 @@ async def test_model_picker_offers_default_row() -> None:
     app = build_test_vibe_app(config=_make_config_with_models())
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_model()
-        await pilot.pause(0.2)
+        await _open_model_picker(pilot, app)
 
         picker = app.query_one(ModelPickerApp)
         option_list = picker.query_one(OptionList)
@@ -238,8 +240,7 @@ async def test_model_picker_default_row_current_when_unpinned() -> None:
     app = build_test_vibe_app(config=_make_unpinned_config())
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_model()
-        await pilot.pause(0.2)
+        await _open_model_picker(pilot, app)
 
         picker = app.query_one(ModelPickerApp)
         assert picker._is_pinned is False
@@ -253,13 +254,12 @@ async def test_model_picker_select_default_unpins() -> None:
     app = build_test_vibe_app(config=_make_config_with_models())
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_model()
-        await pilot.pause(0.2)
+        await _open_model_picker(pilot, app)
 
         # Highlight starts on pinned "alpha" (index 1); move up to Default.
         await pilot.press("up")
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await wait_until(pilot, lambda: app.config.active_model_pinned is False)
 
         assert app.config.active_model_pinned is False
         assert app._current_bottom_app == BottomApp.Input
@@ -271,17 +271,52 @@ async def test_model_picker_select_default_persists_empty_alias() -> None:
     app = build_test_vibe_app(config=_make_config_with_models())
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
-        await app._show_model()
-        await pilot.pause(0.2)
+        await _open_model_picker(pilot, app)
 
         with patch.object(
             app.app_server.resources.config, "update", new=AsyncMock()
         ) as update_config:
             await pilot.press("up")
             await pilot.press("enter")
-            await pilot.pause(0.2)
+            await wait_until(pilot, lambda: update_config.await_count == 1)
 
         update_config.assert_awaited_once_with({"active_model": ""})
+
+
+@pytest.mark.asyncio
+async def test_model_switch_updates_context_window_status_bar() -> None:
+    """Switching models refreshes the bottom-bar context window without a restart.
+
+    The bar's max_tokens is the active model's auto_compact_threshold; a switch
+    to a model with a different threshold must be reflected immediately.
+    """
+    models = [
+        ModelConfig(
+            name="model-a",
+            provider="mistral",
+            alias="alpha",
+            auto_compact_threshold=200_000,
+        ),
+        ModelConfig(
+            name="model-b",
+            provider="mistral",
+            alias="beta",
+            auto_compact_threshold=800_000,
+        ),
+    ]
+    config = build_test_vibe_config(models=models, active_model="alpha")
+    app = build_test_vibe_app(config=config)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        assert app.query_one(ContextProgress).tokens.max_tokens == 200_000
+
+        await _open_model_picker(pilot, app)
+        # Highlight starts on pinned "alpha" (index 1); move down to "beta".
+        await pilot.press("down")
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: app.config.active_model.alias == "beta")
+
+        assert app.query_one(ContextProgress).tokens.max_tokens == 800_000
 
 
 # --- /thinking command ---

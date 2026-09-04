@@ -547,8 +547,7 @@ async def test_interrupting_task_leaves_child_idle_and_closes_runtime(
         child_session_id, runtime = next(iter(child_runtimes.items()))
         assert runtime.turns.active_turn is None
         assert runtime.execution.active is None
-        assert runtime.turns._active_task is not None
-        assert runtime.turns._active_task.done()
+        assert runtime.turns._active_task is None
         assert not [
             task
             for task in asyncio.all_tasks()

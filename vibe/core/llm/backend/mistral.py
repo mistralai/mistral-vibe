@@ -38,6 +38,13 @@ from mistralai.client.models import (
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 from mistralai.extra.observability.telemetry import configure_telemetry
 
+from vibe.core.config._defaults import (
+    DEFAULT_API_CONNECT_TIMEOUT,
+    DEFAULT_API_POOL_TIMEOUT,
+    DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
+    DEFAULT_API_TIMEOUT,
+    DEFAULT_API_WRITE_TIMEOUT,
+)
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.backend.base import MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS
 from vibe.core.llm.exceptions import BackendErrorBuilder
@@ -259,14 +266,22 @@ class MistralBackend:
     def __init__(
         self,
         provider: ProviderConfig,
-        timeout: float = 720.0,
-        retry_max_elapsed_time: float = 300.0,
+        timeout: float = DEFAULT_API_TIMEOUT,
+        retry_max_elapsed_time: float = DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
+        connect_timeout: float = DEFAULT_API_CONNECT_TIMEOUT,
+        write_timeout: float = DEFAULT_API_WRITE_TIMEOUT,
+        pool_timeout: float = DEFAULT_API_POOL_TIMEOUT,
         enable_otel: bool = False,
         on_retry: RetryObserver | None = None,
     ) -> None:
         self._client: Mistral | None = None
         self._http_client: VibeAsyncHTTPClient | None = None
         self._provider = provider
+        self._transport_timeouts = {
+            "connect": connect_timeout,
+            "write": write_timeout,
+            "pool": pool_timeout,
+        }
         self._enable_otel = enable_otel
         self._on_retry = on_retry
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -304,6 +319,22 @@ class MistralBackend:
             ),
             retry_connection_errors=True,
         )
+
+    async def _bound_transport_timeouts(self, request: httpx.Request) -> None:
+        """Cap connect, write and pool waits without shortening the read budget.
+
+        The SDK sends a single scalar timeout per request, which httpx expands
+        onto all four axes. A budget sized for a long model turn then also
+        governs opening a socket and acquiring a pooled connection, so an
+        unreachable host stalls for that whole budget before erroring. Each cap
+        is a ceiling rather than a value, so a caller asking for a shorter
+        overall timeout still wins on every axis.
+        """
+        timeout = dict(request.extensions.get("timeout", {}))
+        for axis, limit in self._transport_timeouts.items():
+            current = timeout.get(axis)
+            timeout[axis] = limit if current is None else min(current, limit)
+        request.extensions = {**request.extensions, "timeout": timeout}
 
     async def _on_response(self, response: httpx.Response) -> None:
         """Release the connection behind a retryable response, then report it.
@@ -381,7 +412,10 @@ class MistralBackend:
         self._http_client = VibeAsyncHTTPClient(
             verify=build_ssl_context(),
             follow_redirects=True,
-            event_hooks={"response": [self._on_response]},
+            event_hooks={
+                "request": [self._bound_transport_timeouts],
+                "response": [self._on_response],
+            },
             limits=httpx.Limits(
                 max_connections=_MAX_CONNECTIONS,
                 keepalive_expiry=MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS,

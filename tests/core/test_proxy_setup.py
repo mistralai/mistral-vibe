@@ -4,6 +4,7 @@ import pytest
 
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.proxy_setup import (
+    PROXY_URL_VARS,
     SUPPORTED_PROXY_VARS,
     ProxySetupError,
     get_current_proxy_settings,
@@ -118,10 +119,26 @@ class TestSetProxyVar:
 
     @pytest.mark.parametrize("key", SUPPORTED_PROXY_VARS.keys())
     def test_sets_all_supported_vars(self, key: str) -> None:
-        set_proxy_var(key, "test-value")
+        value = "http://proxy:8080" if key in PROXY_URL_VARS else "test-value"
+        set_proxy_var(key, value)
 
         result = get_current_proxy_settings()
-        assert result[key] == "test-value"
+        assert result[key] == value
+
+    @pytest.mark.parametrize("key", sorted(PROXY_URL_VARS))
+    def test_rejects_proxy_url_without_scheme(self, key: str) -> None:
+        with pytest.raises(ProxySetupError) as exc_info:
+            set_proxy_var(key, "proxy:8080")
+
+        assert "http://" in str(exc_info.value)
+        # Nothing is persisted, so the CLI still starts on the next launch.
+        assert not GLOBAL_ENV_FILE.path.exists()
+
+    def test_accepts_proxy_url_with_scheme(self) -> None:
+        set_proxy_var("HTTPS_PROXY", "https://proxy:8443")
+
+        result = get_current_proxy_settings()
+        assert result["HTTPS_PROXY"] == "https://proxy:8443"
 
     def test_uppercases_key_before_validation(self) -> None:
         set_proxy_var("http_proxy", "http://proxy:8080")
@@ -232,7 +249,8 @@ class TestUnsetProxyVar:
 
     @pytest.mark.parametrize("key", SUPPORTED_PROXY_VARS.keys())
     def test_all_supported_vars_can_be_unset(self, key: str) -> None:
-        set_proxy_var(key, "test-value")
+        value = "http://proxy:8080" if key in PROXY_URL_VARS else "test-value"
+        set_proxy_var(key, value)
         unset_proxy_var(key)
 
         result = get_current_proxy_settings()

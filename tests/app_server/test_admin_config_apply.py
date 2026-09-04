@@ -17,7 +17,7 @@ from vibe.core.config.default_orchestrator import build_default_orchestrator
 
 async def _build_handler(monkeypatch) -> ResourceRequestHandler:
     monkeypatch.setattr(_admin_config, "resolve_api_key", lambda _env: "api-key")
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     loop = AgentLoop(
         config_orchestrator=orchestrator,
         agent_name="ask",
@@ -66,7 +66,7 @@ async def test_apply_admin_config_no_api_key_emits_no_telemetry(
     monkeypatch, telemetry_events: list[dict[str, Any]]
 ) -> None:
     monkeypatch.setattr(_admin_config, "resolve_api_key", lambda _env: None)
-    orchestrator = await build_default_orchestrator(require_api_key=False)
+    orchestrator = await build_default_orchestrator()
     loop = AgentLoop(
         config_orchestrator=orchestrator,
         agent_name="ask",

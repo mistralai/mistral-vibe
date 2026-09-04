@@ -43,6 +43,8 @@ from vibe.cli.textual_ui import startup
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
+from vibe.cli.textual_ui.widgets.context_progress import ContextProgress
+from vibe.cli.textual_ui.widgets.loading import DEFAULT_LOADING_STATUS, LoadingWidget
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
     ErrorMessage,
@@ -279,12 +281,61 @@ def _approval_callback(callback_id: str) -> PublicCallbackEntry:
     effect = GenericEffectDetail(
         tool_name="example",
         input={"value": "ok"},
-        display=EffectCallDisplay(summary="example", status_text="Running"),
+        display=EffectCallDisplay(
+            summary="example", status_text="Waiting for approval to run example"
+        ),
     )
     callback = _callback(ApprovalCallbackDetail(effect=effect))
     return callback.model_copy(
         update={"id": f"callback:{callback_id}", "callback_id": callback_id}
     )
+
+
+@pytest.mark.asyncio
+async def test_approval_callback_replaces_loading_status_before_typing_pause() -> None:
+    app = MagicMock()
+    callback = _approval_callback("callback-1")
+    loading = LoadingWidget(status=DEFAULT_LOADING_STATUS)
+    release_typing_pause = asyncio.Event()
+    app._active_callback = None
+    app._pending_local_question = None
+    app._pending_callbacks = deque()
+    app._loading_widget = loading
+    app._ensure_loading_widget = AsyncMock()
+    app._wait_for_typing_pause = AsyncMock(side_effect=release_typing_pause.wait)
+    app._switch_to_approval_app = AsyncMock()
+
+    show = asyncio.create_task(VibeApp._show_callback(app, callback))
+    await asyncio.sleep(0)
+
+    assert loading.base_status == "Waiting for approval to run example"
+    assert loading._pause_start is not None
+    app._switch_to_approval_app.assert_not_awaited()
+
+    release_typing_pause.set()
+    await show
+
+
+@pytest.mark.asyncio
+async def test_answering_final_callback_restores_loading_progress() -> None:
+    app = MagicMock()
+    callback = _approval_callback("callback-1")
+    loading = LoadingWidget(status="Running command")
+    loading.begin_action_required("Waiting for approval to run example")
+    app._active_callback = callback
+    app._pending_callbacks = deque()
+    app._loading_widget = loading
+    app.app_server.respond_to_callback = AsyncMock()
+    app._switch_to_input_app = AsyncMock()
+    output = ApprovalCallbackOutput(
+        decision=ApprovalDecision(type=ApprovalDecisionType.APPROVE)
+    )
+
+    await VibeApp._respond_to_active_callback(app, output)
+
+    assert loading.base_status == "Running command"
+    assert loading._pause_start is None
+    app._switch_to_input_app.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -306,6 +357,10 @@ async def test_resolving_a_callback_swaps_to_the_next_without_duplicate_mount(
         await app._handle_turn_event(CallbackRequested(first))
         await _wait_until(pilot, lambda: app._active_callback is first)
         assert len(app.query(ApprovalApp)) == 1
+        assert app._loading_widget is not None
+        assert app._loading_widget.base_status == "Waiting for approval to run example"
+        paused_at = app._loading_widget._pause_start
+        assert paused_at is not None
 
         await app._handle_turn_event(CallbackRequested(second))
         await pilot.pause()
@@ -319,6 +374,8 @@ async def test_resolving_a_callback_swaps_to_the_next_without_duplicate_mount(
         )
         await _wait_until(pilot, lambda: app._active_callback is second)
         assert len(app.query(ApprovalApp)) == 1
+        assert app._loading_widget is not None
+        assert app._loading_widget._pause_start == paused_at
 
 
 @pytest.mark.asyncio
@@ -497,6 +554,55 @@ async def test_incomplete_stream_hides_error_while_retrying() -> None:
 
 
 @pytest.mark.asyncio
+async def test_interrupting_auto_retry_keeps_event_listener_alive() -> None:
+    retry_gate = asyncio.Event()
+
+    class GatedRetryBackend(FakeBackend):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.calls = 0
+            self.retry_started = asyncio.Event()
+
+        async def complete_streaming(self, **kwargs):
+            self.calls += 1
+            async for chunk in super().complete_streaming(**kwargs):
+                yield chunk
+                if self.calls == 2:
+                    self.retry_started.set()
+                    await retry_gate.wait()
+
+    backend = GatedRetryBackend([
+        [mock_llm_chunk(content="partial", stop_reason=None)],
+        [mock_llm_chunk(content=" retry", stop_reason=None)],
+        [mock_llm_chunk(content="after cancel")],
+    ])
+    agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+    app = build_test_vibe_app(agent_loop=agent_loop)
+
+    try:
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+            chat_input = app.query_one(ChatInputContainer)
+            chat_input.post_message(ChatInputContainer.Submitted("first"))
+            await _wait_until(pilot, backend.retry_started.is_set)
+
+            await pilot.press("escape")
+            await _wait_until(pilot, lambda: not app._agent_job_active())
+
+            chat_input.post_message(ChatInputContainer.Submitted("next"))
+            await _wait_until(pilot, lambda: len(backend.requests_messages) == 3)
+            await _wait_until(
+                pilot,
+                lambda: any(
+                    "after cancel" in message.get_content()
+                    for message in app.query(AssistantMessage)
+                ),
+            )
+    finally:
+        retry_gate.set()
+
+
+@pytest.mark.asyncio
 async def test_empty_incomplete_stream_retries_original_request() -> None:
     backend = FakeBackend([[], [mock_llm_chunk(content="Recovered")]])
     agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
@@ -551,25 +657,19 @@ async def test_incomplete_stream_stops_after_two_automatic_retries(
 
 
 @pytest.mark.asyncio
-async def test_auto_retry_does_not_drop_a_queued_prompt() -> None:
-    # A turn started by the queue drain that auto-retries an incomplete stream
-    # must not let the drain resume and start the next queued prompt
-    # concurrently -- that would collide ("A turn is already running") and drop
-    # the queued prompt. Gate turns 0 and 1 so the second prompt is queued only
-    # once the drained turn is already in flight (otherwise the drain batches
-    # both prompts into a single turn).
+async def test_incomplete_stream_does_not_retry_ahead_of_queued_prompts() -> None:
     class GatedBackend(FakeBackend):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
             self.calls = 0
-            self.started = [asyncio.Event() for _ in range(4)]
-            self.release = {0: asyncio.Event(), 1: asyncio.Event()}
+            self.started = [asyncio.Event() for _ in range(3)]
+            self.release = [asyncio.Event() for _ in range(3)]
 
         async def complete_streaming(self, **kwargs):
             idx = self.calls
             self.calls += 1
             self.started[idx].set()
-            if idx in self.release:
+            if idx in (0, 1):
                 await self.release[idx].wait()
             async for chunk in super().complete_streaming(**kwargs):
                 yield chunk
@@ -577,7 +677,6 @@ async def test_auto_retry_does_not_drop_a_queued_prompt() -> None:
     backend = GatedBackend([
         [mock_llm_chunk(content="t0 done")],
         [mock_llm_chunk(content="t1 partial", stop_reason=None)],
-        [mock_llm_chunk(content=" t1 done")],
         [mock_llm_chunk(content="t2 done")],
     ])
     agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
@@ -587,29 +686,47 @@ async def test_auto_retry_does_not_drop_a_queued_prompt() -> None:
         await pilot.pause(0.1)
         chat_input = app.query_one(ChatInputContainer)
 
-        # Turn 0 runs directly and blocks; queue t1 behind it.
+        # t0 runs; t1 queues behind it. When t0 finishes, t1 promotes and runs.
         chat_input.post_message(ChatInputContainer.Submitted("t0"))
         await _wait_until(pilot, backend.started[0].is_set)
         chat_input.post_message(ChatInputContainer.Submitted("t1"))
-        await _wait_until(pilot, lambda: len(app._input_queue) == 1)
+        await _wait_until(pilot, lambda: len(app._queue) == 1)
 
-        # Release t0 -> drain starts t1 (alone). Once t1 is in flight, queue t2.
         backend.release[0].set()
         await _wait_until(pilot, backend.started[1].is_set)
-        chat_input.post_message(ChatInputContainer.Submitted("t2"))
-        await _wait_until(pilot, lambda: len(app._input_queue) == 1)
 
-        # Let t1 fail (incomplete) and auto-retry, then drain t2.
+        # t2 queues only after t1 has started, so it is a separate turn behind
+        # the turn that returns an incomplete stream.
+        chat_input.post_message(ChatInputContainer.Submitted("t2"))
+        await _wait_until(pilot, lambda: len(app._queue) == 1)
+
+        # t1 returns incomplete while t2 is queued: the auto-retry must defer to
+        # the queued prompt rather than retry ahead of it.
         backend.release[1].set()
-        await _wait_until(pilot, lambda: len(backend.requests_messages) == 4)
+        await _wait_until(pilot, lambda: len(backend.requests_messages) == 3)
         await _wait_until(
-            pilot, lambda: not app._agent_job_active() and len(app._input_queue) == 0
+            pilot, lambda: not app._agent_job_active() and len(app._queue) == 0
+        )
+        await _wait_until(
+            pilot,
+            lambda: any(
+                "t2 done" in message.get_content()
+                for message in app.query(AssistantMessage)
+            ),
+        )
+        await _wait_until(pilot, lambda: len(app.query(ErrorMessage)) == 1)
+        await _wait_until(
+            pilot,
+            lambda: (
+                app.query_one(ContextProgress).tokens.current_tokens
+                == agent_loop.stats.context_tokens
+            ),
         )
 
-        # t2 survived the auto-retry and ran to completion; nothing collided.
         contents = " ".join(m.get_content() for m in app.query(AssistantMessage))
         assert "t2 done" in contents
-        assert len(app.query(ErrorMessage)) == 0
+        assert len(app.query(ErrorMessage)) == 1
+        assert "/retry" in str(app.query_one(ErrorMessage)._error)
 
 
 @pytest.mark.asyncio

@@ -28,11 +28,8 @@ class _LayerData:
 class ConfigBuilder[S: ConfigSchema]:
     """Collects layers and merges them into an immutable Config[S]."""
 
-    def __init__(
-        self, schema: type[S], *, validation_context: dict[str, Any] | None = None
-    ) -> None:
+    def __init__(self, schema: type[S]) -> None:
         self._schema = schema
-        self._validation_context = validation_context
         self._layers: list[ConfigLayer[RawConfig]] = []
         self._lock = asyncio.Lock()
 
@@ -54,14 +51,12 @@ class ConfigBuilder[S: ConfigSchema]:
 
     def copy(self) -> ConfigBuilder[S]:
         """Return a new builder for the same schema with deep-copied layers."""
-        new_builder = ConfigBuilder(
-            self._schema, validation_context=copy.deepcopy(self._validation_context)
-        )
+        new_builder = ConfigBuilder(self._schema)
         new_builder.add_layers([copy.deepcopy(layer) for layer in self._layers])
         return new_builder
 
     def validate(self, data: dict[str, Any]) -> S:
-        return self._schema.model_validate(data, context=self._validation_context)
+        return self._schema.model_validate(data)
 
     async def build(
         self,
@@ -93,9 +88,7 @@ class ConfigBuilder[S: ConfigSchema]:
                     continue
 
             merged, origins = self._merge_fields(self._schema, layer_dicts)
-            return self._schema.validate_merged(
-                merged, origins=origins, context=self._validation_context
-            )
+            return self._schema.validate_merged(merged, origins=origins)
 
     def _merge_fields(
         self, schema: type[S], layer_dicts: list[_LayerData]
@@ -120,6 +113,7 @@ class ConfigBuilder[S: ConfigSchema]:
                     if not isinstance(value, dict):
                         continue
 
+                    merged_fragment = False
                     for fragment_key, fragment_value in value.items():
                         if fragment_key not in annotation.model_fields:
                             continue
@@ -139,6 +133,9 @@ class ConfigBuilder[S: ConfigSchema]:
                                 key_fn=self._make_key_fn(fragment_meta),
                             )
                         )
+                        merged_fragment = True
+                    if merged_fragment:
+                        origins[key] = ld.name
                     continue
 
                 meta = MergeFieldMetadata.from_field(field_info)
@@ -149,6 +146,7 @@ class ConfigBuilder[S: ConfigSchema]:
                 accumulated[key] = meta.merge_strategy.apply(
                     accumulated.get(key), value, key_fn=self._make_key_fn(meta)
                 )
+                origins[key] = ld.name
 
         return accumulated, origins
 

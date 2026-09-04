@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 from vibe import __version__
+from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.experiments.cache import store_cached_eval_response
 from vibe.core.experiments.manager import ExperimentManager
-from vibe.core.experiments.models import ExperimentAttributes
+from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
 from vibe.core.identity import IdentityResult, fetch_identity
 from vibe.core.telemetry.send import get_mistral_provider_and_api_key
 from vibe.core.utils import get_platform_id
@@ -30,12 +31,20 @@ IdentityResolver = Callable[..., Awaitable[IdentityResult | None]]
 WhoAmIResolver = Callable[..., Awaitable[WhoAmIResult | None]]
 
 
+# Narrowed from ``SessionLogger`` so one initializer serves both backends: the
+# legacy logger satisfies this structurally, and Unified — whose persisted
+# session metadata has no experiments field — passes a no-op.
+class ExperimentStateSink(Protocol):
+    async def persist_experiments(self, response: EvalResponse | None) -> None: ...
+
+
 async def _fetch_plan_attributes(
     *,
     config: VibeConfigSchema,
     launch_context: LaunchContext | None,
     resolve_identity: IdentityResolver | None,
     resolve_whoami: WhoAmIResolver | None,
+    harness: ExperimentSurface,
 ) -> tuple[ExperimentAttributes | None, str | None]:
     """Resolve the user-scoped attribute snapshot + user_plan from identity and
     ``/whoami`` (through their caches), independent of the session.
@@ -55,9 +64,9 @@ async def _fetch_plan_attributes(
     provider_and_key = get_mistral_provider_and_api_key(config)
     if provider_and_key is None:
         if config.get_mistral_provider() is None:
-            sentinel = _build_attributes(config, "", launch_context).model_copy(
-                update={"planType": NO_PLAN_DATA, "planName": NO_PLAN_DATA}
-            )
+            sentinel = _build_attributes(
+                config, "", launch_context, harness=harness
+            ).model_copy(update={"planType": NO_PLAN_DATA, "planName": NO_PLAN_DATA})
             return sentinel, NO_PLAN_DATA
         return None, None
     provider, api_key = provider_and_key
@@ -81,7 +90,12 @@ async def _fetch_plan_attributes(
         whoami is not None,
     )
     attributes = _build_attributes(
-        config, api_key, launch_context, identity=identity, whoami=whoami
+        config,
+        api_key,
+        launch_context,
+        harness=harness,
+        identity=identity,
+        whoami=whoami,
     )
     return attributes, derive_user_plan(whoami)
 
@@ -90,8 +104,9 @@ async def initialize_experiments(
     *,
     config: VibeConfigSchema,
     manager: ExperimentManager,
-    session_logger: SessionLogger,
+    session_logger: ExperimentStateSink,
     launch_context: LaunchContext | None,
+    harness: ExperimentSurface,
     resolve_identity: IdentityResolver | None = None,
     resolve_whoami: WhoAmIResolver | None = None,
 ) -> tuple[bool, str | None]:
@@ -102,6 +117,7 @@ async def initialize_experiments(
         launch_context=launch_context,
         resolve_identity=resolve_identity,
         resolve_whoami=resolve_whoami,
+        harness=harness,
     )
     if attributes is None:
         # Mistral provider present but key missing — tried but failed.
@@ -119,10 +135,13 @@ async def initialize_experiments(
         # is fail-open and stayed empty, so nothing changed — don't trigger a
         # prompt refresh. We still surface user_plan for early telemetry events.
         return False, user_plan
-    try:
-        store_cached_eval_response(config, state)
-    except Exception:
-        logger.exception("Failed to cache experiment eval response")
+    if attributes.userId is not None:
+        # Without the hash attribute the response carries no assignment, and
+        # caching that empty result would overwrite a good entry.
+        try:
+            store_cached_eval_response(config, state)
+        except Exception:
+            logger.exception("Failed to cache experiment eval response")
     # Persist ONLY the sticky variant assignment. Plan/org attributes and
     # user_plan are user-scoped, not session-scoped, so they are never written
     # to meta.json — they are re-resolved from the user cache on every session.
@@ -167,6 +186,7 @@ async def resolve_plan_attributes(
     config: VibeConfigSchema,
     manager: ExperimentManager,
     launch_context: LaunchContext | None,
+    harness: ExperimentSurface,
     resolve_identity: IdentityResolver | None = None,
     resolve_whoami: WhoAmIResolver | None = None,
 ) -> str | None:
@@ -185,6 +205,7 @@ async def resolve_plan_attributes(
         launch_context=launch_context,
         resolve_identity=resolve_identity,
         resolve_whoami=resolve_whoami,
+        harness=harness,
     )
     if attributes is not None:
         manager.set_attributes(attributes)
@@ -196,6 +217,7 @@ def _build_attributes(
     api_key: str,
     launch_context: LaunchContext | None,
     *,
+    harness: ExperimentSurface,
     identity: IdentityResult | None = None,
     whoami: WhoAmIResult | None = None,
 ) -> ExperimentAttributes:
@@ -219,6 +241,7 @@ def _build_attributes(
     return ExperimentAttributes(
         userId=user_id,
         entrypoint=entrypoint,
+        harness=harness,
         agent_version=agent_version,
         client_name=client_name,
         client_version=client_version,

@@ -242,10 +242,10 @@ async def test_ui_streams_output_incrementally(vibe_app: VibeApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ui_queues_bash_submitted_while_command_running(
+async def test_ui_rejects_bash_submitted_while_command_running(
     vibe_app: VibeApp,
 ) -> None:
-    """Submitting new bash while a bang command is running should queue, not cancel."""
+    """Submitting new bash while a bang command is running preserves the input."""
     async with vibe_app.run_test() as pilot:
         chat_input = vibe_app.query_one(ChatInputContainer)
         chat_input.value = "!sleep 2"
@@ -258,16 +258,15 @@ async def test_ui_queues_bash_submitted_while_command_running(
         chat_input.value = "!echo done"
         await pilot.press("enter")
 
-        # The second command should be queued, not cancelled
-        assert len(vibe_app._input_queue) == 1
+        assert chat_input.value == "!echo done"
+        assert not vibe_app._queue
+        assert any(
+            "cannot be queued while a shell command is running" in notification.message
+            for notification in vibe_app._notifications
+        )
 
-        # Wait for both to complete (first runs, drain runs second)
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            if len(_shell_results(vibe_app)) == 2:
-                break
-            await pilot.pause(0.05)
+        await pilot.press("escape")
+        await _wait_for_shell_result(vibe_app, pilot)
 
         all_msgs = _shell_results(vibe_app)
-        assert len(all_msgs) == 2
-        assert _result_output(all_msgs[1])["stdout"] == "done\n"
+        assert len(all_msgs) == 1

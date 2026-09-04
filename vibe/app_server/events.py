@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -10,9 +11,11 @@ from vibe.app_server.models import (
     PublicCallbackEntry,
     PublicEntryGenerationStatus,
     PublicHistoryEntry,
+    PublicQueuedTurn,
     PublicSession,
     PublicSessionState,
     PublicTurn,
+    PublicTurnQueue,
     PublicTurnStatus,
     validate_history_entry,
 )
@@ -30,6 +33,7 @@ from vibe.app_server.protocol import (
     SessionUpdatedParams,
     StatsUpdatedParams,
     TurnCompletedParams,
+    TurnQueueUpdatedParams,
     TurnRetryingParams,
     TurnStartedParams,
 )
@@ -80,6 +84,11 @@ class TurnCompleted:
 
 
 @dataclass(frozen=True, slots=True)
+class TurnQueueUpdated:
+    queue: PublicTurnQueue
+
+
+@dataclass(frozen=True, slots=True)
 class StatsUpdated:
     params: StatsUpdatedParams
 
@@ -125,6 +134,7 @@ type AppServerEvent = (
     | SessionUpdated
     | TurnStarted
     | TurnCompleted
+    | TurnQueueUpdated
     | StatsUpdated
     | CallbackRequested
     | TurnRetrying
@@ -135,6 +145,8 @@ type AppServerEvent = (
 )
 
 _STREAMING_TEXT_PATHS = {"/content/0/text", "/text", "/state/outputText"}
+# Keep retired IDs for as long as the server keeps retired enqueue retries.
+_RETIRED_QUEUE_ITEM_HISTORY_SIZE = 256
 
 
 def _merge_snapshot_suffix[ItemT](
@@ -215,6 +227,8 @@ def reconcile_snapshot(
             events.append(TurnStarted(current_turn))
         else:
             events.append(TurnCompleted(current_turn))
+    if previous.turn_queue != current.turn_queue:
+        events.append(TurnQueueUpdated(current.turn_queue))
     return events
 
 
@@ -227,6 +241,7 @@ type _KnownEventParams = (
     | SessionUpdatedParams
     | StatsUpdatedParams
     | TurnCompletedParams
+    | TurnQueueUpdatedParams
     | TurnStartedParams
 )
 
@@ -275,10 +290,28 @@ class ClientProjection:
         self.state = state
         self._entries = {entry.id: entry for entry in state.history or []}
         self._last_event_id = state.event_id
+        self._generation = 0
+        self._retired_queue_item_ids: OrderedDict[str, None] = OrderedDict()
+        self._remember_started_queue_items(state)
 
     @property
     def history(self) -> list[PublicHistoryEntry]:
         return self.state.history or []
+
+    @property
+    def last_event_id(self) -> int:
+        return self._last_event_id
+
+    @property
+    def generation(self) -> int:
+        """How many times the whole state has been swapped out for another.
+
+        Event IDs count what the server has published, so a state a request
+        answered with carries the same watermark as the state it replaced.
+        This counts the replacements themselves, which is what tells a caller
+        holding a state that it is reading the conversation it started on.
+        """
+        return self._generation
 
     @property
     def history_before_cursor(self) -> str | None:
@@ -309,6 +342,37 @@ class ClientProjection:
             return False
         self._add_entry(callback)
         return True
+
+    def adopt_turn_queue(
+        self, queue: PublicTurnQueue, *, after_event_id: int
+    ) -> PublicTurnQueue:
+        """Adopt a queue read unless a newer event was already reduced."""
+        if self._last_event_id > after_event_id:
+            return self.state.turn_queue
+        self._replace_turn_queue(queue)
+        return queue
+
+    def track_queued_turn(
+        self, queued_turn: PublicQueuedTurn, *, session_id: str
+    ) -> None:
+        """Reconcile an enqueue result unless that queue item already retired."""
+        if session_id != self.state.session.id:
+            return
+        if any(item.id == queued_turn.id for item in self.state.turn_queue.items):
+            return
+        if queued_turn.id in self._retired_queue_item_ids:
+            return
+        if any(turn.queue_item_id == queued_turn.id for turn in self.state.turns or []):
+            self._remember_retired_queue_item(queued_turn.id)
+            return
+        self.state.turn_queue.items.append(queued_turn)
+
+    def replace_queued_turn(self, queued_turn: PublicQueuedTurn) -> None:
+        """Optimistically update an existing queued item without resurrecting it."""
+        for index, item in enumerate(self.state.turn_queue.items):
+            if item.id == queued_turn.id:
+                self.state.turn_queue.items[index] = queued_turn
+                return
 
     def begin_turn(self, turn: PublicTurn) -> None:
         if turn.session_id != self.state.session.id:
@@ -354,6 +418,9 @@ class ClientProjection:
             case TurnCompletedParams():
                 self._replace_turn(params.turn)
                 event = TurnCompleted(params.turn)
+            case TurnQueueUpdatedParams():
+                self._replace_turn_queue(params.queue)
+                event = TurnQueueUpdated(params.queue)
             case StatsUpdatedParams():
                 self.state.session.token_usage = params.stats.token_usage
                 event = StatsUpdated(params)
@@ -409,9 +476,15 @@ class ClientProjection:
             raise EventSequenceError("App-server handoff watermark must be positive")
 
     def _replace_state(self, state: PublicSessionState) -> None:
+        if state.session.id == self.state.session.id:
+            self._remember_removed_queue_items(self.state.turn_queue, state.turn_queue)
+        else:
+            self._retired_queue_item_ids.clear()
         self.state = state
         self._entries = {entry.id: entry for entry in state.history or []}
         self._last_event_id = state.event_id
+        self._generation += 1
+        self._remember_started_queue_items(state)
 
     def _apply_snapshot(self, state: PublicSessionState) -> None:
         previous = self.state
@@ -493,6 +566,8 @@ class ClientProjection:
                 return
 
     def _replace_turn(self, turn: PublicTurn) -> None:
+        if turn.queue_item_id is not None:
+            self._remember_retired_queue_item(turn.queue_item_id)
         turns = self.state.turns
         if turns is None:
             self.state.turns = [turn]
@@ -502,6 +577,29 @@ class ClientProjection:
                 turns[index] = turn
                 return
         turns.append(turn)
+
+    def _replace_turn_queue(self, queue: PublicTurnQueue) -> None:
+        self._remember_removed_queue_items(self.state.turn_queue, queue)
+        self.state.turn_queue = queue
+
+    def _remember_removed_queue_items(
+        self, previous: PublicTurnQueue, current: PublicTurnQueue
+    ) -> None:
+        current_ids = {item.id for item in current.items}
+        for item in previous.items:
+            if item.id not in current_ids:
+                self._remember_retired_queue_item(item.id)
+
+    def _remember_started_queue_items(self, state: PublicSessionState) -> None:
+        for turn in state.turns or []:
+            if turn.queue_item_id is not None:
+                self._remember_retired_queue_item(turn.queue_item_id)
+
+    def _remember_retired_queue_item(self, queue_item_id: str) -> None:
+        self._retired_queue_item_ids[queue_item_id] = None
+        self._retired_queue_item_ids.move_to_end(queue_item_id)
+        while len(self._retired_queue_item_ids) > _RETIRED_QUEUE_ITEM_HISTORY_SIZE:
+            self._retired_queue_item_ids.popitem(last=False)
 
     def _update_session(self, params: SessionUpdatedParams) -> SessionUpdated:
         previous = self.state.session
@@ -530,6 +628,8 @@ def _parse_event_params(notification: Notification) -> _KnownEventParams:
             params = validate_wire(TurnStartedParams, notification.params)
         case "turn/completed":
             params = validate_wire(TurnCompletedParams, notification.params)
+        case "turn_queue_updated":
+            params = validate_wire(TurnQueueUpdatedParams, notification.params)
         case "session/statsUpdated":
             params = validate_wire(StatsUpdatedParams, notification.params)
         case _:

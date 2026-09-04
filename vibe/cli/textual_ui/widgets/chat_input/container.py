@@ -17,7 +17,6 @@ from vibe.cli.autocompletion.inline_skill_completion import (
 from vibe.cli.autocompletion.path_completion import PathCompletionController
 from vibe.cli.autocompletion.slash_command import SlashCommandController
 from vibe.cli.commands import CommandRegistry
-from vibe.cli.textual_ui.queue_kinds import QueuedItemKind
 from vibe.cli.textual_ui.widgets.chat_input.body import ChatInputBody
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
@@ -42,15 +41,13 @@ class ChatInputContainer(Vertical):
             super().__init__()
 
     class QueueEditSubmitted(Message):
-        def __init__(self, value: str, kind: QueuedItemKind) -> None:
+        def __init__(self, value: str) -> None:
             self.value = value
-            self.kind = kind
             super().__init__()
 
     class QueueEditConsumed(Message):
-        def __init__(self, value: str, kind: QueuedItemKind) -> None:
+        def __init__(self, value: str) -> None:
             self.value = value
-            self.kind = kind
             super().__init__()
 
     class QueueRemoveRequested(Message):
@@ -74,8 +71,7 @@ class ChatInputContainer(Vertical):
         file_watcher_for_autocomplete_getter: Callable[[], bool] | None = None,
         voice_manager: VoiceManagerPort | None = None,
         queue_edit_active_getter: Callable[[], bool] | None = None,
-        queue_items_getter: Callable[[], list[tuple[int, QueuedItemKind, str]]]
-        | None = None,
+        queue_items_getter: Callable[[], list[tuple[int, str]]] | None = None,
         queue_selected_index_getter: Callable[[], int | None] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -260,13 +256,13 @@ class ChatInputContainer(Vertical):
         self, event: ChatInputBody.QueueEditSubmitted
     ) -> None:
         event.stop()
-        self.post_message(self.QueueEditSubmitted(event.value, event.kind))
+        self.post_message(self.QueueEditSubmitted(event.value))
 
     def on_chat_input_body_queue_edit_consumed(
         self, event: ChatInputBody.QueueEditConsumed
     ) -> None:
         event.stop()
-        self.post_message(self.QueueEditConsumed(event.value, event.kind))
+        self.post_message(self.QueueEditConsumed(event.value))
 
     def on_chat_input_body_queue_remove_requested(
         self, event: ChatInputBody.QueueRemoveRequested
