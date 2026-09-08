@@ -93,6 +93,7 @@ _BOOTSTRAP_CACHE_FORMAT = 2
 _BOOTSTRAP_CACHE_TTL_SECONDS = 10 * 60
 _BOOTSTRAP_TIMEOUT_SECONDS = 30.0
 _MAX_CONNECTORS = 256
+# Headroom limit per connector; oversized connectors degrade gracefully to unavailable with a diagnostic.
 _MAX_TOOLS_PER_CONNECTOR = 1_000
 _MAX_INPUT_SCHEMA_BYTES = 64 * 1024
 _MAX_DIAGNOSTICS_PER_CONNECTOR = 3
@@ -1520,10 +1521,6 @@ def _resolve_catalog(
                 "Connector bootstrap contains a duplicate connector ID"
             )
         raw_ids.add(raw_id)
-        if len(raw_connector.tools) > _MAX_TOOLS_PER_CONNECTOR:
-            raise ConnectorCatalogValidationError(
-                f"Connector {raw_id!r} exceeds {_MAX_TOOLS_PER_CONNECTOR} tools"
-            )
         display_name = (raw_connector.name or raw_id).strip() or raw_id
         prepared_connectors.append((raw_id, display_name, raw_connector))
 
@@ -1533,6 +1530,27 @@ def _resolve_catalog(
         prepared_connectors, key=lambda item: item[0]
     ):
         alias = _unique_alias(normalize_connector_alias(display_name), aliases)
+        diagnostics = list(_bounded_diagnostics(raw_connector.bootstrap_errors))
+        if len(raw_connector.tools) > _MAX_TOOLS_PER_CONNECTOR:
+            tool_limit_diagnostic = "Connector bootstrap issue: tool_limit_exceeded"
+            if (
+                tool_limit_diagnostic not in diagnostics
+                and len(diagnostics) < _MAX_DIAGNOSTICS_PER_CONNECTOR
+            ):
+                diagnostics.append(tool_limit_diagnostic)
+            connectors.append(
+                ResolvedConnector(
+                    raw_id=raw_id,
+                    alias=alias,
+                    display_name=display_name,
+                    ready=False,
+                    auth_action=_auth_action(raw_connector.auth_action),
+                    tools=(),
+                    diagnostics=tuple(diagnostics),
+                )
+            )
+            continue
+
         tools = tuple(
             _resolve_tool(tool, raw_id=raw_id) for tool in raw_connector.tools
         )
@@ -1550,7 +1568,7 @@ def _resolve_catalog(
                 ready=raw_connector.status.is_ready,
                 auth_action=_auth_action(raw_connector.auth_action),
                 tools=tools,
-                diagnostics=_bounded_diagnostics(raw_connector.bootstrap_errors),
+                diagnostics=tuple(diagnostics),
             )
         )
 
