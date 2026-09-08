@@ -1,0 +1,42 @@
+FROM debian:trixie AS builder
+
+# Layer 1: System deps (cached unless this block changes)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-dev \
+    gcc g++ make cargo git \
+    zlib1g-dev libffi-dev libssl-dev pkg-config \
+    ripgrep curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Layer 2: uv + maturin (cached unless pinned versions change)
+# maturin is needed to build cryptography from source — no riscv64
+# wheel exists on PyPI, and the maturin PyPI wheel ships a musl binary
+# that doesn't run on glibc systems. Building via cargo works.
+RUN curl -LsSf https://astral.sh/uv/0.10.0/install.sh | sh
+RUN cargo install maturin@1.11.5 --locked --root /usr/local
+ENV PATH="/root/.local/bin:$PATH"
+
+# Place venv outside workspace so COPY . . cannot overwrite it.
+# Pin to system Python so both layers use the same interpreter —
+# without this, Layer 4 downloads uv-managed Python 3.12, detects a
+# version mismatch with the 3.13 venv from Layer 3, and recompiles
+# every Rust extension from scratch.
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+ENV UV_PYTHON=/usr/bin/python3
+
+WORKDIR /workspace
+
+# Layer 3: Deps only — THE KEY LAYER
+# Busted only when pyproject.toml or uv.lock changes.
+# This is where Rust compilation happens (~30-40 min).
+COPY pyproject.toml uv.lock ./
+RUN uv sync --no-dev --group build --no-install-project
+
+# Layer 4: Full source + project install + PyInstaller
+COPY . .
+RUN uv sync --no-dev --group build && \
+    uv run --no-dev --group build pyinstaller vibe-acp.spec
+
+# Output: just the binary
+FROM scratch AS output
+COPY --from=builder /workspace/dist/vibe-acp /vibe-acp
