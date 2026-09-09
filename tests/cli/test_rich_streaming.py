@@ -1,4 +1,5 @@
 """Unit tests for VisualStreamingOutput in vibe/cli/rich_streaming.py."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
