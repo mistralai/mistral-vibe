@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, aclosing, nullcontext
 import functools
 import json
+import ssl
 import types
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
@@ -443,7 +444,7 @@ class GenericBackend:
                     has_tools=bool(tools),
                     tool_choice=tool_choice,
                 ) from e
-            except httpx.RequestError as e:
+            except (httpx.RequestError, ssl.SSLError) as e:
                 raise BackendErrorBuilder.build_request_error(
                     provider=self._provider.name,
                     endpoint=url,
@@ -563,7 +564,7 @@ class GenericBackend:
                     has_tools=bool(tools),
                     tool_choice=tool_choice,
                 ) from e
-            except httpx.RequestError as e:
+            except (httpx.RequestError, ssl.SSLError) as e:
                 raise BackendErrorBuilder.build_request_error(
                     provider=self._provider.name,
                     endpoint=url,

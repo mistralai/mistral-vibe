@@ -8,6 +8,7 @@ from vibe.utils.http import (
     _EnvProxyTransport,
     _normalize_proxy_url,
     _should_bypass_proxy,
+    _SSLTranslatingTransport,
 )
 
 PROXY_ENV_KEYS = (
@@ -59,9 +60,10 @@ async def test_vibe_async_http_client_builds_proxy_transport_from_env(
     client = VibeAsyncHTTPClient()
     try:
         assert client._trust_env is False
-        assert isinstance(client._transport, _EnvProxyTransport)
-        assert client._transport._no_proxy == ("fc00::/7", ".asml.com")
-        assert set(client._transport._proxies) == {"http", "https"}
+        assert isinstance(client._transport, _SSLTranslatingTransport)
+        assert isinstance(client._transport._wrapped, _EnvProxyTransport)
+        assert client._transport._wrapped._no_proxy == ("fc00::/7", ".asml.com")
+        assert set(client._transport._wrapped._proxies) == {"http", "https"}
     finally:
         await client.aclose()
 
@@ -78,7 +80,7 @@ async def test_vibe_async_http_client_keeps_explicit_transport(
     client = VibeAsyncHTTPClient(transport=transport)
     try:
         assert client._trust_env is False
-        assert client._transport is transport
+        assert client._transport._wrapped is transport
     finally:
         await client.aclose()
 
@@ -193,3 +195,55 @@ def test_should_bypass_proxy_documents_supported_no_proxy_rules(
     url: str, rules: tuple[str, ...], expected: bool
 ) -> None:
     assert _should_bypass_proxy(httpx.URL(url), rules) is expected
+
+
+@pytest.mark.asyncio
+async def test_ssl_translating_transport_translates_ssl_error_to_read_error() -> None:
+    """A raw ssl.SSLError from the wrapped transport becomes httpx.ReadError.
+
+    httpcore/httpx only map ssl.SSLEOFError, not other TLS alerts like
+    bad_record_mac. The transport wrapper translates all ssl.SSLError so the
+    existing retry infrastructure (which catches httpx.NetworkError) handles
+    stale keep-alive connections automatically.
+    """
+    import ssl
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise ssl.SSLError("SSLV3_ALERT_BAD_RECORD_MAC")
+
+    inner = httpx.MockTransport(handler)
+    transport = _SSLTranslatingTransport(inner)
+
+    with pytest.raises(httpx.ReadError):
+        await transport.handle_async_request(
+            httpx.Request("GET", "https://example.com")
+        )
+
+
+@pytest.mark.asyncio
+async def test_ssl_translating_transport_passes_through_non_ssl_errors() -> None:
+    """Non-SSL errors must pass through unchanged."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    inner = httpx.MockTransport(handler)
+    transport = _SSLTranslatingTransport(inner)
+
+    with pytest.raises(httpx.ConnectError):
+        await transport.handle_async_request(
+            httpx.Request("GET", "https://example.com")
+        )
+
+
+@pytest.mark.asyncio
+async def test_ssl_translating_transport_passes_through_successful_response() -> None:
+    """A successful response must pass through unchanged."""
+    inner = httpx.MockTransport(lambda request: httpx.Response(200, text="ok"))
+    transport = _SSLTranslatingTransport(inner)
+
+    response = await transport.handle_async_request(
+        httpx.Request("GET", "https://example.com")
+    )
+    assert response.status_code == 200
+    assert response.text == "ok"

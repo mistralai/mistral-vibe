@@ -13,6 +13,7 @@ the tests will be. Always prefer real API data over manually constructed example
 from __future__ import annotations
 
 import json
+import ssl
 from typing import ClassVar, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -902,6 +903,66 @@ class TestMistralRetry:
         assert raised.value.status == 429
         assert "service tier capacity exceeded" in (raised.value.body_text or "")
         assert all(response.is_closed for response in served)
+
+    @pytest.mark.asyncio
+    async def test_ssl_error_during_streaming_is_wrapped_as_backend_error(self):
+        """A raw ssl.SSLError (e.g. bad_record_mac) must not escape uncaught.
+
+        The transport wrapper translates ssl.SSLError to httpx.ReadError, which
+        the SDK retries. After retries are exhausted the backend wraps the
+        remaining error in a BackendError instead of letting a raw RuntimeError
+        surface to the user.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise ssl.SSLError("SSLV3_ALERT_BAD_RECORD_MAC")
+
+        backend = self._create_test_backend()
+        backend._retry_config = RetryConfig(
+            strategy="backoff",
+            backoff=BackoffStrategy(
+                initial_interval=1, max_interval=1, exponent=1, max_elapsed_time=200
+            ),
+            retry_connection_errors=True,
+        )
+        with self._serving(handler), pytest.raises(BackendError) as raised:
+            await self._drain_stream(backend)
+
+        assert raised.value.status is None
+        assert "Network error" in (raised.value.parsed_error or "")
+
+    @pytest.mark.asyncio
+    async def test_ssl_error_during_complete_is_wrapped_as_backend_error(self):
+        """A raw ssl.SSLError on a non-streaming request must be wrapped too."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise ssl.SSLError("SSLV3_ALERT_BAD_RECORD_MAC")
+
+        backend = self._create_test_backend()
+        backend._retry_config = RetryConfig(
+            strategy="backoff",
+            backoff=BackoffStrategy(
+                initial_interval=1, max_interval=1, exponent=1, max_elapsed_time=200
+            ),
+            retry_connection_errors=True,
+        )
+        with self._serving(handler), pytest.raises(BackendError) as raised:
+            model = ModelConfig(
+                name="model_name", provider="test_provider", alias="model_alias"
+            )
+            messages = [LLMMessage(role=Role.user, content="Just say hi")]
+            await backend.complete(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+        assert raised.value.status is None
+        assert "Network error" in (raised.value.parsed_error or "")
 
     @pytest.mark.asyncio
     async def test_transport_timeouts_bound_everything_but_the_read(self):

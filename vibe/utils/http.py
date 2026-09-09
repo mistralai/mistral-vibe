@@ -76,6 +76,32 @@ class _EnvProxyTransport(httpx.AsyncBaseTransport):
             await transport.aclose()
 
 
+class _SSLTranslatingTransport(httpx.AsyncBaseTransport):
+    """Translate raw ``ssl.SSLError`` into ``httpx.ReadError``.
+
+    httpcore/httpx only map ``ssl.SSLEOFError`` (and the
+    ``UNEXPECTED_EOF_WHILE_READING`` message) to a network error. Other TLS
+    alerts — notably ``bad_record_mac`` from reusing a keep-alive connection
+    the server has half-closed — propagate as a raw ``ssl.SSLError`` that
+    bypasses every retry layer: the Mistral SDK only retries
+    ``httpx.NetworkError`` / ``httpx.TimeoutException``, and the backends only
+    catch ``httpx.RequestError``. Translating it here lets the existing retry
+    infrastructure handle it automatically.
+    """
+
+    def __init__(self, wrapped: httpx.AsyncBaseTransport) -> None:
+        self._wrapped = wrapped
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            return await self._wrapped.handle_async_request(request)
+        except ssl.SSLError as exc:
+            raise httpx.ReadError(str(exc) or repr(exc), request=request) from exc
+
+    async def aclose(self) -> None:
+        await self._wrapped.aclose()
+
+
 class VibeAsyncHTTPClient(httpx.AsyncClient):
     """HTTPX client that works around HTTPX's CIDR NO_PROXY limitation."""
 
@@ -107,6 +133,13 @@ class VibeAsyncHTTPClient(httpx.AsyncClient):
                     **transport_kwargs,
                 )
         super().__init__(**kwargs)
+        self._transport = _SSLTranslatingTransport(self._transport)
+        self._mounts = {
+            pattern: _SSLTranslatingTransport(transport)
+            if transport is not None
+            else None
+            for pattern, transport in self._mounts.items()
+        }
 
 
 def _normalize_proxy_url(value: str | None) -> str | None:
@@ -227,6 +260,7 @@ def get_server_url_from_api_base(api_base: str) -> str | None:
 
 __all__ = [
     "VibeAsyncHTTPClient",
+    "_SSLTranslatingTransport",
     "build_ssl_context",
     "configure_ssl_context",
     "get_server_url_from_api_base",

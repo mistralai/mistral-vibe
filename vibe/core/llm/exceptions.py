@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from http import HTTPStatus
 import json
+import ssl
 from typing import Any
 
 import httpx
@@ -236,7 +237,7 @@ class BackendErrorBuilder:
         *,
         provider: str,
         endpoint: str,
-        error: httpx.RequestError | httpx.StreamError,
+        error: httpx.RequestError | httpx.StreamError | ssl.SSLError,
         model: str,
         messages: Sequence[LLMMessage],
         temperature: float,

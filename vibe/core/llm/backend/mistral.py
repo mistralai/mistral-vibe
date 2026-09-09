@@ -6,6 +6,7 @@ from concurrent.futures import CancelledError, Future
 from contextlib import suppress
 import json
 import logging
+import ssl
 import types
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
@@ -516,7 +517,7 @@ class MistralBackend:
                 has_tools=bool(tools),
                 tool_choice=tool_choice,
             ) from e
-        except (httpx.RequestError, httpx.StreamError) as e:
+        except (httpx.RequestError, httpx.StreamError, ssl.SSLError) as e:
             raise BackendErrorBuilder.build_request_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,
@@ -617,7 +618,7 @@ class MistralBackend:
                 has_tools=bool(tools),
                 tool_choice=tool_choice,
             ) from e
-        except (httpx.RequestError, httpx.StreamError) as e:
+        except (httpx.RequestError, httpx.StreamError, ssl.SSLError) as e:
             raise BackendErrorBuilder.build_request_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,
