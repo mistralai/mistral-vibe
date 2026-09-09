@@ -155,7 +155,11 @@ from vibe.cli.textual_ui.widgets.chat_input.paste_image import (
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.textual_ui.widgets.collapsible import CollapsibleSection
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
-from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenState
+from vibe.cli.textual_ui.widgets.context_progress import (
+    ContextProgress,
+    TokenState,
+    _get_total_memory,
+)
 from vibe.cli.textual_ui.widgets.debug_console import DebugConsole
 from vibe.cli.textual_ui.widgets.feedback_bar import FeedbackBar
 from vibe.cli.textual_ui.widgets.inline_notice import InlineNotice
@@ -1117,11 +1121,8 @@ class VibeApp(App):  # noqa: PLR0904
             yield NoMarkupStatic(id="spacer")
             self._context_progress = ContextProgress()
             if has_session:
-                stats = self.app_server.resources.runtime.stats
-                self._context_progress.tokens = TokenState(
-                    max_tokens=self.app_server.resources.runtime.context_window,
-                    current_tokens=stats.context_tokens,
-                )
+                self._refresh_context_progress()
+
             yield self._context_progress
 
     @property
@@ -1271,9 +1272,16 @@ class VibeApp(App):  # noqa: PLR0904
     def _update_context_progress(self, event: StatsUpdated) -> None:
         if self._context_progress is None:
             return
+        stats = event.params.stats
         self._context_progress.tokens = TokenState(
             max_tokens=event.params.context_window,
-            current_tokens=event.params.stats.context_tokens,
+            current_tokens=stats.context_tokens,
+            model_name=self.config.active_model.alias
+            if self.config.active_model
+            else "",
+            session_cost=stats.session_cost,
+            memory_bytes=_get_total_memory(),
+            total_memory_bytes=_get_total_memory(),
         )
 
     def _start_post_ready_startup(self) -> None:
@@ -5356,9 +5364,17 @@ class VibeApp(App):  # noqa: PLR0904
         if self._context_progress is None:
             return
         runtime = self.app_server.resources.runtime
+        stats = runtime.stats
+        memory_bytes = _get_total_memory()
         self._context_progress.tokens = TokenState(
             max_tokens=runtime.context_window,
-            current_tokens=runtime.stats.context_tokens,
+            current_tokens=stats.context_tokens,
+            model_name=self.config.active_model.alias
+            if self.config.active_model
+            else "",
+            session_cost=stats.session_cost,
+            memory_bytes=memory_bytes,
+            total_memory_bytes=memory_bytes,
         )
 
     def _on_profile_changed(self) -> None:
