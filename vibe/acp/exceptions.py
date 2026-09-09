@@ -228,7 +228,7 @@ def from_public_error(error: PublicError) -> VibeRequestError:
             mapped = ImagesNotSupportedError(model)
         case TurnErrorCode.COMPACTION_FAILED if isinstance(reason, str):
             mapped = CompactionError(reason, error.message)
-        case TurnErrorCode.INVALID_MODEL:
+        case TurnErrorCode.INVALID_MODEL | TurnErrorCode.INVALID_API_KEY:
             mapped = ConfigurationError(error.message)
         case _:
             mapped = InternalError(error.message)

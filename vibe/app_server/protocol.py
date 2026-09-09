@@ -206,11 +206,12 @@ SERVER_METHODS: tuple[str, ...] = (
     "stats/read",
     "telemetry/record",
     "tools/list",
-    "app_server/session/turn/enqueue",
-    "app_server/session/turn/queue/read",
-    "app_server/session/turn/queue/remove",
-    "app_server/session/turn/queue/replace",
-    "app_server/session/turn/queue/resume",
+    "session/turn/enqueue",
+    "session/turn/queue/read",
+    "session/turn/queue/remove",
+    "session/turn/queue/replace",
+    "session/turn/queue/steer",
+    "session/turn/queue/resume",
     "turn/interrupt",
     "turn/start",
     "turn/steer",
@@ -225,7 +226,9 @@ SERVER_METHODS: tuple[str, ...] = (
     "vibeCode/teleport/push/respond",
     "vibeCode/teleport/start",
     "workspace/git/checkouts",
+    "workspace/git/worktrees/limit/update",
     "workspace/git/worktrees/list",
+    "workspace/git/worktrees/prune",
     "workspace/git/worktrees/remove",
     "workspace/prompt/prepare",
     "workspace/trust/decision",
@@ -910,6 +913,7 @@ class ConfigReadResponse(ProtocolModel):
     hooks_count: int = 0
     mcp_servers_total: int = 0
     mcp_servers_enabled: int = 0
+    harness_selection_source: str | None = None
 
 
 class AgentInstallParams(ProtocolModel):
@@ -1454,6 +1458,23 @@ class WorkspaceWorktreeListResponse(ProtocolModel):
     repository_cwd: str | None = None
 
 
+class WorkspaceWorktreePruneParams(ProtocolModel):
+    pass
+
+
+class WorkspaceWorktreePruneResponse(ProtocolModel):
+    removed: int
+
+
+class WorkspaceWorktreeLimitUpdateParams(ProtocolModel):
+    limit: int = Field(ge=0, le=100)
+
+
+class WorkspaceWorktreeLimitUpdateResponse(ProtocolModel):
+    limit: int
+    failures: list[str] = Field(default_factory=list)
+
+
 # No session_id on the wire: the caller is deleting a session that has already
 # closed and dropped its holder, and accepting one would let a client name an
 # arbitrary holder file to unlink.
@@ -1537,9 +1558,14 @@ class ProjectLinksListParams(ProtocolModel):
     pass
 
 
+class ProjectLinksLocalLink(ProtocolModel):
+    directory_path: str
+    has_commits: bool
+
+
 class ProjectLinksLinkedProject(ProtocolModel):
     project_id: str
-    repo_local_paths: list[str]
+    local_links: list[ProjectLinksLocalLink]
 
 
 class ProjectLinksListResponse(ProtocolModel):
@@ -1551,11 +1577,17 @@ type ProjectLinksResolveRootRejectReason = Literal[
 ]
 
 
-class ProjectLinksResolvedRoot(ProtocolModel):
-    repo_local_path: str
-    repo_name: str
+class ProjectLinksDirectoryGit(ProtocolModel):
     current_branch: str | None
     default_branch: str | None
+    github_repo_url: str | None
+    has_commits: bool
+
+
+class ProjectLinksInspectedDirectory(ProtocolModel):
+    directory_path: str
+    directory_name: str
+    git: ProjectLinksDirectoryGit | None
 
 
 class ProjectLinksResolveRootParams(ProtocolModel):
@@ -1565,15 +1597,11 @@ class ProjectLinksResolveRootParams(ProtocolModel):
 class ProjectLinksResolveRootResponse(ProtocolModel):
     eligible: bool
     reject_reason: ProjectLinksResolveRootRejectReason | None = None
-    root: ProjectLinksResolvedRoot | None = None
+    root: ProjectLinksInspectedDirectory | None = None
 
 
 class ProjectLinksInspectRootParams(ProtocolModel):
     root_path: str = Field(min_length=1)
-
-
-class ProjectLinksInspectedRoot(ProjectLinksResolvedRoot):
-    repo_url: str
 
 
 class ProjectLinksSavedLink(ProtocolModel):
@@ -1584,7 +1612,7 @@ class ProjectLinksSavedLink(ProtocolModel):
 class ProjectLinksInspectRootResponse(ProtocolModel):
     eligible: bool
     reject_reason: ProjectLinksResolveRootRejectReason | None = None
-    root: ProjectLinksInspectedRoot | None = None
+    root: ProjectLinksInspectedDirectory | None = None
     saved_link: ProjectLinksSavedLink | None = None
     stale_link_cleared: bool
     stale_link_clear_failed: bool = False
@@ -1593,7 +1621,6 @@ class ProjectLinksInspectRootResponse(ProtocolModel):
 class ProjectLinksPickerCandidate(ProtocolModel):
     project_id: str
     name: str
-    match_kind: Literal["exact_repo", "multi_repo"]
     recommended: bool
 
 
@@ -1607,7 +1634,7 @@ class ProjectLinksPickerLoadParams(ProtocolModel):
 
 
 class ProjectLinksPickerLoadResponse(ProtocolModel):
-    root: ProjectLinksResolvedRoot
+    root: ProjectLinksInspectedDirectory
     saved_link: ProjectLinksSavedLink | None = None
     stale_link_cleared: bool
     candidates: ProjectLinksPickerCandidates
@@ -1639,13 +1666,13 @@ class ProjectLinksSaveParams(ProtocolModel):
     root_path: str = Field(min_length=1)
     project_id: str = Field(min_length=1)
     project_name: str = Field(min_length=1)
-    expected_repo_url: str = Field(min_length=1)
+    expected_github_repo_url: str | None
 
 
 class ProjectLink(ProtocolModel):
     project_id: str
     project_name: str
-    repo_local_path: str
+    directory_path: str
 
 
 class ProjectLinkMutationResponse(ProtocolModel):
@@ -1775,6 +1802,17 @@ class TurnQueueReplaceParams(_TurnQueueInputParams):
 
 class TurnQueueReplaceResponse(ProtocolModel):
     queue_item_id: str
+
+
+class TurnQueueSteerParams(ProtocolModel):
+    session_id: str
+    queue_item_id: str
+    expected_turn_id: str
+
+
+class TurnQueueSteerResponse(EventWatermarkResponse):
+    queue_item_id: str
+    turn_id: str
 
 
 class TurnQueueReadParams(ProtocolModel):
@@ -2028,10 +2066,47 @@ class ProtocolError(ProtocolModel):
     data: JsonValue = None
 
 
+def format_invalid_params_issues(data: JsonValue) -> str | None:
+    """Render the field-level detail carried by an INVALID_PARAMS error.
+
+    The useful part of a validation rejection — which field failed and why —
+    travels in ``ProtocolError.data`` as an :class:`InvalidParamsData` payload.
+    Returns a single-line summary like ``field.path: reason; ...`` or ``None``
+    when the data does not carry any issues.
+    """
+    if not isinstance(data, dict):
+        return None
+    issues = data.get("issues")
+    if not isinstance(issues, list) or not issues:
+        return None
+    parts: list[str] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        path = issue.get("path")
+        location = (
+            ".".join(str(segment) for segment in path)
+            if isinstance(path, list) and path
+            else "<root>"
+        )
+        message = issue.get("message")
+        parts.append(f"{location}: {message}" if message else location)
+    if not parts:
+        return None
+    return "; ".join(parts)
+
+
+def _render_protocol_error(error: ProtocolError) -> str:
+    detail = format_invalid_params_issues(error.data)
+    if detail is None:
+        return error.message
+    return f"{error.message} ({detail})"
+
+
 class AppServerResponseError(RuntimeError):
     def __init__(self, error: ProtocolError) -> None:
         self.error = error
-        super().__init__(error.message)
+        super().__init__(_render_protocol_error(error))
 
 
 class JsonRpcProtocolError(RuntimeError):

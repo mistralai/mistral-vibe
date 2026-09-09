@@ -111,6 +111,24 @@ def test_default_agent_is_accept_edits() -> None:
     assert VibeConfigSchema().default_agent == "accept-edits"
 
 
+def test_smart_approve_is_not_offered_by_default() -> None:
+    config = VibeConfigSchema()
+    assert config.smart_approve_offered() is False
+    assert config.resolve_default_agent() == "accept-edits"
+
+
+def test_smart_approve_available_flag_offers_without_defaulting() -> None:
+    config = VibeConfigSchema(smart_approve_available=True, default_agent="ask")
+    assert config.smart_approve_offered() is True
+    assert config.resolve_default_agent() == "ask"
+
+
+def test_smart_approve_default_flag_offers_and_defaults() -> None:
+    config = VibeConfigSchema(smart_approve_default=True)
+    assert config.smart_approve_offered() is True
+    assert config.resolve_default_agent() == "smart-approve"
+
+
 def test_unpinned_active_model_resolves_to_default_model() -> None:
     from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
 

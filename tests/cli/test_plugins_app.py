@@ -176,14 +176,15 @@ def test_the_detail_view_answers_where_a_plugin_came_from_and_what_it_brought() 
     app._show_detail_view(option_list, entry)
 
     assert _labels(option_list) == [
-        "  Scope: global",
-        "  Format: agent_plugins_1_0",
-        "  Frontend design skill for UI/UX implementation",
-        "",
         "  Author: Anthropic",
         "  Version: —",
+        "",
+        "  Frontend design skill for UI/UX implementation",
+        "",
+        "  Location: /tmp/plugins/frontend",
+        "  Scope: global",
+        "  Format: agent_plugins_1_0",
         "  Pinned: 1e040938",
-        "  Installed from: /tmp/plugins/frontend",
         "",
         "  Components:",
         "  ● Skills: frontend-design",
@@ -217,7 +218,7 @@ def test_a_plugin_uninstalled_since_the_pin_says_so_where_its_path_would_be() ->
 
     app._show_detail_view(option_list, entry)
 
-    assert "  Installed from: (uninstalled since pin)" in _labels(option_list)
+    assert "  Location: (uninstalled since pin)" in _labels(option_list)
 
 
 def test_selecting_a_plugin_opens_it_and_backspace_returns_to_the_list() -> None:

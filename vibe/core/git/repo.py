@@ -18,7 +18,7 @@ from vibe.core.git.errors import (
     GitRepositoryNotFoundError,
     GitUnavailableError,
 )
-from vibe.core.git.remote import find_remote_url
+from vibe.core.git.remote import GitHubRemoteInfo, find_github_remote, find_remote_url
 
 _GIT_USAGE_ERROR_STATUS = 129
 _DEFAULT_REMOTE = "origin"
@@ -161,6 +161,14 @@ class GitRepo:
             base_branch=self.base_branch(),
             repo_url=find_remote_url(self._repo),
         )
+
+    def github_remote(self) -> GitHubRemoteInfo | None:
+        """The first GitHub remote, when this checkout has one."""
+        return find_github_remote(self._repo)
+
+    def has_commits(self) -> bool:
+        """Whether HEAD resolves to a commit."""
+        return self._repo.head.is_valid()
 
     def branch_changes(self) -> BranchChanges | None:
         """Committed lines added and removed on this branch, against its base.

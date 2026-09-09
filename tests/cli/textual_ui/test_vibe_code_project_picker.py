@@ -6,9 +6,9 @@ from rich.text import Text
 from textual.widgets import OptionList
 
 from vibe.app_server.models import (
+    RemoteProjectLink,
     VibeCodePickerContext,
     VibeCodeProject,
-    VibeCodeProjectLink,
     VibeCodeRepository,
 )
 from vibe.cli.textual_ui.widgets.vibe_code_project import (
@@ -27,7 +27,7 @@ from vibe.cli.textual_ui.widgets.vibe_code_project.picker import (
 CURRENT_REPO_URL = "https://github.com/mistralai/mistral-vibe.git"
 
 
-def _context(saved_link: VibeCodeProjectLink | None = None) -> VibeCodePickerContext:
+def _context(saved_link: RemoteProjectLink | None = None) -> VibeCodePickerContext:
     return VibeCodePickerContext(
         repo_root="/repo/mistral-vibe",
         repo_url=CURRENT_REPO_URL,
@@ -44,8 +44,8 @@ def _project(project_id: str, name: str, *repo_urls: str) -> VibeCodeProject:
     )
 
 
-def _link(project_id: str, repo_url: str = CURRENT_REPO_URL) -> VibeCodeProjectLink:
-    return VibeCodeProjectLink(
+def _link(project_id: str, repo_url: str = CURRENT_REPO_URL) -> RemoteProjectLink:
+    return RemoteProjectLink(
         repo_root="/repo/mistral-vibe",
         repo_url=repo_url,
         project_id=project_id,

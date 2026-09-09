@@ -140,7 +140,7 @@ async def test_resumed_completed_reasoning_starts_settled() -> None:
                 output_text="transient output",
                 display=EffectResultDisplay(success=True, message="Done"),
             ),
-            "✓",
+            "⏵",
         ),
         (
             CancelledEffectState(
@@ -148,7 +148,7 @@ async def test_resumed_completed_reasoning_starts_settled() -> None:
                 output_text="transient output",
                 display=EffectResultDisplay(success=False, message="Cancelled"),
             ),
-            "□",
+            "⏵",
         ),
     ],
 )

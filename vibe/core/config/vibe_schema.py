@@ -457,6 +457,24 @@ class VibeConfigSchema(ConfigSchema):
             "Applies in both interactive and programmatic (-p/--prompt) mode."
         ),
     )
+    # Smart approve rollout, driven by GrowthBook (see experiments/active.py). The two
+    # flags are independent, mirroring model routing (#49523): one exposes the mode in
+    # the picker, the other makes it the default. Kept off by default so smart approve
+    # ships dark until a cohort is opted in.
+    smart_approve_available: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Expose the smart-approve mode in the mode picker/cycle. "
+            "Set by the vibe_cli_smart_approve experiment; does not change the default."
+        ),
+    )
+    smart_approve_default: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Make smart-approve the default mode (implies it is available). "
+            "Set by the vibe_cli_smart_approve_default experiment."
+        ),
+    )
 
     # Skills
     skill_paths: Annotated[
@@ -542,6 +560,12 @@ class VibeConfigSchema(ConfigSchema):
     voice_mode_enabled: Annotated[bool, WithReplaceMerge()] = False
     narrator_enabled: Annotated[bool, WithReplaceMerge()] = False
     show_thinking_nodes: Annotated[bool, WithReplaceMerge()] = False
+    worktree_limit: Annotated[int, WithReplaceMerge()] = Field(
+        default=15,
+        ge=0,
+        le=100,
+        description="Maximum number of recent managed worktrees kept locally.",
+    )
     bypass_tool_permissions: Annotated[bool, WithReplaceMerge()] = False
     raise_on_compaction_failure: Annotated[bool, WithReplaceMerge()] = False
     enable_telemetry: Annotated[bool, WithReplaceMerge()] = True
@@ -555,6 +579,7 @@ class VibeConfigSchema(ConfigSchema):
     enable_update_checks: Annotated[bool, WithReplaceMerge()] = True
     enable_auto_update: Annotated[bool, WithReplaceMerge()] = True
     enable_notifications: Annotated[bool, WithReplaceMerge()] = True
+    experimental_enable_tab_status: Annotated[bool, WithReplaceMerge()] = True
     enable_system_trust_store: Annotated[bool, WithReplaceMerge()] = False
     api_timeout: Annotated[float, WithReplaceMerge()] = DEFAULT_API_TIMEOUT
     api_retry_max_elapsed_time: Annotated[float, WithReplaceMerge()] = (
@@ -583,6 +608,20 @@ class VibeConfigSchema(ConfigSchema):
     experiments: Annotated[ExperimentsConfig, WithReplaceMerge()] = Field(
         default_factory=ExperimentsConfig
     )
+
+    def smart_approve_offered(self) -> bool:
+        """Whether smart-approve is exposed in the mode picker/cycle.
+
+        Making it the default implies it is offered, so a cohort can be defaulted
+        into it without also flipping the availability flag.
+        """
+        return self.smart_approve_available or self.smart_approve_default
+
+    def resolve_default_agent(self) -> str:
+        """The default agent, honoring the smart-approve default experiment."""
+        if self.smart_approve_default:
+            return BuiltinAgentName.SMART_APPROVE
+        return self.default_agent
 
     def resolve_default_model_alias(self) -> str:
         available = self.available_models()

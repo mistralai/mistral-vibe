@@ -182,6 +182,16 @@ def test_holders_round_trip(tmp_path: Path) -> None:
     assert _claim().holders() == {"session-b"}
 
 
+def test_starting_marker_is_live_only_while_held(tmp_path: Path) -> None:
+    _claim().write(_record(repo_root=tmp_path))
+
+    _claim().mark_starting()
+    assert _claim().is_starting() is True
+
+    _claim().finish_starting()
+    assert _claim().is_starting() is False
+
+
 def test_claims_root_lives_under_the_managed_worktree_root() -> None:
     assert _claims_root().is_relative_to(WORKTREES_DIR.path.resolve())
 

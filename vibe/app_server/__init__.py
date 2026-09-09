@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from vibe.app_server.client import AppServerConnectionClosed
     from vibe.app_server.client_tools import ClientToolHandler
     from vibe.app_server.host import AppServerHost
     from vibe.app_server.session import AppServerSession, SessionExitSummary
 
 __all__ = [
+    "AppServerConnectionClosed",
     "AppServerHost",
     "AppServerSession",
     "ClientToolHandler",
@@ -15,6 +17,10 @@ __all__ = [
 ]
 
 _MAPPING: dict[str, tuple[str, str]] = {
+    "AppServerConnectionClosed": (
+        "vibe.app_server.client",
+        "AppServerConnectionClosed",
+    ),
     "AppServerHost": ("vibe.app_server.host", "AppServerHost"),
     "AppServerSession": ("vibe.app_server.session", "AppServerSession"),
     "ClientToolHandler": ("vibe.app_server.client_tools", "ClientToolHandler"),

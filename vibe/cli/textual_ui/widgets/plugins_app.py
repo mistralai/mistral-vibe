@@ -270,19 +270,20 @@ def _entry_label(entry: PluginCatalogEntry, width: int) -> Text:
 
 
 def _detail_lines(entry: PluginCatalogEntry) -> Iterator[str]:
-    yield f"  Scope: {entry.scope or _UNKNOWN}"
-    yield f"  Format: {entry.source_format}"
-    if entry.description:
-        yield f"  {entry.description}"
-    yield ""
     yield f"  Author: {entry.author or _UNKNOWN}"
     yield f"  Version: {entry.version or _UNKNOWN}"
-    yield f"  Pinned: {_short_digest(entry.content_sha256)}"
+    if entry.description:
+        yield ""
+        yield f"  {entry.description}"
+    yield ""
     yield (
-        "  Installed from: (uninstalled since pin)"
+        "  Location: (uninstalled since pin)"
         if entry.installed_root is None
-        else f"  Installed from: {_abbreviate_home(entry.installed_root)}"
+        else f"  Location: {_abbreviate_home(entry.installed_root)}"
     )
+    yield f"  Scope: {entry.scope or _UNKNOWN}"
+    yield f"  Format: {entry.source_format}"
+    yield f"  Pinned: {_short_digest(entry.content_sha256)}"
     if not entry.components:
         return
     yield ""

@@ -6,10 +6,17 @@ import hashlib
 import os
 from pathlib import Path
 import tempfile
+from threading import Lock
+from typing import BinaryIO
 
 from pydantic import BaseModel, ConfigDict
 
 from vibe.core.paths import WORKTREES_DIR
+from vibe.core.session.session_lease import (
+    _acquire_file_lock,
+    _lease_directory_lock,
+    _release_file_lock,
+)
 from vibe.core.utils.time import utc_now
 from vibe.observability.logging import logger
 
@@ -23,6 +30,9 @@ CLAIMS_DIR_NAME = ".claims"
 RECORD_FILENAME = "record.json"
 HOLDERS_DIR_NAME = "holders"
 _BUCKET_AND_NAME_PARTS = 2
+_STARTING_HOLDER = ".starting"
+_STARTING_FILES: dict[Path, BinaryIO] = {}
+_STARTING_FILES_LOCK = Lock()
 
 
 class WorktreeRecordError(Exception): ...
@@ -86,7 +96,7 @@ class WorktreeClaim:
 
     # Only claimed names, never a listing of the bucket itself: a directory there
     # with no claim is either a live mkdir reservation or something the user
-    # made, and neither is the sweep's to touch.
+    # made, and neither belongs to automatic cleanup.
     @classmethod
     def in_bucket(cls, bucket: str) -> tuple[WorktreeClaim, ...]:
         # iterdir() is lazy, so the tuple must be built inside the try: a missing
@@ -98,6 +108,19 @@ class WorktreeClaim:
             )
         except OSError:
             return ()
+
+    @classmethod
+    def all(cls) -> tuple[WorktreeClaim, ...]:
+        try:
+            buckets = tuple(_claims_root().iterdir())
+        except OSError:
+            return ()
+        return tuple(
+            claim
+            for bucket in buckets
+            if bucket.is_dir()
+            for claim in cls.in_bucket(bucket.name)
+        )
 
     @property
     def directory(self) -> Path:
@@ -142,6 +165,7 @@ class WorktreeClaim:
             return None
 
     def delete(self) -> None:
+        self.finish_starting()
         (self.directory / RECORD_FILENAME).unlink(missing_ok=True)
         self._discard_empty_directories()
 
@@ -180,7 +204,7 @@ class WorktreeClaim:
     def remove_holder(self, session_id: str) -> None:
         self._holder_path(session_id).unlink(missing_ok=True)
         # A delete that ran while this holder was still up could not rmdir past
-        # it, and nothing revisits the leftovers - the sweep skips a claim whose
+        # it, and nothing revisits the leftovers - pruning skips a claim whose
         # record is gone. So the last holder out of a deleted claim takes the
         # empty skeleton with it. Guarded on the record: a live claim keeps its
         # directory even with no one in it.
@@ -190,6 +214,79 @@ class WorktreeClaim:
     def holders(self) -> frozenset[str]:
         directory = self.directory / HOLDERS_DIR_NAME
         try:
-            return frozenset(entry.name for entry in directory.iterdir())
+            return frozenset(
+                entry.name
+                for entry in directory.iterdir()
+                if entry.name != _STARTING_HOLDER
+            )
         except OSError:
             return frozenset()
+
+    def mark_starting(self) -> None:
+        marker = self._holder_path(_STARTING_HOLDER)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        root = _claims_root()
+        root.mkdir(parents=True, exist_ok=True)
+        with _lease_directory_lock(root):
+            with _STARTING_FILES_LOCK:
+                if marker in _STARTING_FILES:
+                    raise WorktreeRecordError("Worktree creation is already active.")
+                file = marker.open("a+b")
+                try:
+                    _acquire_file_lock(file)
+                except BlockingIOError as exc:
+                    file.close()
+                    raise WorktreeRecordError(
+                        "Worktree creation is already active."
+                    ) from exc
+                _STARTING_FILES[marker] = file
+
+    def finish_starting(self) -> None:
+        marker = self._holder_path(_STARTING_HOLDER)
+        root = _claims_root()
+        root.mkdir(parents=True, exist_ok=True)
+        with _lease_directory_lock(root):
+            with _STARTING_FILES_LOCK:
+                file = _STARTING_FILES.pop(marker, None)
+            if file is not None:
+                try:
+                    _release_file_lock(file)
+                finally:
+                    file.close()
+                marker.unlink(missing_ok=True)
+            else:
+                _discard_stale_starting_marker(marker)
+        self._discard_empty_directories()
+
+    def is_starting(self) -> bool:
+        marker = self._holder_path(_STARTING_HOLDER)
+        root = _claims_root()
+        root.mkdir(parents=True, exist_ok=True)
+        with _lease_directory_lock(root):
+            with _STARTING_FILES_LOCK:
+                if marker in _STARTING_FILES:
+                    return True
+            return not _discard_stale_starting_marker(marker)
+
+
+def _discard_stale_starting_marker(marker: Path) -> bool:
+    if not marker.exists():
+        return True
+    try:
+        file = marker.open("a+b")
+    except OSError:
+        return True
+    try:
+        _acquire_file_lock(file)
+    except BlockingIOError:
+        file.close()
+        return False
+    try:
+        _release_file_lock(file)
+    finally:
+        file.close()
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True

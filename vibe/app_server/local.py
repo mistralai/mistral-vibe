@@ -51,6 +51,7 @@ class LocalHarnessHost:
     def __init__(self) -> None:
         self._process: HarnessProcess | None = None
         self._experimental_harness: bool | None = None
+        self._legacy_harness: bool | None = None
 
     async def start(self, options: LocalHarnessOptions) -> AppServerSession:
         host = await self.connect(options)
@@ -61,7 +62,9 @@ class LocalHarnessHost:
             raise
 
     async def connect(self, options: LocalHarnessOptions) -> AppServerHost:
-        process = self._process_for(options.experimental_harness)
+        process = self._process_for(
+            options.experimental_harness, options.legacy_harness
+        )
         client_transport, server_transport = memory_transport_pair()
         harness = await create_harness_server(
             server_transport, transport_kind="in_process", process=process
@@ -89,12 +92,20 @@ class LocalHarnessHost:
         if self._process is not None:
             await self._process.close()
 
-    def _process_for(self, experimental_harness: bool) -> HarnessProcess:
+    def _process_for(
+        self, experimental_harness: bool, legacy_harness: bool
+    ) -> HarnessProcess:
         if self._process is None:
-            self._process = HarnessProcess(experimental_harness=experimental_harness)
+            self._process = HarnessProcess(
+                experimental_harness=experimental_harness, legacy_harness=legacy_harness
+            )
             self._experimental_harness = experimental_harness
+            self._legacy_harness = legacy_harness
             return self._process
-        if self._experimental_harness != experimental_harness:
+        if (
+            self._experimental_harness != experimental_harness
+            or self._legacy_harness != legacy_harness
+        ):
             raise RuntimeError(
                 "A LocalHarnessHost cannot mix legacy and Unified Harness backends"
             )

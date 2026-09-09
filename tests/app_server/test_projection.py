@@ -15,6 +15,7 @@ from vibe.app_server._projection import (
     project_mcp,
     project_session_log,
     project_stats,
+    project_unified_agent_summaries,
 )
 from vibe.app_server.models import (
     AgentStatsSnapshot,
@@ -98,6 +99,29 @@ def test_persisted_known_tool_output_is_not_treated_as_typed_result() -> None:
     assert isinstance(effect.state, CompletedEffectState)
     assert effect.state.output is None
     assert effect.state.output_text.startswith("response: done")
+
+
+def test_unified_agent_projection_hides_plan_from_the_picker() -> None:
+    from vibe.core.agents.models import ACCEPT_EDITS, ASK, PLAN
+
+    active, available = project_unified_agent_summaries(
+        ACCEPT_EDITS, [ASK, PLAN, ACCEPT_EDITS]
+    )
+
+    names = [agent.name for agent in available]
+    assert "plan" not in names
+    assert names == ["ask", "accept-edits"]
+    assert active.name == "accept-edits"
+
+
+def test_unified_agent_projection_still_reports_plan_when_active() -> None:
+    """A session already running plan reports it as active, even though it is hidden."""
+    from vibe.core.agents.models import ACCEPT_EDITS, ASK, PLAN
+
+    active, available = project_unified_agent_summaries(PLAN, [ASK, PLAN, ACCEPT_EDITS])
+
+    assert active.name == "plan"
+    assert "plan" not in [agent.name for agent in available]
 
 
 def test_config_view_redacts_persistence_paths() -> None:

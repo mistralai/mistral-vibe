@@ -10,11 +10,11 @@ In selection mode:
 
 - Up and Down move between queued prompts.
 - Backspace or Delete removes the selected prompt through
-  `app_server/session/turn/queue/remove`.
+  `session/turn/queue/remove`.
 - Enter loads the selected prompt into the input for editing.
 - Escape exits queue mode and restores the original draft.
 
-Submitting an edit calls `app_server/session/turn/queue/replace`. The server
+Submitting an edit calls `session/turn/queue/replace`. The server
 keeps the prompt's queue ID and FIFO position. Shell commands and slash commands
 are never present because the app-server queue accepts user turns only.
 
@@ -37,6 +37,31 @@ the merged item with the remaining prompts. On resume the merged item is one
 combined user history entry, so a resumed queue shows the prompts as a single
 combined message.
 
+## Steering the merged queue
+
+While an active turn is running, empty Enter or Ctrl+Enter sends the merged
+queued block into that turn as steering. Empty Enter on a paused queue resumes
+normal queue delivery instead.
+
+For Unified Harness sessions, `QueueController` calls
+`session/turn/queue/steer` with only the queue item ID and expected active turn
+ID. The server uses the content already stored in the queue. The client does
+not remove the item, call ordinary `turn/steer`, or rebuild the item after an
+error.
+
+The queued widgets remain pending and keep their positions while the request
+is in flight. A matching user `history/entryAdded` event with
+`source = turn_steer` marks them sent in place. Because the event stream is
+processed sequentially, output accepted before that history entry stays above
+the steered message and later output stays below it, including while subagents
+are running.
+
+Only one atomic queued steer may be in flight. Later submissions wait for it to
+settle, and edit or remove actions cannot overtake it. If the connection drops,
+the next authoritative session snapshot resolves whether the message entered
+history, remained queued, or started through normal promotion. The client never
+re-enqueues an uncertain request.
+
 ## State ownership
 
 `ChatInputBody` owns the selection and edit state machine. It receives three
@@ -50,8 +75,9 @@ callbacks from `VibeApp` through `ChatInputContainer`:
 
 `VibeApp` owns the highlighted widget reference and the `queue-selected` CSS
 class. `QueueController` maps app-server queue IDs to pending `UserMessage`
-widgets and performs replace and remove requests. None of these classes owns
-turn scheduling.
+widgets and performs replace, remove, and Unified queued-steer requests. None
+of these classes owns turn scheduling or reconstructs server-owned queue
+content.
 
 ## Input locking
 
@@ -91,6 +117,10 @@ persistent input history with temporary app-server queue entries.
 - Re-prepare edited prompts so file mentions and images match the new text.
 - Resolve edits and removals by widget identity immediately before sending the
   app-server request.
+- Keep queued widgets pinned until the matching steering history entry arrives;
+  do not infer steering from assistant output or subagent completion.
+- Reconcile an uncertain queued-steer request from the session snapshot; never
+  re-enqueue it from client state.
 - Keep `ChatInputBody` and `ChatInputContainer` independent of
   `QueueController`; use the callbacks above.
 - Keep the `queue-selected` CSS class in `VibeApp`, which owns the selected
@@ -100,5 +130,7 @@ persistent input history with temporary app-server queue entries.
 
 - Shell commands or slash commands are added to queue selection.
 - An edit bypasses `queue/replace` or a removal bypasses `queue/remove`.
+- Unified queued steering is split into client-side remove and steer requests.
+- A delivery heuristic depends on assistant messages or subagent completion.
 - A cached numeric index is used after an `await` without re-resolving the
   selected widget.

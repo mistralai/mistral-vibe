@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -8,13 +10,18 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from vibe.app_server.models import (
+    MANUAL_SHELL_TOOL_NAME,
     CancelledEffectState,
     CompletedEffectState,
     EffectCallDisplay,
     EffectResultDisplay,
     EffectState,
     FailedEffectState,
+    HookNoticeDetail,
     PublicEffectEntry,
+    PublicHistoryEntry,
+    PublicNoticeEntry,
+    PublicReasoningEntry,
     SkippedEffectState,
 )
 from vibe.cli.textual_ui.widgets.collapsible import (
@@ -38,6 +45,105 @@ from vibe.cli.textual_ui.widgets.tool_widgets import (
     get_result_widget,
     linkify_effect_result,
 )
+from vibe.utils.tool_presentation import ToolEffectKind
+
+if TYPE_CHECKING:
+    from vibe.cli.textual_ui.app import ChatScroll
+
+_TOOL_CATEGORY_LABELS: dict[ToolEffectKind, str] = {
+    ToolEffectKind.FILE_READ: "read files",
+    ToolEffectKind.FILE_EDIT: "edited files",
+    ToolEffectKind.FILE_WRITE: "wrote files",
+    ToolEffectKind.FILE_SEARCH: "searched files",
+    ToolEffectKind.SHELL: "ran commands",
+    ToolEffectKind.WEB_SEARCH: "searched the web",
+    ToolEffectKind.WEB_FETCH: "fetched pages",
+    ToolEffectKind.TODO: "updated todos",
+    ToolEffectKind.USER_QUESTION: "asked questions",
+    ToolEffectKind.SKILL: "loaded skills",
+    ToolEffectKind.SUBAGENT: "ran subagents",
+    ToolEffectKind.WORKTREE: "created worktrees",
+    ToolEffectKind.TOOL: "called tools",
+}
+
+_TOOL_CATEGORY_RUNNING_LABELS: dict[ToolEffectKind, str] = {
+    ToolEffectKind.FILE_READ: "reading files",
+    ToolEffectKind.FILE_EDIT: "editing files",
+    ToolEffectKind.FILE_WRITE: "writing files",
+    ToolEffectKind.FILE_SEARCH: "searching files",
+    ToolEffectKind.SHELL: "running commands",
+    ToolEffectKind.WEB_SEARCH: "searching the web",
+    ToolEffectKind.WEB_FETCH: "fetching pages",
+    ToolEffectKind.TODO: "updating todos",
+    ToolEffectKind.USER_QUESTION: "asking questions",
+    ToolEffectKind.SKILL: "loading skills",
+    ToolEffectKind.SUBAGENT: "running subagents",
+    ToolEffectKind.WORKTREE: "creating worktrees",
+    ToolEffectKind.TOOL: "calling tools",
+}
+
+
+def _category_label(kind: ToolEffectKind, *, running: bool = False) -> str:
+    if running:
+        return _TOOL_CATEGORY_RUNNING_LABELS.get(kind, "calling tools")
+    return _TOOL_CATEGORY_LABELS.get(kind, "called tools")
+
+
+def _effect_state_to_indicator(state: EffectState) -> IndicatorState:
+    if _effect_state_is_failure(state):
+        return IndicatorState.ERROR
+    if isinstance(state, SkippedEffectState | CancelledEffectState):
+        return IndicatorState.MUTED
+    return IndicatorState.SUCCESS
+
+
+def is_manual_shell_entry(entry: PublicHistoryEntry) -> bool:
+    """Whether this entry is the user's own `!<command>` rather than the agent's.
+
+    A model's shell call carries the real tool's name (``bash``, ``git_bash``,
+    ``powershell``), so the ``tool_name`` is what tells the two apart -- the
+    ``SHELL`` effect kind alone covers both.
+    """
+    return (
+        isinstance(entry, PublicEffectEntry)
+        and entry.detail.tool_name == MANUAL_SHELL_TOOL_NAME
+    )
+
+
+def _effect_state_is_failure(state: EffectState) -> bool:
+    """A failure is either a FailedEffectState or a CompletedEffectState
+    whose display reports success=False (e.g. a shell command with a
+    non-zero exit code in the unified harness).
+    """
+    if isinstance(state, FailedEffectState):
+        return True
+    if isinstance(state, CompletedEffectState):
+        return not state.display.success
+    return False
+
+
+def entry_keeps_tool_group(entry: PublicHistoryEntry) -> bool:
+    if is_manual_shell_entry(entry):
+        # The user typed the command to read what it printed, so it stands on
+        # its own in the timeline instead of folding into the agent's summary
+        # line alongside work they did not ask to see.
+        return False
+    return isinstance(entry, PublicEffectEntry | PublicReasoningEntry) or (
+        isinstance(entry, PublicNoticeEntry)
+        and isinstance(entry.detail, HookNoticeDetail)
+    )
+
+
+def _result_is_collapsible(entry: PublicEffectEntry) -> bool:
+    """Whether this effect's result folds into a one-line header.
+
+    A manual `!<command>` opens like a diff does, for the same reason it stays
+    out of a tool group: its output is the point. A model's shell call keeps
+    folding like every other tool result.
+    """
+    if is_manual_shell_entry(entry):
+        return False
+    return effect_result_is_collapsible(entry.detail)
 
 
 def _failed_header_display(
@@ -54,31 +160,163 @@ def _failed_header_display(
     )
 
 
-class ToolGroup(Vertical):
-    """Visual container grouping consecutive tool calls, results, and thinking.
+class ToolGroupHeader(ClickWithoutDragMixin, StatusMessage):
+    """Collapsible summary line for a ToolGroup.
 
-    Purely a grouping wrapper: no header, no collapse. Its children are packed
-    together with no vertical gaps; the group as a whole is spaced from the
-    surrounding conversation.
+    Subclasses StatusMessage to inherit the PulseSpinner timer and indicator
+    machinery. The _indicator_widget serves as both the status indicator
+    (blinking square while running, colored triangle when settled) and the
+    collapse toggle.
+    """
+
+    SETTLED_GLYPH = "\u23f5"
+
+    def __init__(self) -> None:
+        super().__init__(initial_text="")
+        self._categories: list[ToolEffectKind] = []
+        self._has_reasoning = False
+        self._last_state = IndicatorState.SUCCESS
+        self._is_collapsed = True
+        self.add_class("tool-group-header")
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="tool-call-header") as self._header_row:
+            self._indicator_widget = NonSelectableStatic(
+                self._spinner.current_frame(), classes="status-indicator-icon"
+            )
+            yield self._indicator_widget
+            self._text_widget = LinkStatic("", classes="status-indicator-text")
+            yield self._text_widget
+
+    def add_category(self, kind: ToolEffectKind) -> None:
+        if kind not in self._categories:
+            self._categories.append(kind)
+        self._update_text()
+
+    def mark_reasoning(self) -> None:
+        self._has_reasoning = True
+        self._update_text()
+
+    def settle(self, state: IndicatorState) -> None:
+        # Track the last settled outcome. The group stays spinning in
+        # present tense until finalize() / stop_spinning().
+        self._last_state = state
+
+    def stop_spinning(self, success: bool = True) -> None:
+        super().settle(self._last_state)
+        # After settling, show the triangle in the correct collapse state.
+        if self._indicator_widget is not None:
+            glyph = "\u23f5" if self._is_collapsed else "\u23f7"
+            self._indicator_widget.update(glyph, layout=False)
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self._is_collapsed = collapsed
+        if self._indicator_widget is not None and not self._is_spinning:
+            glyph = "\u23f5" if collapsed else "\u23f7"
+            self._indicator_widget.update(glyph, layout=False)
+
+    def get_content(self) -> str:
+        labels = [
+            _category_label(k, running=self._is_spinning) for k in self._categories
+        ]
+        if self._has_reasoning:
+            labels.append("thinking" if self._is_spinning else "thought")
+        return ", ".join(labels).capitalize()
+
+    def _format_text(self, content: str) -> Content:
+        return Content(content)
+
+    async def on_click(self, event: events.Click) -> None:
+        if self._click_is_passive(event):
+            return
+        event.stop()
+        group = self.parent
+        if group is not None and isinstance(group, ToolGroup):
+            chat = next(
+                (ancestor for ancestor in self.ancestors if ancestor.id == "chat"), None
+            )
+            if chat is not None:
+                cast("ChatScroll", chat).preserve_scroll_position()
+            group.set_collapsed(not group.is_collapsed)
+            self.app.call_after_refresh(self.screen.refresh)
+
+    def _update_text(self) -> None:
+        if self._text_widget is not None:
+            self._text_widget.update(self.get_content())
+
+
+class ToolGroup(Vertical):
+    """Container grouping consecutive tool calls, results, and thinking.
+
+    Has a collapsible summary header. When collapsed, the content container is
+    hidden and only the summary line is visible. When expanded, the full list
+    of tool calls and results renders as before, packed with no inter-child
+    gaps.
     """
 
     def __init__(self) -> None:
         super().__init__(classes="tool-group")
+        self._header = ToolGroupHeader()
+        self._content = Vertical(classes="tool-group-content tool-group")
+        self._border = ExpandingBorder(classes="tool-result-border")
+        self._is_collapsed = True
+
+    def compose(self) -> ComposeResult:
+        yield self._header
+        self._content.display = not self._is_collapsed
+        self._border.display = not self._is_collapsed
+        with Horizontal(classes="tool-group-body"):
+            yield self._border
+            yield self._content
 
     @property
-    def content_container(self) -> ToolGroup:
-        return self
+    def content_container(self) -> Vertical:
+        return self._content
+
+    @property
+    def header(self) -> ToolGroupHeader:
+        return self._header
+
+    @property
+    def is_collapsed(self) -> bool:
+        return self._is_collapsed
+
+    def add_call_kind(self, kind: ToolEffectKind) -> None:
+        self._header.add_category(kind)
+
+    def mark_reasoning(self) -> None:
+        self._header.mark_reasoning()
+
+    def settle_indicator(self, state: IndicatorState) -> None:
+        self._header.settle(state)
+
+    def finalize(self) -> None:
+        self._header.stop_spinning(
+            success=self._header._last_state != IndicatorState.ERROR
+        )
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self._is_collapsed = collapsed
+        self._content.display = not collapsed
+        self._border.display = not collapsed
+        self._header.set_collapsed(collapsed)
+
+    def add_content_child(self, widget: Widget) -> None:
+        """Pre-mount a child into the content container (for history restore).
+
+        Unlike ``content_container.mount()``, this works before the group is
+        attached to a Textual app, because it uses the internal ``_add_child``
+        that Textual's own ``compose`` uses.
+        """
+        self._content._add_child(widget)
 
     def sync_visibility(self) -> None:
-        """Collapse the group when all its children are hidden.
-
-        A group holding only a hidden thinking node would otherwise still
-        reserve its top margin and leave a stray blank line.
-        """
-        self.display = any(child.display for child in self.children)
+        self.display = any(child.display for child in self._content.children)
 
 
 class ToolCallMessage(StatusMessage):
+    SETTLED_GLYPH = "\u23f5"
+
     def __init__(self, entry: PublicEffectEntry) -> None:
         self._entry = entry
         self._tool_name = entry.detail.tool_name
@@ -232,7 +470,7 @@ class ToolCallMessage(StatusMessage):
         if self._header_row is not None:
             self._header_row.set_class(self._is_spinning, "running")
             self._header_row.set_class(
-                effect_result_is_collapsible(self._entry.detail), "collapsible-result"
+                _result_is_collapsible(self._entry), "collapsible-result"
             )
         if self._verb_widget:
             self._verb_widget.update(verb)
@@ -260,6 +498,9 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
         self._result_widget: ToolResultWidget | None = None
         self._is_collapsible = self._determine_collapsible()
         self._is_error = False
+        # Set by history restore when a failed call has no subsequent success
+        # in the same group; on_mount escalates to red after rendering.
+        self._should_escalate: bool = False
         # The collapsed error/skip section whose triangle carries the muted
         # state (and gets recoloured red on escalation).
         self._muted_section: HeaderCollapsibleSection | None = None
@@ -272,7 +513,7 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
         return self._tool_name
 
     def _determine_collapsible(self) -> bool:
-        return effect_result_is_collapsible(self._entry.detail)
+        return _result_is_collapsible(self._entry)
 
     def compose(self) -> ComposeResult:
         if self._is_collapsible:
@@ -299,7 +540,15 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
                 self._call_widget.set_result_text(message, suffix, verb=verb)
             else:
                 success = self._determine_success()
-                self._call_widget.stop_spinning(success=success)
+                if success:
+                    self._call_widget.stop_spinning(success=True)
+                else:
+                    # CompletedEffectState with success=False (e.g. non-zero
+                    # exit code): start muted like a FailedEffectState so the
+                    # escalation logic can keep it grey if a subsequent call
+                    # in the group succeeds, or escalate to red otherwise.
+                    self._call_widget.show_muted()
+                    self._is_error = True
                 # Collapsible results fold into a header and hide the call
                 # widget, so its inline text is only set for expanded results.
                 if not self._is_collapsible:
@@ -310,6 +559,8 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
                     )
         self.recompute_gap()
         await self._render_result()
+        if self._should_escalate:
+            self.escalate_error()
 
     def recompute_gap(self) -> None:
         self.set_class(self._needs_standalone_gap(), "has-gap")
@@ -471,18 +722,39 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
         # The header is inert only when there is genuinely nothing to unfold: no
         # structured output, no fallback text, and no warnings.
         has_body = not (output is None and not fallback_text and not display.warnings)
+        is_failure = not display.success
         section = HeaderCollapsibleSection(
             build_result_body,
             header_text=display.message,
             header_verb=display.verb,
             header_suffix=display.suffix,
+            header_muted=is_failure,
             header_success=display.success,
             collapsible=has_body,
         )
+        if is_failure:
+            self._muted_section = section
         await self.mount(section)
         if self._call_widget:
             self._call_widget.display = False
         self.display = True
+
+    async def _mount_manual_shell_output(self, output_text: str) -> None:
+        """Show what a manual `!` command printed before it failed or was cut off.
+
+        Every other effect reports a bad outcome as the error alone, which is the
+        right shape for a tool call the model made. A `!` command the user typed
+        is different: a non-zero exit is an ordinary result, and the stderr is
+        usually the whole reason they ran it.
+        """
+        if self._content_container is None or not is_manual_shell_entry(self._entry):
+            return
+        output = clean_output(output_text.strip("\n"))
+        if not output:
+            return
+        await self._content_container.mount(
+            NoMarkupStatic(output, classes="tool-result-detail")
+        )
 
     async def _render_result_expanded(self) -> None:
         if self._content_container is None:
@@ -492,6 +764,7 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
 
         if isinstance(self._state, FailedEffectState):
             self._is_error = True
+            await self._mount_manual_shell_output(self._state.output_text)
             # Only the inline "Error" span is ever colored; escalation changes the
             # call icon to a red cross but leaves this folded body untouched.
             message = clean_output(self._state.error.message)
@@ -509,6 +782,8 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
 
         if isinstance(self._state, SkippedEffectState | CancelledEffectState):
             self.add_class("warning-text")
+            if isinstance(self._state, CancelledEffectState):
+                await self._mount_manual_shell_output(self._state.output_text)
             reason = self._state.reason
             await self._content_container.mount(NoMarkupStatic(f"Skipped: {reason}"))
             self.display = True

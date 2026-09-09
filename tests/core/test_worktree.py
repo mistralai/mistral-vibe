@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import timedelta
 import os
 from pathlib import Path
@@ -30,6 +31,22 @@ from vibe.core.git.worktree.record import (
 )
 import vibe.core.git.worktree.repository as worktree_module
 
+_OPEN_REPOS: list[Repo] = []
+
+
+@pytest.fixture(autouse=True)
+def _close_git_repos() -> Iterator[None]:
+    yield
+    for repo in _OPEN_REPOS:
+        repo.close()
+    _OPEN_REPOS.clear()
+
+
+def _track_repo(repo: Repo) -> Repo:
+    _OPEN_REPOS.append(repo)
+    return repo
+
+
 # The API is scoped to a repository or to one managed worktree, so these keep a
 # test that only cares about the outcome down to a single call.
 
@@ -44,6 +61,14 @@ def _prepare_auto(
 ) -> PreparedWorktree:
     with WorktreeRepository.open(base) as repository:
         return repository.prepare_auto(prompt=prompt, suggested_name=suggested_name)
+
+
+def _finish_starts(*worktrees: PreparedWorktree) -> None:
+    for worktree in worktrees:
+        _hold(worktree.root, "test-session")
+        managed = ManagedWorktree.at(worktree.root)
+        assert managed is not None
+        managed.release_holder("test-session")
 
 
 def _linked(base: Path) -> tuple[LinkedWorktree, ...]:
@@ -69,11 +94,13 @@ def _release(cwd: Path, session_id: str | None = None) -> WorktreeRelease:
 
 
 def _init_repo(root: Path, *, separate_git_dir: Path | None = None) -> Repo:
-    repo = Repo.init(
-        root,
-        initial_branch="main",
-        separate_git_dir=separate_git_dir,
-        allow_unsafe_options=True,
+    repo = _track_repo(
+        Repo.init(
+            root,
+            initial_branch="main",
+            separate_git_dir=separate_git_dir,
+            allow_unsafe_options=True,
+        )
     )
     repo.config_writer().set_value("user", "name", "Tester").release()
     repo.config_writer().set_value("user", "email", "t@example.com").release()
@@ -115,7 +142,7 @@ def test_creates_named_worktree_for_separate_branch(tmp_path: Path) -> None:
 
     assert worktree.name == "feature-worktree"
     assert worktree.branch == "feat/feature"
-    assert Repo(worktree.root).active_branch.name == "feat/feature"
+    assert _track_repo(Repo(worktree.root)).active_branch.name == "feat/feature"
     assert "feat/feature" in (head.name for head in repo.heads)
 
 
@@ -124,7 +151,7 @@ def test_prepare_worktree_forwards_branch(tmp_path: Path) -> None:
 
     path = _prepare("feature-worktree", tmp_path, branch="feat/feature").path
 
-    assert Repo(path).active_branch.name == "feat/feature"
+    assert _track_repo(Repo(path)).active_branch.name == "feat/feature"
     assert "feat/feature" in (head.name for head in repo.heads)
 
 
@@ -241,7 +268,7 @@ def test_root_level_system_alias_is_not_an_unstable_path_component(
 def test_cleanup_and_remove_use_separate_branch(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     worktree = _prepare("feature-worktree", tmp_path, branch="feat/feature")
-    worktree_repo = Repo(worktree.root)
+    worktree_repo = _track_repo(Repo(worktree.root))
     (worktree.root / "file.txt").write_text("changed\n")
     worktree_repo.index.add(["file.txt"])
     worktree_repo.index.commit("change")
@@ -265,6 +292,17 @@ def test_auto_worktree_records_ownership(tmp_path: Path) -> None:
     assert record.base_commit == worktree.base_commit
     assert record.branch_created is True
     assert record.repo_root == worktree.repo_root
+    assert _claim(repo, worktree.name).is_starting() is True
+
+
+def test_auto_worktree_stops_starting_when_held(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path)
+    claim = _claim(repo, worktree.name)
+
+    _hold(worktree.root, "session-a")
+
+    assert claim.is_starting() is False
 
 
 def test_auto_worktree_records_the_claim_before_creating_the_worktree(
@@ -275,8 +313,8 @@ def test_auto_worktree_records_the_claim_before_creating_the_worktree(
     seen: list[Any] = []
 
     def record_then_create(*args: Any, **kwargs: Any) -> None:
-        # The reservation must already be on disk here: a crash during the add
-        # is exactly what the sweep needs a breadcrumb for.
+        # The reservation must already be on disk here so a concurrent creator
+        # cannot claim the same managed worktree name while git is adding it.
         seen.append(_claim(repo, args[1].name).read())
         add_worktree(*args, **kwargs)
 
@@ -376,7 +414,7 @@ def test_release_saves_the_work_before_removing_a_worktree(
         case "untracked":
             (worktree.root / "new.txt").write_text("new\n")
         case "commit":
-            worktree_repo = Repo(worktree.root)
+            worktree_repo = _track_repo(Repo(worktree.root))
             (worktree.root / "file.txt").write_text("changed\n")
             worktree_repo.index.add(["file.txt"])
             worktree_repo.index.commit("change")
@@ -523,166 +561,205 @@ def _age_claim(claim: WorktreeClaim, minutes: int) -> None:
     )
 
 
-def test_sweep_keeps_the_worktree_of_a_session_that_can_still_resume(
-    tmp_path: Path,
-) -> None:
+def _push_worktree(repo: Repo, worktree: PreparedWorktree, remote: Path) -> None:
+    if "origin" not in repo.remotes:
+        repo.create_remote("origin", str(remote))
+    worktree_repo = _track_repo(Repo(worktree.root))
+    worktree_repo.git.push("--set-upstream", "origin", worktree.branch)
+
+
+def test_prune_removes_the_oldest_remote_backed_worktree(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    remote = tmp_path / "remote.git"
+    _track_repo(Repo.init(remote, bare=True))
+    oldest = _prepare_auto(Path(repo.working_dir), suggested_name="oldest")
+    newest = _prepare_auto(Path(repo.working_dir), suggested_name="newest")
+    _finish_starts(oldest, newest)
+    _push_worktree(repo, oldest, remote)
+    _age_claim(_claim(repo, oldest.name), 30)
+
+    removed = ManagedWorktree.prune(limit=1)
+
+    assert removed == 1
+    assert not oldest.root.exists()
+    assert newest.root.is_dir()
+    assert f"{SNAPSHOT_REF_PREFIX}/{oldest.name}" not in {
+        ref.path for ref in repo.references
+    }
+
+
+def test_prune_with_zero_removes_all_unheld_worktrees(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    remote = tmp_path / "remote.git"
+    _track_repo(Repo.init(remote, bare=True))
+    first = _prepare_auto(Path(repo.working_dir), suggested_name="first")
+    second = _prepare_auto(Path(repo.working_dir), suggested_name="second")
+    _finish_starts(first, second)
+    _push_worktree(repo, first, remote)
+    _push_worktree(repo, second, remote)
+
+    removed = ManagedWorktree.prune(limit=0)
+
+    assert removed == 2
+    assert not first.root.exists()
+    assert not second.root.exists()
+
+
+def test_prune_keeps_a_worktree_that_has_not_been_held_yet(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    remote = tmp_path / "remote.git"
+    _track_repo(Repo.init(remote, bare=True))
+    starting = _prepare_auto(Path(repo.working_dir), suggested_name="starting")
+    removable = _prepare_auto(Path(repo.working_dir), suggested_name="removable")
+    _finish_starts(removable)
+    _push_worktree(repo, starting, remote)
+    _push_worktree(repo, removable, remote)
+
+    removed = ManagedWorktree.prune(limit=0)
+
+    assert removed == 1
+    assert starting.root.is_dir()
+    assert not removable.root.exists()
+
+
+def test_prune_discards_an_abandoned_empty_reservation(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path)
-    _age_claim(_claim(repo, worktree.name), 30)
-
-    # Closing a session drops its hold and leaves it on disk, so an unheld
-    # worktree is not an abandoned one. Naming it here is what says otherwise.
-    WorktreeRepository.sweep_claims(tmp_path, in_use=[worktree.root])
-
-    assert worktree.root.is_dir()
-    assert worktree.branch in (head.name for head in repo.heads)
-    assert _claim(repo, worktree.name).read() is not None
-
-
-def test_sweep_keeps_a_worktree_a_session_resumes_into_below_its_root(
-    tmp_path: Path,
-) -> None:
-    repo = _init_repo(tmp_path)
-    package = tmp_path / "packages" / "app"
-    package.mkdir(parents=True)
-    (package / "main.py").write_text("run()\n")
-    repo.index.add(["packages/app/main.py"])
-    repo.index.commit("add a package")
-    worktree = _prepare_auto(package)
-    _age_claim(_claim(repo, worktree.name), 30)
-
-    # A session opened in a subdirectory lands in the matching subdirectory of
-    # the worktree, so the cwd resume records is never the root itself.
-    assert worktree.path != worktree.root
-    WorktreeRepository.sweep_claims(package, in_use=[worktree.path])
-
-    assert worktree.root.is_dir()
-    assert worktree.branch in (head.name for head in repo.heads)
-    assert _claim(repo, worktree.name).read() is not None
-
-
-def test_sweep_reaps_a_worktree_no_session_resumes_into(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path)
-    _age_claim(_claim(repo, worktree.name), 30)
-
-    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
-
-    # Nothing was ever done in it: the release gate proves that before this
-    # runs, so what is lost is an empty checkout and the branch made with it.
-    assert not worktree.root.exists()
-    assert worktree.branch not in (head.name for head in repo.heads)
-    assert _claim(repo, worktree.name).read() is None
-
-
-def test_sweep_spares_a_claim_inside_the_grace_period(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path)
-
-    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
-
-    # A session that finished `git worktree add` has no holder until it
-    # attaches; sweeping here would delete the worktree it is starting in.
-    assert worktree.root.is_dir()
-    assert _claim(repo, worktree.name).read() is not None
-
-
-def test_sweep_spares_a_held_worktree(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path)
-    _hold(worktree.root, "session-a")
-    _age_claim(_claim(repo, worktree.name), 30)
-
-    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
-
-    assert worktree.root.is_dir()
-
-
-def test_sweep_saves_the_work_of_an_abandoned_worktree_and_removes_it(
-    tmp_path: Path,
-) -> None:
-    # The pile-up this replaced: a session deleted after writing one untracked
-    # file left a worktree no sweep would ever collect.
-    repo = _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path)
-    (worktree.root / "unsaved.txt").write_text("work\n")
-    _age_claim(_claim(repo, worktree.name), 30)
-
-    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
-
-    assert not worktree.root.exists()
-    saved = repo.commit(f"{SNAPSHOT_REF_PREFIX}/{worktree.name}")
-    assert saved.tree["unsaved.txt"].data_stream.read() == b"work\n"
-
-
-def test_sweep_never_touches_a_directory_without_a_claim(tmp_path: Path) -> None:
-    repo = _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path)
-    shutil.rmtree(worktree_module.WORKTREES_DIR.path / ".claims")
-
-    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
-
-    # This is the live mkdir reservation case too: no claim means not ours.
-    assert worktree.root.is_dir()
-    assert worktree.branch in (head.name for head in repo.heads)
-
-
-def test_sweep_discards_a_reservation_that_never_became_a_worktree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo = _init_repo(tmp_path)
-
-    def fail_create(*args: Any, **kwargs: Any) -> None:
-        raise WorktreeError("crashed before the add finished")
-
-    monkeypatch.setattr(git_repo_module.GitRepo, "add_worktree", fail_create)
-    with pytest.raises(WorktreeError):
-        _prepare_auto(tmp_path)
-    # Rebuild the reservation the crash would have stranded. Not undoing the
-    # patch first: monkeypatch.undo() reverts what the fixtures set too, and
-    # the redirected VIBE_HOME is one of them, so everything written after it
-    # lands in the developer's real home.
-    reservation = _managed_worktree_root(repo) / "stranded"
-    reservation.mkdir(parents=True)
-    _claim(repo, "stranded").write(
+    target = _managed_worktree_root(repo) / "stranded"
+    target.mkdir(parents=True)
+    repo.create_head("vibe/stranded")
+    claim = _claim(repo, "stranded")
+    claim.write(
         WorktreeRecord.new(
             name="stranded",
             branch="vibe/stranded",
             repo_root=tmp_path,
-            branch_created=False,
+            branch_created=True,
         )
     )
-    _age_claim(_claim(repo, "stranded"), 30)
+    marker = claim.directory / "holders" / ".starting"
+    marker.parent.mkdir()
+    marker.touch()
 
-    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
+    removed = ManagedWorktree.prune(limit=15)
 
-    assert not reservation.exists()
-    assert _claim(repo, "stranded").read() is None
+    assert removed == 0
+    assert not target.exists()
+    assert claim.read() is None
+    assert "vibe/stranded" not in (head.name for head in repo.heads)
+    assert _prepare_auto(tmp_path, suggested_name="stranded").name == "stranded"
 
 
-def test_sweep_keeps_a_populated_worktree_whose_claim_has_no_base_commit(
-    tmp_path: Path,
-) -> None:
+def test_prune_keeps_an_active_empty_reservation(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
-    worktree = _prepare_auto(tmp_path)
-    record = _claim(repo, worktree.name).read()
-    assert record is not None
-    # A process killed between `git worktree add` and the second record write.
-    _claim(repo, worktree.name).write(
-        record.model_copy(
-            update={
-                "base_commit": None,
-                "claimed_at": record.claimed_at - timedelta(minutes=30),
-            }
+    target = _managed_worktree_root(repo) / "starting"
+    target.mkdir(parents=True)
+    claim = _claim(repo, "starting")
+    claim.mark_starting()
+    claim.write(
+        WorktreeRecord.new(
+            name="starting",
+            branch="vibe/starting",
+            repo_root=tmp_path,
+            branch_created=True,
         )
     )
 
-    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
+    ManagedWorktree.prune(limit=0)
 
-    # Discarding here would rmdir-fail on the populated directory and drop the
-    # record, orphaning the worktree for good.
+    assert target.is_dir()
+    assert claim.read() is not None
+    claim.delete()
+    target.rmdir()
+
+
+def test_prune_keeps_a_populated_incomplete_reservation(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="interrupted")
+    claim = _claim(repo, worktree.name)
+    record = claim.read()
+    assert record is not None
+    claim.write(record.model_copy(update={"base_commit": None}))
+    claim.finish_starting()
+
+    ManagedWorktree.prune(limit=0)
+
     assert worktree.root.is_dir()
-    assert _claim(repo, worktree.name).read() is not None
+    assert claim.read() is not None
+
+
+def test_prune_keeps_worktrees_with_unpushed_commits(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    remote = tmp_path / "remote.git"
+    _track_repo(Repo.init(remote, bare=True))
+    unpushed = _prepare_auto(Path(repo.working_dir), suggested_name="unpushed")
+    pushed = _prepare_auto(Path(repo.working_dir), suggested_name="pushed")
+    newest = _prepare_auto(Path(repo.working_dir), suggested_name="newest")
+    _finish_starts(unpushed, pushed, newest)
+    unpushed_repo = _track_repo(Repo(unpushed.root))
+    (unpushed.root / "local.txt").write_text("local\n")
+    unpushed_repo.index.add(["local.txt"])
+    unpushed_repo.index.commit("local only")
+    _age_claim(_claim(repo, unpushed.name), 30)
+    _age_claim(_claim(repo, pushed.name), 20)
+    _push_worktree(repo, pushed, remote)
+
+    removed = ManagedWorktree.prune(limit=2)
+
+    assert removed == 1
+    assert unpushed.root.is_dir()
+    assert not pushed.root.exists()
+    assert newest.root.is_dir()
+
+
+def test_prune_keeps_dirty_untracked_and_held_worktrees(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    remote = tmp_path / "remote.git"
+    _track_repo(Repo.init(remote, bare=True))
+    dirty = _prepare_auto(Path(repo.working_dir), suggested_name="dirty")
+    untracked = _prepare_auto(Path(repo.working_dir), suggested_name="untracked")
+    held = _prepare_auto(Path(repo.working_dir), suggested_name="held")
+    removable = _prepare_auto(Path(repo.working_dir), suggested_name="removable")
+    newest = _prepare_auto(Path(repo.working_dir), suggested_name="newest")
+    _finish_starts(dirty, untracked, held, removable, newest)
+    for worktree in (dirty, untracked, held, removable):
+        _push_worktree(repo, worktree, remote)
+    (dirty.root / "file.txt").write_text("changed\n")
+    (untracked.root / "untracked.txt").write_text("local\n")
+    _hold(held.root, "session-a")
+    _age_claim(_claim(repo, dirty.name), 50)
+    _age_claim(_claim(repo, untracked.name), 40)
+    _age_claim(_claim(repo, held.name), 30)
+    _age_claim(_claim(repo, removable.name), 20)
+
+    removed = ManagedWorktree.prune(limit=4)
+
+    assert removed == 1
+    assert dirty.root.is_dir()
+    assert untracked.root.is_dir()
+    assert held.root.is_dir()
+    assert not removable.root.exists()
+    assert newest.root.is_dir()
+
+
+def test_prune_applies_the_limit_across_repositories(tmp_path: Path) -> None:
+    first_repo = _init_repo(tmp_path / "first")
+    second_repo = _init_repo(tmp_path / "second")
+    first_remote = tmp_path / "first-remote.git"
+    second_remote = tmp_path / "second-remote.git"
+    _track_repo(Repo.init(first_remote, bare=True))
+    _track_repo(Repo.init(second_remote, bare=True))
+    oldest = _prepare_auto(Path(first_repo.working_dir), suggested_name="oldest")
+    newest = _prepare_auto(Path(second_repo.working_dir), suggested_name="newest")
+    _finish_starts(oldest, newest)
+    _push_worktree(first_repo, oldest, first_remote)
+    _push_worktree(second_repo, newest, second_remote)
+    _age_claim(_claim(first_repo, oldest.name), 30)
+
+    removed = ManagedWorktree.prune(limit=1)
+
+    assert removed == 1
+    assert not oldest.root.exists()
+    assert newest.root.is_dir()
 
 
 def test_release_keeps_a_worktree_claimed_while_it_was_inspected(
@@ -706,10 +783,6 @@ def test_release_keeps_a_worktree_claimed_while_it_was_inspected(
     assert release.outcome is WorktreeReleaseOutcome.KEPT_IN_USE
     assert worktree.root.is_dir()
     assert worktree.branch in (head.name for head in repo.heads)
-
-
-def test_sweep_ignores_a_non_git_path(tmp_path: Path) -> None:
-    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
 
 
 def test_remove_worktree_does_not_change_the_process_directory(
@@ -781,7 +854,7 @@ def test_cleanup_detects_untracked_files_when_git_config_hides_them(
 def test_cleanup_detects_detached_head_commit(tmp_path: Path) -> None:
     _init_repo(tmp_path)
     worktree = _prepare("feature", tmp_path)
-    worktree_repo = Repo(worktree.root)
+    worktree_repo = _track_repo(Repo(worktree.root))
     worktree_repo.git.checkout("--detach")
     (worktree.root / "file.txt").write_text("detached change\n")
     worktree_repo.index.add(["file.txt"])
@@ -922,7 +995,7 @@ def test_skips_worktree_when_project_path_is_foreign_repository(tmp_path: Path) 
     repo.index.add(["packages/app/app.py"])
     repo.index.commit("add project")
     worktree = _prepare("foreign", project, branch="feat/foreign")
-    Repo.init(worktree.path)
+    _track_repo(Repo.init(worktree.path))
 
     assert _linked(project) == ()
 
@@ -1043,8 +1116,8 @@ def test_named_worktree_reserves_its_claim_before_creating(
     _prepare("feature", tmp_path)
 
     # What a crash mid-add would leave behind. Recorded only afterwards, the
-    # worktree would exist with no claim naming it, and neither the sweep nor
-    # release would ever recognise it as ours.
+    # worktree would exist with no claim naming it and automatic cleanup would
+    # have to treat it as unmanaged.
     assert reserved is not None
     assert reserved.base_commit is None
 
@@ -1122,30 +1195,6 @@ def test_preparing_a_name_already_taken_keeps_its_claim(tmp_path: Path) -> None:
     assert _claim(repo, "feature").read() == record
 
 
-def test_sweep_reclaims_a_named_reservation_whose_add_never_landed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo = _init_repo(tmp_path)
-
-    def die_mid_add(*_args: Any, **_kwargs: Any) -> None:
-        # Not an Exception: _create discards the claim on those, and what is
-        # under test is the claim a killed process leaves behind.
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(git_repo_module.GitRepo, "add_worktree", die_mid_add)
-    with pytest.raises(KeyboardInterrupt):
-        _prepare("feature", tmp_path)
-    _age_claim(_claim(repo, "feature"), 30)
-
-    WorktreeRepository.sweep_claims(tmp_path, in_use=[])
-
-    # The sweep judges a reservation by whether its path is an empty directory,
-    # so a claim naming a path that was never created reads as populated, and
-    # is kept forever.
-    assert _claim(repo, "feature").read() is None
-    assert not (_managed_worktree_root(repo) / "feature").exists()
-
-
 def test_the_bucket_tells_two_repositories_apart(tmp_path: Path) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -1171,7 +1220,9 @@ def test_auto_worktree_derives_name_and_branch_from_prompt(tmp_path: Path) -> No
     assert worktree.branch == "vibe/fix-the-login-bug"
     assert worktree.created is True
     assert worktree.branch_created is True
-    assert Repo(worktree.root).active_branch.name == "vibe/fix-the-login-bug"
+    assert (
+        _track_repo(Repo(worktree.root)).active_branch.name == "vibe/fix-the-login-bug"
+    )
     assert "vibe/fix-the-login-bug" in (head.name for head in repo.heads)
 
 
@@ -1435,13 +1486,13 @@ def _clone_behind_origin(tmp_path: Path) -> tuple[Repo, str]:
     a new worktree branch should start from.
     """
     upstream = tmp_path / "upstream.git"
-    Repo.init(upstream, bare=True, initial_branch="main")
+    _track_repo(Repo.init(upstream, bare=True, initial_branch="main"))
 
     seed = _init_repo(tmp_path / "seed")
     seed.create_remote("origin", str(upstream))
     seed.git.push("origin", "main")
 
-    clone = Repo.clone_from(str(upstream), str(tmp_path / "clone"))
+    clone = _track_repo(Repo.clone_from(str(upstream), str(tmp_path / "clone")))
 
     (Path(seed.working_dir) / "ahead.txt").write_text("ahead\n")
     seed.index.add(["ahead.txt"])
@@ -1568,9 +1619,8 @@ def test_inspecting_a_worktree_does_not_execute_a_malicious_fsmonitor_hook(
     reading somebody else's repository, so without `-c core.fsmonitor=` the
     hook runs with the user's privileges.
 
-    It matters more since the reaper started sweeping on every session attach
-    rather than only on an explicit delete: the read is no longer something the
-    user asked for.
+    It matters more for automatic retention than for explicit deletion: the
+    read is no longer something the user asked for.
     """
     repo = _init_repo(tmp_path)
     worktree = _prepare_auto(tmp_path, prompt="inspect me")

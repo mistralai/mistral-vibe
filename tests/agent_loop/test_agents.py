@@ -93,6 +93,7 @@ class TestAgentProfile:
             BuiltinAgentName.ACCEPT_EDITS,
             BuiltinAgentName.AUTO_APPROVE,
             BuiltinAgentName.LEAN,
+            BuiltinAgentName.SMART_APPROVE,
         }
 
 

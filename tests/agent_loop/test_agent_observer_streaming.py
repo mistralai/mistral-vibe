@@ -13,7 +13,7 @@ from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import VibeConfigSchema
-from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder
+from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder, ModelCall
 from vibe.core.middleware import (
     ConversationContext,
     MiddlewareAction,
@@ -489,6 +489,18 @@ async def test_act_flushes_and_logs_when_streaming_errors() -> None:
     assert agent.session_logger.save_interaction.await_count == 1
 
 
+def _model_call() -> ModelCall:
+    return ModelCall(
+        provider="mistral",
+        endpoint="test",
+        model="test-model",
+        messages=[],
+        temperature=0.0,
+        has_tools=False,
+        tool_choice=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_rate_limit() -> None:
     response = httpx.Response(
@@ -498,15 +510,7 @@ async def test_rate_limit() -> None:
         "rate limited", request=response.request, response=response
     )
     backend_error = BackendErrorBuilder.build_http_error(
-        provider="mistral",
-        endpoint="test",
-        error=error,
-        response=response,
-        model="test-model",
-        messages=[],
-        temperature=0.0,
-        has_tools=False,
-        tool_choice=None,
+        _model_call(), error=error, response=response
     )
     backend = FakeBackend(exception_to_raise=backend_error)
     agent = build_test_agent_loop(
@@ -531,15 +535,7 @@ def _build_context_too_long_backend_error() -> BackendError:
         "context too long", request=response.request, response=response
     )
     return BackendErrorBuilder.build_http_error(
-        provider="mistral",
-        endpoint="test",
-        error=error,
-        response=response,
-        model="test-model",
-        messages=[],
-        temperature=0.0,
-        has_tools=False,
-        tool_choice=None,
+        _model_call(), error=error, response=response
     )
 
 

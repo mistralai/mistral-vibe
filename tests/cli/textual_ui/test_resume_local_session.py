@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tests.conftest import build_test_vibe_app
-from vibe.app_server.models import AgentStatsSnapshot, PreparedPrompt
+from vibe.app_server.models import (
+    AgentStatsSnapshot,
+    IdleSessionStatus,
+    PreparedPrompt,
+    PublicSession,
+)
 from vibe.app_server.protocol import (
     AppServerResponseError,
     ProtocolError,
@@ -18,6 +23,8 @@ from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress
 from vibe.cli.textual_ui.widgets.loading import LoadingWidget
 from vibe.cli.textual_ui.widgets.messages import ErrorMessage
+from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
+from vibe.cli.textual_ui.widgets.spinner_text import SpinnerText
 
 _RESUMED_TOKENS = 50_000
 _RESUMED_CONTEXT_WINDOW = 200_000
@@ -514,6 +521,45 @@ async def test_session_ready_set_on_picker_zero_sessions(vibe_app: VibeApp) -> N
         ):
             await vibe_app._show_session_picker()
         assert vibe_app._session_ready.is_set()
+
+
+@pytest.mark.asyncio
+async def test_session_picker_shows_spinner_while_sessions_load(
+    vibe_app: VibeApp,
+) -> None:
+    list_started = asyncio.Event()
+    release_list = asyncio.Event()
+
+    async with vibe_app.run_test(size=(120, 40)) as pilot:
+        session = PublicSession(
+            id="saved-session",
+            status=IdleSessionStatus(),
+            created_at=1_000,
+            updated_at=1_000,
+            cwd=vibe_app.app_server.cwd,
+        )
+
+        async def list_sessions(_cwd: str | None) -> list[PublicSession]:
+            list_started.set()
+            await release_list.wait()
+            return [session]
+
+        with patch.object(
+            vibe_app.app_server.resources.sessions,
+            "list",
+            AsyncMock(side_effect=list_sessions),
+        ):
+            task = asyncio.create_task(vibe_app._show_session_picker())
+            await asyncio.wait_for(list_started.wait(), timeout=1)
+            await pilot.pause()
+
+            picker = vibe_app.query_one(SessionPickerApp)
+            loading = picker.query_one("#sessionpicker-loading")
+            assert loading.display is True
+            assert loading.query_one(SpinnerText)._timer is not None
+
+            release_list.set()
+            await task
 
 
 @pytest.mark.asyncio

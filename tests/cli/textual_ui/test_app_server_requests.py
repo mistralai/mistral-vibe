@@ -12,6 +12,7 @@ from tests.conftest import (
     build_test_agent_loop,
     build_test_vibe_app,
     build_test_vibe_config,
+    wait_until,
 )
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend, FakeInterruptedStreamingBackend
@@ -75,20 +76,12 @@ def _callback(detail: ApprovalCallbackDetail | UserInputCallbackDetail):
     )
 
 
-async def _wait_until(pilot, predicate, timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        if time.monotonic() >= deadline:
-            raise AssertionError("Timed out waiting for UI state")
-        await pilot.pause(0.01)
-
-
 def _turn_error(code: TurnErrorCode) -> AppServerTurnError:
     return AppServerTurnError(PublicError(message="Network error", code=code))
 
 
 async def _wait_for_retry_error(app: VibeApp, pilot) -> None:
-    await _wait_until(
+    assert await wait_until(
         pilot,
         lambda: any("/retry" in str(error._error) for error in app.query(ErrorMessage)),
     )
@@ -112,7 +105,7 @@ async def test_approval_callback_opens_from_public_protocol() -> None:
     await VibeApp._show_callback(app, callback)
 
     assert app._active_callback is callback
-    app._switch_to_approval_app.assert_awaited_once_with(effect, [])
+    app._switch_to_approval_app.assert_awaited_once_with(effect, [], None)
 
 
 @pytest.mark.asyncio
@@ -351,11 +344,11 @@ async def test_resolving_a_callback_swaps_to_the_next_without_duplicate_mount(
     second = _approval_callback("callback-2")
 
     async with app.run_test() as pilot:
-        await _wait_until(pilot, lambda: app._app_server is not None)
+        assert await wait_until(pilot, lambda: app._app_server is not None)
         monkeypatch.setattr(app.app_server, "respond_to_callback", AsyncMock())
 
         await app._handle_turn_event(CallbackRequested(first))
-        await _wait_until(pilot, lambda: app._active_callback is first)
+        assert await wait_until(pilot, lambda: app._active_callback is first)
         assert len(app.query(ApprovalApp)) == 1
         assert app._loading_widget is not None
         assert app._loading_widget.base_status == "Waiting for approval to run example"
@@ -372,7 +365,7 @@ async def test_resolving_a_callback_swaps_to_the_next_without_duplicate_mount(
                 decision=ApprovalDecision(type=ApprovalDecisionType.APPROVE)
             )
         )
-        await _wait_until(pilot, lambda: app._active_callback is second)
+        assert await wait_until(pilot, lambda: app._active_callback is second)
         assert len(app.query(ApprovalApp)) == 1
         assert app._loading_widget is not None
         assert app._loading_widget._pause_start == paused_at
@@ -441,13 +434,13 @@ async def test_escape_interrupts_unsolicited_server_turn(tmp_path: Path) -> None
 
     async with app.run_test() as pilot:
         await asyncio.wait_for(started.wait(), timeout=2)
-        await _wait_until(pilot, lambda: app.app_server.turn_active)
+        assert await wait_until(pilot, lambda: app.app_server.turn_active)
         assert app._agent_task is None
 
         await pilot.press("escape")
 
         await asyncio.wait_for(interrupted.wait(), timeout=2)
-        await _wait_until(pilot, lambda: not app.app_server.turn_active)
+        assert await wait_until(pilot, lambda: not app.app_server.turn_active)
 
 
 def test_backend_error_message_hints_at_retry() -> None:
@@ -489,8 +482,8 @@ async def test_incomplete_stream_retries_and_reuses_assistant_message(
         await pilot.pause(0.1)
         chat_input = app.query_one(ChatInputContainer)
         chat_input.post_message(ChatInputContainer.Submitted("hi"))
-        await _wait_until(pilot, lambda: len(backend.requests_messages) == 2)
-        await _wait_until(pilot, lambda: not app._agent_job_active())
+        assert await wait_until(pilot, lambda: len(backend.requests_messages) == 2)
+        assert await wait_until(pilot, lambda: not app._agent_job_active())
 
         assert len(app.query(AssistantMessage)) == 1
         assert (
@@ -540,13 +533,13 @@ async def test_incomplete_stream_hides_error_while_retrying() -> None:
 
         # Wait until the automatic retry is in flight, then confirm no error is
         # surfaced while we are still retrying and that the loader says so.
-        await _wait_until(pilot, backend.second_started.is_set)
+        assert await wait_until(pilot, backend.second_started.is_set)
         assert len(app.query(ErrorMessage)) == 0
         assert app._loading_widget is not None
         assert app._loading_widget._base_status == "Retrying"
 
         gate.set()
-        await _wait_until(pilot, lambda: not app._agent_job_active())
+        assert await wait_until(pilot, lambda: not app._agent_job_active())
 
         assert len(app.query(ErrorMessage)) == 0
         assert len(app.query(SlashCommandMessage)) == 0
@@ -584,14 +577,14 @@ async def test_interrupting_auto_retry_keeps_event_listener_alive() -> None:
             await pilot.pause(0.1)
             chat_input = app.query_one(ChatInputContainer)
             chat_input.post_message(ChatInputContainer.Submitted("first"))
-            await _wait_until(pilot, backend.retry_started.is_set)
+            assert await wait_until(pilot, backend.retry_started.is_set)
 
             await pilot.press("escape")
-            await _wait_until(pilot, lambda: not app._agent_job_active())
+            assert await wait_until(pilot, lambda: not app._agent_job_active())
 
             chat_input.post_message(ChatInputContainer.Submitted("next"))
-            await _wait_until(pilot, lambda: len(backend.requests_messages) == 3)
-            await _wait_until(
+            assert await wait_until(pilot, lambda: len(backend.requests_messages) == 3)
+            assert await wait_until(
                 pilot,
                 lambda: any(
                     "after cancel" in message.get_content()
@@ -612,8 +605,8 @@ async def test_empty_incomplete_stream_retries_original_request() -> None:
         await pilot.pause(0.1)
         chat_input = app.query_one(ChatInputContainer)
         chat_input.post_message(ChatInputContainer.Submitted("hi"))
-        await _wait_until(pilot, lambda: len(backend.requests_messages) == 2)
-        await _wait_until(pilot, lambda: not app._agent_job_active())
+        assert await wait_until(pilot, lambda: len(backend.requests_messages) == 2)
+        assert await wait_until(pilot, lambda: not app._agent_job_active())
 
         assert [message.get_content() for message in app.query(AssistantMessage)] == [
             "Recovered"
@@ -643,8 +636,8 @@ async def test_incomplete_stream_stops_after_two_automatic_retries(
         await pilot.pause(0.1)
         chat_input = app.query_one(ChatInputContainer)
         chat_input.post_message(ChatInputContainer.Submitted("hi"))
-        await _wait_until(pilot, lambda: len(backend.requests_messages) == 3)
-        await _wait_until(pilot, lambda: not app._agent_job_active())
+        assert await wait_until(pilot, lambda: len(backend.requests_messages) == 3)
+        assert await wait_until(pilot, lambda: not app._agent_job_active())
         await pilot.pause(0.1)
 
         assert len(backend.requests_messages) == 3
@@ -682,40 +675,61 @@ async def test_incomplete_stream_does_not_retry_ahead_of_queued_prompts() -> Non
     agent_loop = build_test_agent_loop(backend=backend, enable_streaming=True)
     app = build_test_vibe_app(agent_loop=agent_loop)
 
+    def server_queue_len() -> int:
+        return len(app.app_server.turn_queue.items)
+
     async with app.run_test() as pilot:
-        await pilot.pause(0.1)
+        await pilot.pause()
         chat_input = app.query_one(ChatInputContainer)
 
         # t0 runs; t1 queues behind it. When t0 finishes, t1 promotes and runs.
         chat_input.post_message(ChatInputContainer.Submitted("t0"))
-        await _wait_until(pilot, backend.started[0].is_set)
+        assert await wait_until(pilot, backend.started[0].is_set)
         chat_input.post_message(ChatInputContainer.Submitted("t1"))
-        await _wait_until(pilot, lambda: len(app._queue) == 1)
+        # Wait for the server to durably accept t1, not just the client's optimistic
+        # queue projection (len(app._queue) is set before the enqueue RPC lands).
+        assert await wait_until(
+            pilot, lambda: len(app._queue) == 1 and server_queue_len() == 1
+        )
 
+        # Release t0 and wait until the client has processed t1's promotion: its
+        # queue block is cleared and the turn is running. Only then is a follow-up
+        # prompt guaranteed to become a *separate* turn behind t1 rather than being
+        # folded into t1's about-to-promote merged block.
         backend.release[0].set()
-        await _wait_until(pilot, backend.started[1].is_set)
+        assert await wait_until(
+            pilot,
+            lambda: (
+                backend.started[1].is_set()
+                and app.app_server.turn_active
+                and len(app._queue) == 0
+            ),
+        )
 
-        # t2 queues only after t1 has started, so it is a separate turn behind
-        # the turn that returns an incomplete stream.
+        # t2 queues only after t1 has started, so it is a separate turn behind the
+        # turn that returns an incomplete stream. Wait until it is durably queued
+        # both client- and server-side before releasing t1, so the incomplete-stream
+        # retry decision sees an authoritative queue rather than an in-flight enqueue.
         chat_input.post_message(ChatInputContainer.Submitted("t2"))
-        await _wait_until(pilot, lambda: len(app._queue) == 1)
+        assert await wait_until(
+            pilot, lambda: len(app._queue) == 1 and server_queue_len() == 1
+        )
 
         # t1 returns incomplete while t2 is queued: the auto-retry must defer to
         # the queued prompt rather than retry ahead of it.
         backend.release[1].set()
-        await _wait_until(pilot, lambda: len(backend.requests_messages) == 3)
-        await _wait_until(
+        assert await wait_until(
             pilot, lambda: not app._agent_job_active() and len(app._queue) == 0
         )
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: any(
                 "t2 done" in message.get_content()
                 for message in app.query(AssistantMessage)
             ),
         )
-        await _wait_until(pilot, lambda: len(app.query(ErrorMessage)) == 1)
-        await _wait_until(
+        assert await wait_until(pilot, lambda: len(app.query(ErrorMessage)) == 1)
+        assert await wait_until(
             pilot,
             lambda: (
                 app.query_one(ContextProgress).tokens.current_tokens
@@ -743,19 +757,19 @@ async def test_retry_command_reuses_interrupted_assistant_message() -> None:
         chat_input = app.query_one(ChatInputContainer)
         chat_input.post_message(ChatInputContainer.Submitted("hi"))
         await _wait_for_retry_error(app, pilot)
-        await _wait_until(pilot, lambda: not app._agent_job_active())
+        assert await wait_until(pilot, lambda: not app._agent_job_active())
 
         chat_input.post_message(
             ChatInputContainer.Submitted("/retry Keep the conclusion concise.")
         )
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 agent_loop.messages[-1].role is Role.assistant
                 and agent_loop.messages[-1].content == " tool calls successfully."
             ),
         )
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 len(app.query(AssistantMessage)) == 1
@@ -803,17 +817,17 @@ async def test_retry_command_keeps_separate_assistant_after_reasoning() -> None:
         chat_input = app.query_one(ChatInputContainer)
         chat_input.post_message(ChatInputContainer.Submitted("hi"))
         await _wait_for_retry_error(app, pilot)
-        await _wait_until(pilot, lambda: not app._agent_job_active())
+        assert await wait_until(pilot, lambda: not app._agent_job_active())
 
         chat_input.post_message(ChatInputContainer.Submitted("/retry"))
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 agent_loop.messages[-1].role is Role.assistant
                 and agent_loop.messages[-1].content == "recovered"
             ),
         )
-        await _wait_until(pilot, lambda: len(app.query(AssistantMessage)) == 2)
+        assert await wait_until(pilot, lambda: len(app.query(AssistantMessage)) == 2)
 
         assert [message.get_content() for message in app.query(AssistantMessage)] == [
             "partial",
@@ -835,13 +849,13 @@ async def test_retry_command_keeps_diagnostics_until_retry_progress() -> None:
         chat_input = app.query_one(ChatInputContainer)
         chat_input.post_message(ChatInputContainer.Submitted("hi"))
         await _wait_for_retry_error(app, pilot)
-        await _wait_until(pilot, lambda: not app._agent_job_active())
+        assert await wait_until(pilot, lambda: not app._agent_job_active())
 
         backend._exception_to_raise = RuntimeError("retry failed")
         chat_input.post_message(ChatInputContainer.Submitted("/retry"))
-        await _wait_until(pilot, lambda: backend.streaming_attempts == 2)
-        await _wait_until(pilot, lambda: not app._agent_job_active())
-        await _wait_until(pilot, lambda: len(app.query(ErrorMessage)) == 2)
+        assert await wait_until(pilot, lambda: backend.streaming_attempts == 2)
+        assert await wait_until(pilot, lambda: not app._agent_job_active())
+        assert await wait_until(pilot, lambda: len(app.query(ErrorMessage)) == 2)
 
         assert [message.get_content() for message in app.query(AssistantMessage)] == [
             "partial"

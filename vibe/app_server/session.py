@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from vibe.app_server._model import ProtocolModel, validate_wire
+from vibe.app_server._model import ProtocolModel, validate_backend_wire, validate_wire
 from vibe.app_server._streaming import finish_event_queue
 from vibe.app_server._turn_input import session_content_blocks
 from vibe.app_server.client import AppServerClient, AppServerConnectionClosed
@@ -100,6 +100,8 @@ from vibe.app_server.protocol import (
     TurnQueueReplaceResponse,
     TurnQueueResumeParams,
     TurnQueueResumeResponse,
+    TurnQueueSteerParams,
+    TurnQueueSteerResponse,
     TurnStartParams,
     TurnStartResponse,
     TurnSteerParams,
@@ -296,6 +298,10 @@ class AppServerSession:  # noqa: PLR0904
             for turn in self.state.turns or []
         )
 
+    @property
+    def active_turn_id(self) -> str | None:
+        return self._active_public_turn_id()
+
     def exit_summary(self) -> SessionExitSummary:
         session_log = self.resources.runtime.session_log
         session_id = (
@@ -377,6 +383,12 @@ class AppServerSession:  # noqa: PLR0904
         while True:
             item = await self._unsolicited_events.get()
             if isinstance(item, _StreamClosed):
+                if self._closing:
+                    # Intentional shutdown: end the stream cleanly instead of
+                    # raising. A connection dropped during teardown is expected,
+                    # and the failed reconnect/resume it may trigger must not be
+                    # surfaced to consumers as an error.
+                    return
                 raise item.error or RuntimeError(
                     "App-server event stream closed unexpectedly"
                 )
@@ -457,7 +469,7 @@ class AppServerSession:  # noqa: PLR0904
             response = validate_wire(
                 TurnEnqueueResponse,
                 await client.request(
-                    "app_server/session/turn/enqueue",
+                    "session/turn/enqueue",
                     TurnEnqueueParams(
                         idempotency_key=request_idempotency_key,
                         session_id=request_session_id,
@@ -469,7 +481,7 @@ class AppServerSession:  # noqa: PLR0904
             response = validate_wire(
                 TurnQueueReplaceResponse,
                 await client.request(
-                    "app_server/session/turn/queue/replace",
+                    "session/turn/queue/replace",
                     TurnQueueReplaceParams(
                         idempotency_key=request_idempotency_key,
                         session_id=request_session_id,
@@ -511,7 +523,7 @@ class AppServerSession:  # noqa: PLR0904
         response = validate_wire(
             TurnQueueReadResponse,
             await client.request(
-                "app_server/session/turn/queue/read",
+                "session/turn/queue/read",
                 TurnQueueReadParams(session_id=self.session_id),
                 wait_for_incoming=True,
             ),
@@ -520,13 +532,40 @@ class AppServerSession:  # noqa: PLR0904
             response.queue, after_event_id=after_event_id
         )
 
+    async def refresh_state(self) -> PublicSessionState:
+        """Read authoritative session state and publish reconciliation events."""
+        await self._resync(await self._ensure_attached())
+        return self.state
+
+    async def steer_queued_turn(
+        self, queue_item_id: str, expected_turn_id: str
+    ) -> TurnQueueSteerResponse:
+        client = await self._ensure_attached()
+        response = validate_backend_wire(
+            TurnQueueSteerResponse,
+            await client.request(
+                "session/turn/queue/steer",
+                TurnQueueSteerParams(
+                    session_id=self.session_id,
+                    queue_item_id=queue_item_id,
+                    expected_turn_id=expected_turn_id,
+                ),
+                wait_for_incoming=True,
+            ),
+        )
+        if response.queue_item_id != queue_item_id:
+            raise RuntimeError("Queued steering changed the queue item identity")
+        if response.turn_id != expected_turn_id:
+            raise RuntimeError("Queued steering changed the active turn identity")
+        return response
+
     async def remove_queued_turn(self, queue_item_id: str) -> bool:
         client = await self._ensure_attached()
         was_queued = any(item.id == queue_item_id for item in self.turn_queue.items)
         validate_wire(
             TurnQueueRemoveResponse,
             await client.request(
-                "app_server/session/turn/queue/remove",
+                "session/turn/queue/remove",
                 TurnQueueRemoveParams(
                     session_id=self.session_id, queue_item_id=queue_item_id
                 ),
@@ -559,7 +598,7 @@ class AppServerSession:  # noqa: PLR0904
         validate_wire(
             TurnQueueResumeResponse,
             await client.request(
-                "app_server/session/turn/queue/resume",
+                "session/turn/queue/resume",
                 TurnQueueResumeParams(session_id=self.session_id),
             ),
         )
@@ -720,6 +759,16 @@ class AppServerSession:  # noqa: PLR0904
     async def clear_history(self) -> None:
         await self.resources.sessions.clear_history()
         await self.resources.refresh()
+
+    def begin_close(self) -> None:
+        """Signal an intentional shutdown before ``close()``.
+
+        Once set, a dropped connection is treated as expected teardown rather
+        than a recoverable disconnect, so ``_pump_messages`` stops instead of
+        reconnecting and re-running ``session/resume`` (whose failure would
+        otherwise surface as a fatal error on the event stream). Idempotent.
+        """
+        self._closing = True
 
     async def close(self) -> None:
         await self.resources.telemetry.flush()

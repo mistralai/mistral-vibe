@@ -4,6 +4,9 @@ import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from enum import StrEnum, auto
+import hashlib
+import json
 import os
 from pathlib import Path
 import threading
@@ -18,9 +21,9 @@ from vibe._experimental_harness import (
 )
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._projection import (
-    project_agent_summaries,
     project_config_view,
     project_skill_summaries,
+    project_unified_agent_summaries,
 )
 from vibe.app_server._session_backend_port import SessionBackendHost
 from vibe.app_server._session_backend_services import SessionBackendServices
@@ -57,6 +60,7 @@ from vibe.app_server.protocol import (
 from vibe.app_server.transport import JsonRpcTransport, memory_transport_pair
 from vibe.core.agent_loop import AgentLoop, AgentRuntimePolicy
 from vibe.core.agents.manager import AgentManager
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import (
     MCPHttp,
     MCPServer,
@@ -149,19 +153,191 @@ def _build_launch_context_from_services(
     )
 
 
+def _utility_credential_provider(config: VibeConfigSchema) -> ProviderConfig:
+    """The provider a background title's credential resolves against.
+
+    Bound to the Mistral provider (the destination the title route targets)
+    rather than re-running utility selection, so a vanished Mistral key surfaces
+    as auth-required instead of resolving the active provider's key — which the
+    route would then send to the Mistral endpoint. Raising here is turned into an
+    auth-required state by the credential service.
+    """
+    provider = config.get_mistral_provider()
+    if provider is None:
+        raise ValueError("No Mistral provider available for utility completions")
+    return provider
+
+
+def _utility_provider_route(
+    provider_cfg: ProviderConfig,
+    *,
+    session_provider_name: str,
+    credentials: ProviderCredentialProvider,
+    enabled: bool,
+) -> LocalProviderRoute | None:
+    """A utility completion's provider destination, or None to reuse the session's.
+
+    Used by background title generation and the smart-approve classifier: both run
+    the fast Mistral model regardless of the session's active provider. The route
+    is set only when the caller enables it and the utility provider differs from
+    the session's active provider — so the utility call runs on the fast Mistral
+    model while the session runs elsewhere. Same-provider callers reuse the session
+    adapter and its credentials, so the route stays None.
+    """
+    if not enabled or provider_cfg.name == session_provider_name:
+        return None
+    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+        LocalProviderRoute,
+    )
+
+    return LocalProviderRoute(
+        provider=provider_cfg.name,
+        backend=str(provider_cfg.backend),
+        api_style=provider_cfg.api_style,
+        base_url=provider_cfg.api_base,
+        credentials=credentials,
+        reasoning_field_name=provider_cfg.reasoning_field_name,
+        emits_finish_reason=provider_cfg.emits_finish_reason,
+        extra_headers=dict(provider_cfg.extra_headers),
+        project_id=provider_cfg.project_id,
+        region=provider_cfg.region,
+    )
+
+
 if TYPE_CHECKING:
     from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
         RustRuntimeBuiltinToolName,
     )
+    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+        LocalProviderRoute,
+        ProviderCredentialProvider,
+    )
 
     from vibe.app_server._account import AccountGateway
     from vibe.app_server._identity import IdentityGateway
+    from vibe.app_server._mcp_auth import MCPAuthenticationService
     from vibe.app_server._plugin_mcp import PluginMCPCatalog
     from vibe.app_server._plugins import SessionPlugins, UnifiedPluginProvider
+    from vibe.app_server._session_backend_port import ResolvedMCPCatalog
     from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionContext
     from vibe.app_server.server import AppServer
+    from vibe.core.config import ProviderConfig
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
     from vibe.core.tools.mcp.registry import MCPRegistry
+
+
+def merge_plugin_mcp_into_catalog(
+    catalog: ResolvedMCPCatalog,
+    plugin_mcp: PluginMCPCatalog,
+    *,
+    authentication: MCPAuthenticationService,
+) -> ResolvedMCPCatalog:
+    """Merge plugin-owned MCP servers the harness can run into a config catalog.
+
+    A plugin source whose name a configured server already owns is skipped, so
+    the harness runs the config entry. The plugin server's name never reaches
+    the merged catalog, and ``plugin_owned_names`` reflects that.
+    """
+    from vibe.app_server._session_backend_port import (
+        ResolvedMCPCatalog as _ResolvedMCPCatalog,
+        ResolvedMCPServerConfig,
+    )
+    from vibe.core.config import MCPStdio
+
+    configured_names = frozenset(server.name for server in catalog.servers)
+    plugin_servers: list[ResolvedMCPServerConfig] = []
+    for source in plugin_mcp.sources():
+        if source.name in configured_names:
+            continue
+        server = source.entry.server
+        reference = authentication.reference_for(server, owner="plugin")
+        if isinstance(server, MCPStdio):
+            argv = server.argv()
+            plugin_servers.append(
+                ResolvedMCPServerConfig(
+                    name=source.name,
+                    transport="stdio",
+                    url=None,
+                    command=argv[0] if argv else None,
+                    args=tuple(argv[1:]),
+                    cwd=(
+                        Path(server.cwd).expanduser().resolve() if server.cwd else None
+                    ),
+                    env=server.env,
+                    authorization=reference,
+                    prompt=server.prompt,
+                    startup_timeout_s=server.startup_timeout_sec,
+                    tool_timeout_s=server.tool_timeout_sec,
+                    sampling_enabled=server.sampling_enabled,
+                    disabled=server.disabled,
+                    disabled_tools=frozenset(server.disabled_tools),
+                )
+            )
+        else:
+            plugin_servers.append(
+                ResolvedMCPServerConfig(
+                    name=source.name,
+                    transport=server.transport,
+                    url=server.url,
+                    command=None,
+                    args=(),
+                    cwd=None,
+                    env={},
+                    authorization=reference,
+                    prompt=server.prompt,
+                    startup_timeout_s=server.startup_timeout_sec,
+                    tool_timeout_s=server.tool_timeout_sec,
+                    sampling_enabled=server.sampling_enabled,
+                    disabled=server.disabled,
+                    disabled_tools=frozenset(server.disabled_tools),
+                )
+            )
+    if not plugin_servers:
+        return catalog
+    all_servers = (*catalog.servers, *plugin_servers)
+    payload = [
+        {
+            "name": server.name,
+            "transport": server.transport,
+            "url": server.url,
+            "command": server.command,
+            "args": list(server.args),
+            "cwd": str(server.cwd) if server.cwd is not None else None,
+            "env": dict(server.env),
+            "authorization": {
+                "server_name": server.authorization.server_name,
+                "server_fingerprint": server.authorization.server_fingerprint,
+                "kind": server.authorization.kind,
+                "owner": server.authorization.owner,
+            },
+            "prompt": server.prompt,
+            "startup_timeout_s": server.startup_timeout_s,
+            "tool_timeout_s": server.tool_timeout_s,
+            "sampling_enabled": server.sampling_enabled,
+            "disabled": server.disabled,
+            "disabled_tools": sorted(server.disabled_tools),
+        }
+        for server in all_servers
+    ]
+    revision = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return _ResolvedMCPCatalog(revision=revision, servers=all_servers)
+
+
+def plugin_owned_names(catalog: ResolvedMCPCatalog) -> frozenset[str]:
+    """Names in a merged catalog that a plugin owns, not a config entry.
+
+    Derived from the catalog the harness was actually configured with, so a
+    name a configured server won is absent here even though a plugin source
+    declared it. This is the set the authorization adapter needs to route
+    ``owner`` on references the harness sends back.
+    """
+    return frozenset(
+        server.name
+        for server in catalog.servers
+        if server.authorization.owner == "plugin"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +381,7 @@ class LocalHarnessOptions:
     session: LocalSessionIntent = field(default_factory=NewSessionIntent)
     client_tool_handler: ClientToolHandler | None = None
     experimental_harness: bool = field(default=False, kw_only=True)
+    legacy_harness: bool = field(default=False, kw_only=True)
 
 
 class RuntimeSessionNotFoundError(RuntimeError):
@@ -378,7 +555,7 @@ class _RootRuntimeBlueprint:
         cached = load_cached_eval_response(self.config)
         return _AgentLoopBlueprint(
             config_orchestrator=self.config_orchestrator.copy(),
-            agent_name=self.options.agent or self.config.default_agent,
+            agent_name=self.options.agent or self.config.resolve_default_agent(),
             policy=policy,
             parent_session_id=parent_session_id,
             cwd=self.cwd,
@@ -770,6 +947,7 @@ class HarnessProcess:
         harness_files: HarnessFilesManager | None = None,
         *,
         experimental_harness: bool = False,
+        legacy_harness: bool = False,
     ) -> None:
         from vibe.app_server._mcp_auth import MCPAuthenticationService
         from vibe.app_server.mcp_catalog import MCPCatalogService
@@ -786,8 +964,31 @@ class HarnessProcess:
         self._staged_roots_lock = asyncio.Lock()
         self._closed = False
         self._experimental_harness_host: object | None = None
+        self.harness_selection_source: str = "default"
+
+        # Resolve which harness to use. The rollout variant is read from the
+        # eval cache (synchronous local I/O, no network) so it is available
+        # before the config orchestrator is built. The cache is read even when
+        # telemetry/experiments are disabled: the file on disk was written by a
+        # previous session's eval, and the rollout decision should not depend
+        # on the current telemetry opt-in state.
+        from vibe._experimental_harness import resolve_harness_selection
+
+        cached_eval = None
+        try:
+            cached_eval = _load_rollout_cache()
+        except Exception:
+            pass
+
+        selection = resolve_harness_selection(
+            experimental_harness=experimental_harness,
+            legacy_harness=legacy_harness,
+            cached_eval=cached_eval,
+        )
+        self.harness_selection_source = selection.source
+
         startup_issue: ConfigIssue | None = None
-        if experimental_harness:
+        if selection.use_unified:
             try:
                 self._experimental_harness_host = create_experimental_harness_host()
             except (ExperimentalHarnessUnavailableError, ImportError) as exc:
@@ -796,7 +997,9 @@ class HarnessProcess:
                     message=f"{exc}; falling back to the legacy harness.",
                 )
         self.host_handler = HostRequestHandler(
-            self.harness_files, startup_issue=startup_issue
+            self.harness_files,
+            startup_issue=startup_issue,
+            harness_selection_source=self.harness_selection_source,
         )
         self.mcp_authentication = MCPAuthenticationService()
         self.mcp_catalog = MCPCatalogService(
@@ -973,6 +1176,18 @@ class HarnessProcess:
         # every derivation would forget them and re-send a rejected key.
         credentials = ProviderCredentialService(config_orchestrator)
 
+        # A second credential port for background title generation that may run on
+        # the fast Mistral model even when the session's active provider differs.
+        # Bound to the Mistral provider — the one the title route targets — rather
+        # than re-running utility selection: if the Mistral key later disappears,
+        # this must surface as auth-required, not fall back to the active provider
+        # and send its key to the Mistral endpoint the route still points at. Same
+        # per-session lifetime as ``credentials`` so rejection memory survives
+        # derivations.
+        title_credentials = ProviderCredentialService(
+            config_orchestrator, select_provider=_utility_credential_provider
+        )
+
         # One holder per session, shared by every derivation's adapter config and
         # the context: the Mistral adapter writes the provider correlation id into
         # it, and telemetry forwarding reads it.
@@ -987,7 +1202,7 @@ class HarnessProcess:
         # mutation and must outlive any single derivation.
         agents = AgentManager(
             config_orchestrator,
-            options.agent or config.default_agent,
+            options.agent or config.resolve_default_agent(),
             harness_files=harness_files,
         )
         if require_api_key:
@@ -1044,6 +1259,9 @@ class HarnessProcess:
             load_hooks_from_fs, harness_files=session_config.harness_files
         )
         mcp_catalog = await self.mcp_catalog.resolve_catalog(config_orchestrator)
+        mcp_catalog = merge_plugin_mcp_into_catalog(
+            mcp_catalog, plugin_mcp, authentication=self.mcp_authentication
+        )
         # Connector discovery is deferred to a background task so it never blocks
         # session/start. The session opens with an empty connector catalog and the
         # adapter resolves it after start, reconfiguring connectors in-place when
@@ -1067,12 +1285,12 @@ class HarnessProcess:
                 or connector_base_url
             )
 
-        def derive_config(
+        def derive_config(  # noqa: PLR0914 - one cohesive config derivation
             config: VibeConfigSchema, settings: UnifiedSessionSettings
         ) -> UnifiedRuntimeDerivation:
             active_model = config.get_active_model()
             compaction_model = config.get_compaction_model()
-            title_model_config, _title_provider = select_utility_model(config)
+            title_model_config, title_provider_cfg = select_utility_model(config)
             title_model = LocalModelRoute(
                 model=title_model_config.name, temperature=0.0, thinking="off"
             )
@@ -1096,6 +1314,16 @@ class HarnessProcess:
             )
             available_tools = set(derived_tools.available_tools)
             bypass_approval = options.auto_approve or config.bypass_tool_permissions
+            # Recomputed on every derivation (including switch_agent) so entering or
+            # leaving smart-approve mid-session re-derives the gate live.
+            smart_approve = agents.active_profile.name == BuiltinAgentName.SMART_APPROVE
+            gate = (
+                ToolGate.BYPASS
+                if bypass_approval
+                else ToolGate.CLASSIFIER
+                if smart_approve
+                else ToolGate.PROMPT
+            )
             max_iterations = settings.max_turns or options.max_turns or 1_000
             skill_issues, skills = discover_session_skills(
                 lambda: config_orchestrator.config,
@@ -1185,7 +1413,23 @@ class HarnessProcess:
                         thinking=compaction_model.thinking,
                     ),
                     title_model=title_model if auto_title_enabled else None,
+                    title_provider=_utility_provider_route(
+                        title_provider_cfg,
+                        session_provider_name=provider.name,
+                        credentials=title_credentials,
+                        enabled=auto_title_enabled,
+                    ),
                     title_model_is_fast=title_model_is_fast,
+                    # The classifier runs the fast Mistral model even when the
+                    # session runs on another provider, so it needs its own Mistral
+                    # route + credentials rather than the active model's. Set only
+                    # under smart approve, when the classify gate actually runs.
+                    classifier_provider=_utility_provider_route(
+                        title_provider_cfg,
+                        session_provider_name=provider.name,
+                        credentials=title_credentials,
+                        enabled=smart_approve,
+                    ),
                     max_tokens=settings.max_tokens,
                     thinking=active_model.thinking,
                     reasoning_field_name=provider.reasoning_field_name,
@@ -1219,8 +1463,9 @@ class HarnessProcess:
                     tool_modes=_rust_tool_modes(
                         available_tools,
                         lambda name: derived_tools.get_tool_config(name).permission,
-                        bypass_approval=bypass_approval,
+                        gate=gate,
                     ),
+                    provided_tool_mode=_rust_provided_tool_mode(gate),
                     permission_resolver=permission_resolver.resolve,
                     skills=skills.payloads,
                     correlation_id_sink=correlation.record,
@@ -1259,7 +1504,6 @@ class HarnessProcess:
             ),
             tool_catalog=lambda: tool_catalog_for_config(core_config_json),
         )
-
         return UnifiedSessionContext(
             storage_root=config.session_logging.save_dir,
             legacy_source_loader=load_legacy_source,
@@ -1276,6 +1520,8 @@ class HarnessProcess:
             hooks=hooks,
             mcp_catalog=mcp_catalog,
             mcp_authorization_provider=self.mcp_authentication,
+            mcp_authentication=self.mcp_authentication,
+            mcp_catalog_service=self.mcp_catalog,
             mcp_cache_root=str(
                 Path(config.session_logging.save_dir).expanduser().resolve().parent
                 / "mcp-descriptors"
@@ -1446,6 +1692,7 @@ class HarnessProcess:
         from vibe.app_server._plugins import (
             AgentToolCatalogue,
             UnifiedPluginProvider,
+            installed_plugin_scopes,
             resolve_session_plugins,
         )
 
@@ -1486,6 +1733,7 @@ class HarnessProcess:
                     plugin.name: plugin.root
                     for plugin in plugins.materialized.resolution.plugins
                 },
+                installed_scopes=installed_plugin_scopes(plugins),
                 config_orchestrator=session_config.config_orchestrator,
                 plugin_mcp=plugin_mcp,
                 connector_registry=connector_registry,
@@ -1586,12 +1834,60 @@ class HarnessProcess:
             self._configured = True
 
 
+def _load_rollout_cache() -> EvalResponse | None:
+    """Read the rollout variant from the eval cache.
+
+    The cache file (``~/.vibe/experiment_eval_cache.json``) is a JSON object
+    keyed by the hashed Mistral API key. Each value is an eval response with a
+    timestamp and 7-day TTL.
+
+    This function scans all entries and returns the first non-expired one
+    containing the rollout experiment. It does not need the API key, the
+    config, or the orchestrator: the cache is a local file written by a
+    previous session's eval, and the rollout decision applies regardless of
+    which key was used.
+    """
+    import json
+    import time
+
+    from vibe.core.experiments.cache import _EVAL_CACHE_TTL_SECONDS
+    from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE
+
+    try:
+        with EXPERIMENT_EVAL_CACHE_FILE.path.open(encoding="utf-8") as f:
+            entries = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(entries, dict):
+        return None
+    now = int(time.time())
+    for entry in entries.values():
+        if not isinstance(entry, dict):
+            continue
+        stored_at = entry.get("stored_at_timestamp")
+        payload = entry.get("payload")
+        if not isinstance(stored_at, int) or not isinstance(payload, dict):
+            continue
+        if stored_at <= now - _EVAL_CACHE_TTL_SECONDS:
+            continue
+        try:
+            from vibe.core.experiments.models import EvalResponse
+
+            response = EvalResponse.model_validate(payload)
+        except Exception:
+            continue
+        if "vibe_cli_unified_harness_rollout" in response.features:
+            return response
+    return None
+
+
 async def create_harness_server(
     transport: JsonRpcTransport,
     *,
     transport_kind: TransportKind,
     process: HarnessProcess | None = None,
     experimental_harness: bool = False,
+    legacy_harness: bool = False,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
 ) -> HarnessServer:
@@ -1608,7 +1904,9 @@ async def create_harness_server(
         raise ValueError(
             "experimental_harness cannot be combined with an existing HarnessProcess"
         )
-    process = process or HarnessProcess(experimental_harness=experimental_harness)
+    process = process or HarnessProcess(
+        experimental_harness=experimental_harness, legacy_harness=legacy_harness
+    )
     return HarnessServer(
         _server=AppServer(
             transport,
@@ -1704,7 +2002,7 @@ def build_runtime_snapshot(
     config = config_orchestrator.config
     agents = AgentManager(
         config_orchestrator,
-        options.agent or config.default_agent,
+        options.agent or config.resolve_default_agent(),
         harness_files=harness_files,
     )
     return build_unified_runtime_snapshot(
@@ -1734,7 +2032,7 @@ def build_unified_runtime_snapshot(
     """
     config = config_orchestrator.config
     active_model = config.get_active_model()
-    active, available = project_agent_summaries(
+    active, available = project_unified_agent_summaries(
         agents.active_profile, agents.available_agents.values()
     )
     return RuntimeSnapshot(
@@ -1777,12 +2075,20 @@ _PERMISSION_STRICTNESS: tuple[ToolPermission, ...] = (
 )
 
 
+class ToolGate(StrEnum):
+    """How a session approves a gated builtin tool call, resolved from the mode."""
+
+    PROMPT = auto()
+    BYPASS = auto()
+    CLASSIFIER = auto()
+
+
 def _rust_tool_modes(
     available_tools: set[str],
     permission_of: Callable[[str], ToolPermission],
     *,
-    bypass_approval: bool,
-) -> dict[RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny"]]:
+    gate: ToolGate,
+) -> dict[RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny", "classify"]]:
     """Map the effective Vibe tool catalogue onto Rust builtin approval modes.
 
     A builtin is denied when the catalogue offers no tool it stands for, so a
@@ -1790,18 +2096,18 @@ def _rust_tool_modes(
     running commands — but a platform that merely spells the shell differently
     does not.
 
-    A configured ``always`` comes out as ``ask``. The mode is the only thing the
-    Runtime consults before it runs a builtin, and ``allow`` retires the
-    resolver — and with it every rule a Vibe tool applies to the *call*: the
-    prompt on ``**/.env`` and friends, the path denylist, the command denylist.
-    ``AgentLoop._should_execute_tool`` runs ``resolve_permission`` before it ever
-    reads the configured permission, so a tool-wide ``always`` never bought "skip
-    the tool's own rules" on the legacy backend either. ``ask`` hands the call to
-    the resolver, which answers ``allow`` for anything the tool clears — the
-    prompts that come back are the ones legacy was already raising.
+    A present builtin takes the strictest Vibe permission across its sources.
+    Following main's per-call model, a builtin that would ``allow`` is lowered to
+    ``ask`` so the Host's permission resolver applies its rules (the ``.env``
+    prompt, path/command denylists, allowlist grants) per call; ``BYPASS`` keeps
+    ``allow`` and retires the resolver. Under ``CLASSIFIER`` (smart approve) every
+    builtin that would ``ask`` becomes ``classify``: the classify gate runs the
+    resolver first and only classifies its ``ask`` residue. ``classify`` rides the
+    mutable adapter config, so switching modes flips it live.
     """
     from vibe.app_server._unified_permissions import RUST_BUILTIN_TOOL_SOURCES
 
+    bypass_approval = gate is ToolGate.BYPASS
     configured: dict[RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny"]] = {}
     for builtin, sources in RUST_BUILTIN_TOOL_SOURCES.items():
         present = sources & available_tools
@@ -1818,18 +2124,46 @@ def _rust_tool_modes(
             )
             configured[builtin] = _RUST_MODE_BY_PERMISSION[strictest]
 
-    modes: dict[RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny"]] = {
+    # A builtin that would `allow` becomes `ask` so the per-call resolver applies
+    # its rules; `deny`/`ask` stand.
+    modes: dict[
+        RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny", "classify"]
+    ] = {
         builtin: "ask" if mode == "allow" and not bypass_approval else mode
         for builtin, mode in configured.items()
     }
-    # Not downgraded: no Vibe tool stands behind `process.start`, so the resolver
-    # has no rule to apply to it and would answer with a bare ask that `grant`
-    # cannot record -- a prompt on every background start, for nothing. It
-    # follows the shell's configured mode, as it always has.
+    # No Vibe tool stands behind `process.start`, so the resolver has no rule to
+    # scope it; it follows the shell's configured mode rather than the downgraded
+    # one.
     modes["process.start"] = configured["file_system.bash"]
     for builtin in ("process.output", "process.write", "process.list", "process.stop"):
         modes[builtin] = "allow"
+    # Smart approve layers the classifier on the resolver: every builtin that would
+    # `ask` becomes `classify`. The classify gate runs the resolver first, so
+    # main's per-call rules still apply beneath it. `allow`/`deny` stand.
+    if gate is ToolGate.CLASSIFIER:
+        # `process.start` is executed outside the classify gate, so a `classify`
+        # mode there is not honored and falls through to a plain prompt (no
+        # deny-and-continue). Keep it on its resolver mode until process starts are
+        # classified through the gate (follow-up).
+        modes = {
+            builtin: (
+                "classify" if mode == "ask" and builtin != "process.start" else mode
+            )
+            for builtin, mode in modes.items()
+        }
     return modes
+
+
+def _rust_provided_tool_mode(
+    gate: ToolGate,
+) -> Literal["allow", "ask", "deny", "classify"]:
+    """Mode gating provided/MCP tools, which have no per-name entry in tool_modes.
+
+    Smart approve classifies them per call; every other gate leaves them at their
+    pre-smart-approve behaviour of running unconditionally (``allow``).
+    """
+    return "classify" if gate is ToolGate.CLASSIFIER else "allow"
 
 
 def rust_agent_tool_ceiling(
@@ -1863,9 +2197,11 @@ def rust_agent_tool_ceiling(
         except ValueError:
             return permission_of(name)
 
-    # Never `bypass_approval`: a profile is not a place to retire the resolver, and
-    # False is what turns a declared `always` into `ask`.
-    return _rust_tool_modes(narrowed, permission, bypass_approval=False)
+    # Never bypasses: a profile is not a place to retire the resolver, and PROMPT
+    # is what turns a declared `always` into `ask`. A ceiling never classifies, so
+    # narrow the PROMPT result (only allow/ask/deny) to the profile's 3-value type.
+    modes = _rust_tool_modes(narrowed, permission, gate=ToolGate.PROMPT)
+    return {name: mode for name, mode in modes.items() if mode != "classify"}
 
 
 def _glob_patterns(value: Any) -> list[str]:
@@ -2064,15 +2400,12 @@ def _load_unified_import(
             "unified",
             f"Unified session store is invalid: {session_id}: {exc}",
         ) from exc
-    if (
-        not stored.runtime_state.quiescent
-        or stored.journal
-        or stored.interop_export is None
-    ):
+    export = stored.interop_export
+    if not stored.runtime_state.quiescent or stored.journal or export is None:
         raise RuntimeUnfinishedMigrationError(session_id, "unified")
     try:
         messages, provenance = import_unified_committed_history(
-            stored.interop_export.model_dump(mode="json", by_alias=True)
+            export.model_dump(mode="json", by_alias=True)
         )
     except (TypeError, ValueError) as exc:
         raise RuntimeInvalidMigrationSourceError(

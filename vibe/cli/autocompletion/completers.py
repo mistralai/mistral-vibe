@@ -281,10 +281,36 @@ class PathCompleter(Completer):
             shallow_path=-entry.rel.count("/"),
         )
 
+    def _prioritize_exact_directory_prefix(
+        self, entries: list[IndexEntry], context: _SearchContext
+    ) -> list[IndexEntry]:
+        # Fuzzy scoring is capped to keep per-keystroke completion responsive.
+        # Raw index order follows filesystem traversal, so move descendants of
+        # the longest explicitly typed directory ahead of unrelated entries.
+        directory_segments = context.search_pattern.split("/")[:-1]
+        for segment_count in range(len(directory_segments), 0, -1):
+            directory = "/".join(directory_segments[:segment_count]).lower()
+            if not any(
+                entry.is_dir and entry.rel_lower == directory for entry in entries
+            ):
+                continue
+
+            prefix = f"{directory}/"
+            descendants = [
+                entry for entry in entries if entry.rel_lower.startswith(prefix)
+            ]
+            other_entries = [
+                entry for entry in entries if not entry.rel_lower.startswith(prefix)
+            ]
+            return descendants + other_entries
+
+        return entries
+
     def _score_matches(
         self, entries: list[IndexEntry], context: _SearchContext
     ) -> list[tuple[str, PathCompleter.MatchRank]]:
         scored_matches: list[tuple[str, PathCompleter.MatchRank]] = []
+        entries = self._prioritize_exact_directory_prefix(entries, context)
 
         for i, entry in enumerate(entries):
             if i >= self._max_entries_to_process:

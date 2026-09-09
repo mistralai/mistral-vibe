@@ -43,6 +43,7 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "output": "text",
         "agent": "ask",
         "experimental_harness": False,
+        "legacy_harness": False,
         "auto_approve": False,
         "check_upgrade": False,
         "setup": False,

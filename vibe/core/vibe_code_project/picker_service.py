@@ -14,8 +14,8 @@ from vibe.core.vibe_code_project.client import (
 from vibe.core.vibe_code_project.project_store import VibeProjectsStore
 from vibe.core.vibe_code_project.selection import (
     ProjectPickerContext,
+    RemoteProjectLink,
     VibeCodeProject,
-    VibeCodeProjectLink,
     is_project_linked_to_repo,
     suggested_project_name,
 )
@@ -232,8 +232,8 @@ class VibeCodeProjectPickerService:
 
     def save_project_link(
         self, *, context: ProjectPickerContext, project_id: str, project_name: str
-    ) -> VibeCodeProjectLink:
-        link = VibeCodeProjectLink(
+    ) -> RemoteProjectLink:
+        link = RemoteProjectLink(
             repo_root=context.repo_root,
             repo_url=context.repo_url,
             project_id=project_id,
@@ -272,7 +272,7 @@ class VibeCodeProjectPickerService:
 
     async def _save_project_link_async(
         self, *, context: ProjectPickerContext, project_id: str, project_name: str
-    ) -> VibeCodeProjectLink:
+    ) -> RemoteProjectLink:
         return await asyncio.to_thread(
             self.save_project_link,
             context=context,

@@ -14,13 +14,12 @@ from vibe.app_server._project_links import (
     ProjectLinksController,
     ProjectLinksInternalError,
     ProjectLinksInvalidRequest,
+    _read_inspected_directory,
 )
 from vibe.app_server.protocol import SERVER_METHODS, ProtocolErrorCode
 from vibe.core.config.harness_files import HarnessFilesManager
-from vibe.core.teleport.errors import (
-    ServiceTeleportError,
-    ServiceTeleportNotSupportedError,
-)
+from vibe.core.git.errors import GitError
+from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.vibe_code_project import VibeCodeProjectApiError
 from vibe.core.vibe_code_project.picker_service import (
     VibeCodeProjectCreateResult,
@@ -30,10 +29,11 @@ from vibe.core.vibe_code_project.picker_service import (
     VibeCodeProjectResolverError,
 )
 from vibe.core.vibe_code_project.selection import (
+    LocalProjectLink,
     ProjectPickerContext,
     ProjectRepository,
+    RemoteProjectLink,
     VibeCodeProject,
-    VibeCodeProjectLink,
 )
 
 REPO_URL = "https://github.com/acme/widgets.git"
@@ -56,9 +56,27 @@ def _git_info(**overrides: Any) -> SimpleNamespace:
         "repo": "widgets",
         "branch": "main",
         "default_branch": "main",
+        "has_commits": True,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def _inspected_directory(
+    *, git: SimpleNamespace | None = None, path: Path = REPO_ROOT
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        path=path,
+        name=path.name,
+        git=git
+        if git is not None
+        else SimpleNamespace(
+            github_repo_url=REPO_URL,
+            current_branch="main",
+            default_branch="main",
+            has_commits=True,
+        ),
+    )
 
 
 def _project() -> VibeCodeProject:
@@ -70,13 +88,24 @@ def _project() -> VibeCodeProject:
     )
 
 
-def _context(saved_link: VibeCodeProjectLink | None = None) -> ProjectPickerContext:
+def _context(saved_link: RemoteProjectLink | None = None) -> ProjectPickerContext:
     return ProjectPickerContext(
         repo_root=REPO_ROOT,
         repo_url=REPO_URL,
         repo_name="widgets",
         saved_link=saved_link,
     )
+
+
+def test_git_inspection_failure_is_not_a_plain_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _raise(path: Path) -> None:
+        raise GitError("git unavailable")
+
+    monkeypatch.setattr(project_links, "GitRepo", SimpleNamespace(open=_raise))
+    with pytest.raises(ServiceTeleportError, match="git unavailable"):
+        _read_inspected_directory(tmp_path)
 
 
 class _FakeService:
@@ -125,8 +154,8 @@ class _FakeService:
 
     def save_project_link(
         self, *, context: Any, project_id: str, project_name: str
-    ) -> VibeCodeProjectLink:
-        return VibeCodeProjectLink(
+    ) -> RemoteProjectLink:
+        return RemoteProjectLink(
             repo_root=REPO_ROOT,
             repo_url=REPO_URL,
             project_id=project_id,
@@ -157,7 +186,7 @@ class TestList:
     async def test_lists_metadata_without_api_key(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        link = VibeCodeProjectLink(
+        link = RemoteProjectLink(
             repo_root=REPO_ROOT,
             repo_url=REPO_URL,
             project_id="proj-1",
@@ -166,31 +195,17 @@ class TestList:
         monkeypatch.setattr(
             project_links,
             "VibeProjectsStore",
-            lambda: SimpleNamespace(list_remote_projects=lambda: [link]),
+            lambda: SimpleNamespace(list_project_links=lambda: [link]),
         )
         assert await controller.list_links() == {
-            "projects": [{"projectId": "proj-1", "repoLocalPaths": [str(REPO_ROOT)]}]
-        }
-
-    @pytest.mark.asyncio
-    async def test_groups_stored_links_by_project(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        link = VibeCodeProjectLink(
-            repo_root=REPO_ROOT,
-            repo_url=REPO_URL,
-            project_id="proj-1",
-            project_name="Widgets",
-        )
-        monkeypatch.setattr(
-            project_links,
-            "VibeProjectsStore",
-            lambda: SimpleNamespace(list_remote_projects=lambda: [link]),
-        )
-        result = await controller.list_links()
-        assert result["projects"][0] == {
-            "projectId": "proj-1",
-            "repoLocalPaths": [str(REPO_ROOT)],
+            "projects": [
+                {
+                    "projectId": "proj-1",
+                    "localLinks": [
+                        {"directoryPath": str(REPO_ROOT), "hasCommits": False}
+                    ],
+                }
+            ]
         }
 
     @pytest.mark.asyncio
@@ -199,13 +214,13 @@ class TestList:
     ) -> None:
         # Multiple links on one project surface all their local checkout paths;
         # the loopback folds each onto the project's repositories.
-        link_a = VibeCodeProjectLink(
+        link_a = RemoteProjectLink(
             repo_root=Path("/a/widgets"),
             repo_url=REPO_URL,
             project_id="p1",
             project_name="Widgets",
         )
-        link_b = VibeCodeProjectLink(
+        link_b = RemoteProjectLink(
             repo_root=Path("/b/widgets"),
             repo_url=REPO_URL,
             project_id="p1",
@@ -214,12 +229,15 @@ class TestList:
         monkeypatch.setattr(
             project_links,
             "VibeProjectsStore",
-            lambda: SimpleNamespace(list_remote_projects=lambda: [link_a, link_b]),
+            lambda: SimpleNamespace(list_project_links=lambda: [link_a, link_b]),
         )
         result = await controller.list_links()
         assert result["projects"][0] == {
             "projectId": "p1",
-            "repoLocalPaths": ["/a/widgets", "/b/widgets"],
+            "localLinks": [
+                {"directoryPath": "/a/widgets", "hasCommits": False},
+                {"directoryPath": "/b/widgets", "hasCommits": False},
+            ],
         }
 
 
@@ -228,40 +246,41 @@ class TestResolveRoot:
     async def test_eligible_root(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def _info(root_path: Path) -> SimpleNamespace:
-            return _git_info()
+        async def _inspect(root_path: Path) -> SimpleNamespace:
+            return _inspected_directory()
 
-        monkeypatch.setattr(controller, "_git_info", _info)
+        monkeypatch.setattr(controller, "_inspect_directory", _inspect)
         result = await controller.resolve_root(str(REPO_ROOT))
         assert result["eligible"] is True
-        assert result["root"]["repoName"] == "widgets"
-        assert result["root"]["repoLocalPath"] == str(REPO_ROOT)
+        assert result["root"] == {
+            "directoryPath": str(REPO_ROOT),
+            "directoryName": "widgets",
+            "git": {
+                "currentBranch": "main",
+                "defaultBranch": "main",
+                "githubRepoUrl": REPO_URL,
+                "hasCommits": True,
+            },
+        }
 
-    @pytest.mark.parametrize(
-        ("message", "reason"),
-        [
-            ("Not a git repository", "not_git"),
-            (
-                "No GitHub remote found. Teleport only supports GitHub",
-                "unsupported_remote",
-            ),
-            ("Could not determine current commit", "no_commits"),
-        ],
-    )
     @pytest.mark.asyncio
-    async def test_reject_reasons(
-        self,
-        controller: ProjectLinksController,
-        monkeypatch: pytest.MonkeyPatch,
-        message: str,
-        reason: str,
+    async def test_plain_directory_is_eligible(
+        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def _raise(root_path: Path) -> SimpleNamespace:
-            raise ServiceTeleportNotSupportedError(message)
+        async def _inspect(root_path: Path) -> SimpleNamespace:
+            return SimpleNamespace(path=REPO_ROOT, name="widgets", git=None)
 
-        monkeypatch.setattr(controller, "_git_info", _raise)
+        monkeypatch.setattr(controller, "_inspect_directory", _inspect)
         result = await controller.resolve_root(str(REPO_ROOT))
-        assert result == {"eligible": False, "rejectReason": reason, "root": None}
+        assert result == {
+            "eligible": True,
+            "rejectReason": None,
+            "root": {
+                "directoryPath": str(REPO_ROOT),
+                "directoryName": "widgets",
+                "git": None,
+            },
+        }
 
     @pytest.mark.asyncio
     async def test_nested_unresolvable(
@@ -270,50 +289,65 @@ class TestResolveRoot:
         async def _raise(root_path: Path) -> SimpleNamespace:
             raise ServiceTeleportError("some other failure")
 
-        monkeypatch.setattr(controller, "_git_info", _raise)
+        monkeypatch.setattr(controller, "_inspect_directory", _raise)
         result = await controller.resolve_root(str(REPO_ROOT))
         assert result["rejectReason"] == "nested_unresolvable"
 
 
 class TestInspectRoot:
     @pytest.mark.asyncio
-    async def test_no_remote_is_ineligible(
+    async def test_keeps_local_link_when_directory_gains_github_remote(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def _info(root_path: Path) -> SimpleNamespace:
-            return _git_info(remote_url=None)
+        async def _inspect(root_path: Path) -> SimpleNamespace:
+            return _inspected_directory()
 
-        monkeypatch.setattr(controller, "_git_info", _info)
+        saved_link = LocalProjectLink(
+            directory_path=REPO_ROOT,
+            project_id="proj-local",
+            project_name="Local Widgets",
+        )
+        monkeypatch.setattr(controller, "_inspect_directory", _inspect)
+        monkeypatch.setattr(
+            project_links,
+            "VibeProjectsStore",
+            lambda: SimpleNamespace(
+                get_project_link=lambda **kw: saved_link,
+                delete_project_link=lambda **kw: pytest.fail(
+                    "local links are not upgraded or deleted during inspection"
+                ),
+            ),
+        )
+
         result = await controller.inspect_root(str(REPO_ROOT))
-        assert result == {
-            "eligible": False,
-            "rejectReason": "unsupported_remote",
-            "root": None,
-            "savedLink": None,
-            "staleLinkCleared": False,
+
+        assert result["savedLink"] == {
+            "projectId": "proj-local",
+            "projectName": "Local Widgets",
         }
+        assert result["staleLinkCleared"] is False
 
     @pytest.mark.asyncio
     async def test_clears_stale_saved_link_when_remote_differs(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def _info(root_path: Path) -> SimpleNamespace:
-            return _git_info()
+        async def _inspect(root_path: Path) -> SimpleNamespace:
+            return _inspected_directory()
 
-        stale_link = VibeCodeProjectLink(
+        stale_link = RemoteProjectLink(
             repo_root=REPO_ROOT,
             repo_url="https://github.com/acme/old-widgets.git",
             project_id="proj-old",
             project_name="Old Widgets",
         )
         deleted: list[Path] = []
-        monkeypatch.setattr(controller, "_git_info", _info)
+        monkeypatch.setattr(controller, "_inspect_directory", _inspect)
         monkeypatch.setattr(
             project_links,
             "VibeProjectsStore",
             lambda: SimpleNamespace(
-                get_remote_project=lambda **kw: stale_link,
-                delete_remote_project=lambda **kw: deleted.append(kw["repo_root"]),
+                get_project_link=lambda **kw: stale_link,
+                delete_project_link=lambda **kw: deleted.append(kw["repo_root"]),
             ),
         )
 
@@ -328,17 +362,17 @@ class TestInspectRoot:
     async def test_stale_link_delete_failure_keeps_inspection_usable(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def _info(root_path: Path) -> SimpleNamespace:
-            return _git_info()
+        async def _inspect(root_path: Path) -> SimpleNamespace:
+            return _inspected_directory()
 
-        stale_link = VibeCodeProjectLink(
+        stale_link = RemoteProjectLink(
             repo_root=REPO_ROOT,
             repo_url="https://github.com/acme/old-widgets.git",
             project_id="proj-old",
             project_name="Old Widgets",
         )
         captured: list[str] = []
-        monkeypatch.setattr(controller, "_git_info", _info)
+        monkeypatch.setattr(controller, "_inspect_directory", _inspect)
         monkeypatch.setattr(
             project_links,
             "capture_sentry_exception",
@@ -348,8 +382,8 @@ class TestInspectRoot:
             project_links,
             "VibeProjectsStore",
             lambda: SimpleNamespace(
-                get_remote_project=lambda **kw: stale_link,
-                delete_remote_project=lambda **kw: (_ for _ in ()).throw(
+                get_project_link=lambda **kw: stale_link,
+                delete_project_link=lambda **kw: (_ for _ in ()).throw(
                     OSError("store is read-only")
                 ),
             ),
@@ -370,7 +404,7 @@ class TestInspectRoot:
         async def _raise(root_path: Path) -> SimpleNamespace:
             raise FutureServiceTeleportError("future git metadata failure")
 
-        monkeypatch.setattr(controller, "_git_info", _raise)
+        monkeypatch.setattr(controller, "_inspect_directory", _raise)
         result = await controller.inspect_root(str(REPO_ROOT))
         assert result == {
             "eligible": False,
@@ -411,7 +445,7 @@ class TestPicker:
             name="Zeta",
             repositories=(ProjectRepository(repo_url=REPO_URL),),
         )
-        saved_link = VibeCodeProjectLink(
+        saved_link = RemoteProjectLink(
             repo_root=REPO_ROOT,
             repo_url=REPO_URL,
             project_id="proj-zeta",
@@ -439,7 +473,7 @@ class TestPicker:
             name="Other",
             repositories=(ProjectRepository(repo_url=REPO_URL),),
         )
-        saved_link = VibeCodeProjectLink(
+        saved_link = RemoteProjectLink(
             repo_root=REPO_ROOT,
             repo_url=REPO_URL,
             project_id="proj-missing",
@@ -462,7 +496,7 @@ class TestPicker:
     async def test_load_clears_stale_saved_link(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        stale_link = VibeCodeProjectLink(
+        stale_link = RemoteProjectLink(
             repo_root=REPO_ROOT,
             repo_url="https://github.com/acme/old-widgets.git",
             project_id="proj-old",
@@ -531,22 +565,6 @@ class TestPicker:
 
 class TestMutations:
     @pytest.mark.asyncio
-    async def test_create_and_link(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        service = _FakeService(
-            initial=VibeCodeProjectPickerInitialData(
-                context=_context(),
-                state=VibeCodeProjectPickerState(
-                    projects=[], next_cursor=None, repo_url=REPO_URL
-                ),
-            )
-        )
-        _wire_service(controller, monkeypatch, service)
-        result = await controller.create(str(REPO_ROOT), "Widgets", "main")
-        assert result["link"]["projectId"] == "proj-1"
-
-    @pytest.mark.asyncio
     async def test_link_existing_project(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -555,7 +573,7 @@ class TestMutations:
         assert result["link"] == {
             "projectId": "proj-1",
             "projectName": "Widgets",
-            "repoLocalPath": str(REPO_ROOT),
+            "directoryPath": str(REPO_ROOT),
         }
 
     @pytest.mark.asyncio
@@ -583,10 +601,10 @@ class TestMutations:
     async def test_save_rejects_remote_change_before_persisting(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def _info(root_path: Path) -> SimpleNamespace:
-            return _git_info()
+        async def _inspect(root_path: Path) -> SimpleNamespace:
+            return _inspected_directory()
 
-        monkeypatch.setattr(controller, "_git_info", _info)
+        monkeypatch.setattr(controller, "_inspect_directory", _inspect)
         with pytest.raises(ProjectLinksInvalidRequest, match="remote changed"):
             await controller.save(
                 str(REPO_ROOT),
@@ -599,33 +617,35 @@ class TestMutations:
     async def test_save_rejects_remote_change_after_inspection(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        remotes = iter([
-            _git_info(remote_url="https://github.com/acme/old-widgets.git"),
-            _git_info(remote_url="https://github.com/acme/widgets.git"),
+        inspections = iter([
+            _inspected_directory(
+                git=SimpleNamespace(
+                    github_repo_url="https://github.com/acme/old-widgets.git",
+                    current_branch="main",
+                    default_branch="main",
+                    has_commits=True,
+                )
+            ),
+            _inspected_directory(),
         ])
 
-        async def _info(root_path: Path) -> SimpleNamespace:
-            return next(remotes)
+        async def _inspect(root_path: Path) -> SimpleNamespace:
+            return next(inspections)
 
-        monkeypatch.setattr(controller, "_git_info", _info)
+        monkeypatch.setattr(controller, "_inspect_directory", _inspect)
         inspected = await controller.inspect_root(str(REPO_ROOT))
-        assert inspected["root"]["repoUrl"] == "https://github.com/acme/old-widgets.git"
+        assert (
+            inspected["root"]["git"]["githubRepoUrl"]
+            == "https://github.com/acme/old-widgets.git"
+        )
 
         with pytest.raises(ProjectLinksInvalidRequest, match="remote changed"):
             await controller.save(
-                str(REPO_ROOT), "proj-1", "Widgets", inspected["root"]["repoUrl"]
+                str(REPO_ROOT),
+                "proj-1",
+                "Widgets",
+                inspected["root"]["git"]["githubRepoUrl"],
             )
-
-    @pytest.mark.asyncio
-    async def test_save_rejects_empty_expected_remote(
-        self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        async def _info(root_path: Path) -> SimpleNamespace:
-            return _git_info()
-
-        monkeypatch.setattr(controller, "_git_info", _info)
-        with pytest.raises(ProjectLinksInvalidRequest, match="required"):
-            await controller.save(str(REPO_ROOT), "proj-1", "Widgets", " ")
 
     @pytest.mark.asyncio
     async def test_unlink_deletes_local_store_without_api_key(
@@ -636,17 +656,17 @@ class TestMutations:
             project_links,
             "VibeProjectsStore",
             lambda: SimpleNamespace(
-                delete_remote_project=lambda **kw: deleted.append(kw["repo_root"])
+                delete_project_link=lambda **kw: deleted.append(kw["repo_root"])
             ),
         )
 
-        async def _resolve(root_path: str) -> tuple[Path, SimpleNamespace]:
-            return REPO_ROOT, _git_info()
+        async def _resolve(root_path: str) -> SimpleNamespace:
+            return _inspected_directory()
 
         async def _build(repo_root: Path) -> _FakeService:
             raise AssertionError("unlink must not require the project picker service")
 
-        monkeypatch.setattr(controller, "_resolve_root", _resolve)
+        monkeypatch.setattr(controller, "_resolve_inspection_root", _resolve)
         monkeypatch.setattr(controller, "_build_service", _build)
         result = await controller.unlink(str(REPO_ROOT))
         assert result == {"unlinked": True}
@@ -666,16 +686,16 @@ class TestMutations:
             project_links,
             "VibeProjectsStore",
             lambda: SimpleNamespace(
-                delete_remote_project=lambda **kw: (_ for _ in ()).throw(
+                delete_project_link=lambda **kw: (_ for _ in ()).throw(
                     OSError("store is read-only")
                 )
             ),
         )
 
-        async def _resolve(root_path: str) -> tuple[Path, SimpleNamespace]:
-            return REPO_ROOT, _git_info()
+        async def _resolve(root_path: str) -> SimpleNamespace:
+            return _inspected_directory()
 
-        monkeypatch.setattr(controller, "_resolve_root", _resolve)
+        monkeypatch.setattr(controller, "_resolve_inspection_root", _resolve)
 
         result = await controller.unlink(str(REPO_ROOT))
 
@@ -696,22 +716,22 @@ class TestMutations:
         root = (tmp_path / "widgets").resolve()
         chosen_subdir = root / "packages" / "app"
         deleted: list[Path] = []
-        stored = VibeCodeProjectLink(
+        stored = RemoteProjectLink(
             repo_root=root, repo_url=REPO_URL, project_id="p1", project_name="P1"
         )
         monkeypatch.setattr(
             project_links,
             "VibeProjectsStore",
             lambda: SimpleNamespace(
-                list_remote_projects=lambda: [stored],
-                delete_remote_project=lambda **kw: deleted.append(kw["repo_root"]),
+                list_project_links=lambda: [stored],
+                delete_project_link=lambda **kw: deleted.append(kw["repo_root"]),
             ),
         )
 
         async def _raise(root_path: str) -> tuple[Path, SimpleNamespace]:
             raise ProjectLinksInvalidRequest("Not an eligible project root")
 
-        monkeypatch.setattr(controller, "_resolve_root", _raise)
+        monkeypatch.setattr(controller, "_resolve_inspection_root", _raise)
         result = await controller.unlink(str(chosen_subdir))
         assert result == {"unlinked": True}
         assert deleted == [root]
@@ -728,15 +748,15 @@ class TestMutations:
             project_links,
             "VibeProjectsStore",
             lambda: SimpleNamespace(
-                list_remote_projects=lambda: [],
-                delete_remote_project=lambda **kw: deleted.append(kw["repo_root"]),
+                list_project_links=lambda: [],
+                delete_project_link=lambda **kw: deleted.append(kw["repo_root"]),
             ),
         )
 
         async def _raise(root_path: str) -> tuple[Path, SimpleNamespace]:
             raise ProjectLinksInvalidRequest("Not an eligible project root")
 
-        monkeypatch.setattr(controller, "_resolve_root", _raise)
+        monkeypatch.setattr(controller, "_resolve_inspection_root", _raise)
         result = await controller.unlink(str((tmp_path / "gone").resolve()))
         assert result == {"unlinked": True}
         assert deleted == []
@@ -749,7 +769,14 @@ class _FakeProjectLinksController:
 
     async def list_links(self) -> dict[str, Any]:
         self.calls.append(("list_links", ()))
-        return {"projects": [{"projectId": "p1", "repoLocalPaths": ["/repo"]}]}
+        return {
+            "projects": [
+                {
+                    "projectId": "p1",
+                    "localLinks": [{"directoryPath": "/repo", "hasCommits": True}],
+                }
+            ]
+        }
 
     async def resolve_root(self, root_path: str) -> dict[str, Any]:
         self.calls.append(("resolve_root", (root_path,)))
@@ -759,10 +786,14 @@ class _FakeProjectLinksController:
             "eligible": True,
             "rejectReason": None,
             "root": {
-                "repoLocalPath": "/repo",
-                "repoName": "widgets",
-                "currentBranch": "main",
-                "defaultBranch": "main",
+                "directoryPath": "/repo",
+                "directoryName": "widgets",
+                "git": {
+                    "currentBranch": "main",
+                    "defaultBranch": "main",
+                    "githubRepoUrl": "https://github.com/acme/widgets.git",
+                    "hasCommits": True,
+                },
             },
         }
 
@@ -772,11 +803,14 @@ class _FakeProjectLinksController:
             "eligible": True,
             "rejectReason": None,
             "root": {
-                "repoLocalPath": "/repo",
-                "repoName": "widgets",
-                "currentBranch": "main",
-                "defaultBranch": "main",
-                "repoUrl": "https://github.com/acme/widgets.git",
+                "directoryPath": "/repo",
+                "directoryName": "widgets",
+                "git": {
+                    "currentBranch": "main",
+                    "defaultBranch": "main",
+                    "githubRepoUrl": "https://github.com/acme/widgets.git",
+                    "hasCommits": True,
+                },
             },
             "savedLink": {"projectId": "p1", "projectName": "Widgets"},
             "staleLinkCleared": False,
@@ -786,10 +820,14 @@ class _FakeProjectLinksController:
         self.calls.append(("picker_load", (root_path,)))
         return {
             "root": {
-                "repoLocalPath": "/repo",
-                "repoName": "widgets",
-                "currentBranch": "main",
-                "defaultBranch": "main",
+                "directoryPath": "/repo",
+                "directoryName": "widgets",
+                "git": {
+                    "currentBranch": "main",
+                    "defaultBranch": "main",
+                    "githubRepoUrl": "https://github.com/acme/widgets.git",
+                    "hasCommits": True,
+                },
             },
             "savedLink": None,
             "staleLinkCleared": False,
@@ -805,7 +843,7 @@ class _FakeProjectLinksController:
     ) -> dict[str, Any]:
         self.calls.append(("create", (root_path, name, default_branch)))
         return {
-            "link": {"projectId": "p1", "projectName": name, "repoLocalPath": root_path}
+            "link": {"projectId": "p1", "projectName": name, "directoryPath": root_path}
         }
 
     async def link(
@@ -816,22 +854,26 @@ class _FakeProjectLinksController:
             "link": {
                 "projectId": project_id,
                 "projectName": project_name,
-                "repoLocalPath": root_path,
+                "directoryPath": root_path,
             }
         }
 
     async def save(
-        self, root_path: str, project_id: str, project_name: str, expected_repo_url: str
+        self,
+        root_path: str,
+        project_id: str,
+        project_name: str,
+        expected_github_repo_url: str | None,
     ) -> dict[str, Any]:
         self.calls.append((
             "save",
-            (root_path, project_id, project_name, expected_repo_url),
+            (root_path, project_id, project_name, expected_github_repo_url),
         ))
         return {
             "link": {
                 "projectId": project_id,
                 "projectName": project_name,
-                "repoLocalPath": root_path,
+                "directoryPath": root_path,
             }
         }
 
@@ -871,10 +913,14 @@ class TestProjectLinksJsonRpc:
             "eligible": True,
             "rejectReason": None,
             "root": {
-                "repoLocalPath": "/repo",
-                "repoName": "widgets",
-                "currentBranch": "main",
-                "defaultBranch": "main",
+                "directoryPath": "/repo",
+                "directoryName": "widgets",
+                "git": {
+                    "currentBranch": "main",
+                    "defaultBranch": "main",
+                    "githubRepoUrl": "https://github.com/acme/widgets.git",
+                    "hasCommits": True,
+                },
             },
         }
 
@@ -892,7 +938,9 @@ class TestProjectLinksJsonRpc:
 
         assert controller.calls == [("inspect_root", ("/repo",))]
         assert (
-            result.response.model_dump(mode="json", by_alias=True)["root"]["repoUrl"]
+            result.response.model_dump(mode="json", by_alias=True)["root"]["git"][
+                "githubRepoUrl"
+            ]
             == "https://github.com/acme/widgets.git"
         )
 
@@ -910,7 +958,7 @@ class TestProjectLinksJsonRpc:
                 "rootPath": "/repo",
                 "projectId": "p1",
                 "projectName": "Widgets",
-                "expectedRepoUrl": "https://github.com/acme/widgets.git",
+                "expectedGithubRepoUrl": "https://github.com/acme/widgets.git",
             },
         )
 
@@ -921,7 +969,7 @@ class TestProjectLinksJsonRpc:
             "link": {
                 "projectId": "p1",
                 "projectName": "Widgets",
-                "repoLocalPath": "/repo",
+                "directoryPath": "/repo",
             }
         }
 

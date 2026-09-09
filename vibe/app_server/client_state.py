@@ -41,7 +41,10 @@ class ClientSessionState:
 
     @property
     def custom_skills_count(self) -> int:
-        return sum(skill.source != "builtin" for skill in self.skills)
+        return sum(
+            skill.source != "builtin" and skill.scope != "builtin"
+            for skill in self.skills
+        )
 
     def get_skill(self, name: str) -> SkillSummary | None:
         folded = name.casefold()

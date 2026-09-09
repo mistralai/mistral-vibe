@@ -52,6 +52,8 @@ def _install_fresh_wheel(tmp_path: Path, wheel_path: Path) -> Path:
             "install",
             "--no-config",
             "--refresh",
+            "--exclude-newer-package",
+            "mistralai-vibe-local-harness=false",
             "--python",
             str(python_path),
             str(wheel_path),

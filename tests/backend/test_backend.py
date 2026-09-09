@@ -43,7 +43,7 @@ from vibe.core.llm.backend.base import build_chat_payload
 from vibe.core.llm.backend.factory import BACKEND_FACTORY, create_backend
 from vibe.core.llm.backend.generic import GenericBackend, OpenAIAdapter
 from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper, _cached_tokens
-from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder
+from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder, ModelCall
 from vibe.core.llm.types import BackendLike
 from vibe.core.types import Backend, FunctionCall, LLMChunk, LLMMessage, Role, ToolCall
 from vibe.utils.http import VibeAsyncHTTPClient, get_user_agent
@@ -1224,7 +1224,7 @@ class TestMistralBackendReasoningEffort:
 
 class TestBuildHttpErrorBodyReading:
     _MESSAGES: ClassVar[list[LLMMessage]] = [LLMMessage(role=Role.user, content="hi")]
-    _COMMON_KWARGS: ClassVar[dict] = dict(
+    _CALL: ClassVar[ModelCall] = ModelCall(
         provider="test",
         endpoint="https://api.test.com",
         model="test-model",
@@ -1251,9 +1251,7 @@ class TestBuildHttpErrorBodyReading:
             request=httpx.Request("POST", "https://api.test.com"),
         )
         err = BackendErrorBuilder.build_http_error(
-            error=self._make_sdk_error(response),
-            response=response,
-            **self._COMMON_KWARGS,
+            self._CALL, error=self._make_sdk_error(response), response=response
         )
         assert err.status == 400
         assert err.parsed_error == "invalid temperature"
@@ -1266,9 +1264,7 @@ class TestBuildHttpErrorBodyReading:
             request=httpx.Request("POST", "https://api.test.com"),
         )
         err = BackendErrorBuilder.build_http_error(
-            error=self._make_http_status_error(response),
-            response=response,
-            **self._COMMON_KWARGS,
+            self._CALL, error=self._make_http_status_error(response), response=response
         )
         assert err.status == 400
         assert err.parsed_error == "invalid temperature"
@@ -1284,7 +1280,7 @@ class TestBuildHttpErrorBodyReading:
             "sdk error", response, body='{"message": "context too long"}'
         )
         err = BackendErrorBuilder.build_http_error(
-            error=sdk_err, response=response, **self._COMMON_KWARGS
+            self._CALL, error=sdk_err, response=response
         )
         assert err.parsed_error == "context too long"
         assert "context too long" in err.body_text
@@ -1296,9 +1292,7 @@ class TestBuildHttpErrorBodyReading:
             request=httpx.Request("POST", "https://api.test.com"),
         )
         err = BackendErrorBuilder.build_http_error(
-            error=self._make_http_status_error(response),
-            response=response,
-            **self._COMMON_KWARGS,
+            self._CALL, error=self._make_http_status_error(response), response=response
         )
         assert err.parsed_error == "context too long"
         assert "context too long" in err.body_text
@@ -1313,7 +1307,7 @@ class TestBuildHttpErrorBodyReading:
 
         sdk_err = SDKError("sdk msg", response, body='{"message": "context too long"}')
         err = BackendErrorBuilder.build_http_error(
-            error=sdk_err, response=response, **self._COMMON_KWARGS
+            self._CALL, error=sdk_err, response=response
         )
         assert err.body_text == '{"message": "context too long"}'
         assert err.parsed_error == "context too long"
@@ -1331,7 +1325,7 @@ class TestBuildHttpErrorBodyReading:
             "http error with details", request=response.request, response=response
         )
         err = BackendErrorBuilder.build_http_error(
-            error=http_err, response=response, **self._COMMON_KWARGS
+            self._CALL, error=http_err, response=response
         )
         assert "http error with details" in err.body_text
 

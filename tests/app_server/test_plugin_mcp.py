@@ -15,7 +15,11 @@ from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._mcp_auth import MCPAuthenticationService
 from vibe.app_server._plugin_mcp import PluginMCPCatalog
 from vibe.app_server._runtime import build_unified_runtime_snapshot
-from vibe.app_server._session_backend_port import SessionMCPState
+from vibe.app_server._session_backend_port import (
+    ResolvedMCPCatalog,
+    ResolvedMCPServerConfig,
+    SessionMCPState,
+)
 from vibe.app_server.mcp_catalog import MCPCatalogService
 from vibe.app_server.models import MCPSourceKind, MCPSourceStatus, MCPState
 from vibe.app_server.protocol import (
@@ -41,10 +45,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from vibe.app_server._model import ProtocolModel
-    from vibe.app_server._session_backend_port import (
-        MCPAuthorizationRef,
-        ResolvedMCPCatalog,
-    )
+    from vibe.app_server._session_backend_port import MCPAuthorizationRef
     from vibe.core.config import MCPServer
 
 _ALIAS = "plugin_2f8a1c_figma"
@@ -587,7 +588,7 @@ async def test_logging_in_to_a_plugin_server_reconnects_it_without_the_session()
     # Assert
     assert login.await_args is not None
     assert login.await_args.args[0].name == "figma"
-    assert root.notified == []
+    assert root.notified == ["figma"]
     assert root.suspended == []
     assert response.runtime is not None
     assert [
@@ -668,3 +669,76 @@ async def test_a_statically_declared_plugin_server_reaches_a_login_through_its_4
     ]
     assert login.await_args is not None
     assert login.await_args.args[0].auth == MCPOAuth(type="oauth", scopes=[])
+
+
+@pytest.mark.asyncio
+async def test_a_name_a_configured_server_took_is_not_plugin_owned_in_the_merged_catalog() -> (
+    None
+):
+    # A plugin source declares "figma", but a configured server already owns
+    # that name. The merge skips the plugin entry, so the harness runs the
+    # config server. The authorization adapter must not mark this name as
+    # plugin-owned — otherwise resolve would load the plugin's credentials and
+    # attach them to the config server's harness connection.
+    from vibe.app_server._runtime import (
+        merge_plugin_mcp_into_catalog,
+        plugin_owned_names,
+    )
+
+    catalog, authentication = _catalog()
+    await catalog.bind([_definition()])
+    configured = _configured_server()
+
+    # Bind the configured server so the authentication service knows it.
+    await authentication.bind_catalog([configured], owner=authentication)
+    resolved = authentication.reference_for(configured)
+    base = ResolvedMCPCatalog(
+        revision="r1",
+        servers=(
+            ResolvedMCPServerConfig(
+                name="figma",
+                transport="http",
+                url=configured.url,
+                command=None,
+                args=(),
+                cwd=None,
+                env={},
+                authorization=resolved,
+                prompt=None,
+                startup_timeout_s=30,
+                tool_timeout_s=30,
+                sampling_enabled=False,
+                disabled=False,
+                disabled_tools=frozenset(),
+            ),
+        ),
+    )
+
+    merged = merge_plugin_mcp_into_catalog(base, catalog, authentication=authentication)
+    assert plugin_owned_names(merged) == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_logging_out_of_a_plugin_server_notifies_the_harness() -> None:
+    # Prepare
+    catalog, authentication = _catalog()
+    definition = _definition()
+    await catalog.bind([definition])
+    root = _root(catalog)
+    fingerprint_load, keyring = _unauthenticated(_server())
+
+    # Do
+    with (
+        fingerprint_load,
+        keyring,
+        patch("vibe.app_server._mcp_auth.delete_oauth_credentials", new=AsyncMock()),
+    ):
+        await _dispatch(
+            MCPCatalogService(authentication),
+            "mcp_catalog/logout",
+            MCPLogoutParams(session_id="session-1", name="figma"),
+            root,
+        )
+
+    # Assert
+    assert root.notified == ["figma"]

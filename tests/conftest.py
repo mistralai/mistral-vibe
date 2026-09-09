@@ -50,6 +50,14 @@ from vibe.core.utils.concurrency import run_sync
 from vibe.utils import keyring as keyring_utils
 from vibe.utils.platform import resolve_windows_shell
 
+_TESTS_ROOT = Path(__file__).parent
+_LOCAL_XDIST_GROUPS = {
+    Path("core/test_history_properties.py"): "history_properties",
+    Path("core/test_system_prompt.py"): "git_processes",
+    Path("core/test_trusted_folders.py"): "git_processes",
+    Path("core/test_worktree.py"): "git_processes",
+}
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
@@ -58,6 +66,29 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Run backend contract tests with the experimental Unified Harness backend.",
     )
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    local_run = not os.environ.get("BUILDKITE") and not os.environ.get("GITHUB_ACTIONS")
+    for item in items:
+        try:
+            relative_path = Path(item.path).relative_to(_TESTS_ROOT)
+        except ValueError:
+            continue
+        if local_run and (group := _LOCAL_XDIST_GROUPS.get(relative_path)):
+            item.add_marker(pytest.mark.xdist_group(name=group))
+            continue
+        if relative_path.parts[0] != "e2e":
+            continue
+        if relative_path.name == "test_mock_server.py":
+            continue
+        group = (
+            "subprocess_characterization"
+            if relative_path.parts[1] == "agent_loop_characterization"
+            else "subprocess_cli"
+        )
+        item.add_marker(pytest.mark.xdist_group(name=group))
 
 
 @pytest.fixture
@@ -440,6 +471,21 @@ def _prepare_test_config_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 async def wait_until(
     pilot: Any, predicate: Callable[[], bool], timeout: float = 2.0
 ) -> bool:
+    """Poll the Textual app until ``predicate`` holds, returning whether it did.
+
+    Returns ``True`` as soon as ``predicate()`` is truthy, or ``False`` if the
+    timeout elapses first. It deliberately does not raise: callers assert the
+    result (``assert await wait_until(...)`` to require the state, or
+    ``assert not await wait_until(...)`` to require a state stays absent for the
+    window).
+
+    The short ``pilot.pause`` delay both yields to the message pump and advances
+    wall-clock time so timer/debounce-driven UI state settles. This is *not* a
+    substitute for synchronising on real state: wait on *authoritative* signals
+    (e.g. server-confirmed queue length via ``app.app_server``) rather than the
+    client's optimistic projections (``len(app._queue)`` is set before the enqueue
+    RPC lands), which is a common source of ordering flakes.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -508,7 +554,6 @@ def build_test_agent_loop(
     enable_streaming: bool = False,
     **kwargs,
 ) -> AgentLoop:
-
     resolved_config = config or build_test_vibe_config()
     orchestrator = run_sync(_load_orchestrator(resolved_config))
     return AgentLoop(

@@ -36,9 +36,11 @@ class SkillManager:
         config_getter: Callable[[], VibeConfigSchema],
         *,
         harness_files: HarnessFilesManager | None = None,
+        include_builtins: bool = True,
     ) -> None:
         self._config_getter = config_getter
         self._harness_files = harness_files or get_harness_files_manager()
+        self._include_builtins = include_builtins
         self._search_paths = self._compute_search_paths(self._config)
         self._config_issues: list[SkillConfigIssue] = []
         self.available_skills: Mapping[str, SkillInfo] = MappingProxyType(
@@ -107,7 +109,7 @@ class SkillManager:
         return unique
 
     def _discover_skills(self) -> dict[str, SkillInfo]:
-        skills: dict[str, SkillInfo] = {**BUILTIN_SKILLS}
+        skills: dict[str, SkillInfo] = {**self._reserved_builtins}
         for base, scope in self._search_paths:
             if not base.is_dir():
                 continue
@@ -145,7 +147,7 @@ class SkillManager:
             )
             if skill_info is None:
                 continue
-            if skill_info.name in BUILTIN_SKILLS:
+            if skill_info.name in self._reserved_builtins:
                 logger.debug(
                     "Skipping skill '%s' at %s because builtin skill names are reserved",
                     skill_info.name,
@@ -310,8 +312,16 @@ class SkillManager:
         )
 
     @property
+    def _reserved_builtins(self) -> Mapping[str, SkillInfo]:
+        # The names are reserved because the builtins occupy them. A caller that
+        # sources them elsewhere occupies nothing, so nothing is held back.
+        return BUILTIN_SKILLS if self._include_builtins else {}
+
+    @property
     def custom_skills_count(self) -> int:
-        return sum(name not in BUILTIN_SKILLS for name in self.available_skills)
+        return sum(
+            name not in self._reserved_builtins for name in self.available_skills
+        )
 
     def get_skill(self, name: str) -> SkillInfo | None:
         return self.available_skills.get(name)

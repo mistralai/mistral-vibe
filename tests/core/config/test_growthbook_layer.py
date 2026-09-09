@@ -11,7 +11,10 @@ from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.experiments.active import ExperimentName
 from vibe.core.experiments.client import RemoteEvalClient
-from vibe.core.experiments.manager import ExperimentManager
+from vibe.core.experiments.manager import (
+    ExperimentManager,
+    config_variants_from_response,
+)
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
 
 _ROUTED_TEST_ALIAS = "target-testing-model-alias"
@@ -324,6 +327,98 @@ async def test_maps_managed_shell_experiment_to_config_field() -> None:
 
 
 @pytest.mark.asyncio
+async def test_maps_smart_approve_available_experiment_to_config_field() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants({ExperimentName.SMART_APPROVE.value: "on"})
+
+    data = await layer.load()
+
+    assert data.model_dump() == {"smart_approve_available": True}
+
+
+@pytest.mark.asyncio
+async def test_maps_smart_approve_default_experiment_to_config_field() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants({ExperimentName.SMART_APPROVE_DEFAULT.value: "on"})
+
+    data = await layer.load()
+
+    assert data.model_dump() == {"smart_approve_default": True}
+
+
+@pytest.mark.asyncio
+async def test_maps_boolean_true_variant_to_smart_approve() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants({ExperimentName.SMART_APPROVE.value: "true"})
+
+    data = await layer.load()
+
+    assert data.model_dump() == {"smart_approve_available": True}
+
+
+@pytest.mark.asyncio
+async def test_boolean_false_variant_leaves_smart_approve_unset() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants({ExperimentName.SMART_APPROVE.value: "false"})
+
+    data = await layer.load()
+
+    assert data.model_dump() == {}
+
+
+@pytest.mark.asyncio
+async def test_boolean_default_value_enables_smart_approve_end_to_end() -> None:
+    response = EvalResponse.model_validate({
+        "features": {
+            ExperimentName.SMART_APPROVE.value: {"defaultValue": True, "rules": []},
+            ExperimentName.SMART_APPROVE_DEFAULT.value: {
+                "defaultValue": True,
+                "rules": [],
+            },
+        }
+    })
+    layer = GrowthbookLayer()
+    layer.set_variants(config_variants_from_response(response))
+
+    data = await layer.load()
+
+    assert data.model_dump() == {
+        "smart_approve_available": True,
+        "smart_approve_default": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_object_default_value_applies_routing_end_to_end() -> None:
+    routing = {
+        "active_model": "glm-5-2",
+        "model_config": {
+            "name": "zai-glm-5-2",
+            "provider": "mistral",
+            "alias": "glm-5-2",
+            "input_price": "1.4",
+            "output_price": "4.4",
+            "supports_images": False,
+        },
+    }
+    response = EvalResponse.model_validate({
+        "features": {
+            ExperimentName.CLI_MODEL_ROUTING.value: {
+                "defaultValue": routing,
+                "rules": [],
+            }
+        }
+    })
+    layer = GrowthbookLayer()
+    layer.set_variants(config_variants_from_response(response))
+
+    data = (await layer.load()).model_dump()
+
+    assert data["routed_default_model"] == "glm-5-2"
+    assert "glm-5-2" in data["models"]
+
+
+@pytest.mark.asyncio
 async def test_maps_registry_skills_experiment_to_config_field() -> None:
     layer = GrowthbookLayer()
     layer.set_variants(_manager_with_registry_skills_variant("on").config_variants())
@@ -337,6 +432,16 @@ async def test_maps_registry_skills_experiment_to_config_field() -> None:
 async def test_ignores_registry_skills_off_variant() -> None:
     layer = GrowthbookLayer()
     layer.set_variants(_manager_with_registry_skills_variant("off").config_variants())
+
+    data = await layer.load()
+
+    assert data.model_dump() == {}
+
+
+@pytest.mark.asyncio
+async def test_smart_approve_off_variant_maps_nothing() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants({ExperimentName.SMART_APPROVE.value: "off"})
 
     data = await layer.load()
 
@@ -380,13 +485,23 @@ async def test_ignores_unknown_system_prompt_variant() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ignores_growthbook_default_value_without_forced_rule() -> None:
+async def test_growthbook_default_value_equal_to_baseline_not_applied() -> None:
     layer = GrowthbookLayer()
     layer.set_variants(_manager_with_default_value("cli").config_variants())
 
     data = await layer.load()
 
     assert data.model_dump() == {}
+
+
+@pytest.mark.asyncio
+async def test_growthbook_differing_default_value_is_applied() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants(_manager_with_default_value("tests").config_variants())
+
+    data = await layer.load()
+
+    assert data.model_dump() == {"system_prompt_id": "tests"}
 
 
 @pytest.mark.asyncio
@@ -470,7 +585,7 @@ async def test_growthbook_default_value_does_not_override_selected_toml(
     config_path.write_text('system_prompt_id = "lean"\n', encoding="utf-8")
     orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    layer.set_variants(_manager_with_default_value("cli").config_variants())
+    layer.set_variants(_manager_with_default_value("tests").config_variants())
 
     await orchestrator.reload()
 
@@ -692,7 +807,7 @@ async def test_incomplete_growthbook_model_does_not_break_reload(
     orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     default_alias = orchestrator.config.get_active_model().alias
-    layer.set_variants({experiment.value: json.dumps(payload)})
+    layer.set_variants({experiment.value: payload})
 
     await orchestrator.reload()
 
@@ -723,7 +838,7 @@ async def test_empty_alias_growthbook_model_does_not_break_reload(
     orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     default_alias = orchestrator.config.get_active_model().alias
-    layer.set_variants({experiment.value: json.dumps(payload)})
+    layer.set_variants({experiment.value: payload})
 
     await orchestrator.reload()
 
@@ -774,3 +889,17 @@ async def test_copied_orchestrator_keeps_growthbook_variant_after_reload() -> No
 
     assert failures == []
     assert copied.config.system_prompt_id == "tests"
+
+
+@pytest.mark.asyncio
+async def test_routing_accepts_json_string_variant() -> None:
+    # A GrowthBook "string"-typed feature serves its value as JSON text; the
+    # routing mappers must accept that as well as a native object.
+    layer = GrowthbookLayer()
+    layer.set_variants({
+        ExperimentName.CLI_MODEL_ROUTING.value: '{"active_model": "routed-x"}'
+    })
+
+    data = await layer.load()
+
+    assert data.model_dump()["routed_default_model"] == "routed-x"

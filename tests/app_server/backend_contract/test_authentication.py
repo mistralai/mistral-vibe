@@ -26,7 +26,12 @@ from tests.stubs.fake_identity_gateway import FakeIdentityGateway
 from vibe.app_server._account import AccountGateway, WhoAmIResult
 from vibe.app_server._identity import IdentityGateway
 from vibe.app_server.client import AppServerClient
-from vibe.app_server.models import AccountActionKind, AccountPlanKind, AccountStatus
+from vibe.app_server.models import (
+    AccountActionKind,
+    AccountPlanKind,
+    AccountStatus,
+    TurnErrorCode,
+)
 from vibe.app_server.protocol import (
     AppServerResponseError,
     ClientCapabilities,
@@ -39,32 +44,36 @@ from vibe.app_server.protocol import (
 from vibe.app_server.session import AppServerSession, AppServerTurnError
 from vibe.core.identity import IdentityResult
 from vibe.core.llm.exceptions import BackendError, PayloadSummary
+from vibe.utils.api_keys import ApiKeyOrigin, ApiKeySource
+
 
 # The sentence the legacy backend produces for a rejected credential. Derived
 # from ``BackendError`` rather than typed out, so a reworded message fails here
 # instead of leaving the two backends saying different things. The Harness
-# holds its own copy of the string, pinned to this same source by
+# holds its own copy of the string, pinned to the origin-less form by
 # ``tests/app_server/test_provider_credentials.py``.
-_INVALID_API_KEY_MESSAGE = str(
-    BackendError(
-        provider="mistral",
-        endpoint="/chat/completions",
-        status=401,
-        reason="Unauthorized",
-        headers={},
-        body_text="",
-        parsed_error=None,
-        model="mistral-vibe-cli-latest",
-        payload_summary=PayloadSummary(
+def _invalid_api_key_message(api_key_origin: ApiKeyOrigin | None = None) -> str:
+    return str(
+        BackendError(
+            provider="mistral",
+            endpoint="/chat/completions",
+            status=401,
+            reason="Unauthorized",
+            headers={},
+            body_text="",
+            parsed_error=None,
             model="mistral-vibe-cli-latest",
-            message_count=1,
-            approx_chars=0,
-            temperature=0.0,
-            has_tools=False,
-            tool_choice=None,
-        ),
+            payload_summary=PayloadSummary(
+                model="mistral-vibe-cli-latest",
+                message_count=1,
+                approx_chars=0,
+                temperature=0.0,
+                has_tools=False,
+                tool_choice=None,
+            ),
+            api_key_origin=api_key_origin,
+        )
     )
-)
 
 
 def _whoami(plan_name: str) -> WhoAmIResult:
@@ -345,6 +354,7 @@ async def test_a_provider_401_mid_turn_yields_the_legacy_message(
 
     The Unified path builds this message in the Harness, which cannot import
     Vibe; this is the assertion that keeps the two copies the same sentence.
+    The legacy path additionally names the env var the key was read from.
 
     Containment rather than equality: the legacy loop wraps a retried backend
     failure in ``API error from <provider> (model: <model>): ...``
@@ -362,4 +372,10 @@ async def test_a_provider_401_mid_turn_yields_the_legacy_message(
         _ = [event async for event in backend_contract_session.act("hello")]
 
     # Assert
-    assert _INVALID_API_KEY_MESSAGE in exc_info.value.error.message
+    expected = _invalid_api_key_message(
+        ApiKeyOrigin(ApiKeySource.ENVIRONMENT, "MISTRAL_API_KEY")
+    )
+    assert expected in exc_info.value.error.message
+    # Its own code, not BACKEND_ERROR: the CLI offers /retry on that one, and
+    # retrying a refused key can only fail again.
+    assert exc_info.value.error.code == TurnErrorCode.INVALID_API_KEY

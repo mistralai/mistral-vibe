@@ -845,6 +845,7 @@ StatusMessage {
 }
 
 .compact-message,
+.reload-config-message,
 .tool-call {
     width: 100%;
     height: auto;
@@ -868,6 +869,35 @@ StatusMessage {
     width: 100%;
     height: auto;
     margin-top: 1;
+}
+
+.tool-group-header {
+    width: 100%;
+    height: auto;
+}
+
+/* Match the dimmed grey of expanded tool-call headers so the folded summary
+   reads as the same muted line. text-opacity for truecolor themes; ANSI themes
+   fall back to dim. */
+.tool-group-header .status-indicator-text {
+    text-opacity: 55%;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+.tool-group-body {
+    width: 100%;
+    height: auto;
+}
+
+.tool-group-content {
+    width: 1fr;
+    height: auto;
+    /* The inner pane also carries .tool-group for packing / parent checks;
+       do not inherit that class's conversation-level top margin. */
+    margin-top: 0;
 }
 
 .tool-call-header .status-indicator-text {
@@ -1328,6 +1358,12 @@ StatusMessage {
     color: $warning;
 }
 
+.approval-reason {
+    height: auto;
+    color: $warning;
+    margin-bottom: 1;
+}
+
 .approval-tool-info-container {
     width: 100%;
     height: auto;
@@ -1691,6 +1727,22 @@ NarratorStatus {
     margin-bottom: 1;
     text-wrap: nowrap;
     text-overflow: ellipsis;
+}
+
+#sessionpicker-loading {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+}
+
+.sessionpicker-loading-indicator,
+.sessionpicker-loading-status {
+    width: auto;
+    height: auto;
+}
+
+.sessionpicker-loading-indicator {
+    margin-right: 1;
 }
 
 .sessionpicker-help {

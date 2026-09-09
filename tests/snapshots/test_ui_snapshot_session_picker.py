@@ -37,12 +37,32 @@ class SessionPickerTestApp(BaseSnapshotTestApp):
         await self._switch_from_input(picker)
 
 
+class LoadingSessionPickerTestApp(BaseSnapshotTestApp):
+    async def on_mount(self) -> None:
+        await super().on_mount()
+        picker = SessionPickerApp(
+            sessions=[], latest_messages={}, cwd="/test/workdir", loading=True
+        )
+        await self._switch_from_input(picker)
+
+
 def test_snapshot_session_picker_header(snap_compare: SnapCompare) -> None:
     async def run_before(pilot: Pilot) -> None:
         await pilot.pause(0.2)
 
     assert snap_compare(
         "test_ui_snapshot_session_picker.py:SessionPickerTestApp",
+        terminal_size=(100, 36),
+        run_before=run_before,
+    )
+
+
+def test_snapshot_session_picker_loading(snap_compare: SnapCompare) -> None:
+    async def run_before(pilot: Pilot) -> None:
+        await pilot.pause(0.2)
+
+    assert snap_compare(
+        "test_ui_snapshot_session_picker.py:LoadingSessionPickerTestApp",
         terminal_size=(100, 36),
         run_before=run_before,
     )

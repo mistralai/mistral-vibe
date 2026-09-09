@@ -12,6 +12,11 @@ from vibe.config_values import DEFAULT_LOG_LEVEL
 
 logger = logging.getLogger("vibe")
 
+# The experimental Unified Harness Runtime logs under its own top-level logger, which
+# propagates to the root rather than to "vibe". Route it to the same file handler so
+# harness diagnostics (e.g. smart-approve verdicts) land in vibe.log.
+_HARNESS_LOGGER_NAME = "mistralai_vibe_local_harness"
+
 
 def log_model_call_success(
     alias: str,

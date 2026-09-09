@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.app_server.models import PreparedPrompt, PublicQueuedTurn, PublicTurnQueue
+from vibe.app_server.models import (
+    IdleSessionStatus,
+    PreparedPrompt,
+    PublicQueuedTurn,
+    PublicSession,
+    PublicSessionState,
+    PublicTurnQueue,
+)
 from vibe.app_server.protocol import SessionTextContentBlock, TurnUserInputEntry
 from vibe.cli.textual_ui.message_queue import QueueController, QueuePorts
 from vibe.cli.textual_ui.widgets.messages import UserMessage
@@ -68,6 +75,17 @@ def _make_controller() -> QueueController:
     async def resume_turn_queue() -> PublicTurnQueue:
         return turn_queue
 
+    async def refresh_session_state() -> PublicSessionState:
+        return PublicSessionState(
+            event_id=1,
+            session=PublicSession(
+                id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
+            ),
+            history=[],
+            turns=[],
+            turn_queue=turn_queue,
+        )
+
     return QueueController(
         QueuePorts(
             mount_and_scroll=noop,
@@ -77,6 +95,8 @@ def _make_controller() -> QueueController:
             remove_queued_turn=remove_queued_turn,
             resume_turn_queue=resume_turn_queue,
             steer_turn=noop,
+            steer_queued_turn=noop,
+            refresh_session_state=refresh_session_state,
             turn_has_started=lambda _queue_item_id: False,
             set_loading_queue_count=lambda _count: None,
             maybe_show_feedback_bar=noop,

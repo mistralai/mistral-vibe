@@ -732,7 +732,7 @@ class LegacySessionBackend:
     ) -> SessionBackendResult[TurnEnqueueResponse]:
         runtime_updated = await self._pin_session_active_model()
         result = await self._request(
-            "app_server/session/turn/enqueue", params, TurnEnqueueResponse
+            "session/turn/enqueue", params, TurnEnqueueResponse
         )
         return replace(result, runtime_updated=runtime_updated)
 
@@ -756,28 +756,28 @@ class LegacySessionBackend:
         self, params: TurnQueueReadParams
     ) -> SessionBackendResult[TurnQueueReadResponse]:
         return await self._request(
-            "app_server/session/turn/queue/read", params, TurnQueueReadResponse
+            "session/turn/queue/read", params, TurnQueueReadResponse
         )
 
     async def remove_queued_turn(
         self, params: TurnQueueRemoveParams
     ) -> SessionBackendResult[TurnQueueRemoveResponse]:
         return await self._request(
-            "app_server/session/turn/queue/remove", params, TurnQueueRemoveResponse
+            "session/turn/queue/remove", params, TurnQueueRemoveResponse
         )
 
     async def replace_queued_turn(
         self, params: TurnQueueReplaceParams
     ) -> SessionBackendResult[TurnQueueReplaceResponse]:
         return await self._request(
-            "app_server/session/turn/queue/replace", params, TurnQueueReplaceResponse
+            "session/turn/queue/replace", params, TurnQueueReplaceResponse
         )
 
     async def resume_turn_queue(
         self, params: TurnQueueResumeParams
     ) -> SessionBackendResult[TurnQueueResumeResponse]:
         return await self._request(
-            "app_server/session/turn/queue/resume", params, TurnQueueResumeResponse
+            "session/turn/queue/resume", params, TurnQueueResumeResponse
         )
 
     async def steer_turn(

@@ -12,6 +12,9 @@ resolution-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P2D"
 
+[options.exclude-newer-package]
+mistralai-vibe-local-harness = false
+
 [manifest]
 overrides = [{ name = "pytest", specifier = ">=9.0.3" }]
 
@@ -306,27 +309,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/64/a2/4615c8f7d81a00b1d6e6afe19f694e1543582349fb5f4076f6cb5dc36485/cryptography-50.0.0-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:c87f62a3d3b9888ed0fdde100ec06aa61ca9cd44bad9057d1dff9a516b5f5bb9", size = 4878208, upload-time = "2026-07-31T14:24:45.522Z" },
     { url = "https://files.pythonhosted.org/packages/d2/1a/efcfb02f91407149a0dacffffab791f7e19bf6385f63b3666dc8b5e5c9c8/cryptography-50.0.0-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:65c2c3add92b45fd0709db8594536aea39c2a67af0e27ffcf049c498501140b7", size = 5037050, upload-time = "2026-07-31T14:24:47.697Z" },
     { url = "https://files.pythonhosted.org/packages/57/30/4a22984d4f1bdfb8c054f07a92bc176b97a3134cc1d6c4b3bffb1f3688b4/cryptography-50.0.0-cp39-abi3-win_amd64.whl", hash = "sha256:d24fead1d4d076e1bfb006dcec392074a3cd8d7b4fc8a595aa64073b2b7a96ba", size = 3874135, upload-time = "2026-07-31T14:24:50.085Z" },
-]
-
-[[package]]
-name = "debugpy"
-version = "1.8.21"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/f2/aa/12037145b7a56eaa5b29b41872f7a21b538e807e13f32c4d3c46e59be084/debugpy-1.8.21.tar.gz", hash = "sha256:a3c53278e84c94e11bd87c53970ec391d1a67396c8b22609fcac576520e611a6", size = 1697577, upload-time = "2026-06-01T19:30:35.156Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a2/df/bf625547431a9cadc9f4cbfeda38866e2b17f6aed147b625377e87834449/debugpy-1.8.21-cp312-cp312-macosx_15_0_universal2.whl", hash = "sha256:9f96713896f39c3dff0ee841f47320c3f2983d33c341e009361bb0ebc79adc4e", size = 2483609, upload-time = "2026-06-01T19:30:50.794Z" },
-    { url = "https://files.pythonhosted.org/packages/bf/09/59324b903599031ff9faaec1758292409f6561a0ec2492fe4b703327705a/debugpy-1.8.21-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:c193d474f0a211191f2b4449d2d06157c689013035bd952f3b617e0ef422b176", size = 3968900, upload-time = "2026-06-01T19:30:52.341Z" },
-    { url = "https://files.pythonhosted.org/packages/14/cd/27f65b805d7fe005c44e1a36b9183ecdfbcdbf9d3e721a5115d461ecc7ee/debugpy-1.8.21-cp312-cp312-win32.whl", hash = "sha256:4743373c1cac7f9e74a1b9915bf1dbe0e900eca657ffb170ae07ac8363205ae9", size = 5336340, upload-time = "2026-06-01T19:30:54.047Z" },
-    { url = "https://files.pythonhosted.org/packages/77/1d/c84e30c0c674184948b66f076ab271c01d940618a2824c23cd035a27bc20/debugpy-1.8.21-cp312-cp312-win_amd64.whl", hash = "sha256:bd7ba9dd3daa7c2f942c6ca8d4695a16bf9ac16b63615261c7982bc74f7ed20c", size = 5374751, upload-time = "2026-06-01T19:30:55.891Z" },
-    { url = "https://files.pythonhosted.org/packages/77/6b/d817e1f8cc77aa055d37fba092e0febfdff40fe652d8d53d4cd7a86ad98d/debugpy-1.8.21-cp313-cp313-macosx_15_0_universal2.whl", hash = "sha256:13678151fc401e2d68c9880b91e28714f797d40422994572b24560ef80910a88", size = 2477398, upload-time = "2026-06-01T19:30:57.644Z" },
-    { url = "https://files.pythonhosted.org/packages/48/57/412421516afc3055fa577516f00beec3d663f9b0ab330639547ae6c57720/debugpy-1.8.21-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "sha256:ecbd158386c31ffe71d46f72d44d56e66331ab9b16cad649156d514368f23ab2", size = 3962096, upload-time = "2026-06-01T19:30:59.235Z" },
-    { url = "https://files.pythonhosted.org/packages/c1/62/2c616337cf6ba7b07ebbc97f02c6c945a8e2f76b365e33ee809c32ee36d1/debugpy-1.8.21-cp313-cp313-win32.whl", hash = "sha256:2c2ae706dec41d99a9ca1f7ebc987a83e65578363be6f6b3ac9067504917fae1", size = 5336288, upload-time = "2026-06-01T19:31:00.79Z" },
-    { url = "https://files.pythonhosted.org/packages/f8/99/9175103392f84c4b1bf7622888cdc68da07f0ff7d9e581266428f6776033/debugpy-1.8.21-cp313-cp313-win_amd64.whl", hash = "sha256:aa648733047443eb1d07682c4ef287d36a54507b643ffdf38b09a3ef002c72a0", size = 5376567, upload-time = "2026-06-01T19:31:02.56Z" },
-    { url = "https://files.pythonhosted.org/packages/ce/3d/f4bbb323a548bfab2af3d6b4ffd9bf22636e55956a1285d317a1de643aad/debugpy-1.8.21-cp314-cp314-macosx_15_0_universal2.whl", hash = "sha256:9bb2a685287a2ac9b181cde89edcec64845cb51de7faaa75badb9a698bc24782", size = 2477209, upload-time = "2026-06-01T19:31:04.157Z" },
-    { url = "https://files.pythonhosted.org/packages/8c/2d/6e7ec524984a1702777868de49a4c53202bddac2a432a76a093469587750/debugpy-1.8.21-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "sha256:3d6922439bf33fd38a3e2c447869ebc7b97da5cd3d329ff1ef9bc06c4903437e", size = 3927115, upload-time = "2026-06-01T19:31:05.863Z" },
-    { url = "https://files.pythonhosted.org/packages/97/47/d1aa6d64005a98a9144647d99306b419396f9ad7bf1d73c119e17a81fb4d/debugpy-1.8.21-cp314-cp314-win32.whl", hash = "sha256:15d4963bd5ffa48f0da0947fd06757fa7621945048a14ad7705431566d3c0e7c", size = 5336724, upload-time = "2026-06-01T19:31:07.711Z" },
-    { url = "https://files.pythonhosted.org/packages/5f/67/b905b90d163af11878c1af8abafa4a25206335e112e284e413454543a6da/debugpy-1.8.21-cp314-cp314-win_amd64.whl", hash = "sha256:fe0744a12353406de0ae8ccff0d0a4a666f00801a3db8fd04e7a5f761cd520e8", size = 5373803, upload-time = "2026-06-01T19:31:09.469Z" },
-    { url = "https://files.pythonhosted.org/packages/95/51/67e7cf11a53e40694f720457d5b3a1cdaaa3d5a9a633e482f225456b93ff/debugpy-1.8.21-py2.py3-none-any.whl", hash = "sha256:b1e37d333663c8851516a47364ef473da127f9caebe4417e6df6f5825a7e9a92", size = 5352888, upload-time = "2026-06-01T19:31:25.186Z" },
 ]
 
 [[package]]
@@ -831,7 +813,7 @@ wheels = [
 
 [[package]]
 name = "mistral-vibe"
-version = "2.25.0"
+version = "2.25.1"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -876,6 +858,7 @@ dependencies = [
     { name = "mdit-py-plugins" },
     { name = "mdurl" },
     { name = "mistralai" },
+    { name = "mistralai-vibe-local-harness" },
     { name = "more-itertools" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-common" },
@@ -948,7 +931,6 @@ build = [
 ]
 dev = [
     { name = "cryptography" },
-    { name = "debugpy" },
     { name = "pre-commit" },
     { name = "pre-commit-uv" },
     { name = "pyinstrument" },
@@ -1010,6 +992,7 @@ requires-dist = [
     { name = "mdit-py-plugins", specifier = "==0.5.0" },
     { name = "mdurl", specifier = "==0.1.2" },
     { name = "mistralai", specifier = "==2.6.0" },
+    { name = "mistralai-vibe-local-harness", specifier = "==0.4.3" },
     { name = "more-itertools", specifier = "==11.0.2" },
     { name = "opentelemetry-api", specifier = "==1.39.1" },
     { name = "opentelemetry-exporter-otlp-proto-common", specifier = "==1.39.1" },
@@ -1082,7 +1065,6 @@ build = [
 ]
 dev = [
     { name = "cryptography", specifier = ">=48.0.0" },
-    { name = "debugpy", specifier = ">=1.8.21" },
     { name = "pre-commit", specifier = ">=4.2.0" },
     { name = "pre-commit-uv", specifier = ">=4.3.0" },
     { name = "pyinstrument", specifier = ">=5.1.2" },
@@ -1117,6 +1099,30 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/39/c1/c6452c81a3d7fc0423b4cfcd84840cf7141c93a0c50755abc27a7619a988/mistralai-2.6.0.tar.gz", hash = "sha256:531a86292ad498fc0fcd6dfcd480a3f4db9e92f558e14ffb22172824831e3a6e", size = 518760, upload-time = "2026-07-06T14:40:08.578Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e3/d5/6b9c08ab9b5b890970e8949bf00a9f8f82653826de5cc5ad506fe1c1fb73/mistralai-2.6.0-py3-none-any.whl", hash = "sha256:4b7202b0cab84ea03f8ff4a933c8cfc615b3057520d9d76467c07aa23939dab2", size = 1235945, upload-time = "2026-07-06T14:40:06.226Z" },
+]
+
+[[package]]
+name = "mistralai-vibe-local-harness"
+version = "0.4.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "certifi" },
+    { name = "httpx" },
+    { name = "mcp" },
+    { name = "mistralai" },
+    { name = "opentelemetry-api" },
+    { name = "pydantic" },
+    { name = "pywinpty", marker = "sys_platform == 'win32'" },
+    { name = "rfc8785" },
+    { name = "truststore" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9a/34/c55289e1e52c10b11e683885145a8f0b9565fe07c6371b98e900eb125918/mistralai_vibe_local_harness-0.4.3-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:272476b29ae3dc85de4d453184a7a64026b5f9b66f30a1a279d28865859a7644", size = 25565981, upload-time = "2026-09-09T09:24:48.115Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/1d/65ca54fcb18081f9fe14e23995e64f4bcfcb5cf075b94fbca80e5bf5554c/mistralai_vibe_local_harness-0.4.3-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:d528171fdb4ee45e9153842d1c68f9017504df36f3aac9dacef9467ae9b3d9c0", size = 24528876, upload-time = "2026-09-09T09:24:50.904Z" },
+    { url = "https://files.pythonhosted.org/packages/13/8f/d4b50a4904d19a811d06d988c4a821749fae1f1099028c0da95bec33146b/mistralai_vibe_local_harness-0.4.3-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:a5ddb108855c4b1710c6b3d9f2d90ccc219ff52ff2cd13eae2cc1ddda079b5b0", size = 23760393, upload-time = "2026-09-09T09:24:53.384Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/21/00e5a45dc080ffda059976e03e04b8a8d3d8e795f14be12be83a31a0164a/mistralai_vibe_local_harness-0.4.3-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:25369308a4e8d78d180394843d5901b901dc7228eba7b920f94e8d2ae2dcb18c", size = 24802678, upload-time = "2026-09-09T09:24:56.279Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/d4/3ddfb83508302238419d9f1a9fb8378bdc978ac20432e3409a99805c0efb/mistralai_vibe_local_harness-0.4.3-cp312-abi3-win_amd64.whl", hash = "sha256:2712e7fac993cfbffe718acf00cff0d323ebd0998435cf2990fc968a44d1ba3b", size = 24259132, upload-time = "2026-09-09T09:24:58.899Z" },
 ]
 
 [[package]]

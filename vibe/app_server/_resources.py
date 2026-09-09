@@ -45,16 +45,14 @@ from vibe.app_server._session_model import (
     set_session_active_model_override,
     with_session_active_model_write,
 )
+from vibe.app_server._skills_service import SkillsController
 from vibe.app_server.config import ProxySettingsView
 from vibe.app_server.models import (
     AccountView,
     IdentityView,
     MCPState,
     ScheduledLoop,
-    SkillCatalogEntry,
-    SkillDetailView,
-    SkillUpdateView,
-    SkillVersionView,
+    SkillSummary,
 )
 from vibe.app_server.protocol import (
     AccountReadParams,
@@ -101,29 +99,9 @@ from vibe.app_server.protocol import (
     NarrationSummarizeParams,
     NarrationSummarizeResponse,
     ProtocolErrorCode,
-    RuntimeMutationResponse,
     RuntimeReadParams,
     RuntimeReadResponse,
     RuntimeSnapshot,
-    SkillsCatalogParams,
-    SkillsCatalogResponse,
-    SkillsConvertLocalParams,
-    SkillsConvertResponse,
-    SkillsDetailParams,
-    SkillsDetailResponse,
-    SkillsImportParams,
-    SkillsInstalledParams,
-    SkillsInstalledResponse,
-    SkillsListParams,
-    SkillsListResponse,
-    SkillsRemoveParams,
-    SkillsSetAliasParams,
-    SkillsSetLatestParams,
-    SkillsSetVersionParams,
-    SkillsUpdatesParams,
-    SkillsUpdatesResponse,
-    SkillsVersionsParams,
-    SkillsVersionsResponse,
     StatsReadParams,
     StatsReadResponse,
     TelemetryRecordParams,
@@ -131,6 +109,7 @@ from vibe.app_server.protocol import (
     ToolsListResponse,
 )
 from vibe.core.agent_loop import AgentLoop
+from vibe.core.config import VibeConfigSchema
 from vibe.core.config.admin_config import (
     MANAGED_CONFIG_TIMEOUT,
     AdminConfigApplyResult,
@@ -152,26 +131,53 @@ from vibe.core.proxy_setup import (
     set_proxy_var,
     unset_proxy_var,
 )
-from vibe.core.skills.models import SkillScope
-from vibe.core.skills.registry import (
-    RegistrySkillsError,
-    check_new_versions,
-    check_updates,
-    convert_skill_to_local,
-    get_skill_body,
-    get_skill_details,
-    has_registry_endpoint,
-    import_skill,
-    list_catalog,
-    list_skill_versions,
-    project_scope_available,
-    remove_skill,
-    set_skill_alias,
-    set_skill_latest,
-    set_skill_version,
-)
 from vibe.core.types import Role, ScheduledLoop as CoreScheduledLoop
 from vibe.observability.logging import logger
+
+
+class _LegacySkillsHost:
+    """``SkillsHost`` over the legacy agent loop.
+
+    A skill change is picked up by reloading the loop, which re-walks the search
+    paths; the snapshot is re-projected afterwards so the client sees the new
+    catalogue in the same response.
+    """
+
+    def __init__(
+        self,
+        agent_loop: AgentLoop,
+        execution: SessionExecution,
+        runtime_snapshot: Callable[[], RuntimeSnapshot],
+        require_session: Callable[[str], None],
+    ) -> None:
+        self._agent_loop = agent_loop
+        self._execution = execution
+        self._runtime_snapshot = runtime_snapshot
+        self._require_session = require_session
+
+    @property
+    def config(self) -> VibeConfigSchema:
+        return self._agent_loop.config
+
+    @property
+    def skill_roots(self) -> list[Path]:
+        return self._agent_loop.harness_files.project_roots
+
+    def require_idle(self) -> None:
+        self._execution.require_idle()
+
+    def require_session(self, session_id: str) -> None:
+        self._require_session(session_id)
+
+    def list_skills(self) -> list[SkillSummary]:
+        return project_skills(self._agent_loop)
+
+    def installed_skills(self) -> list[SkillSummary]:
+        return project_installed_skills(self._agent_loop)
+
+    async def refresh(self) -> RuntimeSnapshot:
+        await self._agent_loop.reload_with_initial_messages(reload_hooks=True)
+        return self._runtime_snapshot()
 
 
 class ResourceRequestHandler:
@@ -200,6 +206,11 @@ class ResourceRequestHandler:
                 user_plan=agent_loop.user_plan,
             )
         )
+        self._skills = SkillsController(
+            _LegacySkillsHost(
+                agent_loop, execution, self.runtime_snapshot, self._require_session
+            )
+        )
         self._mcp_discovery_errors: dict[str, str] = {}
         self.restore_loops()
 
@@ -217,7 +228,7 @@ class ResourceRequestHandler:
             case "agents":
                 result = await self._dispatch_agents(method, raw_params)
             case "skills":
-                result = await self._dispatch_skills(method, raw_params)
+                result = await self._skills.dispatch(method, raw_params)
             case "tools" | "stats" | "diagnostics":
                 result = self._dispatch_catalog(method, raw_params)
             case "connectors":
@@ -734,290 +745,6 @@ class ResourceRequestHandler:
             )
         active, agents = project_agents(self._agent_loop)
         return AgentsListResponse(active=active, agents=agents)
-
-    def _skills_list(self, params: SkillsListParams) -> SkillsListResponse:
-        self._require_session(params.session_id)
-        return SkillsListResponse(skills=project_skills(self._agent_loop))
-
-    async def _dispatch_skills(
-        self, method: str, raw_params: dict[str, Any]
-    ) -> DispatchResult:
-        match method:
-            case "skills/list":
-                response: ProtocolModel = self._skills_list(
-                    validate_wire(SkillsListParams, raw_params)
-                )
-                runtime_updated = False
-            case "skills/installed":
-                response = self._skills_installed(
-                    validate_wire(SkillsInstalledParams, raw_params)
-                )
-                runtime_updated = False
-            case "skills/catalog":
-                response = await self._skills_catalog(
-                    validate_wire(SkillsCatalogParams, raw_params)
-                )
-                runtime_updated = False
-            case "skills/versions":
-                response = await self._skills_versions(
-                    validate_wire(SkillsVersionsParams, raw_params)
-                )
-                runtime_updated = False
-            case "skills/updates":
-                response = await self._skills_updates(
-                    validate_wire(SkillsUpdatesParams, raw_params)
-                )
-                runtime_updated = False
-            case "skills/detail":
-                response = await self._skills_detail(
-                    validate_wire(SkillsDetailParams, raw_params)
-                )
-                runtime_updated = False
-            case "skills/import":
-                response = await self._skills_import(
-                    validate_wire(SkillsImportParams, raw_params)
-                )
-                runtime_updated = True
-            case "skills/setVersion":
-                response = await self._skills_set_version(
-                    validate_wire(SkillsSetVersionParams, raw_params)
-                )
-                runtime_updated = True
-            case "skills/setLatest":
-                response = await self._skills_set_latest(
-                    validate_wire(SkillsSetLatestParams, raw_params)
-                )
-                runtime_updated = True
-            case "skills/setAlias":
-                response = await self._skills_set_alias(
-                    validate_wire(SkillsSetAliasParams, raw_params)
-                )
-                runtime_updated = True
-            case "skills/remove":
-                response = await self._skills_remove(
-                    validate_wire(SkillsRemoveParams, raw_params)
-                )
-                runtime_updated = True
-            case "skills/convertLocal":
-                response = await self._skills_convert_local(
-                    validate_wire(SkillsConvertLocalParams, raw_params)
-                )
-                runtime_updated = True
-            case _:
-                raise method_not_found(method)
-        return DispatchResult(response, runtime_updated=runtime_updated)
-
-    def _skills_installed(
-        self, params: SkillsInstalledParams
-    ) -> SkillsInstalledResponse:
-        self._require_session(params.session_id)
-        return SkillsInstalledResponse(
-            skills=project_installed_skills(self._agent_loop)
-        )
-
-    async def _skills_catalog(
-        self, params: SkillsCatalogParams
-    ) -> SkillsCatalogResponse:
-        self._require_session(params.session_id)
-        config = self._agent_loop.config
-        roots = self._skill_roots()
-        project_available = project_scope_available(roots)
-        authenticated = await has_registry_endpoint(config)
-        if not authenticated:
-            return SkillsCatalogResponse(
-                skills=[],
-                updates={},
-                loaded=True,
-                project_available=project_available,
-                authenticated=False,
-            )
-        try:
-            catalog = await list_catalog(config)
-            updates = {
-                u.name: u.latest_version for u in await check_updates(config, roots)
-            }
-        except Exception:
-            return SkillsCatalogResponse(
-                skills=[], updates={}, loaded=False, project_available=project_available
-            )
-        return SkillsCatalogResponse(
-            skills=[
-                SkillCatalogEntry(
-                    name=c.name,
-                    skill_id=c.skill_id,
-                    description=c.description,
-                    latest_version=c.latest_version,
-                    sharing_scope=c.sharing_scope,
-                )
-                for c in catalog
-            ],
-            updates=updates,
-            loaded=True,
-            project_available=project_available,
-        )
-
-    async def _skills_versions(
-        self, params: SkillsVersionsParams
-    ) -> SkillsVersionsResponse:
-        self._require_session(params.session_id)
-        versions = await list_skill_versions(self._agent_loop.config, params.skill_id)
-        return SkillsVersionsResponse(
-            versions=[
-                SkillVersionView(version=v.version, aliases=list(v.aliases))
-                for v in versions
-            ]
-        )
-
-    async def _skills_updates(
-        self, params: SkillsUpdatesParams
-    ) -> SkillsUpdatesResponse:
-        self._require_session(params.session_id)
-        updates = await check_new_versions(self._agent_loop.config, self._skill_roots())
-        return SkillsUpdatesResponse(
-            updates=[
-                SkillUpdateView(
-                    name=u.name,
-                    current_version=u.current_version,
-                    latest_version=u.latest_version,
-                )
-                for u in updates
-            ]
-        )
-
-    async def _skills_detail(self, params: SkillsDetailParams) -> SkillsDetailResponse:
-        self._require_session(params.session_id)
-        config = self._agent_loop.config
-        detail = await get_skill_details(
-            config, params.skill_id, version=params.version
-        )
-        if detail is not None:
-            return SkillsDetailResponse(
-                detail=SkillDetailView.model_validate(detail.model_dump())
-            )
-        try:
-            body = await get_skill_body(config, params.skill_id, version=params.version)
-        except RegistrySkillsError:
-            body = None
-        return SkillsDetailResponse(detail=None, body=body)
-
-    def _skill_roots(self) -> list[Path]:
-        return self._agent_loop.harness_files.project_roots
-
-    def _skill_scope(self, scope: str) -> SkillScope:
-        if scope == "project":
-            return SkillScope.PROJECT
-        if scope == "global":
-            return SkillScope.GLOBAL
-        raise RequestFailure(
-            ProtocolErrorCode.INVALID_PARAMS, f"invalid skill scope: {scope!r}"
-        )
-
-    async def _refresh_after_skill_change(self) -> RuntimeMutationResponse:
-        await self._agent_loop.reload_with_initial_messages(reload_hooks=True)
-        return RuntimeMutationResponse(runtime=self.runtime_snapshot())
-
-    async def _skills_import(
-        self, params: SkillsImportParams
-    ) -> RuntimeMutationResponse:
-        self._execution.require_idle()
-        self._require_session(params.session_id)
-        try:
-            await import_skill(
-                self._agent_loop.config,
-                params.skill_id,
-                version=params.version,
-                alias=params.alias,
-                scope=self._skill_scope(params.scope),
-                roots=self._skill_roots(),
-            )
-        except RegistrySkillsError as exc:
-            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
-        return await self._refresh_after_skill_change()
-
-    async def _skills_set_version(
-        self, params: SkillsSetVersionParams
-    ) -> RuntimeMutationResponse:
-        self._execution.require_idle()
-        self._require_session(params.session_id)
-        try:
-            await set_skill_version(
-                self._agent_loop.config,
-                params.name,
-                params.version,
-                self._skill_scope(params.scope),
-                self._skill_roots(),
-            )
-        except RegistrySkillsError as exc:
-            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
-        return await self._refresh_after_skill_change()
-
-    async def _skills_set_latest(
-        self, params: SkillsSetLatestParams
-    ) -> RuntimeMutationResponse:
-        self._execution.require_idle()
-        self._require_session(params.session_id)
-        try:
-            await set_skill_latest(
-                self._agent_loop.config,
-                params.name,
-                self._skill_scope(params.scope),
-                self._skill_roots(),
-            )
-        except RegistrySkillsError as exc:
-            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
-        return await self._refresh_after_skill_change()
-
-    async def _skills_set_alias(
-        self, params: SkillsSetAliasParams
-    ) -> RuntimeMutationResponse:
-        self._execution.require_idle()
-        self._require_session(params.session_id)
-        try:
-            await set_skill_alias(
-                self._agent_loop.config,
-                params.name,
-                params.alias,
-                self._skill_scope(params.scope),
-                self._skill_roots(),
-            )
-        except RegistrySkillsError as exc:
-            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
-        return await self._refresh_after_skill_change()
-
-    async def _skills_remove(
-        self, params: SkillsRemoveParams
-    ) -> RuntimeMutationResponse:
-        self._execution.require_idle()
-        self._require_session(params.session_id)
-        try:
-            await asyncio.to_thread(
-                remove_skill,
-                params.name,
-                self._skill_scope(params.scope),
-                self._skill_roots(),
-            )
-        except (RegistrySkillsError, OSError) as exc:
-            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
-        return await self._refresh_after_skill_change()
-
-    async def _skills_convert_local(
-        self, params: SkillsConvertLocalParams
-    ) -> SkillsConvertResponse:
-        self._execution.require_idle()
-        self._require_session(params.session_id)
-        try:
-            target = await asyncio.to_thread(
-                convert_skill_to_local,
-                params.name,
-                self._skill_scope(params.scope),
-                self._skill_roots(),
-            )
-        except (RegistrySkillsError, OSError) as exc:
-            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
-        await self._agent_loop.reload_with_initial_messages(reload_hooks=True)
-        return SkillsConvertResponse(
-            converted=target is not None, runtime=self.runtime_snapshot()
-        )
 
     def _tools_list(self, params: ToolsListParams) -> ToolsListResponse:
         self._require_session(params.session_id)

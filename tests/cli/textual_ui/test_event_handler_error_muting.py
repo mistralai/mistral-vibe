@@ -63,7 +63,7 @@ async def test_error_result_is_registered_as_pending() -> None:
 
 
 @pytest.mark.asyncio
-async def test_followup_tool_call_keeps_error_muted() -> None:
+async def test_followup_successful_call_keeps_error_muted() -> None:
     handler, mount_callback, projection = _make_handler()
 
     await projection.dispatch(_call_event("a"), handler.handle_event)
@@ -72,8 +72,34 @@ async def test_followup_tool_call_keeps_error_muted() -> None:
     result_widget.escalate_error = Mock()
 
     await projection.dispatch(_call_event("b"), handler.handle_event)
+    await projection.dispatch(_ok_result("b"), handler.handle_event)
 
     result_widget.escalate_error.assert_not_called()
+    assert handler._pending_error_results == []
+
+
+@pytest.mark.asyncio
+async def test_followup_failed_call_keeps_error_pending() -> None:
+    """An error followed by another error (no success) keeps both pending
+    so they get escalated to red at turn end.
+    """
+    handler, mount_callback, projection = _make_handler()
+
+    await projection.dispatch(_call_event("a"), handler.handle_event)
+    await projection.dispatch(_error_result("a"), handler.handle_event)
+    result_widget_a = _last_result_widget(mount_callback)
+    result_widget_a.escalate_error = Mock()
+
+    await projection.dispatch(_call_event("b"), handler.handle_event)
+    await projection.dispatch(_error_result("b"), handler.handle_event)
+
+    # Neither error should have been escalated yet.
+    result_widget_a.escalate_error.assert_not_called()
+    assert len(handler._pending_error_results) == 2
+
+    # Turn end escalates both.
+    handler.escalate_unresolved_errors()
+    result_widget_a.escalate_error.assert_called_once()
     assert handler._pending_error_results == []
 
 

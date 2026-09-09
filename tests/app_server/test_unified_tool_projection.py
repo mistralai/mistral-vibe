@@ -15,14 +15,26 @@ from vibe.app_server.models import (
     FileEditEffectOutput,
     FileReadEffectDetail,
     FileReadEffectOutput,
+    FileSearchEffectDetail,
+    FileSearchEffectOutput,
     FileWriteEffectDetail,
     FileWriteEffectOutput,
     GenericEffectDetail,
+    ProcessEffectDetail,
     PublicCallbackEntry,
     PublicEffectEntry,
     ShellEffectDetail,
     ShellEffectOutput,
     SkillEffectDetail,
+    TodoEffectDetail,
+    TodoEffectItem,
+    TodoEffectOutput,
+    UserQuestionEffectDetail,
+    UserQuestionResult,
+    WebFetchEffectDetail,
+    WebFetchEffectOutput,
+    WebSearchEffectDetail,
+    WebSearchEffectOutput,
     validate_history_entry,
 )
 
@@ -213,6 +225,36 @@ def test_projects_unified_shell_result_from_structured_transcript() -> None:
     assert projected.state.output_text == "outerr"
 
 
+def test_shell_projection_preserves_auto_approved_note_warning() -> None:
+    """*Prepare*: A completed bash effect whose incoming display carries a
+    smart-approve auto-approved note as a warning.
+    *Do*: Project it through the Vibe-owned semantic adapter.
+    *Assert*: The rebuilt shell display keeps the note so the TUI can render it.
+    """
+    note = "Auto-approved: read-only command (ls)"
+    entry = _effect(
+        "bash",
+        {"command": "ls"},
+        result={
+            "structured_content": {
+                "command": "ls",
+                "stdout": "file.txt\n",
+                "stderr": "",
+                "output": "file.txt\n",
+                "returncode": 0,
+                "was_truncated": False,
+            }
+        },
+        warnings=[note],
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.warnings == [note]
+
+
 def test_projects_unified_skill_without_exposing_the_runtime_result_envelope() -> None:
     """*Prepare*: A generic Unified skill call whose text result contains the loaded body.
     *Do*: Project it through the Vibe-owned semantic adapter.
@@ -270,11 +312,7 @@ def test_unknown_or_malformed_unified_tools_remain_exactly_generic(
 
 @pytest.mark.parametrize(
     ("name", "verb", "message", "settled_verb"),
-    [
-        ("ui.ask_user_question", "Asking", "a question", "Asked"),
-        ("subagent.wait", "Waiting", "for a subagent", "Waited"),
-        ("process.start", "Starting", "a background process", "Started"),
-    ],
+    [("subagent.wait", "Waiting", "for a subagent", "Waited")],
 )
 def test_humanizes_namespaced_builtin_labels(
     name: str, verb: str, message: str, settled_verb: str
@@ -302,6 +340,33 @@ def test_humanizes_namespaced_builtin_labels(
     assert isinstance(projected.state, CompletedEffectState)
     assert projected.state.display.message == message
     assert projected.state.display.verb == settled_verb
+
+
+def test_projects_process_start_with_command_in_display() -> None:
+    entry = _effect(
+        "process.start",
+        {"command": "sleep 30"},
+        result={
+            "structured_content": {
+                "processId": "process-abc12345-abcdef",
+                "status": "running",
+            }
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, ProcessEffectDetail)
+    assert projected.detail.tool_name == "process.start"
+    assert projected.detail.display.verb == "Starting"
+    assert projected.detail.display.message == "sleep 30"
+    assert projected.detail.display.settled_verb == "Started"
+    assert projected.detail.display.settled_message == "sleep 30"
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.verb == "Started"
+    assert projected.state.display.message == "sleep 30"
+    assert projected.state.display.suffix == "(running)"
 
 
 def test_self_sleep_label_renders_the_verb_alone() -> None:
@@ -403,10 +468,10 @@ def test_humanizes_labeled_builtin_through_approval_callback() -> None:
         "generationStatus": "in_progress",
         "relatedEntryId": "effect-action-1",
         "callbackId": "approval-action-1",
-        "title": "Approve ui.ask_user_question",
+        "title": "Approve subagent.wait",
         "detail": {
             "kind": "approval",
-            "effect": _generic_detail("ui.ask_user_question", {}),
+            "effect": _generic_detail("subagent.wait", {}),
             "requiredPermissions": [],
             "choices": ["approve", "deny"],
             "relatedEntryId": "effect-action-1",
@@ -422,9 +487,9 @@ def test_humanizes_labeled_builtin_through_approval_callback() -> None:
     assert isinstance(projected.detail, ApprovalCallbackDetail)
     effect = projected.detail.effect
     assert isinstance(effect, GenericEffectDetail)
-    assert effect.tool_name == "ui.ask_user_question"
-    assert effect.display.verb == "Asking"
-    assert effect.display.message == "a question"
+    assert effect.tool_name == "subagent.wait"
+    assert effect.display.verb == "Waiting"
+    assert effect.display.message == "for a subagent"
 
 
 def test_failed_recognized_tool_keeps_semantic_call_detail() -> None:
@@ -440,6 +505,118 @@ def test_failed_recognized_tool_keeps_semantic_call_detail() -> None:
     assert isinstance(projected.detail, FileReadEffectDetail)
     assert isinstance(projected.state, FailedEffectState)
     assert projected.state.error.message == "File not found"
+
+
+def test_projects_unified_ask_user_question_result() -> None:
+    questions_input = {
+        "questions": [
+            {
+                "question": "Which visual direction do you prefer?",
+                "header": "",
+                "options": [
+                    {"label": "Distinct background", "description": ""},
+                    {"label": "Inline highlight", "description": ""},
+                ],
+            }
+        ]
+    }
+    result = {
+        "structured_content": {
+            "answers": [
+                {
+                    "question": "Which visual direction do you prefer?",
+                    "answer": "Distinct background",
+                    "isOther": False,
+                }
+            ],
+            "cancelled": False,
+        }
+    }
+    entry = _effect("ui.ask_user_question", questions_input, result=result)
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, UserQuestionEffectDetail)
+    assert projected.detail.input is not None
+    assert projected.detail.input.questions[0].question == (
+        "Which visual direction do you prefer?"
+    )
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.verb == "Answered"
+    assert projected.state.display.message == (
+        '"Which visual direction do you prefer?" → Distinct background'
+    )
+    result = UserQuestionResult.model_validate(projected.state.output)
+    assert result.answers[0].answer == "Distinct background"
+    assert result.cancelled is False
+
+
+def test_projects_unified_ask_user_question_cancelled() -> None:
+    questions_input = {
+        "questions": [
+            {
+                "question": "Pick one",
+                "header": "",
+                "options": [
+                    {"label": "A", "description": ""},
+                    {"label": "B", "description": ""},
+                ],
+            }
+        ]
+    }
+    result = {"structured_content": {"answers": [], "cancelled": True}}
+    entry = _effect("ui.ask_user_question", questions_input, result=result)
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, UserQuestionEffectDetail)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.verb == "Cancelled"
+    assert projected.state.display.message == "by user"
+
+
+def test_projects_unified_ask_user_question_multi_question() -> None:
+    questions_input = {
+        "questions": [
+            {
+                "question": "Q1",
+                "header": "",
+                "options": [
+                    {"label": "A", "description": ""},
+                    {"label": "B", "description": ""},
+                ],
+            },
+            {
+                "question": "Q2",
+                "header": "",
+                "options": [
+                    {"label": "C", "description": ""},
+                    {"label": "D", "description": ""},
+                ],
+            },
+        ]
+    }
+    result = {
+        "structured_content": {
+            "answers": [
+                {"question": "Q1", "answer": "A", "isOther": False},
+                {"question": "Q2", "answer": "D", "isOther": False},
+            ],
+            "cancelled": False,
+        }
+    }
+    entry = _effect("ui.ask_user_question", questions_input, result=result)
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, UserQuestionEffectDetail)
+    assert projected.detail.display.message == "2 questions"
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.verb == "Answered"
+    assert projected.state.display.message == '"Q1" → A · "Q2" → D'
 
 
 def test_projects_approval_callback_with_the_same_semantic_call_detail() -> None:
@@ -478,6 +655,180 @@ def test_projects_approval_callback_with_the_same_semantic_call_detail() -> None
     assert projected.related_entry_id == "effect-action-1"
 
 
+def test_projects_unified_web_search_result() -> None:
+    entry = _effect(
+        "web_search",
+        {"query": "mistral ai"},
+        result={
+            "structured_content": {
+                "query": "mistral ai",
+                "answer": "Mistral AI is a Paris-based AI company.",
+                "sources": [
+                    {"title": "Mistral AI", "url": "https://mistral.ai"},
+                    {"title": "Wikipedia", "url": "https://wikipedia.org"},
+                ],
+            }
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, WebSearchEffectDetail)
+    assert projected.detail.input is not None
+    assert projected.detail.input.query == "mistral ai"
+    assert projected.detail.display.verb == "Searching"
+    assert "mistral ai" in projected.detail.display.summary
+    assert isinstance(projected.state, CompletedEffectState)
+    output = WebSearchEffectOutput.model_validate(projected.state.output)
+    assert output.query == "mistral ai"
+    assert output.answer == "Mistral AI is a Paris-based AI company."
+    assert len(output.sources) == 2
+    assert output.sources[0].title == "Mistral AI"
+    assert projected.state.display.verb == "Searched"
+    assert "2 sources" in projected.state.display.message
+
+
+def test_projects_unified_web_fetch_result() -> None:
+    entry = _effect(
+        "web_fetch",
+        {"url": "https://example.com/page", "timeout": 30},
+        result={
+            "structured_content": {
+                "url": "https://example.com/page",
+                "content": "Hello world",
+                "content_type": "text/html; charset=utf-8",
+                "was_truncated": True,
+            }
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, WebFetchEffectDetail)
+    assert projected.detail.input is not None
+    assert projected.detail.input.url == "https://example.com/page"
+    assert projected.detail.input.timeout == 30
+    assert "example.com" in projected.detail.display.summary
+    assert "timeout 30s" in projected.detail.display.summary
+    assert isinstance(projected.state, CompletedEffectState)
+    output = WebFetchEffectOutput.model_validate(projected.state.output)
+    assert output.url == "https://example.com/page"
+    assert output.content == "Hello world"
+    assert output.content_type == "text/html; charset=utf-8"
+    assert output.was_truncated is True
+    assert projected.state.display.verb == "Fetched"
+    assert "11 chars" in projected.state.display.message
+    assert "text/html" in projected.state.display.message
+    assert projected.state.display.suffix == "(truncated)"
+
+
+def test_projects_unified_grep_result() -> None:
+    entry = _effect(
+        "grep",
+        {"pattern": "TODO", "path": "src/", "max_matches": 50},
+        result={
+            "structured_content": {
+                "matches": "src/main.py:10:TODO fix\nsrc/util.py:5:TODO refactor",
+                "match_count": 2,
+                "was_truncated": False,
+                "parsed_matches": [
+                    {"path": "src/main.py", "line": 10},
+                    {"path": "src/util.py", "line": 5},
+                ],
+            }
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, FileSearchEffectDetail)
+    assert projected.detail.input is not None
+    assert projected.detail.input.pattern == "TODO"
+    assert projected.detail.input.path == "src/"
+    assert projected.detail.input.max_matches == 50
+    assert "in src/" in (projected.detail.display.message or "")
+    assert "max 50 matches" in (projected.detail.display.message or "")
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileSearchEffectOutput.model_validate(projected.state.output)
+    assert output.match_count == 2
+    assert output.parsed_matches[0].path == "src/main.py"
+    assert output.parsed_matches[0].line == 10
+    assert projected.state.display.verb == "Searched"
+    assert "TODO" in projected.state.display.message
+    assert "2 matches" in projected.state.display.message
+
+
+def test_projects_unified_todo_result() -> None:
+    entry = _effect(
+        "todo",
+        {"action": "write", "todos": [{"id": "1", "content": "Task A"}]},
+        result={
+            "structured_content": {
+                "verb": "Updated",
+                "todos": [{"id": "1", "content": "Task A", "status": "pending"}],
+                "total_count": 1,
+                "message": "Updated 1 todos",
+            }
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, TodoEffectDetail)
+    assert projected.detail.input is not None
+    assert projected.detail.input.action == "write"
+    assert projected.detail.input.todos is not None
+    assert len(projected.detail.input.todos) == 1
+    assert projected.detail.input.todos[0].id == "1"
+    assert projected.detail.input.todos[0].content == "Task A"
+    assert projected.detail.display.verb == "Updating"
+    assert "1 todos" in projected.detail.display.summary
+    assert isinstance(projected.state, CompletedEffectState)
+    output = TodoEffectOutput.model_validate(projected.state.output)
+    assert output.todos == [TodoEffectItem(id="1", content="Task A")]
+    assert projected.state.display.verb == "Updated"
+    assert projected.state.display.message == "1 todos"
+
+
+def test_projects_unified_todo_read_action() -> None:
+    entry = _effect(
+        "todo",
+        {"action": "read"},
+        result={
+            "structured_content": {
+                "verb": "Retrieved",
+                "todos": [
+                    {"id": "1", "content": "Task A", "status": "completed"},
+                    {"id": "2", "content": "Task B", "status": "in_progress"},
+                ],
+                "total_count": 2,
+                "message": "Retrieved 2 todos",
+            }
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, TodoEffectDetail)
+    assert projected.detail.input is not None
+    assert projected.detail.input.action == "read"
+    assert projected.detail.input.todos is None
+    assert projected.detail.display.verb == "Retrieving"
+    assert projected.detail.display.message == "todos"
+    assert isinstance(projected.state, CompletedEffectState)
+    output = TodoEffectOutput.model_validate(projected.state.output)
+    assert len(output.todos) == 2
+    assert output.todos[0].id == "1"
+    assert output.todos[0].content == "Task A"
+    assert projected.state.display.verb == "Retrieved"
+    assert projected.state.display.message == "2 todos"
+
+
 def _effect(
     name: str,
     input_value: object,
@@ -485,7 +836,14 @@ def _effect(
     result: object | None = None,
     error: str | None = None,
     output_text: str = "",
+    warnings: list[str] | None = None,
 ) -> PublicEffectEntry:
+    completed_display: dict[str, object] = {
+        "success": True,
+        "message": f"{name} completed",
+    }
+    if warnings is not None:
+        completed_display["warnings"] = warnings
     raw = {
         "type": "effect",
         "id": "effect-action-1",
@@ -508,7 +866,7 @@ def _effect(
                 "status": "completed",
                 "output": deepcopy(result),
                 "outputText": output_text,
-                "display": {"success": True, "message": f"{name} completed"},
+                "display": completed_display,
             }
         ),
     }

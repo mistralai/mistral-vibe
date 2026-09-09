@@ -2,14 +2,24 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
-import time
 
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_app
+from tests.conftest import (
+    build_test_agent_loop,
+    build_test_vibe_app,
+    wait_until as _wait_until,
+)
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
+from vibe.app_server import AppServerConnectionClosed
 from vibe.app_server._turns import TurnController
+from vibe.app_server.events import HistoryEntryAdded
+from vibe.app_server.models import (
+    PublicEntryGenerationStatus,
+    PublicMessageEntry,
+    TextContentBlock,
+)
 from vibe.app_server.protocol import (
     AppServerResponseError,
     ProtocolError,
@@ -46,15 +56,6 @@ def _reset_log_level_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 @pytest.fixture
 def vibe_app() -> VibeApp:
     return build_test_vibe_app()
-
-
-async def _wait_until(pilot, predicate, timeout: float = 2.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        await pilot.pause(0.05)
-    return False
 
 
 async def _press_escape_and_wait_for_settle(pilot, app, timeout: float = 5.0) -> None:
@@ -1265,6 +1266,107 @@ async def test_steer_after_ended_turn_does_not_drop_queue() -> None:
         "block queue",
         "first queued\n\nsecond queued",
     ]
+
+
+@pytest.mark.asyncio
+async def test_unified_steer_uses_atomic_rpc_and_history_event() -> None:
+    app, backend = _blocked_app()
+    async with app.run_test() as pilot:
+        chat_input = app.query_one(ChatInputContainer)
+        chat_input.post_message(ChatInputContainer.Submitted("block queue"))
+        assert await _wait_until(pilot, backend.started.is_set)
+        chat_input.post_message(ChatInputContainer.Submitted("queued"))
+        await _wait_for_queued(pilot, app, ["queued"])
+
+        app.app_server.state.session.harness = "unified"
+        queue_item_id = app.app_server.turn_queue.items[0].id
+        active_turn = app.app_server.state.latest_turn
+        assert active_turn is not None
+        active_turn_id = active_turn.id
+        widget = app._queue.widgets[0]
+        message_entry_id = widget.history_entry_id
+        assert message_entry_id is not None
+        calls: list[tuple[str, str]] = []
+        original_remove = app.app_server.remove_queued_turn
+        subagent_output = AssistantMessage("subagent finished")
+        later_output = AssistantMessage("continued after steer")
+
+        async def atomic_steer(queue_item_id: str, expected_turn_id: str) -> None:
+            calls.append((queue_item_id, expected_turn_id))
+            assert await original_remove(queue_item_id)
+            await app._mount_and_scroll(subagent_output)
+            await app._handle_turn_event(
+                HistoryEntryAdded(
+                    PublicMessageEntry(
+                        id=message_entry_id,
+                        session_id=app.app_server.session_id,
+                        turn_id=expected_turn_id,
+                        created_at=1,
+                        updated_at=1,
+                        generation_status=PublicEntryGenerationStatus.COMPLETED,
+                        role="user",
+                        content=[TextContentBlock(text="queued")],
+                        source="turn_steer",
+                    )
+                )
+            )
+
+        async def unexpected_legacy_steer(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("Unified queued steering used turn/steer")
+
+        app.app_server.steer_queued_turn = atomic_steer  # type: ignore[method-assign]
+        app.app_server.inject_user_context = unexpected_legacy_steer  # type: ignore[method-assign]
+
+        assert await asyncio.wait_for(app._steer_queued_now(), timeout=1.0)
+        await app._mount_and_scroll(later_output)
+
+        assert calls == [(queue_item_id, active_turn_id)]
+        assert not widget.pending
+        assert app._queue.widgets == []
+        assert not list(app.query(QueueHeaderMessage))
+        children = list(app._messages_area.children)
+        assert children.index(subagent_output) < children.index(widget)
+        assert children.index(widget) < children.index(later_output)
+
+        backend.release.set()
+        assert await _wait_until(pilot, lambda: not app._agent_job_active())
+
+
+@pytest.mark.parametrize(
+    ("error", "shows_error"),
+    [
+        pytest.param(
+            AppServerConnectionClosed("connection dropped"), False, id="disconnect"
+        ),
+        pytest.param(RuntimeError("queued steer failed"), True, id="runtime-error"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unified_steer_failure_does_not_escape_submit(
+    error: RuntimeError, shows_error: bool
+) -> None:
+    app, backend = _blocked_app()
+    async with app.run_test() as pilot:
+        chat_input = app.query_one(ChatInputContainer)
+        chat_input.post_message(ChatInputContainer.Submitted("block queue"))
+        assert await _wait_until(pilot, backend.started.is_set)
+        chat_input.post_message(ChatInputContainer.Submitted("queued"))
+        await _wait_for_queued(pilot, app, ["queued"])
+        app.app_server.state.session.harness = "unified"
+
+        async def failing_steer(_queue_item_id: str, _expected_turn_id: str) -> None:
+            raise error
+
+        app.app_server.steer_queued_turn = failing_steer  # type: ignore[method-assign]
+
+        await app._dispatch_submitted_value("")
+
+        assert bool(list(app.query(ErrorMessage))) is shows_error
+        if isinstance(error, AppServerConnectionClosed):
+            await app._queue.reconcile_snapshot(await app.app_server.refresh_state())
+        assert app._queue.has_removable
+        backend.release.set()
+        assert await _wait_until(pilot, lambda: not app._agent_job_active())
 
 
 @pytest.mark.asyncio

@@ -61,6 +61,8 @@ from vibe.app_server.protocol import (
     TurnQueueReplaceResponse,
     TurnQueueResumeParams,
     TurnQueueResumeResponse,
+    TurnQueueSteerParams,
+    TurnQueueSteerResponse,
     TurnStartParams,
     TurnStartResponse,
     TurnSteerParams,
@@ -441,6 +443,15 @@ class SessionBackend(Protocol):
     ) -> SessionBackendResult[SessionCompactResponse]: ...
 
     async def shutdown(self) -> None: ...
+
+
+@runtime_checkable
+class SessionBackendQueuedTurnSteering(Protocol):
+    """Optional atomic transfer of an accepted queued Turn into the active Turn."""
+
+    async def steer_queued_turn(
+        self, params: TurnQueueSteerParams
+    ) -> SessionBackendResult[TurnQueueSteerResponse]: ...
 
 
 @runtime_checkable

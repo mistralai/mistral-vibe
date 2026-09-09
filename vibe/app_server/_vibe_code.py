@@ -18,6 +18,7 @@ from vibe.app_server.models import (
     AccountActionKind,
     AccountView,
     PublicError,
+    RemoteProjectLink,
     TeleportCheckingGit,
     TeleportComplete,
     TeleportEvent,
@@ -32,7 +33,6 @@ from vibe.app_server.models import (
     VibeCodePickerState,
     VibeCodePickerView,
     VibeCodeProject,
-    VibeCodeProjectLink,
     VibeCodeRepository,
 )
 from vibe.app_server.protocol import TeleportEventParams, TeleportStartParams
@@ -647,7 +647,7 @@ def _context(context: ProjectPickerContext) -> VibeCodePickerContext:
         saved_link=(
             None
             if link is None
-            else VibeCodeProjectLink(
+            else RemoteProjectLink(
                 repo_root=str(link.repo_root),
                 repo_url=link.repo_url,
                 project_id=link.project_id,

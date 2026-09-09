@@ -86,6 +86,23 @@ def load_hooks_file(path: Path, *, strict: bool = False) -> HookConfigResult:
                     message=f"{label} - {_format_validation_error(e, root_label='hook')}",
                 )
             )
+            continue
+
+        # Backslashes are stripped by shlex.split (exec-based executor) and
+        # break the command. Disable the hook so it doesn’t fail silently on
+        # every invocation.
+        hook = hooks[-1]
+        if "\\" in hook.command:
+            hooks.pop()
+            issues.append(
+                HookConfigIssue(
+                    file=path,
+                    message=(
+                        f"Hook {hook.name!r} skipped: backslash paths are"
+                        " not supported in hook commands. Use forward slashes instead."
+                    ),
+                )
+            )
 
     return HookConfigResult(hooks=hooks, issues=issues)
 

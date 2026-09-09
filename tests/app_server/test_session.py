@@ -350,6 +350,88 @@ async def test_session_close_does_not_reconnect_after_stop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_begin_close_suppresses_reconnect_on_dropped_connection() -> None:
+    """*Prepare*: A reconnectable session told it is shutting down.
+    *Do*: Drop the live connection after begin_close().
+    *Assert*: The drop is treated as an intentional shutdown, not a recoverable
+    disconnect, so no replacement connection is opened.
+    """
+    # Prepare
+    session = await _create_reconnectable_session(build_test_agent_loop())
+    reconnect = Mock(wraps=session._connection._client_factory)
+    session._connection._client_factory = reconnect
+
+    # Do
+    session.begin_close()
+    client = session._connection.current
+    assert client is not None
+    await client.close()
+    assert session._message_task is not None
+    await asyncio.wait_for(session._message_task, timeout=1)
+
+    # Assert
+    reconnect.assert_not_called()
+    await session.close()
+
+
+@pytest.mark.asyncio
+async def test_events_end_cleanly_when_closing_despite_stream_error() -> None:
+    """*Prepare*: An event stream on a session that has begun closing.
+    *Do*: Close the stream with the error a failed reconnect/resume would raise.
+    *Assert*: The stream ends cleanly instead of propagating the error, so a
+    disconnect during shutdown cannot crash the consumer.
+    """
+    # Prepare
+    session = await create_test_app_server_session(build_test_agent_loop())
+    events = session.events()
+
+    # Do
+    session.begin_close()
+    session._close_event_streams(
+        AppServerResponseError(
+            ProtocolError(
+                code=ProtocolErrorCode.INVALID_PARAMS,
+                message="Invalid request parameters",
+            )
+        )
+    )
+
+    # Assert
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(events), timeout=1)
+    await events.aclose()
+    await session.close()
+
+
+@pytest.mark.asyncio
+async def test_events_propagate_stream_error_when_not_closing() -> None:
+    """*Prepare*: An event stream on a session that is not closing.
+    *Do*: Close the stream with a terminal error.
+    *Assert*: The error propagates; the closing guard must not swallow genuine
+    mid-session failures.
+    """
+    # Prepare
+    session = await create_test_app_server_session(build_test_agent_loop())
+    events = session.events()
+
+    # Do
+    session._close_event_streams(
+        AppServerResponseError(
+            ProtocolError(
+                code=ProtocolErrorCode.INVALID_PARAMS,
+                message="Invalid request parameters",
+            )
+        )
+    )
+
+    # Assert
+    with pytest.raises(AppServerResponseError):
+        await asyncio.wait_for(anext(events), timeout=1)
+    await events.aclose()
+    await session.close()
+
+
+@pytest.mark.asyncio
 async def test_turn_pushes_fresh_context_while_tool_runs() -> None:
     tool_call = ToolCall(
         id="todo-1",
@@ -2779,7 +2861,7 @@ async def test_legacy_queue_exposes_canonical_procedures_and_minimal_results() -
         client = session._connection.current
         assert client is not None
         enqueue_result = await client.request(
-            "app_server/session/turn/enqueue",
+            "session/turn/enqueue",
             {
                 "idempotencyKey": "enqueue-1",
                 "sessionId": session.session_id,
@@ -2795,15 +2877,15 @@ async def test_legacy_queue_exposes_canonical_procedures_and_minimal_results() -
         queue_item_id = enqueue_result["queueItemId"]
 
         read_result = await client.request(
-            "app_server/session/turn/queue/read", {"sessionId": session.session_id}
+            "session/turn/queue/read", {"sessionId": session.session_id}
         )
         item = read_result["queue"]["items"][0]
         remove_result = await client.request(
-            "app_server/session/turn/queue/remove",
+            "session/turn/queue/remove",
             {"sessionId": session.session_id, "queueItemId": queue_item_id},
         )
         resume_result = await client.request(
-            "app_server/session/turn/queue/resume", {"sessionId": session.session_id}
+            "session/turn/queue/resume", {"sessionId": session.session_id}
         )
 
         with pytest.raises(AppServerResponseError) as exc_info:
@@ -2862,7 +2944,7 @@ async def test_legacy_queue_injects_context_before_promoting_the_user_entry() ->
         client = session._connection.current
         assert client is not None
         await client.request(
-            "app_server/session/turn/enqueue",
+            "session/turn/enqueue",
             {
                 "sessionId": session.session_id,
                 "entries": [
@@ -2986,7 +3068,7 @@ async def test_enqueue_response_does_not_restore_a_turn_promoted_by_newer_events
         method, params=None, *, wait_for_incoming=False
     ):
         response = await request(method, params, wait_for_incoming=wait_for_incoming)
-        if method != "app_server/session/turn/enqueue":
+        if method != "session/turn/enqueue":
             return response
         queue_item_id = response["queueItemId"]
         async with asyncio.timeout(2):
@@ -3392,7 +3474,7 @@ async def test_queue_read_does_not_restore_an_item_removed_by_a_newer_event(
             response = await request(
                 method, params, wait_for_incoming=wait_for_incoming
             )
-            if method == "app_server/session/turn/queue/read":
+            if method == "session/turn/queue/read":
                 read_captured.set()
                 await release_read.wait()
             return response
@@ -3402,7 +3484,7 @@ async def test_queue_read_does_not_restore_an_item_removed_by_a_newer_event(
         await read_captured.wait()
 
         await request(
-            "app_server/session/turn/queue/remove",
+            "session/turn/queue/remove",
             TurnQueueRemoveParams(
                 session_id=session.session_id, queue_item_id=queued.id
             ),
@@ -3461,7 +3543,7 @@ async def test_remove_queued_turn_reports_concurrent_promotion(
         async def promote_before_remove(
             method, params=None, *, wait_for_incoming=False
         ):
-            if method == "app_server/session/turn/queue/remove":
+            if method == "session/turn/queue/remove":
                 release_first.set()
                 await second_started.wait()
             return await request(method, params, wait_for_incoming=wait_for_incoming)

@@ -7,6 +7,13 @@ import pytest
 from tests.conftest import build_test_vibe_app, build_test_vibe_config
 from tests.stubs.app_server import CoreEventProjection
 from tests.stubs.fake_tool import FakeTool, FakeToolArgs
+from vibe.app_server._shell import shell_effect_detail
+from vibe.app_server.events import HistoryEntryAdded
+from vibe.app_server.models import (
+    PublicEffectEntry,
+    PublicEntryGenerationStatus,
+    RunningEffectState,
+)
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.widgets.messages import ReasoningMessage
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolGroup
@@ -102,22 +109,24 @@ async def test_assistant_text_breaks_group_into_two() -> None:
 
 
 @pytest.mark.asyncio
-async def test_edit_mounts_standalone_and_breaks_open_group() -> None:
+async def test_edit_mounts_into_group() -> None:
     handler, mount_callback, projection = _make_handler()
 
     await projection.dispatch(_call_event("a"), handler.handle_event)
     await projection.dispatch(_call_event("e", tool_name="edit"), handler.handle_event)
 
-    assert handler.current_tool_group is None
+    assert handler.current_tool_group is not None
 
     edit_widget = handler.tool_calls["e"]
     edit_call = _mount_call_for(mount_callback, edit_widget)
-    assert "container" not in edit_call.kwargs
-    assert "after" not in edit_call.kwargs
+    assert (
+        edit_call.kwargs.get("container")
+        is handler.current_tool_group.content_container
+    )
 
 
 @pytest.mark.asyncio
-async def test_edit_after_edit_does_not_open_a_group() -> None:
+async def test_edit_after_edit_shares_one_group() -> None:
     handler, mount_callback, projection = _make_handler()
 
     await projection.dispatch(_call_event("e1", tool_name="edit"), handler.handle_event)
@@ -125,8 +134,9 @@ async def test_edit_after_edit_does_not_open_a_group() -> None:
         _call_event("e2", tool_name="write_file"), handler.handle_event
     )
 
-    assert _mounted_groups(mount_callback) == []
-    assert handler.current_tool_group is None
+    groups = _mounted_groups(mount_callback)
+    assert len(groups) == 1
+    assert handler.current_tool_group is groups[0]
 
 
 @pytest.mark.asyncio
@@ -198,7 +208,50 @@ async def test_grouped_tool_call_mounts_into_the_group() -> None:
     assert group is not None
     call_widget = handler.tool_calls["a"]
     mount_call = _mount_call_for(mount_callback, call_widget)
-    # First child of an empty group is mounted via the container kwarg.
-    assert mount_call.kwargs.get("container") is group
+    # First child of an empty group is mounted via the container kwarg, which
+    # now points to the group's inner content container (not the group itself).
+    assert mount_call.kwargs.get("container") is group.content_container
     assert not isinstance(call_widget, ToolGroup)
     assert isinstance(call_widget, ToolCallMessage)
+
+
+def _manual_shell_entry(entry_id: str) -> PublicEffectEntry:
+    """The entry the Host adds to the timeline for a `!<command>`."""
+    return PublicEffectEntry(
+        id=entry_id,
+        session_id="s1",
+        turn_id="t1",
+        created_at=1,
+        updated_at=1,
+        generation_status=PublicEntryGenerationStatus.IN_PROGRESS,
+        title="shell",
+        detail=shell_effect_detail("ls"),
+        state=RunningEffectState(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_shell_is_mounted_outside_any_group() -> None:
+    # The user typed `!ls` to read what it printed; a group would fold it away.
+    handler, mount_callback, _ = _make_handler()
+
+    await handler.handle_event(HistoryEntryAdded(_manual_shell_entry("sh-1")))
+
+    assert not _mounted_groups(mount_callback)
+    assert handler.current_tool_group is None
+    call = handler.tool_calls["sh-1"]
+    assert _mount_call_for(mount_callback, call).kwargs.get("container") is None
+
+
+@pytest.mark.asyncio
+async def test_manual_shell_breaks_an_open_group_of_agent_calls() -> None:
+    handler, mount_callback, projection = _make_handler()
+
+    await projection.dispatch(_call_event("a"), handler.handle_event)
+    assert handler.current_tool_group is not None
+
+    await handler.handle_event(HistoryEntryAdded(_manual_shell_entry("sh-1")))
+    assert handler.current_tool_group is None
+
+    await projection.dispatch(_call_event("b"), handler.handle_event)
+    assert len(_mounted_groups(mount_callback)) == 2

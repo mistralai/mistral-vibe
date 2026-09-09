@@ -46,25 +46,9 @@ def bootstrap_config_files() -> None:
             raise
 
 
-# When DEBUG_MODE=true, attaches debugpy on localhost:5678.
-def handle_debug_mode() -> None:
-    if os.environ.get("DEBUG_MODE") != "true":
-        return
-
-    try:
-        import debugpy
-    except ImportError:
-        return
-
-    debugpy.listen(("localhost", 5678))
-    # uncomment this to wait for the debugger to attach
-    # debugpy.wait_for_client()
-
-
 def main() -> None:
     silence_proactor_transport_teardown_warnings()
 
-    handle_debug_mode()
     init_harness_files_manager("user", "project")
     init_file_logging(LOG_FILE.path)
 

@@ -38,6 +38,9 @@ class IndicatorState(StrEnum):
 class StatusMessage(SpinnerMixin, NoMarkupStatic):
     SPINNER_TYPE: ClassVar[SpinnerType] = SpinnerType.PULSE
 
+    # Glyph shown when settled. Subclasses override to use a triangle.
+    SETTLED_GLYPH: ClassVar[str] = ""
+
     def __init__(self, initial_text: str = "", **kwargs: Any) -> None:
         self._initial_text = initial_text
         self._indicator_widget: Static | None = None
@@ -70,7 +73,8 @@ class StatusMessage(SpinnerMixin, NoMarkupStatic):
         if self._is_spinning:
             self._indicator_widget.update(self._spinner.next_frame(), layout=False)
         else:
-            self._indicator_widget.update(self._state.glyph, layout=False)
+            glyph = self.SETTLED_GLYPH or self._state.glyph
+            self._indicator_widget.update(glyph, layout=False)
 
         for state in IndicatorState:
             self._indicator_widget.set_class(

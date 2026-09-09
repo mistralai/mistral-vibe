@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Self, cast
+from typing import Annotated, Literal, Self, cast
 
 from pydantic import (
     BaseModel,
@@ -29,10 +29,15 @@ from vibe.app_server.models import (
     FileReadEffectDetail,
     FileReadEffectInput,
     FileReadEffectOutput,
+    FileSearchEffectDetail,
+    FileSearchEffectInput,
+    FileSearchEffectMatch,
+    FileSearchEffectOutput,
     FileWriteEffectDetail,
     FileWriteEffectInput,
     FileWriteEffectOutput,
     GenericEffectDetail,
+    ProcessEffectDetail,
     PublicCallbackEntry,
     PublicEffectEntry,
     PublicHistoryEntry,
@@ -41,11 +46,33 @@ from vibe.app_server.models import (
     ShellEffectOutput,
     SkillEffectDetail,
     SkillEffectInput,
+    TodoEffectDetail,
+    TodoEffectInput,
+    TodoEffectItem,
+    TodoEffectOutput,
+    UserQuestionEffectDetail,
+    UserQuestionRequest,
+    UserQuestionResult,
+    WebFetchEffectDetail,
+    WebFetchEffectInput,
+    WebFetchEffectOutput,
+    WebSearchEffectDetail,
+    WebSearchEffectInput,
+    WebSearchEffectOutput,
+    WebSearchEffectSource,
 )
 
 _SEARCH_REPLACE_ANNOTATION_KEY = "mistralai.vibe.sdk.search_replace"
 type UnifiedToolCategory = Literal[
-    "file_edit", "file_read", "file_write", "shell", "skill"
+    "file_edit",
+    "file_read",
+    "file_search",
+    "file_write",
+    "shell",
+    "skill",
+    "todo",
+    "web_fetch",
+    "web_search",
 ]
 
 
@@ -120,7 +147,60 @@ class _ShellResult(_SourceModel):
     stdout: str = ""
     stderr: str = ""
     output: str = ""
+    returncode: int = 0
     was_truncated: bool = False
+
+
+class _WebSearchArguments(_SourceModel):
+    query: str = Field(min_length=1)
+
+
+class _WebSearchSource(_SourceModel):
+    title: str
+    url: str
+
+
+class _WebSearchResult(_SourceModel):
+    query: str
+    answer: str = ""
+    sources: list[_WebSearchSource] = Field(default_factory=list)
+
+
+class _WebFetchArguments(_SourceModel):
+    url: str = Field(min_length=1)
+    timeout: int | None = None
+
+
+class _WebFetchResult(_SourceModel):
+    url: str
+    content: str = ""
+    content_type: str = ""
+    was_truncated: bool = False
+
+
+class _GrepArguments(_SourceModel):
+    pattern: str = Field(min_length=1)
+    path: str = "."
+    max_matches: int | None = None
+    use_default_ignore: bool = True
+
+
+class _GrepResult(_SourceModel):
+    matches: str = ""
+    match_count: int = Field(ge=0)
+    was_truncated: bool = False
+    parsed_matches: list[FileSearchEffectMatch] = Field(default_factory=list)
+
+
+class _TodoArguments(_SourceModel):
+    action: str = Field(min_length=1)
+    todos: list[TodoEffectItem] | None = None
+
+
+class _TodoResult(_SourceModel):
+    verb: str = ""
+    todos: list[TodoEffectItem] = Field(default_factory=list)
+    total_count: int = Field(ge=0)
 
 
 class _ToolResultEnvelope(_SourceModel):
@@ -128,6 +208,95 @@ class _ToolResultEnvelope(_SourceModel):
 
     structured_content: dict[str, JsonValue]
     meta: dict[str, JsonValue] | None = Field(default=None, alias="_meta")
+
+
+class _ProcessStartArguments(_SourceModel):
+    command: str = Field(min_length=1)
+    cwd: str = ""
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+class _ProcessStopArguments(_SourceModel):
+    process_id: Annotated[str, Field(min_length=1, alias="processId")]
+
+
+class _ProcessOutputArguments(_SourceModel):
+    process_id: Annotated[str, Field(min_length=1, alias="processId")]
+    from_: Literal["start", "end"] = Field(default="start", alias="from")
+    cursor: int = Field(default=0, ge=0)
+    wait_ms: Annotated[int, Field(default=0, ge=0, alias="waitMs")]
+    max_bytes: Annotated[int, Field(default=65536, ge=1, alias="maxBytes")]
+
+
+class _ProcessWriteArguments(_SourceModel):
+    process_id: Annotated[str, Field(min_length=1, alias="processId")]
+    text: str | None = None
+    control: list[str] | None = None
+    bytes_base64: Annotated[str | None, Field(default=None, alias="bytesBase64")]
+
+
+class _ProcessStartResult(_SourceModel):
+    process_id: Annotated[str, Field(min_length=1, alias="processId")]
+    status: str
+
+
+class _ProcessStopResult(_SourceModel):
+    process_id: Annotated[str, Field(min_length=1, alias="processId")]
+    status: str
+    exit_code: Annotated[int | None, Field(default=None, alias="exitCode")]
+
+
+class _ProcessOutputResult(_SourceModel):
+    process_id: Annotated[str, Field(min_length=1, alias="processId")]
+    status: str
+    exit_code: Annotated[int | None, Field(default=None, alias="exitCode")]
+    output: str = ""
+    output_start_cursor: Annotated[
+        int | None, Field(default=None, ge=0, alias="outputStartCursor")
+    ]
+    next_cursor: Annotated[int, Field(default=0, ge=0, alias="nextCursor")]
+    bytes_available: Annotated[int, Field(default=0, ge=0, alias="bytesAvailable")]
+    has_more: Annotated[bool, Field(default=False, alias="hasMore")]
+    truncated_before: Annotated[bool, Field(default=False, alias="truncatedBefore")]
+
+
+class _ProcessListResultItem(_SourceModel):
+    process_id: Annotated[str, Field(min_length=1, alias="processId")]
+    command: str
+    status: str
+    exit_code: Annotated[int | None, Field(default=None, alias="exitCode")]
+    output_path: Annotated[str | None, Field(default=None, alias="outputPath")]
+
+
+class _ProcessListResult(_SourceModel):
+    processes: list[_ProcessListResultItem] = Field(default_factory=list)
+
+
+class _ProcessWriteResult(_SourceModel):
+    process_id: Annotated[str, Field(min_length=1, alias="processId")]
+    status: str
+    bytes_written: Annotated[int, Field(ge=0, alias="bytesWritten")]
+
+
+class _ProcessOutputEnvelope(_SourceModel):
+    """Wraps a process result with the tool name so ProcessResultWidget can branch."""
+
+    tool_name: str
+    process_id: Annotated[str | None, Field(default=None, alias="processId")] = None
+    status: str | None = None
+    exit_code: Annotated[int | None, Field(default=None, alias="exitCode")] = None
+    output: str | None = None
+    bytes_available: Annotated[
+        int | None, Field(default=None, alias="bytesAvailable")
+    ] = None
+    has_more: Annotated[bool, Field(default=False, alias="hasMore")] = False
+    truncated_before: Annotated[bool, Field(default=False, alias="truncatedBefore")] = (
+        False
+    )
+    processes: list[dict[str, JsonValue]] | None = None
+    bytes_written: Annotated[int | None, Field(default=None, alias="bytesWritten")] = (
+        None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,17 +479,26 @@ def _project_shell(detail: GenericEffectDetail) -> _ProjectedCall:
 
     def project_result(state: CompletedEffectState) -> CompletedEffectState:
         envelope = _ToolResultEnvelope.model_validate(state.output)
-        result = _ShellResult.model_validate(envelope.structured_content)
-        output = ShellEffectOutput(
-            stdout=result.stdout,
-            stderr=result.stderr,
-            output=result.output,
-            truncated=result.was_truncated,
-        )
+        try:
+            result = _ShellResult.model_validate(envelope.structured_content)
+            output = ShellEffectOutput(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                output=result.output,
+                truncated=result.was_truncated,
+            )
+            output_text = output.transcript
+            is_error = result.returncode != 0
+        except ValidationError:
+            output = ShellEffectOutput(
+                stdout="", stderr=str(envelope.structured_content.get("error", ""))
+            )
+            output_text = output.stderr
+            is_error = True
         display = EffectResultDisplay(
-            success=True, verb="Ran", message=arguments.command
+            success=not is_error, verb="Ran", message=arguments.command
         )
-        return _completed_state(state, output, display, output_text=output.transcript)
+        return _completed_state(state, output, display, output_text=output_text)
 
     return _ProjectedCall(detail=semantic, project_result=project_result)
 
@@ -353,6 +531,377 @@ def _project_skill(detail: GenericEffectDetail) -> _ProjectedCall:
     return _ProjectedCall(detail=semantic, project_result=project_result)
 
 
+_SHORT_PROCESS_ID_LEN = 8
+
+
+def _short_process_id(process_id: str) -> str:
+    """Last characters of the process ID for display."""
+    return (
+        process_id[-_SHORT_PROCESS_ID_LEN:]
+        if len(process_id) > _SHORT_PROCESS_ID_LEN
+        else process_id
+    )
+
+
+def _process_call_display(
+    verb: str, message: str, settled_verb: str, settled_message: str
+) -> EffectCallDisplay:
+    return EffectCallDisplay(
+        summary=f"{verb} {message}".strip(),
+        verb=verb,
+        message=message,
+        settled_verb=settled_verb,
+        settled_message=settled_message,
+        status_text=f"{verb} {message}".strip(),
+    )
+
+
+def _process_detail(
+    detail: GenericEffectDetail, display: EffectCallDisplay
+) -> ProcessEffectDetail:
+    return ProcessEffectDetail(
+        tool_name=detail.tool_name, display=display, input=detail.input
+    )
+
+
+def _project_process_start(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _ProcessStartArguments.model_validate(detail.input)
+    display = _process_call_display(
+        "Starting", arguments.command, "Started", arguments.command
+    )
+    semantic = _process_detail(detail, display)
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = _ProcessStartResult.model_validate(envelope.structured_content)
+        suffix = f"({result.status})" if result.status else ""
+        display = EffectResultDisplay(
+            success=True, verb="Started", message=arguments.command, suffix=suffix
+        )
+        return _completed_state(
+            state,
+            _ProcessOutputEnvelope(
+                tool_name="process.start",
+                process_id=result.process_id,
+                status=result.status,
+            ),
+            display,
+        )
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_process_stop(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _ProcessStopArguments.model_validate(detail.input)
+    short_id = _short_process_id(arguments.process_id)
+    display = _process_call_display(
+        "Stopping", f"process {short_id}", "Stopped", f"process {short_id}"
+    )
+    semantic = _process_detail(detail, display)
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = _ProcessStopResult.model_validate(envelope.structured_content)
+        display = EffectResultDisplay(
+            success=True, verb="Stopped", message=f"process {short_id}"
+        )
+        return _completed_state(
+            state,
+            _ProcessOutputEnvelope(
+                tool_name="process.stop",
+                process_id=result.process_id,
+                status=result.status,
+                exit_code=result.exit_code,
+            ),
+            display,
+        )
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_process_output(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _ProcessOutputArguments.model_validate(detail.input)
+    short_id = _short_process_id(arguments.process_id)
+    display = _process_call_display(
+        "Reading output from", f"process {short_id}", "Read", f"process {short_id}"
+    )
+    semantic = _process_detail(detail, display)
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = _ProcessOutputResult.model_validate(envelope.structured_content)
+        byte_text = _format_bytes(result.bytes_available)
+        suffix = "(truncated)" if result.has_more else ""
+        display = EffectResultDisplay(
+            success=True,
+            verb="Read",
+            message=f"{byte_text} from process {short_id}",
+            suffix=suffix,
+        )
+        return _completed_state(
+            state,
+            _ProcessOutputEnvelope(
+                tool_name="process.output",
+                process_id=result.process_id,
+                status=result.status,
+                exit_code=result.exit_code,
+                output=result.output or None,
+                bytes_available=result.bytes_available,
+                has_more=result.has_more,
+                truncated_before=result.truncated_before,
+            ),
+            display,
+            output_text=result.output or None,
+        )
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_process_list(detail: GenericEffectDetail) -> _ProjectedCall:
+    display = _process_call_display(
+        "Listing", "background processes", "Listed", "background processes"
+    )
+    semantic = _process_detail(detail, display)
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = _ProcessListResult.model_validate(envelope.structured_content)
+        count = len(result.processes)
+        word = "process" if count == 1 else "processes"
+        display = EffectResultDisplay(
+            success=True, verb="Listed", message=f"{count} background {word}"
+        )
+        processes_json = [
+            cast(dict[str, JsonValue], item.model_dump(mode="json", by_alias=True))
+            for item in result.processes
+        ]
+        return _completed_state(
+            state,
+            _ProcessOutputEnvelope(tool_name="process.list", processes=processes_json),
+            display,
+        )
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_process_write(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _ProcessWriteArguments.model_validate(detail.input)
+    short_id = _short_process_id(arguments.process_id)
+    display = _process_call_display(
+        "Writing to", f"process {short_id}", "Wrote", f"process {short_id}"
+    )
+    semantic = _process_detail(detail, display)
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = _ProcessWriteResult.model_validate(envelope.structured_content)
+        byte_text = _format_bytes(result.bytes_written)
+        display = EffectResultDisplay(
+            success=True, verb="Wrote", message=f"{byte_text} to process {short_id}"
+        )
+        return _completed_state(
+            state,
+            _ProcessOutputEnvelope(
+                tool_name="process.write",
+                process_id=result.process_id,
+                status=result.status,
+                bytes_written=result.bytes_written,
+            ),
+            display,
+        )
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+_KB = 1024
+_MB = 1024 * 1024
+
+
+def _format_bytes(n: int) -> str:
+    """Human-readable byte count."""
+    if n < _KB:
+        return f"{n}B"
+    if n < _MB:
+        return f"{n / _KB:.1f}KB"
+    return f"{n / _MB:.1f}MB"
+
+
+def _project_web_search(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _WebSearchArguments.model_validate(detail.input)
+    query = arguments.query
+    semantic = WebSearchEffectDetail(
+        tool_name=detail.tool_name,
+        input=WebSearchEffectInput(query=query),
+        display=EffectCallDisplay(
+            summary=f"Searching the web: {query!r}",
+            verb="Searching",
+            message=f"the web: {query!r}",
+            settled_verb="Searched",
+            settled_message=f"the web: {query!r}",
+            status_text="Searching the web",
+        ),
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = _WebSearchResult.model_validate(envelope.structured_content)
+        output = WebSearchEffectOutput(
+            query=result.query,
+            answer=result.answer,
+            sources=[
+                WebSearchEffectSource(title=s.title, url=s.url) for s in result.sources
+            ],
+        )
+        source_count = len(result.sources)
+        plural = "" if source_count == 1 else "s"
+        display = EffectResultDisplay(
+            success=True,
+            verb="Searched",
+            message=f"{result.query!r} ({source_count} source{plural})",
+        )
+        return _completed_state(state, output, display)
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_web_fetch(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _WebFetchArguments.model_validate(detail.input)
+    url = arguments.url
+    parsed = _url_domain(url)
+    display_message = parsed
+    if arguments.timeout is not None:
+        display_message += f" (timeout {arguments.timeout}s)"
+    semantic = WebFetchEffectDetail(
+        tool_name=detail.tool_name,
+        input=WebFetchEffectInput(url=url, timeout=arguments.timeout),
+        display=EffectCallDisplay(
+            summary=f"Fetching: {display_message}",
+            verb="Fetching",
+            message=display_message,
+            settled_verb="Fetched",
+            settled_message=display_message,
+            status_text="Fetching URL",
+        ),
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = _WebFetchResult.model_validate(envelope.structured_content)
+        output = WebFetchEffectOutput(
+            url=result.url,
+            content=result.content,
+            content_type=result.content_type,
+            was_truncated=result.was_truncated,
+        )
+        content_len = len(result.content)
+        content_type = result.content_type.split(";")[0]
+        display = EffectResultDisplay(
+            success=True,
+            verb="Fetched",
+            message=f"{result.url} ({content_len:,} chars, {content_type})",
+            suffix="(truncated)" if result.was_truncated else "",
+        )
+        return _completed_state(state, output, display)
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_grep(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _GrepArguments.model_validate(detail.input)
+    pattern = arguments.pattern
+    message = f"'{pattern}'"
+    if arguments.path != ".":
+        message += f" in {arguments.path}"
+    if arguments.max_matches is not None:
+        message += f" (max {arguments.max_matches} matches)"
+    if not arguments.use_default_ignore:
+        message += " [no-ignore]"
+    semantic = FileSearchEffectDetail(
+        tool_name=detail.tool_name,
+        input=FileSearchEffectInput(
+            pattern=pattern, path=arguments.path, max_matches=arguments.max_matches
+        ),
+        display=EffectCallDisplay(
+            summary=f"Grepping {message}",
+            verb="Searching",
+            message=message,
+            settled_verb="Searched",
+            settled_message=message,
+            status_text="Searching files",
+        ),
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = _GrepResult.model_validate(envelope.structured_content)
+        output = FileSearchEffectOutput(
+            matches=result.matches,
+            match_count=result.match_count,
+            was_truncated=result.was_truncated,
+            parsed_matches=result.parsed_matches,
+        )
+        count = result.match_count
+        word = "match" if count == 1 else "matches"
+        display = EffectResultDisplay(
+            success=True,
+            verb="Searched",
+            message=f"{pattern} ({count} {word})" if pattern else f"({count} {word})",
+            suffix="(truncated)" if result.was_truncated else "",
+        )
+        return _completed_state(state, output, display)
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_todo(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _TodoArguments.model_validate(detail.input)
+    action = arguments.action
+    if action == "read":
+        display = EffectCallDisplay(
+            summary="Reading todos",
+            verb="Retrieving",
+            message="todos",
+            settled_verb="Retrieved",
+            settled_message="todos",
+            status_text="Managing todos",
+        )
+    elif action == "write":
+        count = len(arguments.todos) if arguments.todos else 0
+        display = EffectCallDisplay(
+            summary=f"Writing {count} todos",
+            verb="Updating",
+            message=f"{count} todos",
+            settled_verb="Updated",
+            settled_message=f"{count} todos",
+            status_text="Managing todos",
+        )
+    else:
+        display = EffectCallDisplay(
+            summary=f"Unknown action: {action}",
+            verb="Running",
+            message=f"unknown todo action: {action}",
+            settled_verb="Ran",
+            settled_message=f"unknown todo action: {action}",
+            status_text="Managing todos",
+        )
+    semantic = TodoEffectDetail(
+        tool_name=detail.tool_name,
+        input=TodoEffectInput(action=action, todos=arguments.todos),
+        display=display,
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = _TodoResult.model_validate(envelope.structured_content)
+        output = TodoEffectOutput(todos=result.todos)
+        display = EffectResultDisplay(
+            success=True, verb=result.verb, message=f"{result.total_count} todos"
+        )
+        return _completed_state(state, output, display)
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
 def _search_replace_annotations(
     envelope: _ToolResultEnvelope,
 ) -> _SearchReplaceAnnotations:
@@ -370,6 +919,12 @@ def _completed_state(
     *,
     output_text: str | None = None,
 ) -> CompletedEffectState:
+    # Semantic projection rebuilds display from scratch, but cross-cutting
+    # advisories (smart approve's "Auto-approved: <reason>" note) ride in on the
+    # incoming effect's display.warnings. Carry them across so they still render.
+    carried = [w for w in state.display.warnings if w not in display.warnings]
+    if carried:
+        display = display.model_copy(update={"warnings": [*display.warnings, *carried]})
     update: dict[str, object] = {
         "output": cast(
             JsonValue, output.model_dump(mode="json", by_alias=True, exclude_none=False)
@@ -385,6 +940,14 @@ def _display_offset(offset: int) -> int | None:
     if offset == 0:
         return None
     return offset + 1 if offset > 0 else offset
+
+
+def _url_domain(url: str) -> str:
+    """Extract the netloc for display, falling back to a truncated URL."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    return parsed.netloc or url[:50]
 
 
 def _file_display(
@@ -454,11 +1017,6 @@ _TOOL_LABELS: dict[str, _ToolLabel] = {
     "subagent.send_message": _ToolLabel("Sending", "a message to a subagent", "Sent"),
     "subagent.interrupt": _ToolLabel("Interrupting", "a subagent", "Interrupted"),
     "subagent.stop": _ToolLabel("Stopping", "a subagent", "Stopped"),
-    "process.start": _ToolLabel("Starting", "a background process", "Started"),
-    "process.stop": _ToolLabel("Stopping", "a background process", "Stopped"),
-    "process.output": _ToolLabel("Reading", "process output", "Read"),
-    "process.list": _ToolLabel("Listing", "background processes", "Listed"),
-    "process.write": _ToolLabel("Writing", "to a background process", "Wrote"),
     # ── GitHub App connector ────────────────────────────────────────────
     "connector_github_app.add_comment_to_pending_review": _ToolLabel(
         "Adding", "a review comment", "Added"
@@ -686,6 +1244,46 @@ _TOOL_LABELS: dict[str, _ToolLabel] = {
 }
 
 
+def _project_ask_user_question(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = UserQuestionRequest.model_validate(detail.input)
+    question_text = (
+        arguments.questions[0].question
+        if len(arguments.questions) == 1
+        else f"{len(arguments.questions)} questions"
+    )
+    semantic = UserQuestionEffectDetail(
+        tool_name=detail.tool_name,
+        input=arguments,
+        display=EffectCallDisplay(
+            summary=f"Asking: {question_text}",
+            verb="Asking",
+            message=question_text,
+            settled_verb="Asked",
+            settled_message=question_text,
+            status_text="Waiting for user input",
+        ),
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = UserQuestionResult.model_validate(envelope.structured_content)
+        if result.cancelled:
+            display = EffectResultDisplay(
+                success=False, verb="Cancelled", message="by user"
+            )
+        else:
+            parts = [
+                f'"{a.question}" → {"(Other) " if a.is_other else ""}{a.answer}'
+                for a in result.answers
+            ]
+            display = EffectResultDisplay(
+                success=True, verb="Answered", message=" · ".join(parts)
+            )
+        return _completed_state(state, result, display)
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
 def _project_labeled(detail: GenericEffectDetail, label: _ToolLabel) -> _ProjectedCall:
     semantic = detail.model_copy(update={"display": label.call_display()})
 
@@ -712,6 +1310,16 @@ _CALL_PROJECTORS: dict[str, Callable[[GenericEffectDetail], _ProjectedCall]] = {
     "bash": _project_shell,
     "file_system.bash": _project_shell,
     "skill.read": _project_skill,
+    "process.start": _project_process_start,
+    "process.stop": _project_process_stop,
+    "process.output": _project_process_output,
+    "process.list": _project_process_list,
+    "process.write": _project_process_write,
+    "ui.ask_user_question": _project_ask_user_question,
+    "web_search": _project_web_search,
+    "web_fetch": _project_web_fetch,
+    "grep": _project_grep,
+    "todo": _project_todo,
 }
 
 _TOOL_CATEGORIES: dict[str, UnifiedToolCategory] = {
@@ -724,6 +1332,10 @@ _TOOL_CATEGORIES: dict[str, UnifiedToolCategory] = {
     "bash": "shell",
     "file_system.bash": "shell",
     "skill.read": "skill",
+    "web_search": "web_search",
+    "web_fetch": "web_fetch",
+    "grep": "file_search",
+    "todo": "todo",
 }
 
 

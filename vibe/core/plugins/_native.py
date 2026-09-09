@@ -473,42 +473,80 @@ class PluginResolver:
         project_roots: Sequence[Path] = (),
         user_roots: Sequence[Path] = (),
         plugin_dirs: Sequence[Path] = (),
+        builtin_roots: Sequence[Path] = (),
+        plugin_scopes: Mapping[Path, SkillScope] | None = None,
         data_root_base: Path | None = None,
         config_orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None,
     ) -> None:
         self._project_roots = tuple(project_roots)
         self._user_roots = tuple(user_roots)
+        self._builtin_roots = tuple(builtin_roots)
         # Named outright rather than discovered under a root: a pinned session
-        # rebuilding its recorded set has nothing to scan and no scope to
-        # distinguish, so these join the project scope and skip discovery.
+        # rebuilding its recorded set has nothing to scan, so these skip
+        # discovery and take their scope from ``plugin_scopes``.
         self._plugin_dirs = tuple(plugin_dirs)
+        self._plugin_scopes = dict(plugin_scopes) if plugin_scopes is not None else {}
         self._data_root_base = data_root_base
         self._config_orchestrator = config_orchestrator
         self._issues: list[PluginConfigIssue] = []
         self._unsupported_components: list[PluginUnsupportedComponent] = []
+
+    @property
+    def _builtin_plugin_dirs(self) -> list[Path]:
+        dirs: list[Path] = []
+        for root in self._builtin_roots:
+            try:
+                dirs.extend(
+                    sorted(
+                        (
+                            path
+                            for path in root.iterdir()
+                            if path.is_dir()
+                            and not path.name.startswith("__")
+                            and (path / "plugin.json").is_file()
+                        ),
+                        key=lambda path: path.name,
+                    )
+                )
+            except OSError as error:
+                self._issues.append(
+                    PluginConfigIssue(file=root, message=f"Failed to discover: {error}")
+                )
+        return dirs
 
     @classmethod
     def from_harness_files(
         cls,
         harness_files: HarnessFilesManager,
         *,
+        builtin_roots: Sequence[Path] = (),
+        data_root_base: Path | None = None,
         config_orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None,
     ) -> PluginResolver:
         return cls(
             project_roots=harness_files.project_plugins_dirs,
             user_roots=harness_files.user_plugins_dirs,
+            builtin_roots=builtin_roots,
+            data_root_base=data_root_base,
             config_orchestrator=config_orchestrator,
         )
 
     def resolve(self) -> ResolvedPluginSet:
         self._issues = []
         self._unsupported_components = []
+        named = self._named_dirs_by_scope()
         project = self._load_scope(
-            [*self._plugin_dirs, *self._child_dirs(self._project_roots)],
+            [*named[SkillScope.PROJECT], *self._child_dirs(self._project_roots)],
             SkillScope.PROJECT,
         )
-        user = self._load_scope(self._child_dirs(self._user_roots), SkillScope.GLOBAL)
-        selected = self._select_by_precedence(project, user)
+        user = self._load_scope(
+            [*named[SkillScope.GLOBAL], *self._child_dirs(self._user_roots)],
+            SkillScope.GLOBAL,
+        )
+        builtin = self._load_scope(
+            [*named[SkillScope.BUILTIN], *self._builtin_plugin_dirs], SkillScope.BUILTIN
+        )
+        selected = self._select_by_precedence(project, user, builtin)
         selected = self._remove_namespace_collisions(selected)
         plugins = tuple(
             sorted(
@@ -533,7 +571,11 @@ class PluginResolver:
             for candidate in sorted(
                 selected,
                 key=lambda item: (
-                    0 if item.descriptor.scope is SkillScope.PROJECT else 1,
+                    0
+                    if item.descriptor.scope is SkillScope.PROJECT
+                    else 1
+                    if item.descriptor.scope is SkillScope.GLOBAL
+                    else 2,
                     item.descriptor.name,
                 ),
             )
@@ -606,6 +648,17 @@ class PluginResolver:
                 )
         return plugin_dirs
 
+    def _named_dirs_by_scope(self) -> dict[SkillScope, list[Path]]:
+        buckets: dict[SkillScope, list[Path]] = {
+            SkillScope.PROJECT: [],
+            SkillScope.GLOBAL: [],
+            SkillScope.BUILTIN: [],
+        }
+        for plugin_dir in self._plugin_dirs:
+            scope = self._plugin_scopes.get(plugin_dir.resolve(), SkillScope.PROJECT)
+            buckets.get(scope, buckets[SkillScope.PROJECT]).append(plugin_dir)
+        return buckets
+
     def _load_scope(
         self, plugin_dirs: Sequence[Path], scope: SkillScope
     ) -> list[_PluginCandidate]:
@@ -615,6 +668,23 @@ class PluginResolver:
             if (candidate := self._load_plugin(plugin_dir, scope))
         ]
         return self._remove_same_scope_duplicates(candidates)
+
+    def _reject_builtin_foreign_format(
+        self, root: Path, source_format: DetectedPluginFormat
+    ) -> None:
+        self._issues.append(
+            PluginConfigIssue(
+                file=root,
+                message=(
+                    "Built-in plugins must use the Agent Plugins 1.0 format; "
+                    f"{source_format.value} is not supported"
+                ),
+                code="plugin.compatibility.format_unsupported_builtin",
+                fatal=True,
+                source_format=source_format,
+                component="manifest",
+            )
+        )
 
     def _load_plugin(
         self, plugin_dir: Path, scope: SkillScope
@@ -647,8 +717,10 @@ class PluginResolver:
             return None
         if detection.source_format is DetectedPluginFormat.AGENT_PLUGINS_1_0:
             return self._load_native_plugin(root, scope)
+        if scope is SkillScope.BUILTIN:
+            self._reject_builtin_foreign_format(root, detection.source_format)
         adapter = _compatibility_adapter(detection.source_format)
-        if adapter is not None:
+        if adapter is not None and scope is not SkillScope.BUILTIN:
             result = adapter.adapt(
                 root=root, data_root_base=self._plugin_data_root_base(root), scope=scope
             )
@@ -735,7 +807,12 @@ class PluginResolver:
             if extension is not None and extension.tool_namespace is not None
             else _typescript_identifier(manifest.name)
         )
-        if namespace in _RESERVED_NAMESPACES:
+        _builtin_reserved = (
+            _RESERVED_NAMESPACES
+            if scope is not SkillScope.BUILTIN
+            else (_RESERVED_NAMESPACES - {"vibe"})
+        )
+        if namespace in _builtin_reserved:
             self._issues.append(
                 PluginConfigIssue(
                     file=manifest_path,
@@ -750,7 +827,7 @@ class PluginResolver:
             or f"Capabilities provided by {manifest.name}.",
             root=root,
             manifest_path=resolved_manifest,
-            data_root=self._plugin_data_root_base(root) / manifest.name,
+            data_root=self._scope_data_root(scope, root) / manifest.name,
             namespace=namespace,
             scope=scope,
             source_format=DetectedPluginFormat.AGENT_PLUGINS_1_0,
@@ -1007,6 +1084,19 @@ class PluginResolver:
 
     def _plugin_data_root_base(self, root: Path) -> Path:
         return self._data_root_base or root.parent.parent / "plugin-data"
+
+    def _scope_data_root(self, scope: SkillScope, root: Path) -> Path:
+        if scope is SkillScope.BUILTIN:
+            if self._data_root_base is None:
+                self._issues.append(
+                    PluginConfigIssue(
+                        file=root,
+                        message="data_root_base is required for built-in plugins",
+                    )
+                )
+                return root.parent.parent / "plugin-data"
+            return self._data_root_base
+        return self._plugin_data_root_base(root)
 
     @staticmethod
     def _adapt_mcp_servers(
@@ -1767,15 +1857,26 @@ class PluginResolver:
 
     @staticmethod
     def _select_by_precedence(
-        project: Sequence[_PluginCandidate], user: Sequence[_PluginCandidate]
+        project: Sequence[_PluginCandidate],
+        user: Sequence[_PluginCandidate],
+        builtin: Sequence[_PluginCandidate] = (),
     ) -> list[_PluginCandidate]:
         project_by_name = {
             candidate.descriptor.name: candidate for candidate in project
         }
         user_by_name = {candidate.descriptor.name: candidate for candidate in user}
+        builtin_by_name = {
+            candidate.descriptor.name: candidate for candidate in builtin
+        }
         return [
-            project_by_name[name] if name in project_by_name else user_by_name[name]
-            for name in sorted(project_by_name.keys() | user_by_name.keys())
+            project_by_name[name]
+            if name in project_by_name
+            else user_by_name[name]
+            if name in user_by_name
+            else builtin_by_name[name]
+            for name in sorted(
+                project_by_name.keys() | user_by_name.keys() | builtin_by_name.keys()
+            )
         ]
 
     def _remove_namespace_collisions(

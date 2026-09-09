@@ -20,6 +20,7 @@ async def serve_stdio(
     reader: BinaryLineReader | None = None,
     writer: BinaryLineWriter | None = None,
     experimental_harness: bool = False,
+    legacy_harness: bool = False,
 ) -> None:
     transport = (
         StdioJsonRpcTransport.from_standard_streams()
@@ -27,14 +28,24 @@ async def serve_stdio(
         else StdioJsonRpcTransport(reader, writer)
     )
     harness = await create_harness_server(
-        transport, transport_kind="stdio", experimental_harness=experimental_harness
+        transport,
+        transport_kind="stdio",
+        experimental_harness=experimental_harness,
+        legacy_harness=legacy_harness,
     )
     await harness.serve()
 
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Mistral Vibe app server")
-    add_experimental_harness_argument(parser)
+    harness_group = parser.add_mutually_exclusive_group()
+    add_experimental_harness_argument(parser, group=harness_group)
+    harness_group.add_argument(
+        "--legacy-harness",
+        action="store_true",
+        default=False,
+        help="Force the legacy Python harness, overriding the GrowthBook rollout.",
+    )
     return parser.parse_args()
 
 
@@ -49,4 +60,9 @@ def main() -> None:
     init_harness_files_manager("user", "project")
     init_file_logging(LOG_FILE.path)
     load_dotenv_values()
-    asyncio.run(serve_stdio(experimental_harness=args.experimental_harness))
+    asyncio.run(
+        serve_stdio(
+            experimental_harness=args.experimental_harness,
+            legacy_harness=args.legacy_harness,
+        )
+    )

@@ -98,3 +98,6 @@ class CompletionAttributionHolder:
         if self._source is None:
             return {}
         return self._source(purpose, iteration)
+
+    def affinity_id(self) -> str | None:
+        return self.metadata("agent", 0).get("session_id")

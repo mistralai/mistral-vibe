@@ -19,6 +19,7 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "prompt": None,
         "agent": None,
         "experimental_harness": False,
+        "legacy_harness": False,
         "auto_approve": False,
         "enabled_tools": None,
         "disabled_tools": None,

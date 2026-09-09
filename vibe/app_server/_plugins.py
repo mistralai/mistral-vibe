@@ -38,6 +38,7 @@ from vibe.core.config import VibeConfigSchema
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.models import MCPHttp, MCPStdio, MCPStreamableHttp
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.paths import VIBE_HOME
 from vibe.core.plugins import (
     DetectedPluginFormat,
     MaterializedPluginSet,
@@ -64,7 +65,7 @@ from vibe.core.plugins import (
     snapshot_bytes,
     validate_resolved_plugin_snapshot,
 )
-from vibe.core.skills.models import SkillInfo
+from vibe.core.skills.models import SkillInfo, SkillScope
 from vibe.core.tools.models import ToolPermission
 
 if TYPE_CHECKING:
@@ -92,6 +93,15 @@ if TYPE_CHECKING:
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _builtin_plugin_roots() -> list[Path]:
+    """Discover built-in plugin directories shipped inside the package."""
+    try:
+        import vibe.plugins.builtins as _pkg
+    except ImportError:
+        return []
+    return [Path(_pkg.__file__).parent]
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +148,7 @@ async def resolve_session_plugins(
     config_orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None,
     plugin_mcp: PluginMCPCatalog | None = None,
     connector_registry: ConnectorRegistry | None = None,
+    builtin_plugin_roots: list[Path] | None = None,
 ) -> SessionPlugins:
     """Resolve, materialize, and project the plugins visible to a session.
 
@@ -149,9 +160,15 @@ async def resolve_session_plugins(
     while ``connector_registry`` is ``None``, which reports itself: an
     account-scoped source vanishing silently is a session the operator
     diagnoses by hand.
+
+    ``builtin_plugin_roots`` overrides the default built-in plugin discovery.
+    Pass an empty list to suppress built-in plugins (used in tests that assert
+    exact plugin sets).
     """
+    if builtin_plugin_roots is None:
+        builtin_plugin_roots = _builtin_plugin_roots()
     resolution = await asyncio.to_thread(
-        _resolve_installed, harness_files, config_orchestrator
+        _resolve_installed, harness_files, config_orchestrator, builtin_plugin_roots
     )
     materialized = await _materialize(resolution, plugin_mcp, connector_registry)
     return SessionPlugins(
@@ -164,6 +181,7 @@ async def resolve_session_plugins(
 def _resolve_installed(
     harness_files: HarnessFilesManager,
     config_orchestrator: ConfigOrchestrator[VibeConfigSchema] | None,
+    builtin_roots: list[Path],
 ) -> ResolvedPluginSet:
     """Discover and resolve the installed plugin tree, off the event loop.
 
@@ -174,8 +192,20 @@ def _resolve_installed(
     waits. ``bind`` offloads the same work for the same reason.
     """
     return PluginResolver.from_harness_files(
-        harness_files, config_orchestrator=config_orchestrator
+        harness_files,
+        builtin_roots=builtin_roots,
+        data_root_base=VIBE_HOME.path / "plugin-data",
+        config_orchestrator=config_orchestrator,
     ).resolve()
+
+
+def installed_plugin_scopes(plugins: SessionPlugins) -> dict[str, SkillScope]:
+    # Read off the resolve, never re-derived from paths: scope decides which
+    # checks a plugin is held to, so a second derivation that disagrees drops
+    # plugins the Host just loaded.
+    return {
+        plugin.name: plugin.scope for plugin in plugins.materialized.resolution.plugins
+    }
 
 
 async def _materialize(
@@ -253,19 +283,23 @@ class UnifiedPluginProvider:
         storage_root: Path,
         workdir: Path,
         installed_roots: Mapping[str, Path],
+        installed_scopes: Mapping[str, SkillScope] | None = None,
         config_orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None,
         plugin_mcp: PluginMCPCatalog | None = None,
         connector_registry: ConnectorRegistry | None = None,
         harness_files: HarnessFilesManager | None = None,
         agent_tools: Callable[[], AgentToolCatalogue] | None = None,
+        builtin_plugin_roots: list[Path] | None = None,
     ) -> None:
         self._plugins_root = Path(storage_root).expanduser().resolve() / "plugins"
         self._workdir = workdir
         self._installed_roots = dict(installed_roots)
+        self._plugin_scopes = dict(installed_scopes or {})
         self._config_orchestrator = config_orchestrator
         self._plugin_mcp = plugin_mcp
         self._connector_registry = connector_registry
         self._harness_files = harness_files
+        self._builtin_plugin_roots = builtin_plugin_roots
         # Read once per bind. Absent, plugin agent types stay unexecutable: Core is
         # still told about them and the Host strips them for want of a binding, which
         # beats guessing at a ceiling with no catalogue to measure it against.
@@ -310,11 +344,13 @@ class UnifiedPluginProvider:
             config_orchestrator=self._config_orchestrator,
             plugin_mcp=self._plugin_mcp,
             connector_registry=self._connector_registry,
+            builtin_plugin_roots=self._builtin_plugin_roots,
         )
         self._installed_roots = {
             plugin.name: plugin.root
             for plugin in plugins.materialized.resolution.plugins
         }
+        self._plugin_scopes = installed_plugin_scopes(plugins)
         return requested_plugin_definitions(plugins)
 
     async def pin(
@@ -480,8 +516,15 @@ class UnifiedPluginProvider:
         Sorted by plugin name so the order the resolver sees does not depend on
         the order the Runtime happened to check the packages out.
         """
+        sorted_names = sorted(checkouts)
         resolution = PluginResolver(
-            plugin_dirs=[checkouts[name] for name in sorted(checkouts)],
+            plugin_dirs=[checkouts[name] for name in sorted_names],
+            plugin_scopes={
+                checkouts[name].resolve(): self._plugin_scopes.get(
+                    name, SkillScope.PROJECT
+                )
+                for name in sorted_names
+            },
             data_root_base=self._data_root(session_id),
             config_orchestrator=self._config_orchestrator,
         ).resolve()

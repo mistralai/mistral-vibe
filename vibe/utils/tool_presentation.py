@@ -29,6 +29,7 @@ class ToolEffectKind(StrEnum):
     SKILL = auto()
     SUBAGENT = auto()
     WORKTREE = auto()
+    PROCESS = auto()
 
 
 class EffectCallDisplay(PresentationModel):

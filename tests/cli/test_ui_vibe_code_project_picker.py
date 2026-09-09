@@ -5,12 +5,12 @@ from textual.widgets import OptionList
 
 from tests.conftest import build_test_vibe_app, build_test_vibe_config
 from vibe.app_server.models import (
+    RemoteProjectLink,
     VibeCodeGitInfo,
     VibeCodePickerContext,
     VibeCodePickerState,
     VibeCodePickerView,
     VibeCodeProject,
-    VibeCodeProjectLink,
     VibeCodeRepository,
 )
 from vibe.app_server.protocol import (
@@ -38,8 +38,8 @@ def _project(project_id: str, name: str, repo_url: str = REPO_URL) -> VibeCodePr
     )
 
 
-def _link(project: VibeCodeProject, repo_url: str = REPO_URL) -> VibeCodeProjectLink:
-    return VibeCodeProjectLink(
+def _link(project: VibeCodeProject, repo_url: str = REPO_URL) -> RemoteProjectLink:
+    return RemoteProjectLink(
         repo_root=REPO_ROOT,
         repo_url=repo_url,
         project_id=project.project_id,
@@ -51,7 +51,7 @@ def _view(
     projects: list[VibeCodeProject],
     *,
     next_cursor: str | None = None,
-    saved_link: VibeCodeProjectLink | None = None,
+    saved_link: RemoteProjectLink | None = None,
     saved_project_link_cleared: bool = False,
     project_repo_remote_changed: bool = False,
 ) -> VibeCodePickerView:

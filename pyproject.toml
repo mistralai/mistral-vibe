@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.25.0"
+version = "2.25.1"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -69,6 +69,7 @@ dependencies = [
     "mdit-py-plugins==0.5.0",
     "mdurl==0.1.2",
     "mistralai==2.6.0",
+    "mistralai-vibe-local-harness==0.4.3",
     "more-itertools==11.0.2",
     "opentelemetry-api==1.39.1",
     "opentelemetry-exporter-otlp-proto-common==1.39.1",
@@ -156,6 +157,7 @@ vibe-app-server = "vibe.app_server.stdio:main"
 
 [tool.uv]
 exclude-newer = "2 days"
+exclude-newer-package = { mistralai-vibe-local-harness = false }
 index-strategy = "first-index"
 package = true
 required-version = ">=0.8.0"
@@ -169,7 +171,6 @@ override-dependencies = [
 [dependency-groups]
 dev = [
     "cryptography>=48.0.0",
-    "debugpy>=1.8.21",
     "pre-commit-uv>=4.3.0",
     "pre-commit>=4.2.0",
     "pyinstrument>=5.1.2",
@@ -268,7 +269,7 @@ max-nested-blocks = 5
 ignore_decorators = ["@*"]
 
 [tool.pytest.ini_options]
-addopts = "-p pytest_vibe -vvvv -q -n auto --durations=10 --import-mode=importlib --maxschedchunk=1"
+addopts = "-p pytest_vibe -vvvv -q -n auto --dist=loadgroup --durations=10 --import-mode=importlib --maxschedchunk=1"
 timeout = 10
 markers = [
     "unified_supported: backend contract behavior implemented by the Unified Harness",

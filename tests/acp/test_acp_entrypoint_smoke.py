@@ -116,7 +116,15 @@ async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
     if proc.returncode is None:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
-            await proc.wait()
+        # Bound the reap. Each test runs on its own function-scoped event loop
+        # under xdist, and asyncio's child watcher can miss the SIGCHLD for a
+        # process it spawned, leaving ``proc.wait()`` blocked forever even though
+        # the process is already dead. An unbounded wait here would then run out
+        # to the per-test timeout and surface as an opaque hang instead of the
+        # test's real result. The process is killed; stop waiting after a grace
+        # period and let the OS reap it.
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=5)
 
 
 def _build_env(vibe_home_dir: Path, *, include_api_key: bool) -> dict[str, str]:

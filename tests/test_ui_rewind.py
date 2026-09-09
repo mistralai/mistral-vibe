@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-import time
 
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_app
+from tests.conftest import build_test_agent_loop, build_test_vibe_app, wait_until
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.app_server.models import PublicCheckpointEntry
@@ -35,20 +34,12 @@ async def _send_messages(pilot, messages: list[str]) -> None:
     for msg in messages:
         await pilot.press(*msg)
         await pilot.press("enter")
-        await _wait_until(pilot, lambda: not pilot.app._agent_job_active())
-
-
-async def _wait_until(pilot, predicate, timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        if time.monotonic() >= deadline:
-            raise AssertionError("Timed out waiting for UI state")
-        await pilot.pause(0.01)
+        assert await wait_until(pilot, lambda: not pilot.app._agent_job_active())
 
 
 async def _enter_rewind(pilot) -> None:
     await pilot.press("escape", "escape")
-    await _wait_until(
+    assert await wait_until(
         pilot,
         lambda: (
             pilot.app._rewind_mode and pilot.app._rewind_highlighted_widget is not None
@@ -101,7 +92,7 @@ async def test_rewind_preview_error_does_not_fail_worker(
         )
 
         await pilot.press("escape", "escape")
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: any(
                 notification.message == "Rewindable history entry not found: stale"
@@ -121,7 +112,7 @@ async def test_rewind_navigates_to_previous_message() -> None:
 
         await _enter_rewind(pilot)
         await pilot.press("left")
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 app._rewind_highlighted_widget is not None
@@ -142,7 +133,7 @@ async def test_rewind_navigates_down() -> None:
         # Go up once, then back down
         await _enter_rewind(pilot)
         await pilot.press("left")
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 app._rewind_highlighted_widget is not None
@@ -150,7 +141,7 @@ async def test_rewind_navigates_down() -> None:
             ),
         )
         await pilot.press("right")
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 app._rewind_highlighted_widget is not None
@@ -171,7 +162,7 @@ async def test_rewind_escape_navigates_to_previous() -> None:
         await _enter_rewind(pilot)
 
         await pilot.press("escape")
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 app._rewind_highlighted_widget is not None
@@ -193,7 +184,7 @@ async def test_rewind_q_exits_mode() -> None:
         await _enter_rewind(pilot)
 
         await pilot.press("q")
-        await _wait_until(pilot, lambda: not app._rewind_mode)
+        assert await wait_until(pilot, lambda: not app._rewind_mode)
 
         assert app._rewind_mode is False
         assert app._rewind_highlighted_widget is None
@@ -214,7 +205,7 @@ async def test_rewind_q_exits_mode_from_persistence_step() -> None:
         assert rewind_app._step == _RewindStep.PERSISTENCE
 
         await pilot.press("q")
-        await _wait_until(pilot, lambda: not app._rewind_mode)
+        assert await wait_until(pilot, lambda: not app._rewind_mode)
 
         assert app._rewind_highlighted_widget is None
         assert app._current_bottom_app == BottomApp.Input
@@ -229,7 +220,7 @@ async def test_rewind_arrow_keys_navigate_messages() -> None:
         await _enter_rewind(pilot)
 
         await pilot.press("left")
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 app._rewind_highlighted_widget is not None
@@ -241,7 +232,7 @@ async def test_rewind_arrow_keys_navigate_messages() -> None:
         assert app._rewind_highlighted_widget.get_content() == "hello"
 
         await pilot.press("right")
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 app._rewind_highlighted_widget is not None
@@ -265,7 +256,7 @@ async def test_rewind_confirm_edits_message_and_prefills_input() -> None:
         await pilot.press("enter")
         await pilot.pause(0.1)
         await pilot.press("enter")
-        await _wait_until(pilot, lambda: not app._rewind_mode)
+        assert await wait_until(pilot, lambda: not app._rewind_mode)
 
         assert app._rewind_mode is False
         assert app._current_bottom_app == BottomApp.Input
@@ -284,7 +275,7 @@ async def test_rewind_truncates_public_history_and_appends_checkpoint() -> None:
         # Navigate to "second"
         await _enter_rewind(pilot)
         await pilot.press("left")
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 app._rewind_highlighted_widget is not None
@@ -299,7 +290,7 @@ async def test_rewind_truncates_public_history_and_appends_checkpoint() -> None:
         await pilot.press("enter")
         await pilot.pause(0.1)
         await pilot.press("enter")
-        await _wait_until(pilot, lambda: not app._rewind_mode)
+        assert await wait_until(pilot, lambda: not app._rewind_mode)
 
         messages_area = app.query_one("#messages")
         user_widgets = [
@@ -332,7 +323,7 @@ async def test_rewind_skips_command_messages() -> None:
 
         # Going previous should land on "hello", skipping the command message
         await pilot.press("left")
-        await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 app._rewind_highlighted_widget is not None
@@ -374,7 +365,7 @@ async def test_rewind_option_selection_with_number_keys() -> None:
         await pilot.press("1")
         await pilot.pause(0.1)
         await pilot.press("1")
-        await _wait_until(pilot, lambda: not app._rewind_mode)
+        assert await wait_until(pilot, lambda: not app._rewind_mode)
 
         assert app._rewind_mode is False
         assert app._current_bottom_app == BottomApp.Input
@@ -447,7 +438,7 @@ async def test_rewind_in_place_persists_in_current_session(monkeypatch) -> None:
         await pilot.press("enter")
         await pilot.pause(0.1)
         await pilot.press("enter")
-        await _wait_until(pilot, lambda: not app._rewind_mode)
+        assert await wait_until(pilot, lambda: not app._rewind_mode)
 
         assert captured == {"inplace": True, "restore_files": False}
         assert app.app_server.session_id == old_session_id
@@ -477,7 +468,7 @@ async def test_rewind_fork_creates_new_session(monkeypatch) -> None:
         await pilot.press("enter")
         await pilot.pause(0.1)
         await pilot.press("2")
-        await _wait_until(pilot, lambda: not app._rewind_mode)
+        assert await wait_until(pilot, lambda: not app._rewind_mode)
 
         assert captured["inplace"] is False
 
@@ -494,7 +485,7 @@ async def test_rewind_fork_shows_session_hint() -> None:
         await pilot.press("enter")
         await pilot.pause(0.1)
         await pilot.press("2")
-        await _wait_until(pilot, lambda: not app._rewind_mode)
+        assert await wait_until(pilot, lambda: not app._rewind_mode)
 
         new_session_id = app.app_server.session_id
         assert new_session_id != old_session_id
@@ -515,6 +506,6 @@ async def test_rewind_in_place_shows_no_session_hint() -> None:
         await pilot.press("enter")
         await pilot.pause(0.1)
         await pilot.press("enter")
-        await _wait_until(pilot, lambda: not app._rewind_mode)
+        assert await wait_until(pilot, lambda: not app._rewind_mode)
 
         assert len(app.query(RewindForkMessage)) == 0

@@ -74,7 +74,11 @@ async def test_stdio_server_creates_the_harness_behind_its_transport(
     assert call is not None
     args, kwargs = call
     assert isinstance(args[0], StdioJsonRpcTransport)
-    assert kwargs == {"transport_kind": "stdio", "experimental_harness": False}
+    assert kwargs == {
+        "transport_kind": "stdio",
+        "experimental_harness": False,
+        "legacy_harness": False,
+    }
     harness.serve.assert_awaited_once_with()
 
 
@@ -93,7 +97,11 @@ async def test_stdio_server_forwards_experimental_harness_selection(
     call = factory.await_args
     assert call is not None
     _, kwargs = call
-    assert kwargs == {"transport_kind": "stdio", "experimental_harness": True}
+    assert kwargs == {
+        "transport_kind": "stdio",
+        "experimental_harness": True,
+        "legacy_harness": False,
+    }
 
 
 @pytest.mark.asyncio

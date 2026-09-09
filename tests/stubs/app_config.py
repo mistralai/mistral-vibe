@@ -37,8 +37,10 @@ def build_test_app_config(
         voice_mode_enabled=voice_mode_enabled,
         narrator_enabled=narrator_enabled,
         show_thinking_nodes=show_thinking_nodes,
+        worktree_limit=15,
         enable_update_checks=True,
         enable_notifications=True,
+        experimental_enable_tab_status=False,
         vibe_code_enabled=True,
         models=[
             ModelConfigView(

@@ -13,21 +13,25 @@ contract does not import core.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
 from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server.protocol import ProtocolErrorCode, SessionOptions
 from vibe.core.git.worktree import PreparedWorktree
+from vibe.core.paths import dedup_paths
 from vibe.core.session.worktrees import (
     CreateNamedWorktree,
     CreateWorktreeForPrompt,
     ResolvedWorktree,
-    ResumableDirectories,
     SessionWorktrees as WorktreeLifecycle,
     UseExistingWorktree,
     WorktreeRequest,
 )
+
+type MoveSession = Callable[[SessionOptions], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +82,37 @@ class SessionWorktrees:
         resolved = await self._lifecycle.resolve_for_start(request, _base_cwd(options))
         return _rewritten(options, resolved)
 
+    async def raise_behind(
+        self,
+        session_id: str,
+        move: MoveSession,
+        requested: SessionOptions,
+        started_in: SessionOptions,
+    ) -> None:
+        """Raise the worktree the session asked for and move it in.
+
+        Raises rather than logging: the caller holds the session's turns behind
+        this, and a session that asked to be isolated and is still standing in
+        the project must refuse to run rather than quietly write it.
+        """
+        previous = _base_cwd(started_in)
+        resolution = await self.resolve_for_start(requested)
+        cwd = _base_cwd(resolution.options)
+        try:
+            self.hold(cwd, session_id)
+            await move(resolution.options)
+        except BaseException:
+            # Inside the same arm as the move: a worktree created and then not
+            # held could be selected by retention while startup is unwinding.
+            with suppress(BaseException):
+                self.release(cwd, session_id)
+            await self.cleanup(resolution)
+            raise
+        # The session is standing in the worktree by now. Letting go of where it
+        # was is bookkeeping, and must not be the reason its turns are refused.
+        with suppress(Exception):
+            self.release(previous, session_id)
+
     async def cleanup(self, resolution: WorktreeResolution) -> None:
         """Undo what this start did, and only that."""
         await self._lifecycle.cleanup(resolution.prepared_worktree)
@@ -116,12 +151,6 @@ class SessionWorktrees:
     def release(cwd: Path, session_id: str) -> None:
         WorktreeLifecycle.release(cwd, session_id)
 
-    def start_sweep(self, cwd: Path, resumable: ResumableDirectories) -> None:
-        self._lifecycle.start_sweep(cwd, resumable)
-
-    async def sweep(self, cwd: Path, resumable: ResumableDirectories) -> None:
-        await self._lifecycle.sweep(cwd, resumable)
-
 
 def _requested(options: SessionOptions) -> WorktreeRequest | None:
     """The wire's `worktree` in the lifecycle's vocabulary, or None for neither.
@@ -153,9 +182,22 @@ def _rewritten(
 ) -> WorktreeResolution:
     """Options that start where the lifecycle decided, with the request spent."""
     cwd = str(resolved.cwd)
+    previous_cwd = _base_cwd(options).expanduser().resolve()
+    # Moving replaces the checkout root, not extra directories the caller
+    # authorized, such as Desktop's attachment cache.
+    workspace_roots = [
+        cwd,
+        *(
+            str(root)
+            for root in dedup_paths(
+                Path(root).expanduser() for root in options.workspace_roots
+            )
+            if root not in {previous_cwd, resolved.cwd}
+        ),
+    ]
     return WorktreeResolution(
         options=options.model_copy(
-            update={"cwd": cwd, "workspace_roots": [cwd], "worktree": None}
+            update={"cwd": cwd, "workspace_roots": workspace_roots, "worktree": None}
         ),
         prepared_worktree=resolved.prepared,
     )

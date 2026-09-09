@@ -22,7 +22,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vibe import __version__
-from vibe._experimental_harness import add_experimental_harness_argument
+from vibe._experimental_harness import (
+    add_experimental_harness_argument,
+    add_smart_approve_argument,
+)
 
 # Anything heavier than argparse is imported inside the functions below, after
 # argument parsing, so that --help/--version don't pay for the config stack
@@ -120,12 +123,20 @@ def parse_arguments() -> argparse.Namespace:
         "--agent",
         metavar="NAME",
         default=None,
-        help="Agent to use (builtin: ask, plan, accept-edits, auto-approve, "
-        "or custom from ~/.vibe/agents/NAME.toml). Defaults to the "
+        help="Agent to use (builtin: ask, plan, accept-edits, smart-approve, "
+        "auto-approve, or custom from ~/.vibe/agents/NAME.toml). Defaults to the "
         "'default_agent' config setting in both interactive and programmatic "
         "(-p/--prompt) mode.",
     )
-    add_experimental_harness_argument(parser)
+    harness_group = parser.add_mutually_exclusive_group()
+    add_experimental_harness_argument(parser, group=harness_group)
+    harness_group.add_argument(
+        "--legacy-harness",
+        action="store_true",
+        default=False,
+        help="Force the legacy Python harness, overriding the GrowthBook rollout.",
+    )
+    add_smart_approve_argument(parser)
     parser.add_argument(
         "--auto-approve",
         "--yolo",
@@ -195,7 +206,16 @@ def parse_arguments() -> argparse.Namespace:
     cli_args = sys.argv[1:]
     if cli_args[:1] == ["update"]:
         cli_args[0] = "--check-upgrade"
-    return parser.parse_args(cli_args)
+    args = parser.parse_args(cli_args)
+    # --smart-approve selects the smart-approve mode unless an explicit --agent wins.
+    # Smart approve is a Unified Harness classify gate with no legacy equivalent, so
+    # the flag also turns on the experimental harness -- otherwise a legacy session
+    # would just relabel the mode and run ordinary permissions.
+    if getattr(args, "smart_approve", False):
+        args.experimental_harness = True
+        if args.agent is None:
+            args.agent = "smart-approve"
+    return args
 
 
 def _enter_worktree(args: argparse.Namespace) -> PreparedWorktree:

@@ -9,6 +9,7 @@ class AgentSafety(StrEnum):
     SAFE = auto()
     NEUTRAL = auto()
     DESTRUCTIVE = auto()
+    SMART = auto()
     YOLO = auto()
 
 

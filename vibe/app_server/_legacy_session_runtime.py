@@ -81,13 +81,10 @@ from vibe.app_server.protocol import (
     TurnStartParams,
 )
 from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import VibeConfigSchema
 from vibe.core.git.errors import GitError
 from vibe.core.git.worktree import PreparedWorktree
 from vibe.core.session import last_session_pointer
-from vibe.core.session.resume_sessions import resume_directories
 from vibe.core.session.session_lease import SessionBusyError
-from vibe.core.session.worktrees import ResumableDirectories
 from vibe.core.types import (
     BackgroundWorkEvent,
     SessionTitleUpdatedEvent,
@@ -547,9 +544,6 @@ class LegacySessionRuntimeController:
             state = started.response.state
             self._schedule_admin_config_fetch()
             self._worktrees.hold(agent_loop.cwd, agent_loop.session_id)
-            self._worktrees.start_sweep(
-                agent_loop.cwd, _legacy_resumable_directories(agent_loop.config)
-            )
             if resumed:
                 state = self._root_session.append_checkpoint(
                     current_history=[],
@@ -882,12 +876,3 @@ def create_legacy_session_backend_host(
         account_gateway=account_gateway,
         identity_gateway=identity_gateway,
     ).create_host()
-
-
-def _legacy_resumable_directories(config: VibeConfigSchema) -> ResumableDirectories:
-    """The legacy store's answer for the sweep, off the event loop."""
-
-    async def _resumable() -> tuple[Path, ...]:
-        return await asyncio.to_thread(resume_directories, config)
-
-    return _resumable

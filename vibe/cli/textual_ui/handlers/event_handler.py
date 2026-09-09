@@ -58,17 +58,14 @@ from vibe.cli.textual_ui.widgets.tools import (
     ToolCallMessage,
     ToolGroup,
     ToolResultMessage,
+    _effect_state_is_failure,
+    _effect_state_to_indicator,
+    entry_keeps_tool_group,
+    is_manual_shell_entry,
 )
-from vibe.utils.tool_presentation import ToolEffectKind
 
 if TYPE_CHECKING:
     from vibe.cli.textual_ui.widgets.loading import LoadingWidget
-
-
-_NON_GROUPED_EFFECT_KINDS = frozenset({
-    ToolEffectKind.FILE_EDIT,
-    ToolEffectKind.FILE_WRITE,
-})
 
 
 @dataclass(slots=True)
@@ -155,7 +152,7 @@ class EventHandler:
     async def _handle_entry_added(
         self, entry: PublicHistoryEntry, loading_widget: LoadingWidget | None
     ) -> ToolCallMessage | None:
-        if self.current_tool_group is not None and not _entry_keeps_tool_group(entry):
+        if self.current_tool_group is not None and not entry_keeps_tool_group(entry):
             self._finalize_tool_group()
 
         match entry:
@@ -205,6 +202,8 @@ class EventHandler:
         match entry:
             case PublicMessageEntry(role="assistant"):
                 if delta := _appended_text(update.patch, "/content/0/text"):
+                    if self.current_tool_group is not None:
+                        self._finalize_tool_group()
                     await self._handle_assistant_delta(delta, loading_widget)
                 if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
                     await self.finalize_streaming()
@@ -239,15 +238,17 @@ class EventHandler:
             existing.update_entry(entry)
             tool_call = existing
         else:
-            self._resolve_pending_errors(escalate=False)
             tool_call = ToolCallMessage(entry)
             self.tool_calls[entry.id] = tool_call
             self._tool_call_anchors[entry.id] = tool_call
-            if entry.detail.kind in _NON_GROUPED_EFFECT_KINDS:
-                self._finalize_tool_group()
+            if is_manual_shell_entry(entry):
+                # Mounted at top level, not in a group: `_handle_entry_added`
+                # already closed the open one, and folding the user's own `!`
+                # command into a summary line would hide what they ran it for.
                 await self.mount_callback(tool_call)
             else:
                 group = await self._ensure_tool_group()
+                group.add_call_kind(entry.detail.kind)
                 await self._mount_in_group(group, tool_call)
         if loading_widget is not None:
             loading_widget.set_status(entry.detail.display.status_text)
@@ -260,8 +261,17 @@ class EventHandler:
         anchor = self._tool_call_anchors.get(entry.id) or call_widget
         result = ToolResultMessage(entry, call_widget)
         await self.mount_callback(result, after=anchor)
-        if isinstance(entry.state, FailedEffectState):
+        if _effect_state_is_failure(entry.state):
             self._pending_error_results.append(result)
+        elif isinstance(entry.state, CompletedEffectState):
+            # A successful call means earlier errors in the group were
+            # recoverable: keep their indicators muted (grey) instead of
+            # escalating them to red at turn end.
+            self._resolve_pending_errors(escalate=False)
+        if self.current_tool_group is not None and not is_manual_shell_entry(entry):
+            self.current_tool_group.settle_indicator(
+                _effect_state_to_indicator(entry.state)
+            )
         self._tool_call_anchors[entry.id] = result
         self.tool_calls.pop(entry.id, None)
         if loading_widget is not None and not self.tool_calls:
@@ -319,6 +329,8 @@ class EventHandler:
             message = ReasoningMessage(content, collapsed=self.get_tools_collapsed())
             self.current_streaming_reasoning = message
             group = await self._ensure_tool_group()
+            if self.get_show_thinking():
+                group.mark_reasoning()
             await self._mount_in_group(group, message)
             if not self.get_show_thinking():
                 message.display = False
@@ -422,7 +434,10 @@ class EventHandler:
             if tool_call is not None:
                 tool_call.add_class("no-gap")
 
-    def _finalize_tool_group(self) -> None:
+    def _finalize_tool_group(self, *, escalate: bool = True) -> None:
+        if self.current_tool_group is not None:
+            self._resolve_pending_errors(escalate=escalate)
+            self.current_tool_group.finalize()
         self.current_tool_group = None
 
     async def _ensure_tool_group(self) -> ToolGroup:
@@ -480,8 +495,7 @@ class EventHandler:
         self.tool_calls.clear()
         self._tool_call_anchors.clear()
         self._hook_containers.clear()
-        self._finalize_tool_group()
-        self._resolve_pending_errors(escalate=not cancelled)
+        self._finalize_tool_group(escalate=not cancelled)
 
     def stop_current_compact(self) -> None:
         if self.current_compact:
@@ -499,13 +513,6 @@ class EventHandler:
             return
         self.plan_file_message.stop_watching()
         self.plan_file_message = None
-
-
-def _entry_keeps_tool_group(entry: PublicHistoryEntry) -> bool:
-    return isinstance(entry, PublicEffectEntry | PublicReasoningEntry) or (
-        isinstance(entry, PublicNoticeEntry)
-        and isinstance(entry.detail, HookNoticeDetail)
-    )
 
 
 def _appended_text(patch: list[JsonPatchOperation], path: str) -> str:

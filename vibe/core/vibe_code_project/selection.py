@@ -31,7 +31,7 @@ class VibeCodeProject:
 
 
 @dataclass(frozen=True)
-class VibeCodeProjectLink:
+class RemoteProjectLink:
     repo_root: Path
     repo_url: str
     project_id: str
@@ -39,11 +39,27 @@ class VibeCodeProjectLink:
 
 
 @dataclass(frozen=True)
+class LocalProjectLink:
+    directory_path: Path
+    project_id: str
+    project_name: str
+
+
+type ProjectLink = RemoteProjectLink | LocalProjectLink
+
+
+def project_link_path(link: ProjectLink) -> Path:
+    if isinstance(link, RemoteProjectLink):
+        return link.repo_root
+    return link.directory_path
+
+
+@dataclass(frozen=True)
 class ProjectPickerContext:
     repo_root: Path
     repo_url: str
     repo_name: str
-    saved_link: VibeCodeProjectLink | None = None
+    saved_link: RemoteProjectLink | None = None
 
 
 def suggested_project_name(context: ProjectPickerContext) -> str:

@@ -66,8 +66,11 @@ class SessionLoggingConfig(BaseSettings):
     session_prefix: str = "session"
     enabled: bool = True
     # Background LLM-generated session titles (shown in --resume and the
-    # terminal tab). Off falls back to the first-message preview.
-    generate_titles: bool = True
+    # terminal tab). Off falls back to the first-message preview. Default off:
+    # the utility model (mistral-vibe-cli-fast) is not served by every Mistral
+    # deployment (dedicated/on-prem), where these calls return 400s, so titling
+    # is opt-in.
+    generate_titles: bool = False
 
     @field_validator("save_dir", mode="before")
     @classmethod

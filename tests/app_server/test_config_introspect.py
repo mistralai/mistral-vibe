@@ -161,10 +161,10 @@ async def test_build_field_wires_projects_growthbook_routed_model_threshold(
     }
     growthbook = GrowthbookLayer()
     growthbook.set_variants({
-        ExperimentName.CLI_MODEL_ROUTING.value: json.dumps({
+        ExperimentName.CLI_MODEL_ROUTING.value: {
             "active_model": "routed",
             "model_config": routed,
-        })
+        }
     })
 
     values = await collect_layer_values([growthbook])

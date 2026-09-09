@@ -8,9 +8,11 @@ from tests.stubs.fake_backend import FakeBackend
 from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.llm import utility_completion
 from vibe.core.llm.utility_completion import (
+    is_fast_utility_model,
     run_utility_completion,
     select_utility_model,
 )
+from vibe.core.types import Backend
 
 
 def _anthropic_config():
@@ -20,6 +22,7 @@ def _anthropic_config():
                 name="mistral",
                 api_base="https://api.mistral.ai/v1",
                 api_key_env_var="MISTRAL_API_KEY",
+                backend=Backend.MISTRAL,
             ),
             ProviderConfig(
                 name="anthropic",
@@ -34,20 +37,63 @@ def _anthropic_config():
     )
 
 
+def _anthropic_only_config():
+    # A session on Anthropic with no Mistral provider configured at all.
+    return build_test_vibe_config(
+        providers=[
+            ProviderConfig(
+                name="anthropic",
+                api_base="https://api.anthropic.com",
+                api_key_env_var="ANTHROPIC_API_KEY",
+            )
+        ],
+        models=[
+            ModelConfig(name="claude-test", provider="anthropic", alias="anthropic")
+        ],
+        active_model="anthropic",
+    )
+
+
 class TestSelectUtilityModel:
     def test_picks_small_mistral_when_active_provider_mistral(self) -> None:
         model, provider = select_utility_model(build_test_vibe_config())
 
         assert model.alias == "mistral-small"
         assert provider.name == "mistral"
+        assert is_fast_utility_model(build_test_vibe_config())
 
-    def test_uses_active_model_when_active_provider_differs(self) -> None:
-        # The session talks to Anthropic: utility calls stay on that provider and
-        # never leak to Mistral, regardless of which keys happen to be present.
-        model, provider = select_utility_model(_anthropic_config())
+    def test_prefers_fast_mistral_across_providers_when_available(self) -> None:
+        # The session talks to Anthropic, but a Mistral provider is configured and
+        # its key resolves: the cheap fast model runs the background nicety rather
+        # than the expensive coding model.
+        config = _anthropic_config()
+
+        model, provider = select_utility_model(config)
+
+        assert model.alias == "mistral-small"
+        assert provider.name == "mistral"
+        assert is_fast_utility_model(config)
+
+    def test_falls_back_to_active_when_mistral_key_missing(self, monkeypatch) -> None:
+        # Without a resolvable Mistral key the cross-provider route is unusable, so
+        # the utility call stays on the session's active model.
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        config = _anthropic_config()
+
+        model, provider = select_utility_model(config)
 
         assert provider.name == "anthropic"
         assert model.alias == "anthropic"
+        assert not is_fast_utility_model(config)
+
+    def test_falls_back_to_active_when_no_mistral_provider(self) -> None:
+        config = _anthropic_only_config()
+
+        model, provider = select_utility_model(config)
+
+        assert provider.name == "anthropic"
+        assert model.alias == "anthropic"
+        assert not is_fast_utility_model(config)
 
     def test_uses_active_model_when_fast_model_not_allowed(self) -> None:
         config = build_test_vibe_config(

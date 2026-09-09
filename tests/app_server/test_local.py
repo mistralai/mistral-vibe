@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import timedelta
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -68,8 +67,12 @@ from vibe.app_server.protocol import (
     WorkspaceGitCheckoutsParams,
     WorkspaceGitCheckoutsResponse,
     WorkspaceTrustStatusParams,
+    WorkspaceWorktreeLimitUpdateParams,
+    WorkspaceWorktreeLimitUpdateResponse,
     WorkspaceWorktreeListParams,
     WorkspaceWorktreeListResponse,
+    WorkspaceWorktreePruneParams,
+    WorkspaceWorktreePruneResponse,
     WorkspaceWorktreeRemoveResponse,
 )
 from vibe.app_server.session import AppServerSession
@@ -232,6 +235,13 @@ def _prepare(name: str, base: Path, *, branch: str | None = None) -> PreparedWor
 def _prepare_auto(base: Path, *, prompt: str | None = None) -> PreparedWorktree:
     with WorktreeRepository.open(base) as repository:
         return repository.prepare_auto(prompt=prompt)
+
+
+def _finish_worktree_start(worktree: PreparedWorktree) -> None:
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    managed.hold("test-session")
+    managed.release_holder("test-session")
 
 
 def _linked(base: Path) -> tuple[LinkedWorktree, ...]:
@@ -1081,23 +1091,14 @@ async def test_session_stop_keeps_a_worktree_the_session_did_not_create(
 
 
 @pytest.mark.asyncio
-async def test_session_start_does_not_sweep_a_stale_claim_it_is_using(
+async def test_session_start_keeps_the_managed_worktree_it_is_using(
     tmp_path: Path,
 ) -> None:
     _init_repo(tmp_path)
     worktree = _prepare_auto(tmp_path)
-    claim = worktree_record.WorktreeClaim.locate(worktree.root)
-    assert claim is not None
-    record = claim.read()
-    assert record is not None
-    claim.write(
-        record.model_copy(
-            update={"claimed_at": record.claimed_at - timedelta(minutes=30)}
-        )
-    )
 
     session, client = await _open_local_session(
-        "stale-claim-client", SessionOptions(cwd=str(worktree.path))
+        "managed-worktree-client", SessionOptions(cwd=str(worktree.path))
     )
     try:
         await asyncio.sleep(0.1)
@@ -1143,6 +1144,7 @@ async def _remove_worktree_over_rpc(
 async def test_worktree_remove_deletes_a_clean_managed_worktree(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     worktree = _prepare_auto(tmp_path)
+    _finish_worktree_start(worktree)
 
     response = await _remove_worktree_over_rpc(worktree.root)
 
@@ -1157,6 +1159,7 @@ async def test_worktree_remove_deletes_a_clean_managed_worktree(tmp_path: Path) 
 async def test_worktree_remove_saves_the_work_it_removes(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     worktree = _prepare_auto(tmp_path)
+    _finish_worktree_start(worktree)
     (worktree.root / "unsaved.txt").write_text("work\n")
 
     response = await _remove_worktree_over_rpc(worktree.root)
@@ -1194,6 +1197,7 @@ async def test_worktree_remove_is_reachable_while_a_root_is_attached(
 ) -> None:
     _init_repo(tmp_path)
     worktree = _prepare_auto(tmp_path)
+    _finish_worktree_start(worktree)
 
     response = await _remove_worktree_over_rpc(worktree.root, attach_root=tmp_path)
 
@@ -1235,8 +1239,8 @@ async def test_session_start_cleans_created_worktree_when_runtime_open_fails(
     assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS
     assert _linked(tmp_path) == ()
     assert "feat/startup-fails" not in [head.name for head in repo.heads]
-    # The record has to go with the worktree. The sweep only reclaims claims
-    # with no base commit, so one left here would outlive what it describes.
+    # The ownership record has to go with the failed worktree; otherwise it
+    # would permanently reserve a name for a checkout that no longer exists.
     bucket = worktree_record.managed_bucket_name(tmp_path, tmp_path / ".git")
     assert (
         worktree_record.WorktreeClaim(bucket=bucket, name="startup-fails").read()
@@ -1393,6 +1397,42 @@ async def test_passive_host_lists_linked_worktrees(tmp_path: Path) -> None:
             "branchChanges": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_passive_host_uses_worktree_limit(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (config_dir / "config.toml").write_text("worktree_limit = 25\n")
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    prune = Mock(return_value=2)
+    monkeypatch.setattr(ManagedWorktree, "prune", prune)
+    prune_result = await handler.dispatch(
+        "workspace/git/worktrees/prune",
+        WorkspaceWorktreePruneParams().model_dump(mode="json", by_alias=True),
+    )
+
+    prune_response = cast(WorkspaceWorktreePruneResponse, prune_result.response)
+    assert prune_response.removed == 2
+    prune.assert_called_once_with(25)
+
+
+@pytest.mark.asyncio
+async def test_passive_host_updates_worktree_limit(config_dir: Path) -> None:
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/git/worktrees/limit/update",
+        WorkspaceWorktreeLimitUpdateParams(limit=0).model_dump(
+            mode="json", by_alias=True
+        ),
+    )
+
+    response = cast(WorkspaceWorktreeLimitUpdateResponse, result.response)
+    assert response.limit == 0
+    assert response.failures == []
+    assert "worktree_limit = 0" in (config_dir / "config.toml").read_text()
 
 
 @pytest.mark.asyncio
@@ -1806,7 +1846,9 @@ def test_experimental_harness_process_selects_the_unified_harness_host(
     )
 
     selected = SimpleNamespace(harness_kind="rust")
-    monkeypatch.setattr(runtime, "create_experimental_harness_host", lambda: selected)
+    monkeypatch.setattr(
+        runtime, "create_experimental_harness_host", lambda *_args, **_kwargs: selected
+    )
     services = _FakeSessionBackendServices()
 
     def unavailable_client_info() -> ClientInfo:
@@ -1844,7 +1886,7 @@ def test_default_process_selects_the_legacy_session_backend(
 async def test_unavailable_experimental_harness_falls_back_to_legacy(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    def unavailable() -> object:
+    def unavailable(**_kwargs: object) -> object:
         raise runtime.ExperimentalHarnessUnavailableError("not installed")
 
     monkeypatch.setattr(runtime, "create_experimental_harness_host", unavailable)
@@ -2603,3 +2645,36 @@ def test_continue_requires_session_logging() -> None:
         runtime.RuntimeSessionNotFoundError, match="Session logging is disabled"
     ):
         runtime.AgentRuntimeFactory().resolve_latest(source, Path.cwd())
+
+
+@pytest.mark.asyncio
+async def test_a_worktree_is_removed_when_the_session_cannot_hold_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed holder write must trigger immediate startup cleanup."""
+    _init_repo(tmp_path)
+    worktrees = SessionWorktrees()
+    attempted: list[Path] = []
+
+    def refuse(cwd: Path, _session_id: str) -> None:
+        attempted.append(cwd)
+        raise OSError("holder write failed")
+
+    monkeypatch.setattr(SessionWorktrees, "hold", staticmethod(refuse))
+
+    async def never_moves(_options: SessionOptions) -> None:
+        raise AssertionError("the session moved without holding its worktree")
+
+    with pytest.raises(OSError):
+        await worktrees.raise_behind(
+            "session-1",
+            never_moves,
+            SessionOptions(
+                cwd=str(tmp_path),
+                worktree=NewWorktreeInput(branch="jun/unheld", name="unheld"),
+            ),
+            SessionOptions(cwd=str(tmp_path)),
+        )
+
+    assert attempted
+    assert not attempted[0].exists()

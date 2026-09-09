@@ -6,6 +6,11 @@ import pytest
 from textual.worker import Worker, WorkerState
 
 from tests.conftest import build_test_vibe_app
+from vibe.app_server.protocol import (
+    AppServerResponseError,
+    ProtocolError,
+    ProtocolErrorCode,
+)
 
 
 async def _wait_for_event_worker(app, pilot) -> Worker[None]:
@@ -14,6 +19,45 @@ async def _wait_for_event_worker(app, pilot) -> Worker[None]:
             return app._app_server_events_worker
         await pilot.pause(0.05)
     raise AssertionError("app-server event worker never started")
+
+
+async def _wait_for_worker_to_finish(worker: Worker[None], pilot) -> None:
+    for _ in range(40):
+        if worker.state in (WorkerState.SUCCESS, WorkerState.ERROR):
+            return
+        await pilot.pause(0.05)
+    raise AssertionError(f"event worker never finished (state={worker.state})")
+
+
+@pytest.mark.asyncio
+async def test_event_listener_finishes_cleanly_when_connection_drops_during_shutdown() -> (
+    None
+):
+    """During shutdown a dropped connection can trigger a failed reconnect/resume
+    that closes the event stream with an error. Because the session is closing,
+    the listener must finish cleanly instead of propagating that error and
+    crashing the Textual worker (which dumps a traceback on the way out).
+    """
+    app = build_test_vibe_app()
+    async with app.run_test() as pilot:
+        worker = await _wait_for_event_worker(app, pilot)
+
+        # Shutdown has begun (as _stop_app_server_event_listener signals).
+        app.app_server.begin_close()
+        # A connection drop then a rejected session/resume closes the stream.
+        app.app_server._close_event_streams(
+            AppServerResponseError(
+                ProtocolError(
+                    code=ProtocolErrorCode.INVALID_PARAMS,
+                    message="Invalid request parameters",
+                )
+            )
+        )
+
+        await _wait_for_worker_to_finish(worker, pilot)
+
+        assert worker.state is WorkerState.SUCCESS
+        assert app.is_running
 
 
 @pytest.mark.asyncio

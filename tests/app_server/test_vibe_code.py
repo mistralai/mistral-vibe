@@ -39,10 +39,10 @@ from vibe.core.teleport.types import (
 from vibe.core.vibe_code_project import (
     ProjectPickerContext,
     ProjectRepository,
+    RemoteProjectLink,
     TeleportProjectResolution,
     VibeCodeProject,
     VibeCodeProjectCreateResult,
-    VibeCodeProjectLink,
     VibeCodeProjectLoadMoreResult,
     VibeCodeProjectPickerInitialData,
     VibeCodeProjectPickerService,
@@ -85,7 +85,7 @@ class FakePickerService:
         self.recovery = recovery or initial
         self.load_initial_calls = 0
         self.load_more_calls = 0
-        self.saved_links: list[VibeCodeProjectLink] = []
+        self.saved_links: list[RemoteProjectLink] = []
         self.cleared_contexts: list[ProjectPickerContext] = []
 
     async def load_initial(
@@ -134,8 +134,8 @@ class FakePickerService:
 
     def save_project_link(
         self, *, context: ProjectPickerContext, project_id: str, project_name: str
-    ) -> VibeCodeProjectLink:
-        link = VibeCodeProjectLink(
+    ) -> RemoteProjectLink:
+        link = RemoteProjectLink(
             repo_root=context.repo_root,
             repo_url=context.repo_url,
             project_id=project_id,
@@ -169,8 +169,8 @@ def _project(
     )
 
 
-def _link(tmp_path: Path, project: VibeCodeProject) -> VibeCodeProjectLink:
-    return VibeCodeProjectLink(
+def _link(tmp_path: Path, project: VibeCodeProject) -> RemoteProjectLink:
+    return RemoteProjectLink(
         repo_root=tmp_path,
         repo_url=REPO_URL,
         project_id=project.project_id,
@@ -182,7 +182,7 @@ def _initial(
     tmp_path: Path,
     projects: list[VibeCodeProject],
     *,
-    saved_link: VibeCodeProjectLink | None = None,
+    saved_link: RemoteProjectLink | None = None,
     next_cursor: str | None = None,
 ) -> VibeCodeProjectPickerInitialData:
     return VibeCodeProjectPickerInitialData(

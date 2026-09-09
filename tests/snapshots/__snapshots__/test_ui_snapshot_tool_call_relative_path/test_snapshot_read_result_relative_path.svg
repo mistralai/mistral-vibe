@@ -38,7 +38,6 @@
 .terminal-r4 { fill: #c5c8c6;font-weight: bold }
 .terminal-r5 { fill: #868887 }
 .terminal-r6 { fill: #98a84b }
-.terminal-r7 { fill: #4a637a;font-weight: bold }
     </style>
 
     <defs>
@@ -189,7 +188,7 @@
 </text><text class="terminal-r1" x="1464" y="605.6" textLength="12.2" clip-path="url(#terminal-line-24)">
 </text><text class="terminal-r1" x="24.4" y="630" textLength="366" clip-path="url(#terminal-line-25)">Let&#160;me&#160;read&#160;that&#160;file&#160;for&#160;you.</text><text class="terminal-r1" x="1464" y="630" textLength="12.2" clip-path="url(#terminal-line-25)">
 </text><text class="terminal-r1" x="1464" y="654.4" textLength="12.2" clip-path="url(#terminal-line-26)">
-</text><text class="terminal-r6" x="0" y="678.8" textLength="12.2" clip-path="url(#terminal-line-27)">⏵</text><text class="terminal-r7" x="24.4" y="678.8" textLength="48.8" clip-path="url(#terminal-line-27)">Read</text><text class="terminal-r5" x="85.4" y="678.8" textLength="305" clip-path="url(#terminal-line-27)">1&#160;line&#160;from&#160;src/config.py</text><text class="terminal-r1" x="1464" y="678.8" textLength="12.2" clip-path="url(#terminal-line-27)">
+</text><text class="terminal-r6" x="0" y="678.8" textLength="12.2" clip-path="url(#terminal-line-27)">⏵</text><text class="terminal-r5" x="24.4" y="678.8" textLength="122" clip-path="url(#terminal-line-27)">Read&#160;files</text><text class="terminal-r1" x="1464" y="678.8" textLength="12.2" clip-path="url(#terminal-line-27)">
 </text><text class="terminal-r1" x="1464" y="703.2" textLength="12.2" clip-path="url(#terminal-line-28)">
 </text><text class="terminal-r1" x="1464" y="727.6" textLength="12.2" clip-path="url(#terminal-line-29)">
 </text><text class="terminal-r1" x="0" y="752" textLength="1464" clip-path="url(#terminal-line-30)">──────────────────────────────────────────────────────────────────────────────────────────────────────────────────&#160;ask&#160;─</text><text class="terminal-r1" x="1464" y="752" textLength="12.2" clip-path="url(#terminal-line-30)">

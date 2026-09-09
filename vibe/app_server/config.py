@@ -70,8 +70,10 @@ class ConfigView(ProtocolModel):
     voice_mode_enabled: bool
     narrator_enabled: bool
     show_thinking_nodes: bool
+    worktree_limit: int
     enable_update_checks: bool
     enable_notifications: bool
+    experimental_enable_tab_status: bool
     vibe_code_enabled: bool
     experimental_enable_registry_skills: bool = False
     models: list[ModelConfigView]

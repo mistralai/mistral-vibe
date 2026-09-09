@@ -181,6 +181,7 @@ def _run_programmatic_mode(args: argparse.Namespace, stdin_prompt: str | None) -
         final_response = run_programmatic(
             harness_options=LocalHarnessOptions(
                 experimental_harness=args.experimental_harness,
+                legacy_harness=args.legacy_harness,
                 client=ClientDescriptor(
                     info=ClientInfo(
                         name="vibe_programmatic",
@@ -263,6 +264,7 @@ def _run_interactive_mode(
     harness = LocalHarness(
         LocalHarnessOptions(
             experimental_harness=args.experimental_harness,
+            legacy_harness=args.legacy_harness,
             client=ClientDescriptor(
                 info=ClientInfo(
                     name="vibe_tui",
