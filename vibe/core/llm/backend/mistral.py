@@ -271,6 +271,7 @@ class MistralBackend:
         connect_timeout: float = DEFAULT_API_CONNECT_TIMEOUT,
         write_timeout: float = DEFAULT_API_WRITE_TIMEOUT,
         pool_timeout: float = DEFAULT_API_POOL_TIMEOUT,
+        keepalive_expiry: float = MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS,
         enable_otel: bool = False,
         on_retry: RetryObserver | None = None,
     ) -> None:
@@ -304,6 +305,7 @@ class MistralBackend:
             )
         self._server_url = server_url
         self._timeout = timeout
+        self._keepalive_expiry = keepalive_expiry
         self._retry_max_elapsed_time = retry_max_elapsed_time
         self._retry_config = self._build_retry_config()
 
@@ -418,7 +420,7 @@ class MistralBackend:
             },
             limits=httpx.Limits(
                 max_connections=_MAX_CONNECTIONS,
-                keepalive_expiry=MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS,
+                keepalive_expiry=self._keepalive_expiry,
             ),
         )
         client = Mistral(

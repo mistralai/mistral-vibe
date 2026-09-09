@@ -20,6 +20,7 @@ from pydantic import (
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config._defaults import (
     DEFAULT_API_CONNECT_TIMEOUT,
+    DEFAULT_API_KEEPALIVE_EXPIRY,
     DEFAULT_API_POOL_TIMEOUT,
     DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
     DEFAULT_API_TIMEOUT,
@@ -565,6 +566,9 @@ class VibeConfigSchema(ConfigSchema):
     )
     api_write_timeout: Annotated[float, WithReplaceMerge()] = DEFAULT_API_WRITE_TIMEOUT
     api_pool_timeout: Annotated[float, WithReplaceMerge()] = DEFAULT_API_POOL_TIMEOUT
+    api_keepalive_expiry: Annotated[float, WithReplaceMerge()] = (
+        DEFAULT_API_KEEPALIVE_EXPIRY
+    )
     vibe_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_VIBE_BASE_URL
     vibe_code_sessions_base_url: Annotated[str, WithReplaceMerge()] = (
         "https://chat.mistral.ai"

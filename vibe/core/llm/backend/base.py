@@ -12,7 +12,9 @@ if TYPE_CHECKING:
     from vibe.core.config import ProviderConfig
 
 
-MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS = 60.0
+from vibe.core.config._defaults import DEFAULT_API_KEEPALIVE_EXPIRY
+
+MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS = DEFAULT_API_KEEPALIVE_EXPIRY
 
 
 def apply_reasoning_effort(payload: dict[str, Any], thinking: str) -> None:

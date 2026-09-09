@@ -1483,6 +1483,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             connect_timeout=config.api_connect_timeout,
             write_timeout=config.api_write_timeout,
             pool_timeout=config.api_pool_timeout,
+            keepalive_expiry=config.api_keepalive_expiry,
             enable_otel=(
                 config.enable_telemetry
                 and config.enable_otel

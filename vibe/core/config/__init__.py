@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from vibe.core.config._defaults import (
         AUTO_THEME,
         DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
+        DEFAULT_API_KEEPALIVE_EXPIRY,
         DEFAULT_API_TIMEOUT,
         DEFAULT_AUTO_COMPACT_THRESHOLD,
         DEFAULT_CONSOLE_BASE_URL,
@@ -109,6 +110,7 @@ __all__ = [
     "AUTO_THEME",
     "DEFAULT_ACTIVE_MODEL_CONFIG",
     "DEFAULT_API_RETRY_MAX_ELAPSED_TIME",
+    "DEFAULT_API_KEEPALIVE_EXPIRY",
     "DEFAULT_API_TIMEOUT",
     "DEFAULT_AUTO_COMPACT_THRESHOLD",
     "DEFAULT_CONSOLE_BASE_URL",
@@ -199,6 +201,10 @@ _MAPPING: dict[str, tuple[str, str]] = {
         "DEFAULT_API_RETRY_MAX_ELAPSED_TIME",
     ),
     "DEFAULT_API_TIMEOUT": ("vibe.core.config._defaults", "DEFAULT_API_TIMEOUT"),
+    "DEFAULT_API_KEEPALIVE_EXPIRY": (
+        "vibe.core.config._defaults",
+        "DEFAULT_API_KEEPALIVE_EXPIRY",
+    ),
     "DEFAULT_AUTO_COMPACT_THRESHOLD": (
         "vibe.core.config._defaults",
         "DEFAULT_AUTO_COMPACT_THRESHOLD",

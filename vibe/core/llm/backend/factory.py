@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from vibe.core.config import ProviderConfig
 from vibe.core.config._defaults import (
     DEFAULT_API_CONNECT_TIMEOUT,
+    DEFAULT_API_KEEPALIVE_EXPIRY,
     DEFAULT_API_POOL_TIMEOUT,
     DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
     DEFAULT_API_TIMEOUT,
@@ -48,6 +49,7 @@ def create_backend(
     connect_timeout: float = DEFAULT_API_CONNECT_TIMEOUT,
     write_timeout: float = DEFAULT_API_WRITE_TIMEOUT,
     pool_timeout: float = DEFAULT_API_POOL_TIMEOUT,
+    keepalive_expiry: float = DEFAULT_API_KEEPALIVE_EXPIRY,
     enable_otel: bool = False,
     on_retry: RetryObserver | None = None,
 ) -> BackendLike:
@@ -58,9 +60,10 @@ def create_backend(
             "connect_timeout": connect_timeout,
             "write_timeout": write_timeout,
             "pool_timeout": pool_timeout,
+            "keepalive_expiry": keepalive_expiry,
         }
         if backend is Backend.MISTRAL
-        else {}
+        else {"keepalive_expiry": keepalive_expiry}
     )
     return factory(
         provider=provider,

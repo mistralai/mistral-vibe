@@ -259,6 +259,7 @@ class GenericBackend:
         on_retry: RetryObserver | None = None,
         pacer: AdaptivePacer | None = None,
         enable_otel: bool = False,
+        keepalive_expiry: float = MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS,
     ) -> None:
         """Initialize the backend.
 
@@ -277,6 +278,7 @@ class GenericBackend:
         self._owns_client = client is None
         self._provider = provider
         self._timeout = timeout
+        self._keepalive_expiry = keepalive_expiry
         self._retry_max_elapsed_time = retry_max_elapsed_time
         self._pacer = pacer if pacer is not None else AdaptivePacer()
         self._user_on_retry = on_retry
@@ -344,7 +346,7 @@ class GenericBackend:
                 limits=httpx.Limits(
                     max_keepalive_connections=5,
                     max_connections=10,
-                    keepalive_expiry=MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS,
+                    keepalive_expiry=self._keepalive_expiry,
                 ),
                 verify=build_ssl_context(),
             )
@@ -367,7 +369,7 @@ class GenericBackend:
                 limits=httpx.Limits(
                     max_keepalive_connections=5,
                     max_connections=10,
-                    keepalive_expiry=MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS,
+                    keepalive_expiry=self._keepalive_expiry,
                 ),
                 verify=build_ssl_context(),
             )

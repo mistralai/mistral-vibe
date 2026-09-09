@@ -64,7 +64,7 @@ def test_generic_backend_keeps_idle_connections_for_tool_turns() -> None:
         GenericBackend(provider=provider)._get_client()
 
     limits = create_http_client.call_args.kwargs["limits"]
-    assert limits.keepalive_expiry == 60.0
+    assert limits.keepalive_expiry == 5.0
 
 
 @pytest.mark.asyncio
@@ -83,7 +83,7 @@ async def test_mistral_backend_keeps_idle_connections_for_tool_turns() -> None:
         backend._create_mistral_client()
 
     limits = create_http_client.call_args.kwargs["limits"]
-    assert limits.keepalive_expiry == 60.0
+    assert limits.keepalive_expiry == 5.0
 
 
 @pytest.mark.asyncio
