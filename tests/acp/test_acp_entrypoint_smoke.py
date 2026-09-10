@@ -318,6 +318,7 @@ async def test_vibe_acp_initialize_exposes_terminal_auth_when_supported(
 def test_vibe_acp_setup_shows_onboarding_and_exits_on_cancel(
     vibe_home_dir: Path,
 ) -> None:
+    pytest.importorskip("pty")
     env = cast("os._Environ[str]", _build_env(vibe_home_dir, include_api_key=False))
     env["TERM"] = "xterm-256color"
 

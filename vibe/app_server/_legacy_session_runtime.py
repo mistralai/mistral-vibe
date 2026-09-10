@@ -516,6 +516,7 @@ class LegacySessionRuntimeController:
         *,
         resumed: bool = False,
         created_worktree: PreparedWorktree | None = None,
+        opened_worktree: WorktreeResolution,
     ) -> PublicSessionState:
         try:
             (
@@ -543,7 +544,9 @@ class LegacySessionRuntimeController:
             assert isinstance(started.response, SessionStartResponse)
             state = started.response.state
             self._schedule_admin_config_fetch()
-            self._worktrees.hold(agent_loop.cwd, agent_loop.session_id)
+            self._worktrees.hold(
+                agent_loop.cwd, agent_loop.session_id, opened_worktree.pending_hold
+            )
             if resumed:
                 state = self._root_session.append_checkpoint(
                     current_history=[],
@@ -673,6 +676,7 @@ class LegacySessionRuntimeController:
                 history_limit,
                 resumed=resumed,
                 created_worktree=created,
+                opened_worktree=opened.worktree_resolution,
             )
         except BaseException:
             await self._worktrees.cleanup(opened.worktree_resolution)

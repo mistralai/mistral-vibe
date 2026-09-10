@@ -43,8 +43,9 @@ Reuse an existing worktree only after validating: no symlinks in the path,
 ## Holding
 
 A session using a worktree must register as a holder to prevent the
-background sweep from reaping it: create an empty file at
-`.claims/<bucket>/<name>/holders/<session_id>`. Remove it when done.
+background cleanup from removing it. Holder files are locked for the lifetime
+of the session; an unlocked marker left by a crashed process is stale and may
+be removed. A temporary holder protects a worktree while a session attaches.
 
 ## Cleaning up
 
@@ -80,6 +81,9 @@ skips claims made within the last 10 minutes, worktrees with active holders,
 and worktrees that saved sessions would resume into. Reservations without a
 `base_commit` (mkdir claim that never became a worktree) are discarded only
 if empty.
+
+Creation, attachment, and retention transitions use a cross-process lock so a
+worktree cannot be removed while another process is claiming or attaching it.
 
 ## Gotchas
 

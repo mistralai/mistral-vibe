@@ -17,6 +17,7 @@ from vibe.app_server.models import (
     PublicTurn,
     PublicTurnQueue,
     PublicTurnStatus,
+    TextContentBlock,
 )
 from vibe.app_server.protocol import (
     SERVER_METHODS,
@@ -59,6 +60,7 @@ from vibe.app_server.protocol import (
     TurnQueueSteerResponse,
     TurnQueueUpdatedParams,
     TurnStartResponse,
+    TurnSteerParams,
     TurnSteerResponse,
     TurnUserInputEntry,
 )
@@ -417,6 +419,30 @@ def test_canonical_enqueue_accepts_context_user_content_and_annotations() -> Non
     assert dumped["entries"][1]["annotations"] == {
         "vibe.userDisplayContent": display.model_dump(mode="json")
     }
+
+
+def test_turn_steer_preserves_user_display_content() -> None:
+    """*Prepare*: Host-owned display metadata for a steered user message.
+    *Do*: Serialize the typed `turn/steer` request.
+    *Assert*: The display metadata remains in the camel-case wire payload.
+    """
+    # Prepare
+    display = UserDisplayContent(
+        version="1", host="code-local", content=[{"type": "text", "text": "display"}]
+    )
+
+    # Do
+    params = TurnSteerParams(
+        session_id="session-1",
+        expected_turn_id="turn-1",
+        message=[TextContentBlock(text="model input")],
+        user_display_content=display,
+    )
+
+    # Assert
+    assert params.model_dump(mode="json", by_alias=True)["userDisplayContent"] == (
+        display.model_dump(mode="json", by_alias=True)
+    )
 
 
 def test_canonical_enqueue_requires_the_user_entry_to_be_last() -> None:

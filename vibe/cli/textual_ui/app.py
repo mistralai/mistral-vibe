@@ -1373,7 +1373,7 @@ class VibeApp(App):  # noqa: PLR0904
                 ProtocolErrorCode.NOT_FOUND,
             }:
                 # The fresh session's readiness watch is superseded by a resume:
-                # CONFLICT while the resume holds the lifecycle reservation, or
+                # CONFLICT while the resume holds its pending session hold, or
                 # NOT_FOUND once the rebind re-attaches the root to the resumed id.
                 # Neither is a real init failure — the resume owns readiness/UI.
                 logger.info("Init readiness watch superseded by a session resume")

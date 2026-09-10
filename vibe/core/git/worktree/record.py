@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -31,8 +33,9 @@ RECORD_FILENAME = "record.json"
 HOLDERS_DIR_NAME = "holders"
 _BUCKET_AND_NAME_PARTS = 2
 _STARTING_HOLDER = ".starting"
-_STARTING_FILES: dict[Path, BinaryIO] = {}
-_STARTING_FILES_LOCK = Lock()
+_PRUNE_LOCK_FILENAME = ".prune"
+_HELD_FILES: dict[Path, tuple[BinaryIO, int]] = {}
+_HELD_FILES_LOCK = Lock()
 
 
 class WorktreeRecordError(Exception): ...
@@ -71,6 +74,18 @@ def managed_bucket_name(repo_root: Path, common_git_dir: Path) -> str:
 
 def _claims_root() -> Path:
     return WORKTREES_DIR.path.resolve() / CLAIMS_DIR_NAME
+
+
+@contextmanager
+def worktree_prune_lock() -> Iterator[None]:
+    root = _claims_root()
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / _PRUNE_LOCK_FILENAME).open("a+b") as file:
+        _acquire_file_lock(file, blocking=True)
+        try:
+            yield
+        finally:
+            _release_file_lock(file)
 
 
 # Identifies one managed worktree. Bucket and name are a pair that is meaningless
@@ -197,12 +212,10 @@ class WorktreeClaim:
         return candidate
 
     def add_holder(self, session_id: str) -> None:
-        holder = self._holder_path(session_id)
-        holder.parent.mkdir(parents=True, exist_ok=True)
-        holder.touch()
+        self._acquire_holder(self._holder_path(session_id))
 
     def remove_holder(self, session_id: str) -> None:
-        self._holder_path(session_id).unlink(missing_ok=True)
+        self._release_holder(self._holder_path(session_id))
         # A delete that ran while this holder was still up could not rmdir past
         # it, and nothing revisits the leftovers - pruning skips a claim whose
         # record is gone. So the last holder out of a deleted claim takes the
@@ -212,70 +225,99 @@ class WorktreeClaim:
             self._discard_empty_directories()
 
     def holders(self) -> frozenset[str]:
-        directory = self.directory / HOLDERS_DIR_NAME
-        try:
-            return frozenset(
-                entry.name
-                for entry in directory.iterdir()
-                if entry.name != _STARTING_HOLDER
-            )
-        except OSError:
-            return frozenset()
+        return self._live_holders(exclude={_STARTING_HOLDER})
 
     def mark_starting(self) -> None:
-        marker = self._holder_path(_STARTING_HOLDER)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        root = _claims_root()
-        root.mkdir(parents=True, exist_ok=True)
-        with _lease_directory_lock(root):
-            with _STARTING_FILES_LOCK:
-                if marker in _STARTING_FILES:
-                    raise WorktreeRecordError("Worktree creation is already active.")
-                file = marker.open("a+b")
+        self._acquire_holder(self._holder_path(_STARTING_HOLDER))
+
+    def finish_starting(self) -> None:
+        self._release_holder(self._holder_path(_STARTING_HOLDER))
+        self._discard_empty_directories()
+
+    def is_starting(self) -> bool:
+        return bool(self._live_holders(include={_STARTING_HOLDER}))
+
+    def _acquire_holder(self, holder: Path) -> None:
+        holder.parent.mkdir(parents=True, exist_ok=True)
+        with _holder_registry_lock():
+            with _HELD_FILES_LOCK:
+                if held := _HELD_FILES.get(holder):
+                    _HELD_FILES[holder] = (held[0], held[1] + 1)
+                    return
+                file = holder.open("a+b")
                 try:
                     _acquire_file_lock(file)
                 except BlockingIOError as exc:
                     file.close()
                     raise WorktreeRecordError(
-                        "Worktree creation is already active."
+                        f"Worktree holder {holder.name!r} is already active."
                     ) from exc
-                _STARTING_FILES[marker] = file
+                _HELD_FILES[holder] = (file, 1)
 
-    def finish_starting(self) -> None:
-        marker = self._holder_path(_STARTING_HOLDER)
-        root = _claims_root()
-        root.mkdir(parents=True, exist_ok=True)
-        with _lease_directory_lock(root):
-            with _STARTING_FILES_LOCK:
-                file = _STARTING_FILES.pop(marker, None)
-            if file is not None:
-                try:
-                    _release_file_lock(file)
-                finally:
-                    file.close()
-                marker.unlink(missing_ok=True)
-            else:
-                _discard_stale_starting_marker(marker)
-        self._discard_empty_directories()
+    def _release_holder(self, holder: Path) -> None:
+        if not holder.exists() and not _holder_is_owned(holder):
+            return
+        with _holder_registry_lock():
+            with _HELD_FILES_LOCK:
+                held = _HELD_FILES.get(holder)
+                if held is not None:
+                    file, count = held
+                    if count > 1:
+                        _HELD_FILES[holder] = (file, count - 1)
+                        return
+                    del _HELD_FILES[holder]
+                    try:
+                        _release_file_lock(file)
+                    finally:
+                        file.close()
+                    holder.unlink(missing_ok=True)
+                    return
+            _discard_stale_holder(holder)
 
-    def is_starting(self) -> bool:
-        marker = self._holder_path(_STARTING_HOLDER)
-        root = _claims_root()
-        root.mkdir(parents=True, exist_ok=True)
-        with _lease_directory_lock(root):
-            with _STARTING_FILES_LOCK:
-                if marker in _STARTING_FILES:
-                    return True
-            return not _discard_stale_starting_marker(marker)
+    def _live_holders(
+        self, *, include: set[str] | None = None, exclude: set[str] | None = None
+    ) -> frozenset[str]:
+        directory = self.directory / HOLDERS_DIR_NAME
+        live: set[str] = set()
+        with _holder_registry_lock():
+            try:
+                entries = tuple(directory.iterdir())
+            except FileNotFoundError:
+                return frozenset()
+            for entry in entries:
+                if include is not None and entry.name not in include:
+                    continue
+                if exclude is not None and entry.name in exclude:
+                    continue
+                if _holder_is_live(entry):
+                    live.add(entry.name)
+        return frozenset(live)
 
 
-def _discard_stale_starting_marker(marker: Path) -> bool:
-    if not marker.exists():
+@contextmanager
+def _holder_registry_lock() -> Iterator[None]:
+    root = _claims_root()
+    root.mkdir(parents=True, exist_ok=True)
+    with _lease_directory_lock(root):
+        yield
+
+
+def _holder_is_owned(holder: Path) -> bool:
+    with _HELD_FILES_LOCK:
+        return holder in _HELD_FILES
+
+
+def _holder_is_live(holder: Path) -> bool:
+    if _holder_is_owned(holder):
         return True
+    return not _discard_stale_holder(holder)
+
+
+def _discard_stale_holder(holder: Path) -> bool:
     try:
-        file = marker.open("a+b")
+        file = holder.open("a+b")
     except OSError:
-        return True
+        return False
     try:
         _acquire_file_lock(file)
     except BlockingIOError:
@@ -286,7 +328,7 @@ def _discard_stale_starting_marker(marker: Path) -> bool:
     finally:
         file.close()
     try:
-        marker.unlink(missing_ok=True)
+        holder.unlink(missing_ok=True)
     except OSError:
         return False
     return True

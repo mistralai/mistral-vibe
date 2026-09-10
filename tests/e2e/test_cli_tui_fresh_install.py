@@ -9,6 +9,8 @@ import sys
 import pexpect
 import pytest
 
+pytest.importorskip("pty")
+
 from tests import TESTS_ROOT
 from tests.e2e.common import (
     ansi_tolerant_pattern,

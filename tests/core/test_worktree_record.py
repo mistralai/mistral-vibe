@@ -8,6 +8,7 @@ import pytest
 
 from vibe.core.git.worktree.record import (
     CLAIMS_DIR_NAME,
+    HOLDERS_DIR_NAME,
     RECORD_FILENAME,
     WorktreeClaim,
     WorktreeRecord,
@@ -180,6 +181,28 @@ def test_holders_round_trip(tmp_path: Path) -> None:
     _claim().remove_holder("session-a")
 
     assert _claim().holders() == {"session-b"}
+
+
+def test_holders_discard_an_unlocked_marker(tmp_path: Path) -> None:
+    _claim().write(_record(repo_root=tmp_path))
+    marker = _claim().directory / HOLDERS_DIR_NAME / "dead-session"
+    marker.parent.mkdir()
+    marker.touch()
+
+    assert _claim().holders() == frozenset()
+    assert not marker.exists()
+
+
+def test_holder_lock_is_reference_counted(tmp_path: Path) -> None:
+    _claim().write(_record(repo_root=tmp_path))
+
+    _claim().add_holder("session-a")
+    _claim().add_holder("session-a")
+    _claim().remove_holder("session-a")
+
+    assert _claim().holders() == frozenset({"session-a"})
+    _claim().remove_holder("session-a")
+    assert _claim().holders() == frozenset()
 
 
 def test_starting_marker_is_live_only_while_held(tmp_path: Path) -> None:

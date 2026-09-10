@@ -146,9 +146,9 @@ async def test_superseded_watch_defers_post_init_notices_to_resume(
         patch.object(app, "_mount_and_scroll", AsyncMock()) as mount,
     ):
         # A resume supersedes the fresh session's readiness watch — CONFLICT while
-        # the reservation is held, or NOT_FOUND once the root is rebound. Either way
-        # the watch returns early: no fatal-init state, no error mounted, notices
-        # deferred to the resume path.
+        # the pending session hold is active, or NOT_FOUND once the root is rebound.
+        # Either way the watch returns early: no fatal-init state, no error mounted,
+        # notices deferred to the resume path.
         await app._watch_init_completion()
         assert app._fatal_init_error is False
         mount.assert_not_awaited()

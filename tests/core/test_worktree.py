@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import timedelta
 import os
 from pathlib import Path
 import shutil
 import subprocess
+from threading import Event, Lock
 from typing import Any, cast
 
 from git import Repo
@@ -622,6 +625,131 @@ def test_prune_keeps_a_worktree_that_has_not_been_held_yet(tmp_path: Path) -> No
     assert not removable.root.exists()
 
 
+def test_prune_keeps_a_worktree_held_while_a_session_attaches(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="reserved")
+    _finish_starts(worktree)
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    pending_hold = managed.hold_for_attachment()
+    assert pending_hold is not None
+
+    assert ManagedWorktree.prune(limit=0) == 0
+
+    managed.hold("session-a", pending_hold)
+    assert managed.holders() == frozenset({"session-a"})
+    managed.release_holder("session-a")
+
+
+def test_prune_keeps_an_incomplete_worktree_held_while_a_session_attaches(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    target = _managed_worktree_root(repo) / "reserved"
+    target.mkdir(parents=True)
+    repo.create_head("vibe/reserved")
+    claim = _claim(repo, "reserved")
+    claim.write(
+        WorktreeRecord.new(
+            name="reserved",
+            branch="vibe/reserved",
+            repo_root=tmp_path,
+            branch_created=True,
+        )
+    )
+    managed = ManagedWorktree(claim=claim)
+    pending_hold = managed.hold_for_attachment()
+    assert pending_hold is not None
+
+    assert ManagedWorktree.prune(limit=0) == 0
+
+    assert target.is_dir()
+    assert claim.read() is not None
+    assert "vibe/reserved" in (head.name for head in repo.heads)
+    pending_hold.release()
+
+
+def test_hold_preserves_a_record_completed_during_attachment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, suggested_name="attaching")
+    claim = _claim(repo, worktree.name)
+    incomplete = claim.read()
+    assert incomplete is not None
+    claim.write(incomplete.model_copy(update={"base_commit": None}))
+    managed = ManagedWorktree(claim=claim)
+    pending_hold = managed.hold_for_attachment()
+    assert pending_hold is not None
+    add_holder = WorktreeClaim.add_holder
+
+    def complete_during_add(current: WorktreeClaim, session_id: str) -> None:
+        add_holder(current, session_id)
+        if current == claim and session_id == "session-a":
+            current.write(incomplete)
+
+    monkeypatch.setattr(WorktreeClaim, "add_holder", complete_during_add)
+
+    managed.hold("session-a", pending_hold)
+
+    record = claim.read()
+    assert record is not None
+    assert record.base_commit == worktree.base_commit
+    managed.release_holder("session-a")
+
+
+def test_concurrent_prunes_do_not_remove_below_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    remote = tmp_path / "remote.git"
+    _track_repo(Repo.init(remote, bare=True))
+    oldest = _prepare_auto(Path(repo.working_dir), suggested_name="oldest")
+    newest = _prepare_auto(Path(repo.working_dir), suggested_name="newest")
+    _finish_starts(oldest, newest)
+    _push_worktree(repo, oldest, remote)
+    _push_worktree(repo, newest, remote)
+    _age_claim(_claim(repo, oldest.name), 30)
+    inspection_started = Event()
+    release_inspection = Event()
+    inspect = PreparedWorktree.inspect_for_prune
+
+    def pause_inspection(prepared: PreparedWorktree) -> Any:
+        if prepared.name == oldest.name:
+            inspection_started.set()
+            assert release_inspection.wait(timeout=5)
+        return inspect(prepared)
+
+    real_prune_lock = worktree_module.worktree_prune_lock
+    lock_attempts = 0
+    attempts_lock = Lock()
+    second_started = Event()
+
+    @contextmanager
+    def observe_prune_lock() -> Iterator[None]:
+        nonlocal lock_attempts
+        with attempts_lock:
+            lock_attempts += 1
+            if lock_attempts == 2:
+                second_started.set()
+        with real_prune_lock():
+            yield
+
+    monkeypatch.setattr(PreparedWorktree, "inspect_for_prune", pause_inspection)
+    monkeypatch.setattr(worktree_module, "worktree_prune_lock", observe_prune_lock)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(ManagedWorktree.prune, 1)
+        assert inspection_started.wait(timeout=5)
+        second = executor.submit(ManagedWorktree.prune, 1)
+        assert second_started.wait(timeout=5)
+        release_inspection.set()
+        assert sorted((first.result(timeout=10), second.result(timeout=10))) == [0, 1]
+
+    assert not oldest.root.exists()
+    assert newest.root.is_dir()
+
+
 def test_prune_discards_an_abandoned_empty_reservation(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     target = _managed_worktree_root(repo) / "stranded"
@@ -685,6 +813,32 @@ def test_prune_keeps_a_populated_incomplete_reservation(tmp_path: Path) -> None:
 
     assert worktree.root.is_dir()
     assert claim.read() is not None
+
+
+def test_prune_keeps_a_populated_incomplete_reservation_without_gitlink(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    target = _managed_worktree_root(repo) / "interrupted"
+    target.mkdir(parents=True)
+    (target / "partial.txt").write_text("partial\n")
+    repo.create_head("vibe/interrupted")
+    claim = _claim(repo, "interrupted")
+    claim.write(
+        WorktreeRecord.new(
+            name="interrupted",
+            branch="vibe/interrupted",
+            repo_root=tmp_path,
+            branch_created=True,
+        )
+    )
+
+    ManagedWorktree.prune(limit=0)
+
+    assert target.is_dir()
+    assert (target / "partial.txt").read_text() == "partial\n"
+    assert claim.read() is not None
+    assert "vibe/interrupted" in (head.name for head in repo.heads)
 
 
 def test_prune_keeps_worktrees_with_unpushed_commits(tmp_path: Path) -> None:

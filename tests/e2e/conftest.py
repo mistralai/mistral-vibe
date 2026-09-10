@@ -62,6 +62,8 @@ type SpawnedVibeFactory = Callable[
 
 @pytest.fixture
 def spawned_vibe_process() -> SpawnedVibeFactory:
+    pytest.importorskip("pty")
+
     @contextmanager
     def spawn(
         workdir: Path, extra_args: Sequence[str] | None = None

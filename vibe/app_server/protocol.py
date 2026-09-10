@@ -1865,6 +1865,7 @@ class TurnSteerParams(ProtocolModel):
     expected_turn_id: str
     message: list[ContentBlock]
     client_user_message_id: str | None = None
+    user_display_content: UserDisplayContent | None = None
     inject_invoked_skill: bool = True
     mention_stats: MentionStats | None = None
 

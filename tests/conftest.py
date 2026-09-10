@@ -133,6 +133,7 @@ def _isolate_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setenv("GCM_INTERACTIVE", "never")
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "commit.gpgsign")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "false")
@@ -277,6 +278,8 @@ def _mock_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("SHELL", "/bin/sh")
+    if not hasattr(os, "getuid"):
+        monkeypatch.setattr(os, "getuid", lambda: 0, raising=False)
     resolve_auto_theme.cache_clear()
     monkeypatch.setattr("vibe.cli._theme_detection.detect_terminal_dark", lambda: None)
     monkeypatch.setattr(

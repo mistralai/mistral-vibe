@@ -356,7 +356,7 @@ class UnifiedPermissionResolver:
     ) -> None:
         """Write an "always" grant to the config layer that outlives the session."""
         if not required_permissions:
-            await self._config.set_field(
+            await self._config.set_field_or_warn(
                 f"/tools/{name}/permission", ToolPermission.ALWAYS.value
             )
             return
@@ -380,7 +380,7 @@ class UnifiedPermissionResolver:
         )
         if update is None:
             return
-        await self._config.set_field(
+        await self._config.set_field_or_warn(
             f"/tools/{name}/allowlist", update["tools"][name]["allowlist"]
         )
 

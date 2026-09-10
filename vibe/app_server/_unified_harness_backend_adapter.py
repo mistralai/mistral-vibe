@@ -189,7 +189,7 @@ from vibe.app_server._workspace import (
     mentioned_file_content_blocks_async,
     prepare_prompt_from_context,
 )
-from vibe.app_server._worktree_session import SessionWorktrees
+from vibe.app_server._worktree_session import SessionWorktrees, WorktreeResolution
 from vibe.app_server.config import ProxySettingsView
 from vibe.app_server.connector_catalog import (
     ConnectorCatalogError,
@@ -666,6 +666,22 @@ class _NullExperimentSink:
         del response
 
 
+@dataclass(frozen=True, slots=True)
+class _MergedListingKey:
+    cwd: str | None
+    root_session_id: str | None
+    parent_session_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _MergedListing:
+    """One cursor walk's view of the merged unified + legacy session list."""
+
+    key: _MergedListingKey
+    sessions: list[PublicSession]
+    continue_session_id: str | None
+
+
 _NULL_EXPERIMENT_SINK: Final = _NullExperimentSink()
 _SESSION_LISTING_PAGE = 500
 
@@ -891,10 +907,11 @@ class UnifiedHarnessBackendHostAdapter:
         self._telemetry_clients: set[TelemetryClient] = set()
         self._adapters: dict[str, UnifiedHarnessBackendAdapter] = {}
         self._worktrees = SessionWorktrees()
+        self._merged_listing: _MergedListing | None = None
 
     @property
     def harness_kind(self) -> SessionBackendKind:
-        return self._host.harness_kind
+        return "unified"
 
     async def start(self, params: SessionStartParams) -> SessionLifecycleResult:
         if params.agent_config.worktree is None:
@@ -948,24 +965,34 @@ class UnifiedHarnessBackendHostAdapter:
     async def _start_resolved(
         self, params: SessionStartParams, options: SessionOptions
     ) -> SessionLifecycleResult:
-        context, derivation = await self._context(options, require_api_key=True)
-        session = await _harness_call(
-            self._host.start(
-                HarnessSessionStartParams(history_limit=params.history_limit),
-                cwd=_session_cwd(options),
-                # A public session identity is live immediately, but it only becomes
-                # durable once its first turn starts.  The Harness's ephemeral path
-                # already owns that promotion boundary and discards an unused session
-                # on shutdown.
-                ephemeral=True,
-                hook_bindings=context.hooks.bindings,
-                hook_handlers=context.hooks.handlers,
+        resolution = await self._worktrees.resolve_for_start(options)
+        try:
+            context, derivation = await self._context(
+                resolution.options, require_api_key=True
             )
-        )
-        backend = self._adapter(
-            session, context, derivation, scheduled_loops_enabled=not options.headless
-        )
-        await self._prepare_opened_backend(backend, backend.restore_scheduled_loops())
+            session = await _harness_call(
+                self._host.start(
+                    HarnessSessionStartParams(history_limit=params.history_limit),
+                    cwd=_session_cwd(resolution.options),
+                    ephemeral=True,
+                    hook_bindings=context.hooks.bindings,
+                    hook_handlers=context.hooks.handlers,
+                )
+            )
+            backend = self._adapter(
+                session,
+                context,
+                derivation,
+                scheduled_loops_enabled=not resolution.options.headless,
+            )
+            await self._prepare_opened_backend(
+                backend,
+                backend.restore_scheduled_loops(),
+                worktree_resolution=resolution,
+            )
+        except BaseException:
+            await self._worktrees.cleanup(resolution)
+            raise
         # Fresh start emits new_session/ready once the background experiment eval
         # resolves, so those events carry user_plan/experiment_attributes — the
         # only path that emits both, mirroring the legacy AgentLoop.
@@ -979,28 +1006,36 @@ class UnifiedHarnessBackendHostAdapter:
         context, derivation = await self._context(
             params.agent_config, require_api_key=True
         )
-        context, derivation = await self._pin_to_session_cwd(
+        context, derivation, resolution = await self._pin_to_session_cwd(
             params.agent_config,
             params.session_id,
             context,
             derivation,
             require_api_key=True,
         )
-        session = await _harness_call(
-            self._host.resume(
-                params.session_id,
-                history_limit=params.history_limit,
-                hook_bindings=context.hooks.bindings,
-                hook_handlers=context.hooks.handlers,
+        try:
+            session = await _harness_call(
+                self._host.resume(
+                    params.session_id,
+                    history_limit=params.history_limit,
+                    hook_bindings=context.hooks.bindings,
+                    hook_handlers=context.hooks.handlers,
+                )
             )
-        )
-        backend = self._adapter(
-            session,
-            context,
-            derivation,
-            scheduled_loops_enabled=not params.agent_config.headless,
-        )
-        await self._prepare_opened_backend(backend, backend.restore_scheduled_loops())
+            backend = self._adapter(
+                session,
+                context,
+                derivation,
+                scheduled_loops_enabled=not params.agent_config.headless,
+            )
+            await self._prepare_opened_backend(
+                backend,
+                backend.restore_scheduled_loops(),
+                worktree_resolution=resolution,
+            )
+        except BaseException:
+            await self._worktrees.cleanup(resolution)
+            raise
         self._start_experiments(backend)
         return SessionLifecycleResult(
             backend=backend, after_response=backend.start_scheduled_loops
@@ -1025,24 +1060,32 @@ class UnifiedHarnessBackendHostAdapter:
             raise SessionBackendError(
                 ProtocolErrorCode.NOT_FOUND, "No session to continue"
             )
-        context, derivation = await self._pin_to_session_cwd(
+        context, derivation, resolution = await self._pin_to_session_cwd(
             params.agent_config, target_id, context, derivation, require_api_key=True
         )
-        session = await _harness_call(
-            self._host.resume(
-                target_id,
-                history_limit=params.history_limit,
-                hook_bindings=context.hooks.bindings,
-                hook_handlers=context.hooks.handlers,
+        try:
+            session = await _harness_call(
+                self._host.resume(
+                    target_id,
+                    history_limit=params.history_limit,
+                    hook_bindings=context.hooks.bindings,
+                    hook_handlers=context.hooks.handlers,
+                )
             )
-        )
-        backend = self._adapter(
-            session,
-            context,
-            derivation,
-            scheduled_loops_enabled=not params.agent_config.headless,
-        )
-        await self._prepare_opened_backend(backend, backend.restore_scheduled_loops())
+            backend = self._adapter(
+                session,
+                context,
+                derivation,
+                scheduled_loops_enabled=not params.agent_config.headless,
+            )
+            await self._prepare_opened_backend(
+                backend,
+                backend.restore_scheduled_loops(),
+                worktree_resolution=resolution,
+            )
+        except BaseException:
+            await self._worktrees.cleanup(resolution)
+            raise
         self._start_experiments(backend)
         return SessionLifecycleResult(
             backend=backend, after_response=backend.start_scheduled_loops
@@ -1050,35 +1093,41 @@ class UnifiedHarnessBackendHostAdapter:
 
     async def fork(self, params: SessionForkParams) -> SessionForkResult:
         options = params.agent_config or SessionOptions()
+        self._worktrees.reject_input(options)
         source = self._adapters.get(params.source_session_id)
         if source is not None and source._closed:
             source = None
         context, derivation = await self._context(options, require_api_key=True)
-        context, derivation = await self._pin_to_session_cwd(
+        context, derivation, resolution = await self._pin_to_session_cwd(
             options, params.source_session_id, context, derivation, require_api_key=True
         )
-        result = await _harness_call(
-            self._host.fork(
-                params.source_session_id,
-                entry_id=params.entry_id,
-                history_limit=params.history_limit,
-                hook_handlers=context.hooks.handlers,
+        try:
+            result = await _harness_call(
+                self._host.fork(
+                    params.source_session_id,
+                    entry_id=params.entry_id,
+                    history_limit=params.history_limit,
+                    hook_handlers=context.hooks.handlers,
+                )
             )
-        )
-        backend = self._adapter(
-            result.session,
-            context,
-            derivation,
-            scheduled_loops_enabled=not options.headless,
-        )
-        await self._prepare_opened_backend(
-            backend,
-            (
-                backend.replace_scheduled_loops(await source.scheduled_loops())
-                if source is not None
-                else backend.copy_scheduled_loops(params.source_session_id)
-            ),
-        )
+            backend = self._adapter(
+                result.session,
+                context,
+                derivation,
+                scheduled_loops_enabled=not options.headless,
+            )
+            await self._prepare_opened_backend(
+                backend,
+                (
+                    backend.replace_scheduled_loops(await source.scheduled_loops())
+                    if source is not None
+                    else backend.copy_scheduled_loops(params.source_session_id)
+                ),
+                worktree_resolution=resolution,
+            )
+        except BaseException:
+            await self._worktrees.cleanup(resolution)
+            raise
         self._start_experiments(backend)
         snapshot = await backend.read(
             SessionReadParams(
@@ -1106,66 +1155,23 @@ class UnifiedHarnessBackendHostAdapter:
         )
 
     async def list(self, params: SessionListParams) -> SessionListResponse:
-        options = SessionOptions(cwd=params.cwd)
-        # Listing sessions has never needed a credential; the legacy path
-        # answers it through structurally loaded configuration without credential
-        # validation.
-        context, _ = await self._context(options, require_api_key=False)
-
-        # Fetch ALL unified sessions by paginating through the unified host.
-        # The cursor the client passes is opaque to the client and consumed
-        # here; the merged list's own cursor is what the client sees.
-        unified_items: list[PublicSession] = []
-        unified_cursor: str | None = None
-        unified_continue_session_id: str | None = None
-        while True:
-            result = await _harness_call(
-                self._host.list(
-                    limit=_SESSION_LISTING_PAGE,
-                    cursor=unified_cursor,
-                    cwd=_session_cwd(options) if params.cwd is not None else None,
-                    root_session_id=params.root_session_id,
-                    parent_session_id=params.parent_session_id,
-                )
-            )
-            unified_items.extend(
-                _public_session(item.session, item.cwd, harness="unified")
-                for item in result.items
-            )
-            if unified_continue_session_id is None:
-                unified_continue_session_id = result.continue_session_id
-            if result.next_cursor is None or not result.items:
-                break
-            unified_cursor = result.next_cursor
-
-        # Fetch ALL legacy sessions in one filesystem read. The legacy store
-        # is a secondary source: if the read fails the picker degrades to
-        # unified-only rather than blocking the primary listing. Lineage
-        # filters (root/parent) are unified-only: legacy sessions carry no
-        # root_session_id, so they are excluded from those queries entirely.
-        config = context.config_orchestrator.config
-        legacy_items: list[PublicSession] = []
-        if params.root_session_id is None and params.parent_session_id is None:
-            try:
-                legacy_sessions = await asyncio.to_thread(
-                    list_local_resume_sessions, config, params.cwd
-                )
-            except OSError:
-                logger.debug("Legacy session listing failed; returning unified-only")
-            else:
-                legacy_items = [
-                    _legacy_public_session(session, config, harness="legacy")
-                    for session in legacy_sessions
-                ]
-
-        # Merge, sort by (updated_at, session_id) descending, and apply
-        # client-side pagination on the merged result. Session IDs are UUIDs,
-        # so the (updated_at, id) key is unique across both stores.
-        merged = sorted(
-            [*unified_items, *legacy_items],
-            key=lambda s: (s.updated_at, s.id),
-            reverse=True,
+        key = _MergedListingKey(
+            cwd=params.cwd,
+            root_session_id=params.root_session_id,
+            parent_session_id=params.parent_session_id,
         )
+        listing = self._merged_listing
+        # A cursor continues a walk whose first page already swept both stores,
+        # so rebuilding here would pay for the whole merge once per page. It
+        # would also re-sort live data mid-walk: a session whose ``updated_at``
+        # advances moves ahead of the cursor into the region already passed,
+        # and the walk never returns it. Hold the first page's merge instead
+        # and let the walk read a stable snapshot of it.
+        if params.cursor is None or listing is None or listing.key != key:
+            listing = await self._build_merged_listing(params, key)
+            self._merged_listing = listing
+
+        merged = listing.sessions
         start = _merged_cursor_index(merged, params.cursor)
         page = merged[start : start + params.limit]
         return SessionListResponse(
@@ -1176,8 +1182,86 @@ class UnifiedHarnessBackendHostAdapter:
                 else None
             ),
             previous_cursor=None,
-            continue_session_id=unified_continue_session_id,
+            continue_session_id=listing.continue_session_id,
         )
+
+    async def _build_merged_listing(
+        self, params: SessionListParams, key: _MergedListingKey
+    ) -> _MergedListing:
+        options = SessionOptions(cwd=params.cwd)
+        # Listing sessions has never needed a credential; the legacy path
+        # answers it through structurally loaded configuration without credential
+        # validation.
+        context, _ = await self._context(options, require_api_key=False)
+
+        # One store is a host round trip and the other a worker-thread
+        # filesystem scan, so reading them in sequence would add the smaller
+        # to the larger for nothing.
+        (unified_items, continue_session_id), legacy_items = await asyncio.gather(
+            self._sweep_unified_sessions(params, options),
+            self._list_legacy_sessions(params, context.config_orchestrator.config),
+        )
+
+        # Merge and sort by (updated_at, session_id) descending. Session IDs are
+        # UUIDs, so the (updated_at, id) key is unique across both stores.
+        return _MergedListing(
+            key=key,
+            sessions=sorted(
+                [*unified_items, *legacy_items],
+                key=lambda s: (s.updated_at, s.id),
+                reverse=True,
+            ),
+            continue_session_id=continue_session_id,
+        )
+
+    async def _sweep_unified_sessions(
+        self, params: SessionListParams, options: SessionOptions
+    ) -> tuple[list[PublicSession], str | None]:
+        """Every unified session matching the request, and the continue pointer."""
+        items: list[PublicSession] = []
+        cursor: str | None = None
+        continue_session_id: str | None = None
+        while True:
+            result = await _harness_call(
+                self._host.list(
+                    limit=_SESSION_LISTING_PAGE,
+                    cursor=cursor,
+                    cwd=_session_cwd(options) if params.cwd is not None else None,
+                    root_session_id=params.root_session_id,
+                    parent_session_id=params.parent_session_id,
+                )
+            )
+            items.extend(
+                _public_session(item.session, item.cwd, harness="unified")
+                for item in result.items
+            )
+            if continue_session_id is None:
+                continue_session_id = result.continue_session_id
+            if result.next_cursor is None or not result.items:
+                break
+            cursor = result.next_cursor
+        return items, continue_session_id
+
+    async def _list_legacy_sessions(
+        self, params: SessionListParams, config: VibeConfigSchema
+    ) -> list[PublicSession]:
+        """Every legacy session matching the request, in one filesystem read.
+
+        A secondary source: if the read fails the picker degrades to
+        unified-only rather than blocking the primary listing. Lineage filters
+        (root/parent) are unified-only, because legacy sessions carry no
+        ``root_session_id``.
+        """
+        if params.root_session_id is not None or params.parent_session_id is not None:
+            return []
+        try:
+            # Projected on the worker thread too: an untitled session still
+            # reads its transcript for a preview, which must not run on the
+            # event loop.
+            return await asyncio.to_thread(_legacy_public_sessions, config, params.cwd)
+        except OSError:
+            logger.debug("Legacy session listing failed; returning unified-only")
+            return []
 
     async def read(self, params: SessionReadParams) -> SessionReadResponse:
         options = SessionOptions()
@@ -1544,7 +1628,11 @@ class UnifiedHarnessBackendHostAdapter:
         task.add_done_callback(services.task_finished)
 
     async def _prepare_opened_backend(
-        self, backend: UnifiedHarnessBackendAdapter, prepare: Awaitable[None]
+        self,
+        backend: UnifiedHarnessBackendAdapter,
+        prepare: Awaitable[None],
+        *,
+        worktree_resolution: WorktreeResolution | None = None,
     ) -> None:
         try:
             await prepare
@@ -1563,16 +1651,26 @@ class UnifiedHarnessBackendHostAdapter:
                     "Failed to close Unified session after opening failed", exc_info=exc
                 )
             raise
-        self._occupy_worktree(backend)
+        self._occupy_worktree(backend, worktree_resolution)
 
     # Where start, resume and continue all end up, which is why the marking
     # happens here rather than three times over. Only after the open succeeded:
     # a session that failed to open is not standing anywhere.
-    def _occupy_worktree(self, backend: UnifiedHarnessBackendAdapter) -> None:
+    def _occupy_worktree(
+        self,
+        backend: UnifiedHarnessBackendAdapter,
+        resolution: WorktreeResolution | None,
+    ) -> None:
         if backend.cwd is None:
+            if resolution is not None and resolution.pending_hold is not None:
+                resolution.pending_hold.release()
             return
         cwd = Path(backend.cwd)
-        self._worktrees.hold(cwd, backend.session_id)
+        self._worktrees.hold(
+            cwd,
+            backend.session_id,
+            None if resolution is None else resolution.pending_hold,
+        )
 
     async def _pin_to_session_cwd(
         self,
@@ -1582,7 +1680,7 @@ class UnifiedHarnessBackendHostAdapter:
         derivation: UnifiedRuntimeDerivation,
         *,
         require_api_key: bool,
-    ) -> tuple[UnifiedSessionContext, UnifiedRuntimeDerivation]:
+    ) -> tuple[UnifiedSessionContext, UnifiedRuntimeDerivation, WorktreeResolution]:
         """Rebuild the context against an existing session's stored cwd, if it differs.
 
         The caller must have already built ``context`` once (which configures the Host's
@@ -1592,34 +1690,41 @@ class UnifiedHarnessBackendHostAdapter:
         skips every persisted hook or binds the wrong project's hooks (§7 as-built).
         """
         stored_cwd = await _harness_call(self._host.session_cwd(session_id))
-        if stored_cwd is not None and stored_cwd != _session_cwd(options):
-            if options.trust_workspace:
-                # The first build recorded an ephemeral --trust grant for the caller cwd on
-                # the process-wide trust store. Its ancestor walk would still trust the pinned
-                # (often descendant) session cwd, so revoke that one grant before rebuilding.
-                context.harness_files.trust_store.revoke_session_trust(
-                    Path(_session_cwd(options))
+        pinned_options = _with_session_cwd(options, stored_cwd)
+        resolution = await self._worktrees.resolve_for_start(pinned_options)
+        try:
+            if stored_cwd is not None and stored_cwd != _session_cwd(options):
+                if options.trust_workspace:
+                    # The first build recorded an ephemeral --trust grant for the caller cwd on
+                    # the process-wide trust store. Its ancestor walk would still trust the pinned
+                    # (often descendant) session cwd, so revoke that one grant before rebuilding.
+                    context.harness_files.trust_store.revoke_session_trust(
+                        Path(_session_cwd(options))
+                    )
+                context, derivation = await self._context(
+                    resolution.options, require_api_key=require_api_key
                 )
-            context, derivation = await self._context(
-                _with_session_cwd(options, stored_cwd), require_api_key=require_api_key
-            )
-        # Every stored pin is a user choice the session must reopen with. Storage
-        # and lookup are generic (see ``SessionPin``); only applying a pin is
-        # per-pin policy. Layers are independent, so restore order does not matter.
-        rederive = False
-        for pin in SessionPin:
-            value = await _harness_call(self._host.session_pin(session_id, pin))
-            if value is not None and await self._apply_restored_pin(
-                pin, context, value
-            ):
-                rederive = True
-        if not rederive:
-            return context, derivation
-        derivation = await asyncio.to_thread(context.derive, UnifiedSessionSettings())
-        self._host.configure_runtime(
-            derivation.core_config, adapter_config=derivation.adapter_config
-        )
-        return context, derivation
+            # Every stored pin is a user choice the session must reopen with. Storage
+            # and lookup are generic (see ``SessionPin``); only applying a pin is
+            # per-pin policy. Layers are independent, so restore order does not matter.
+            rederive = False
+            for pin in SessionPin:
+                value = await _harness_call(self._host.session_pin(session_id, pin))
+                if value is not None and await self._apply_restored_pin(
+                    pin, context, value
+                ):
+                    rederive = True
+            if rederive:
+                derivation = await asyncio.to_thread(
+                    context.derive, UnifiedSessionSettings()
+                )
+                self._host.configure_runtime(
+                    derivation.core_config, adapter_config=derivation.adapter_config
+                )
+            return context, derivation, resolution
+        except BaseException:
+            await self._worktrees.cleanup(resolution)
+            raise
 
     async def _apply_restored_pin(
         self, pin: SessionPin, context: UnifiedSessionContext, value: str
@@ -2936,6 +3041,9 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         self, params: AgentSwitchParams
     ) -> SessionBackendResult[RuntimeMutationResponse]:
         self._require_session(params.session_id)
+        # Pending worktree setup ends by adopting a context built from the launch
+        # options, which discards a profile switched before it lands.
+        await self._await_deferred_setup()
         # Entering or leaving smart-approve flips gated tools between "classify" and
         # "ask"/"allow" in the adapter config, which _apply_derivation pushes to the
         # live session -- no Core hook rebinding, so the switch is safe mid-session.
@@ -5357,6 +5465,15 @@ def _public_session(
     )
 
 
+def _legacy_public_sessions(
+    config: VibeConfigSchema, cwd: str | None
+) -> list[PublicSession]:
+    return [
+        _legacy_public_session(session, config, harness="legacy")
+        for session in list_local_resume_sessions(config, cwd)
+    ]
+
+
 def _legacy_public_session(
     session: ResumeSessionInfo,
     config: VibeConfigSchema,
@@ -5375,8 +5492,16 @@ def _legacy_public_session(
         root_session_id=None,
         parent_session_id=session.parent_session_id,
         title=session.title,
-        preview=SessionLoader.get_first_user_message(
-            session.session_id, config.session_logging
+        # Reading the transcript for a preview no caller will show is the
+        # legacy half's dominant cost, and every consumer renders
+        # ``title or preview``. The legacy picker short-circuits the same way
+        # in ``resume_sessions.session_latest_messages``.
+        preview=(
+            ""
+            if session.title
+            else SessionLoader.get_first_user_message(
+                session.session_id, config.session_logging
+            )
         ),
         status=VibeIdleSessionStatus(),
         created_at=_time_ms(session.start_time or session.updated_at),

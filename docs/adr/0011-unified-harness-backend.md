@@ -11,8 +11,8 @@ reads stored sessions, creates forks, tracks live backends, and shuts them down
 with the process. Fork belongs to the Host because it creates and registers a
 new session identity, even though its implementation reads a source session.
 
-A Host also reports its `harness_kind`: `python` for the legacy `AgentLoop`
-adapter and `rust` for the Unified Harness. This is backend identity, not a
+A Host also reports its `harness_kind`: `legacy` for the legacy `AgentLoop`
+adapter and `unified` for the Unified Harness. This is backend identity, not a
 capability, so it stays on the common Host interface. The app server records
 the kind with the session identity when a session is created. Process
 composition selects which Host an app-server instance receives; backend

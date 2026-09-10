@@ -996,7 +996,7 @@ class LegacySessionBackendHost:
 
     @property
     def harness_kind(self) -> SessionBackendKind:
-        return "python"
+        return "legacy"
 
     async def start(self, params: SessionStartParams) -> SessionLifecycleResult:
         backend = self._register(await self._invoke(self._start(params)))

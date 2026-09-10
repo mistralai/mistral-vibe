@@ -20,6 +20,7 @@ from pathlib import Path
 
 from vibe.core.git.worktree import (
     ManagedWorktree,
+    PendingSessionHold,
     PreparedWorktree,
     WorktreeError,
     WorktreeRepository,
@@ -66,6 +67,7 @@ class ResolvedWorktree:
 
     cwd: Path
     prepared: PreparedWorktree | None = None
+    pending_hold: PendingSessionHold | None = None
 
 
 class SessionWorktrees:
@@ -91,7 +93,17 @@ class SessionWorktrees:
                     raise WorktreeError(
                         f"Worktree is not linked to the local project: {requested}"
                     )
-                return ResolvedWorktree(cwd=requested)
+                managed = ManagedWorktree.at(requested)
+                pending_hold = (
+                    None if managed is None else managed.hold_for_attachment()
+                )
+                if (
+                    managed is not None
+                    and pending_hold is None
+                    and not requested.is_dir()
+                ):
+                    raise WorktreeError(f"Worktree is no longer available: {requested}")
+                return ResolvedWorktree(cwd=requested, pending_hold=pending_hold)
             case CreateNamedWorktree(name=name, branch=branch):
                 with WorktreeRepository.open(base_cwd) as repository:
                     created = repository.prepare(name, branch=branch)
@@ -100,7 +112,9 @@ class SessionWorktrees:
                     created = repository.prepare_auto(
                         prompt=prompt, suggested_name=suggested_name
                     )
-        return ResolvedWorktree(cwd=created.path, prepared=created)
+        return ResolvedWorktree(
+            cwd=created.path, prepared=created, pending_hold=created.pending_hold
+        )
 
     async def resolve_for_start(
         self, request: WorktreeRequest, base_cwd: Path
@@ -120,7 +134,8 @@ class SessionWorktrees:
             return await asyncio.shield(resolve)
         except asyncio.CancelledError:
             with suppress(BaseException):
-                await self.cleanup((await resolve).prepared)
+                resolved = await resolve
+                await self.cleanup(resolved.prepared, resolved.pending_hold)
             raise
 
     @staticmethod
@@ -136,7 +151,10 @@ class SessionWorktrees:
         return await suggest_worktree_name(request.prompt, cwd=base_cwd)
 
     @staticmethod
-    async def cleanup(worktree: PreparedWorktree | None) -> None:
+    async def cleanup(
+        worktree: PreparedWorktree | None,
+        pending_hold: PendingSessionHold | None = None,
+    ) -> None:
         """Undo what this start did, and only that.
 
         Takes what raising the worktree produced rather than the resolution it
@@ -146,6 +164,8 @@ class SessionWorktrees:
         Best effort throughout: the session has already failed, and a directory
         left behind is worth less than the error the caller is about to raise.
         """
+        if pending_hold is not None:
+            pending_hold.release()
         if worktree is None or not worktree.created:
             return
         try:
@@ -164,7 +184,9 @@ class SessionWorktrees:
     # -- who is standing in it ---------------------------------------------
 
     @staticmethod
-    def hold(cwd: Path, session_id: str) -> None:
+    def hold(
+        cwd: Path, session_id: str, pending_hold: PendingSessionHold | None = None
+    ) -> None:
         """Mark the worktree a session is standing in as occupied.
 
         Retention pruning reads this marker before deleting a worktree. A session
@@ -173,7 +195,9 @@ class SessionWorktrees:
         nothing outside one.
         """
         if managed := ManagedWorktree.at(cwd):
-            managed.hold(session_id)
+            managed.hold(session_id, pending_hold)
+        elif pending_hold is not None:
+            pending_hold.release()
 
     @staticmethod
     def root(cwd: Path) -> Path | None:

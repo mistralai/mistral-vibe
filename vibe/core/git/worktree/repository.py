@@ -8,6 +8,7 @@ from functools import cached_property
 import os
 from pathlib import Path, PureWindowsPath
 from typing import Any
+from uuid import uuid4
 
 from vibe.core.git.errors import GitError
 from vibe.core.git.repo import GitRepo, GitStatus, RepoPaths, _git_python
@@ -19,6 +20,7 @@ from vibe.core.git.worktree.record import (
     WorktreeClaim,
     WorktreeRecord,
     managed_bucket_name,
+    worktree_prune_lock,
 )
 from vibe.core.paths import WORKTREES_DIR
 from vibe.core.utils.slug import create_slug
@@ -43,6 +45,22 @@ class WorktreeError(GitError): ...
 
 
 @dataclass(frozen=True)
+class PendingSessionHold:
+    """Temporary holder bridging worktree resolution and session attachment.
+
+    Pruning must see the worktree as occupied before the session has an ID it
+    can register as a durable holder. This hold closes that gap and is released
+    after the session holder is installed, or when startup is abandoned.
+    """
+
+    claim: WorktreeClaim
+    holder_id: str
+
+    def release(self) -> None:
+        self.claim.remove_holder(self.holder_id)
+
+
+@dataclass(frozen=True)
 class PreparedWorktree:
     name: str
     branch: str
@@ -52,6 +70,7 @@ class PreparedWorktree:
     base_commit: str
     created: bool
     branch_created: bool
+    pending_hold: PendingSessionHold | None = None
 
     def inspect_for_cleanup(self) -> WorktreeCleanupState:
         """Inspect worktree state relative to the session-start HEAD.
@@ -362,10 +381,24 @@ class WorktreeRepository:
         try:
             target.mkdir(parents=True)
         except FileExistsError:
-            _validate_existing_worktree(target, branch, paths.common_git_dir)
-            return self._build_prepared(
-                name, branch, target, created=False, branch_created=False
+            managed = ManagedWorktree(
+                claim=WorktreeClaim(bucket=self.bucket, name=name)
             )
+            pending_hold = managed.hold_for_attachment()
+            try:
+                _validate_existing_worktree(target, branch, paths.common_git_dir)
+                return self._build_prepared(
+                    name,
+                    branch,
+                    target,
+                    created=False,
+                    branch_created=False,
+                    pending_hold=pending_hold,
+                )
+            except BaseException:
+                if pending_hold is not None:
+                    pending_hold.release()
+                raise
         except OSError as e:
             raise WorktreeError(
                 f"Failed to claim worktree directory {target}: {e}"
@@ -534,6 +567,7 @@ class WorktreeRepository:
         *,
         created: bool,
         branch_created: bool,
+        pending_hold: PendingSessionHold | None = None,
     ) -> PreparedWorktree:
         # base_commit is the worktree's own HEAD at session start, so cleanup
         # counts only commits added during this session (not commits an attached
@@ -548,6 +582,7 @@ class WorktreeRepository:
             base_commit=GitRepo.head_commit_at(target),
             created=created,
             branch_created=branch_created,
+            pending_hold=pending_hold,
         )
 
     def _claim_auto_name(self, base_name: str) -> tuple[str, str, Path]:
@@ -648,12 +683,32 @@ class ManagedWorktree:
     def root(self) -> Path:
         return WORKTREES_DIR.path.resolve() / self.claim.bucket / self.claim.name
 
-    def hold(self, session_id: str) -> None:
+    def hold_for_attachment(self) -> PendingSessionHold | None:
+        """Prevent pruning until a resolved worktree gains its session holder."""
+        holder_id = f"attach-{uuid4().hex}"
+        with worktree_prune_lock():
+            if self.claim.read() is None:
+                return None
+            self.claim.add_holder(holder_id)
+        return PendingSessionHold(claim=self.claim, holder_id=holder_id)
+
+    def hold(
+        self, session_id: str, pending_hold: PendingSessionHold | None = None
+    ) -> None:
+        if pending_hold is not None and pending_hold.claim != self.claim:
+            pending_hold.release()
+            raise WorktreeError("Pending session hold does not match the session cwd")
         # A directory under the managed root with no record is not ours to
         # hold: either it is someone else's, or the claim is already released.
         if self.claim.read() is None:
+            if pending_hold is not None:
+                pending_hold.release()
             return
-        self.claim.add_holder(session_id)
+        try:
+            self.claim.add_holder(session_id)
+        finally:
+            if pending_hold is not None:
+                pending_hold.release()
         self.claim.finish_starting()
 
     def release_holder(self, session_id: str) -> None:
@@ -668,55 +723,72 @@ class ManagedWorktree:
         if limit < 0:
             raise ValueError("limit must be non-negative")
 
-        cls._reclaim_abandoned_reservations()
-        claimed = sorted(
-            (
-                (record.claimed_at, claim)
-                for claim in WorktreeClaim.all()
-                if (record := claim.read()) is not None
-                and record.base_commit is not None
-            ),
-            key=lambda item: (item[0], item[1].bucket, item[1].name),
-        )
-        excess = len(claimed) - limit
-        removed = 0
-        for _, claim in claimed:
-            if excess <= 0:
-                break
-            if claim.is_starting():
-                continue
-            try:
-                release = cls(claim=claim).prune_if_pushed()
-            except (GitError, OSError) as exc:
-                logger.warning(
-                    "Keeping managed worktree %s/%s: retention check failed",
-                    claim.bucket,
-                    claim.name,
-                    exc_info=exc,
-                )
-                continue
-            if release.outcome in {
-                WorktreeReleaseOutcome.REMOVED,
-                WorktreeReleaseOutcome.NOT_FOUND,
-            }:
-                excess -= 1
-            if release.outcome is WorktreeReleaseOutcome.REMOVED:
-                removed += 1
-        return removed
+        with worktree_prune_lock():
+            cls._reclaim_abandoned_reservations()
+            claimed = sorted(
+                (
+                    (record.claimed_at, claim)
+                    for claim in WorktreeClaim.all()
+                    if (record := claim.read()) is not None
+                    and record.base_commit is not None
+                ),
+                key=lambda item: (item[0], item[1].bucket, item[1].name),
+            )
+            excess = len(claimed) - limit
+            removed = 0
+            for _, claim in claimed:
+                if excess <= 0:
+                    break
+                if claim.is_starting():
+                    continue
+                try:
+                    release = cls(claim=claim).prune_if_pushed()
+                except (GitError, OSError) as exc:
+                    logger.warning(
+                        "Keeping managed worktree %s/%s: retention check failed",
+                        claim.bucket,
+                        claim.name,
+                        exc_info=exc,
+                    )
+                    continue
+                if release.outcome in {
+                    WorktreeReleaseOutcome.REMOVED,
+                    WorktreeReleaseOutcome.NOT_FOUND,
+                }:
+                    excess -= 1
+                if release.outcome is WorktreeReleaseOutcome.REMOVED:
+                    removed += 1
+            return removed
 
     @classmethod
     def _reclaim_abandoned_reservations(cls) -> None:
         for claim in WorktreeClaim.all():
             record = claim.read()
-            if record is None or record.base_commit is not None or claim.is_starting():
+            if (
+                record is None
+                or record.base_commit is not None
+                or claim.is_starting()
+                or claim.holders()
+            ):
                 continue
             target = cls(claim=claim).root
             try:
-                if target.is_symlink() or (
-                    target.exists() and (not target.is_dir() or any(target.iterdir()))
-                ):
+                if target.is_symlink() or (target.exists() and not target.is_dir()):
                     continue
             except OSError:
+                continue
+            if (target / ".git").is_file():
+                try:
+                    base_commit = GitRepo.head_commit_at(target)
+                except GitError:
+                    continue
+                claim.write(record.model_copy(update={"base_commit": base_commit}))
+                continue
+            try:
+                is_empty = not target.exists() or not any(target.iterdir())
+            except OSError:
+                continue
+            if not is_empty:
                 continue
             claim.delete()
             with suppress(OSError):

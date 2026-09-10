@@ -13,6 +13,7 @@ contract does not import core.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ from pathlib import Path
 
 from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server.protocol import ProtocolErrorCode, SessionOptions
-from vibe.core.git.worktree import PreparedWorktree
+from vibe.core.git.worktree import ManagedWorktree, PendingSessionHold, PreparedWorktree
 from vibe.core.paths import dedup_paths
 from vibe.core.session.worktrees import (
     CreateNamedWorktree,
@@ -46,6 +47,7 @@ class WorktreeResolution:
 
     options: SessionOptions
     prepared_worktree: PreparedWorktree | None = None
+    pending_hold: PendingSessionHold | None = None
 
 
 class SessionWorktrees:
@@ -68,7 +70,13 @@ class SessionWorktrees:
         """Turn a `worktree` request into the directory the session will run in."""
         request = _requested(options)
         if request is None:
-            return WorktreeResolution(options=options)
+            managed = ManagedWorktree.at(_base_cwd(options))
+            return WorktreeResolution(
+                options=options,
+                pending_hold=(
+                    None if managed is None else managed.hold_for_attachment()
+                ),
+            )
         resolved = WorktreeLifecycle.resolve(
             request, _base_cwd(options), suggested_name
         )
@@ -78,7 +86,22 @@ class SessionWorktrees:
         """Resolve off the event loop, cleaning up if the start is cancelled."""
         request = _requested(options)
         if request is None:
-            return WorktreeResolution(options=options)
+            managed = ManagedWorktree.at(_base_cwd(options))
+            if managed is None:
+                return WorktreeResolution(options=options)
+            acquire_hold = asyncio.create_task(
+                asyncio.to_thread(managed.hold_for_attachment)
+            )
+            try:
+                return WorktreeResolution(
+                    options=options, pending_hold=await asyncio.shield(acquire_hold)
+                )
+            except asyncio.CancelledError:
+                with suppress(BaseException):
+                    pending_hold = await acquire_hold
+                    if pending_hold is not None:
+                        pending_hold.release()
+                raise
         resolved = await self._lifecycle.resolve_for_start(request, _base_cwd(options))
         return _rewritten(options, resolved)
 
@@ -99,7 +122,7 @@ class SessionWorktrees:
         resolution = await self.resolve_for_start(requested)
         cwd = _base_cwd(resolution.options)
         try:
-            self.hold(cwd, session_id)
+            self.hold(cwd, session_id, resolution.pending_hold)
             await move(resolution.options)
         except BaseException:
             # Inside the same arm as the move: a worktree created and then not
@@ -115,7 +138,9 @@ class SessionWorktrees:
 
     async def cleanup(self, resolution: WorktreeResolution) -> None:
         """Undo what this start did, and only that."""
-        await self._lifecycle.cleanup(resolution.prepared_worktree)
+        await self._lifecycle.cleanup(
+            resolution.prepared_worktree, resolution.pending_hold
+        )
 
     @staticmethod
     def reject_input(options: SessionOptions) -> None:
@@ -140,8 +165,10 @@ class SessionWorktrees:
     # holds one object for all of it.
 
     @staticmethod
-    def hold(cwd: Path, session_id: str) -> None:
-        WorktreeLifecycle.hold(cwd, session_id)
+    def hold(
+        cwd: Path, session_id: str, pending_hold: PendingSessionHold | None = None
+    ) -> None:
+        WorktreeLifecycle.hold(cwd, session_id, pending_hold)
 
     @staticmethod
     def root(cwd: Path) -> Path | None:
@@ -200,4 +227,5 @@ def _rewritten(
             update={"cwd": cwd, "workspace_roots": workspace_roots, "worktree": None}
         ),
         prepared_worktree=resolved.prepared,
+        pending_hold=resolved.pending_hold,
     )

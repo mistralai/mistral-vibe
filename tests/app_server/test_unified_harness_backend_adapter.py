@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable
 import contextlib
+from dataclasses import replace
 import json
 import logging
 from pathlib import Path
@@ -11,6 +12,7 @@ import time
 import tomllib
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
+from unittest.mock import AsyncMock, Mock
 
 import mistralai_vibe_local_harness.session_protocol as harness_session_protocol
 import pytest
@@ -24,6 +26,7 @@ from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from vibe.app_server import _runtime as runtime_module
 from vibe.app_server._account import WhoAmIResult
+from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._mcp_auth import MCPAuthenticationService
 import vibe.app_server._narration as narration_module
 from vibe.app_server._plugin_mcp import PluginMCPCatalog
@@ -73,6 +76,7 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import (
     AppServerResponseError,
+    AutoWorktreeInput,
     CallbackResultError,
     ClientCapabilities,
     ClientInfo,
@@ -678,7 +682,7 @@ def test_unified_mcp_projection_update_preserves_connector_sources() -> None:
 
 
 @pytest.mark.asyncio
-async def test_legacy_session_start_records_the_python_harness(
+async def test_legacy_session_start_records_the_legacy_harness(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     client_transport, server_transport = memory_transport_pair()
@@ -696,11 +700,11 @@ async def test_legacy_session_start_records_the_python_harness(
         finally:
             await session.close()
 
-    assert recorded == [("python", session.session_id)]
+    assert recorded == [("legacy", session.session_id)]
 
 
 @pytest.mark.asyncio
-async def test_unified_harness_session_start_records_the_rust_harness(
+async def test_unified_harness_session_start_records_the_unified_harness(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     client, server = _connect_harness_host()
@@ -716,7 +720,7 @@ async def test_unified_harness_session_start_records_the_rust_harness(
             await server.close()
 
     recorded = _recorded_sessions(caplog)
-    assert recorded == [("rust", started.state.session.id)]
+    assert recorded == [("unified", started.state.session.id)]
     assert started.state.history == []
     assert started.state.session.cwd is not None
 
@@ -5304,7 +5308,7 @@ async def test_unified_harness_start_returns_distinct_session_identities() -> No
     second = await host.start(SessionStartParams())
     await host.shutdown()
 
-    assert host.harness_kind == "rust"
+    assert host.harness_kind == "unified"
     assert first.backend.session_id != second.backend.session_id
 
 
@@ -5540,6 +5544,94 @@ async def test_resume_compiles_hooks_against_the_session_cwd(tmp_path: Path) -> 
     # never the caller's `elsewhere`.
     assert seen_cwds[-1] == str(project.resolve())
     assert seen_cwds[-1] != str(elsewhere)
+
+
+@pytest.mark.asyncio
+async def test_pin_releases_pending_worktree_hold_when_context_rebuild_fails(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendHostAdapter,
+    )
+    from vibe.app_server._worktree_session import WorktreeResolution
+
+    stored_cwd = str(tmp_path / "stored")
+
+    harness = Mock()
+    harness.session_cwd = AsyncMock(return_value=stored_cwd)
+    host = UnifiedHarnessBackendHostAdapter(
+        cast(Any, harness), AsyncMock(side_effect=RuntimeError("context failed"))
+    )
+    pending_hold = Mock()
+    resolution = WorktreeResolution(
+        options=SessionOptions(cwd=stored_cwd), pending_hold=cast(Any, pending_hold)
+    )
+    cast(Any, host._worktrees).resolve_for_start = AsyncMock(return_value=resolution)
+
+    with pytest.raises(RuntimeError, match="context failed"):
+        await host._pin_to_session_cwd(
+            SessionOptions(cwd=str(tmp_path / "requested")),
+            "session-1",
+            cast(Any, object()),
+            cast(Any, object()),
+            require_api_key=True,
+        )
+
+    pending_hold.release.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_fork_releases_pending_worktree_hold_when_open_fails() -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendHostAdapter,
+    )
+    from vibe.app_server._worktree_session import WorktreeResolution
+
+    harness = Mock()
+    harness.fork = AsyncMock(side_effect=RuntimeError("fork failed"))
+    host = UnifiedHarnessBackendHostAdapter(cast(Any, harness), AsyncMock())
+    context = Mock()
+    context.hooks.handlers = ()
+    derivation = Mock()
+    pending_hold = Mock()
+    resolution = WorktreeResolution(
+        options=SessionOptions(), pending_hold=cast(Any, pending_hold)
+    )
+    raw_host = cast(Any, host)
+    raw_host._context = AsyncMock(return_value=(context, derivation))
+    raw_host._pin_to_session_cwd = AsyncMock(
+        return_value=(context, derivation, resolution)
+    )
+
+    with pytest.raises(RuntimeError, match="fork failed"):
+        await host.fork(SessionForkParams(source_session_id="session-1"))
+
+    pending_hold.release.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_fork_rejects_a_new_worktree_request() -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendHostAdapter,
+    )
+
+    harness = Mock()
+    host = UnifiedHarnessBackendHostAdapter(cast(Any, harness), AsyncMock())
+
+    with pytest.raises(RequestFailure, match="only supported when starting"):
+        await host.fork(
+            SessionForkParams(
+                source_session_id="session-1",
+                agent_config=SessionOptions(
+                    worktree=AutoWorktreeInput(prompt="create another checkout")
+                ),
+            )
+        )
+
+    harness.fork.assert_not_called()
 
 
 def test_foreign_hook_definitions_preserve_a_zero_timeout(tmp_path: Path) -> None:
@@ -8605,6 +8697,118 @@ async def test_unified_list_folder_scoping_excludes_non_matching_legacy(
     )
 
     assert other_legacy_id not in {item.id for item in listed.items}
+
+
+@pytest.mark.asyncio
+async def test_unified_list_previews_only_untitled_legacy_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A titled legacy row costs no transcript read: every consumer renders
+    ``title or preview``, so the read would be thrown away.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server import _unified_harness_backend_adapter as adapter_module
+    from vibe.core.session.resume_sessions import ResumeSessionInfo
+
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    project_cwd = str((tmp_path / "project").resolve())
+    (tmp_path / "project").mkdir()
+
+    monkeypatch.setattr(
+        adapter_module,
+        "list_local_resume_sessions",
+        lambda _config, _cwd: [
+            ResumeSessionInfo(
+                session_id="titled",
+                cwd=project_cwd,
+                title="A saved title",
+                updated_at="2026-01-01T00:00:00",
+            ),
+            ResumeSessionInfo(
+                session_id="untitled", cwd=project_cwd, updated_at="2026-01-01T00:00:01"
+            ),
+        ],
+    )
+    previewed: list[str] = []
+
+    def _preview(session_id: str, _logging: Any) -> str:
+        previewed.append(session_id)
+        return "the first user message"
+
+    monkeypatch.setattr(
+        adapter_module.SessionLoader, "get_first_user_message", _preview
+    )
+
+    listed = await _harness_backend_host(config).list(
+        SessionListParams(cwd=project_cwd)
+    )
+
+    assert previewed == ["untitled"]
+    rows = {item.id: item for item in listed.items}
+    assert rows["titled"].title == "A saved title"
+    assert rows["titled"].preview == ""
+    assert rows["untitled"].preview == "the first user message"
+
+
+@pytest.mark.asyncio
+async def test_unified_list_cursor_walk_reads_one_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paging holds the merge the first page paid for. Rebuilding per page
+    would sweep both stores again, and re-sorting live data mid-walk would
+    drop any session whose ``updated_at`` moved it back behind the cursor.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server import _unified_harness_backend_adapter as adapter_module
+    from vibe.core.session.resume_sessions import ResumeSessionInfo
+
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    project_cwd = str((tmp_path / "project").resolve())
+    (tmp_path / "project").mkdir()
+
+    stored = [
+        ResumeSessionInfo(
+            session_id=f"legacy-{index}",
+            cwd=project_cwd,
+            title=f"title {index}",
+            updated_at=f"2026-01-01T00:00:{index:02d}",
+        )
+        for index in range(5)
+    ]
+    builds = 0
+
+    def _listing(_config: Any, _cwd: Any) -> list[ResumeSessionInfo]:
+        nonlocal builds
+        builds += 1
+        return list(stored)
+
+    monkeypatch.setattr(adapter_module, "list_local_resume_sessions", _listing)
+
+    host = _harness_backend_host(config)
+    walked: list[str] = []
+    cursor: str | None = None
+    while True:
+        page = await host.list(
+            SessionListParams(cwd=project_cwd, limit=2, cursor=cursor)
+        )
+        walked.extend(item.id for item in page.items)
+        # The oldest session becomes the newest between pages. Against a live
+        # re-sort it would jump ahead of the cursor and never be returned.
+        stored[0] = replace(stored[0], updated_at="2026-01-01T00:01:00")
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+
+    assert builds == 1
+    assert sorted(walked) == [f"legacy-{index}" for index in range(5)]
 
 
 @pytest.mark.asyncio

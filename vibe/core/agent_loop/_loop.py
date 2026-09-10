@@ -1081,7 +1081,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self, tool_name: str, permission: ToolPermission, save_permanently: bool = False
     ) -> None:
         if save_permanently:
-            await self.config_orchestrator.set_field(
+            await self.config_orchestrator.set_field_or_warn(
                 f"/tools/{tool_name}/permission", permission.value
             )
 
@@ -1112,7 +1112,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     ).allowlist,
                 )
             ):
-                await self.config_orchestrator.set_field(
+                await self.config_orchestrator.set_field_or_warn(
                     f"/tools/{tool_name}/allowlist",
                     update["tools"][tool_name]["allowlist"],
                 )

@@ -408,6 +408,7 @@ def test_session_start_worktree_auto_selection_without_prompt_uses_a_slug(
 def test_session_start_worktree_existing_selection_resolves_cwd(tmp_path: Path) -> None:
     _init_repo(tmp_path)
     worktree = _prepare("existing-worktree", tmp_path, branch="feat/existing-worktree")
+    _finish_worktree_start(worktree)
 
     resolution = SessionWorktrees.resolve(
         SessionOptions(
@@ -422,6 +423,23 @@ def test_session_start_worktree_existing_selection_resolves_cwd(tmp_path: Path) 
     assert options.cwd == str(worktree.path)
     assert options.workspace_roots == [str(worktree.path)]
     assert resolution.prepared_worktree is None
+    assert resolution.pending_hold is not None
+    assert ManagedWorktree.prune(limit=0) == 0
+    resolution.pending_hold.release()
+
+
+def test_session_start_from_managed_worktree_holds_it_for_attachment(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+    worktree = _prepare("existing-worktree", tmp_path, branch="feat/existing-worktree")
+    _finish_worktree_start(worktree)
+
+    resolution = SessionWorktrees.resolve(SessionOptions(cwd=str(worktree.path)))
+
+    assert resolution.pending_hold is not None
+    assert ManagedWorktree.prune(limit=0) == 0
+    resolution.pending_hold.release()
 
 
 def test_session_list_falls_back_for_malformed_saved_timestamps(
@@ -1845,7 +1863,7 @@ def test_experimental_harness_process_selects_the_unified_harness_host(
         UnifiedHarnessBackendHostAdapter,
     )
 
-    selected = SimpleNamespace(harness_kind="rust")
+    selected = SimpleNamespace(harness_kind="unified")
     monkeypatch.setattr(
         runtime, "create_experimental_harness_host", lambda *_args, **_kwargs: selected
     )
@@ -2656,7 +2674,7 @@ async def test_a_worktree_is_removed_when_the_session_cannot_hold_it(
     worktrees = SessionWorktrees()
     attempted: list[Path] = []
 
-    def refuse(cwd: Path, _session_id: str) -> None:
+    def refuse(cwd: Path, _session_id: str, _reservation: object = None) -> None:
         attempted.append(cwd)
         raise OSError("holder write failed")
 

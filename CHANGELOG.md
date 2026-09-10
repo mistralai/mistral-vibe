@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.25.2] - 2026-09-10
+
+### Added
+
+- VS Code extension: debug submenu with log level picker, open log file, and a togglable session status panel showing agent statistics (steps, tokens, tokens/sec, context, cost)
+
+### Changed
+
+- Open the session picker faster by building the merged session listing once per cursor walk instead of on every page.
+- Renamed `SessionBackendKind` literals from `"python"`/`"rust"` to `"legacy"`/`"unified"` to match backend identity naming.
+
+### Fixed
+
+- An "always" permission grant that fails to reach `~/.vibe` now warns instead of passing silently: `ConfigOrchestrator.set_field` returns its errors rather than raising, so an ignored failure looked exactly like a successful write and the next session asked again with nothing to explain why.
+- Steered prompts now preserve their host-provided display content in app-server session history.
+- Preserve the selected permission mode when a session starts in a worktree.
+- Managed worktree creation, attachment, and retention cleanup are serialized across processes, and stale reservations are recovered safely.
+- Stop dropping a session from the picker when it is touched while paging through the list.
+
 ## [2.25.1] - 2026-09-09
 
 ### Added

@@ -241,7 +241,7 @@ def _enter_worktree(args: argparse.Namespace) -> PreparedWorktree:
         sys.exit(1)
     rprint(f"[dim]Using worktree: {session.path}[/]", file=sys.stderr)
     if managed := ManagedWorktree.at(session.root):
-        managed.hold(_cli_worktree_holder())
+        managed.hold(_cli_worktree_holder(), session.pending_hold)
     os.chdir(session.path)
     return session
 
