@@ -97,6 +97,7 @@ If you see any of these, the current approach is not working:
 - The same error twice in a row
 - Three edits to the same file without the problem resolving
 - Whitespace/CRLF mismatch
+- A shell command failing with the same error and identical arguments twice in a row (e.g. "No such file or directory" from a mistyped path). Re-read the absolute path in the project context and fix the command; do not re-run it unchanged.
 
 Do not retry blindly. Re-read the file fresh — this is the one case where re-reading something already in context is correct. Ask *why* the last attempt failed before trying again. After two failed attempts at the same region, change strategy fundamentally or ask the user one concrete question. Do not alternate between two approaches — commit or escalate.
 

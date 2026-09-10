@@ -1062,3 +1062,144 @@ async def test_pending_injected_message_continues_loop_after_tool_result() -> No
         m for m in reversed(agent_loop.messages) if m.role == Role.assistant
     )
     assert "Acting on the injected guidance" in (last_assistant.content or "")
+
+
+@pytest.mark.asyncio
+async def test_repeated_identical_tool_failure_injects_circuit_breaker() -> None:
+    """The agent loop detects N consecutive identical tool failures and injects
+    a corrective user message so the model stops retrying verbatim."""
+    from vibe.core.tools.base import ToolError
+
+    make_call = lambda cid: ToolCall(
+        id=cid, index=0, function=FunctionCall(name="stub_tool", arguments="{}")
+    )
+    backend = FakeBackend([
+        [mock_llm_chunk(content="Try 1.", tool_calls=[make_call("f1")])],
+        [mock_llm_chunk(content="Try 2.", tool_calls=[make_call("f2")])],
+        [mock_llm_chunk(content="Try 3.", tool_calls=[make_call("f3")])],
+        [mock_llm_chunk(content="I will stop retrying and change approach.")],
+    ])
+    config = build_test_vibe_config(enabled_tools=["stub_tool"])
+    agent_loop = build_test_agent_loop(
+        config=config,
+        agent_name=BuiltinAgentName.AUTO_APPROVE,
+        backend=backend,
+    )
+    agent_loop.tool_manager._all_tools["stub_tool"] = FakeTool
+    stub_tool_instance = agent_loop.tool_manager.get("stub_tool")
+    assert isinstance(stub_tool_instance, FakeTool)
+    stub_tool_instance._exception_to_raise = ToolError("Command failed: 'ls /bad/path'")
+
+    events: list[BaseEvent] = []
+    async for ev in agent_loop.act("List the files"):
+        events.append(ev)
+
+    assert agent_loop.stats.tool_calls_failed == 3
+
+    injected = [
+        m
+        for m in agent_loop.messages
+        if m.role == Role.user and m.injected and "failed" in (m.content or "")
+    ]
+    assert len(injected) == 1
+    assert "same arguments" in (injected[0].content or "")
+    assert "stub_tool" in (injected[0].content or "")
+
+    last_assistant = next(
+        m for m in reversed(agent_loop.messages) if m.role == Role.assistant
+    )
+    assert "stop retrying" in (last_assistant.content or "")
+
+
+@pytest.mark.asyncio
+async def test_different_tool_failures_do_not_trigger_circuit_breaker() -> None:
+    """Two failures with different arguments must not trip the circuit-breaker."""
+    from vibe.core.tools.base import ToolError
+
+    make_call = lambda cid, text: ToolCall(
+        id=cid,
+        index=0,
+        function=FunctionCall(name="stub_tool", arguments=json.dumps({"text": text})),
+    )
+    backend = FakeBackend([
+        [mock_llm_chunk(content="Try 1.", tool_calls=[make_call("d1", "aaa")])],
+        [mock_llm_chunk(content="Try 2.", tool_calls=[make_call("d2", "bbb")])],
+        [mock_llm_chunk(content="Done.")],
+    ])
+    config = build_test_vibe_config(enabled_tools=["stub_tool"])
+    agent_loop = build_test_agent_loop(
+        config=config,
+        agent_name=BuiltinAgentName.AUTO_APPROVE,
+        backend=backend,
+    )
+    agent_loop.tool_manager._all_tools["stub_tool"] = FakeTool
+    stub_tool_instance = agent_loop.tool_manager.get("stub_tool")
+    assert isinstance(stub_tool_instance, FakeTool)
+    stub_tool_instance._exception_to_raise = ToolError("boom")
+
+    async for _ in agent_loop.act("Go"):
+        pass
+
+    assert agent_loop.stats.tool_calls_failed == 2
+    injected = [
+        m
+        for m in agent_loop.messages
+        if m.role == Role.user and m.injected and "failed" in (m.content or "")
+    ]
+    assert len(injected) == 0
+
+
+@pytest.mark.asyncio
+async def test_success_resets_repeated_failure_counter() -> None:
+    """A successful tool call between two identical failures must reset the
+    counter so the circuit-breaker does not fire."""
+    from vibe.core.tools.base import ToolError
+
+    make_call = lambda cid, text: ToolCall(
+        id=cid,
+        index=0,
+        function=FunctionCall(name="stub_tool", arguments=json.dumps({"text": text})),
+    )
+    backend = FakeBackend([
+        [mock_llm_chunk(content="Fail.", tool_calls=[make_call("r1", "x")])],
+        [mock_llm_chunk(content="Succeed.", tool_calls=[make_call("r2", "x")])],
+        [mock_llm_chunk(content="Fail.", tool_calls=[make_call("r3", "x")])],
+        [mock_llm_chunk(content="Done.")],
+    ])
+    config = build_test_vibe_config(enabled_tools=["stub_tool"])
+    agent_loop = build_test_agent_loop(
+        config=config,
+        agent_name=BuiltinAgentName.AUTO_APPROVE,
+        backend=backend,
+    )
+    agent_loop.tool_manager._all_tools["stub_tool"] = FakeTool
+    stub_tool_instance = agent_loop.tool_manager.get("stub_tool")
+    assert isinstance(stub_tool_instance, FakeTool)
+
+    # Fail, then succeed, then fail — only 2 total failures, not 3 consecutive.
+    call_count = 0
+
+    original_run = stub_tool_instance.run
+
+    async def selective_run(args, ctx=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            async for item in original_run(args, ctx):
+                yield item
+        else:
+            raise ToolError("boom")
+
+    stub_tool_instance.run = selective_run
+
+    async for _ in agent_loop.act("Go"):
+        pass
+
+    assert agent_loop.stats.tool_calls_failed == 2
+    assert agent_loop.stats.tool_calls_succeeded == 1
+    injected = [
+        m
+        for m in agent_loop.messages
+        if m.role == Role.user and m.injected and "failed" in (m.content or "")
+    ]
+    assert len(injected) == 0

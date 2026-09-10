@@ -645,6 +645,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.messages = MessageList()
 
         self.stats = AgentStats()
+        # Circuit-breaker: track consecutive identical tool failures so the
+        # agent loop can nudge the model off a retry spiral (e.g. a mistyped
+        # path that fails "No such file or directory" on every attempt).
+        self._repeated_tool_failure_key: str | None = None
+        self._repeated_tool_failure_count: int = 0
         self._tool_event_queue: asyncio.Queue[BaseEvent | None] | None = None
         self._request_broker = InteractionRequestBroker()
         self._active_turn: _ActiveTurn | None = None
@@ -2022,6 +2027,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.messages.append(user_message)
         self.stats.steps += 1
         self._current_user_message_id = user_message.message_id
+        self._reset_repeated_tool_failure_tracking()
 
         if user_message.message_id is None:
             raise AgentLoopError("User message must have a message_id")
@@ -2783,6 +2789,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     type(exc).__name__,
                 )
                 self.stats.tool_calls_failed += 1
+                self._track_repeated_tool_failure(tool_call.tool_name, tool_input)
             yield ToolResultEvent(
                 tool_name=tool_call.tool_name,
                 tool_class=tool_call.tool_class,
@@ -2903,6 +2910,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         ):
             yield ev
         self.stats.tool_calls_succeeded += 1
+        self._reset_repeated_tool_failure_tracking()
         logger.info(
             "Tool call completed tool=%s tool_call_id=%s duration_ms=%d outcome=%s",
             tool_call.tool_name,
@@ -3025,6 +3033,56 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             cancelled=cancelled,
             tool_call_id=tool_call.call_id,
         )
+
+    _REPEATED_TOOL_FAILURE_THRESHOLD = 3
+
+    def _track_repeated_tool_failure(
+        self, tool_name: str, tool_input: dict[str, Any]
+    ) -> None:
+        """Count consecutive identical tool failures and break the spiral.
+
+        When the same tool is called with the same arguments and fails
+        ``_REPEATED_TOOL_FAILURE_THRESHOLD`` times in a row, inject a
+        corrective user message so the model stops retrying verbatim. The
+        counter resets on any success, a new user turn, or a different
+        call key.
+        """
+        key = f"{tool_name}:{json.dumps(tool_input, sort_keys=True)}"
+        if key == self._repeated_tool_failure_key:
+            self._repeated_tool_failure_count += 1
+        else:
+            self._repeated_tool_failure_key = key
+            self._repeated_tool_failure_count = 1
+
+        if self._repeated_tool_failure_count < self._REPEATED_TOOL_FAILURE_THRESHOLD:
+            return
+
+        logger.warning(
+            "Repeated identical tool failure tool=%s count=%d — injecting circuit-breaker",
+            tool_name,
+            self._repeated_tool_failure_count,
+        )
+        self._pending_injected_messages.append(
+            LLMMessage(
+                role=Role.user,
+                content=(
+                    f"<{VIBE_WARNING_TAG}>The tool '{tool_name}' has now failed "
+                    f"{self._repeated_tool_failure_count} times in a row with the "
+                    f"same arguments. Re-running it unchanged will keep failing. "
+                    f"Stop and reconsider: if a path is involved, compare it "
+                    f"against the absolute path in the project context for typos; "
+                    f"otherwise change your approach or ask the user for help."
+                    f"</{VIBE_WARNING_TAG}>"
+                ),
+                injected=True,
+            )
+        )
+        self._repeated_tool_failure_key = None
+        self._repeated_tool_failure_count = 0
+
+    def _reset_repeated_tool_failure_tracking(self) -> None:
+        self._repeated_tool_failure_key = None
+        self._repeated_tool_failure_count = 0
 
     def _messages_for_backend(
         self, messages: Sequence[LLMMessage], active_model: ModelConfig

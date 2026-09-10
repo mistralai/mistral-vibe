@@ -3,6 +3,7 @@ Execute a shell command and return its output.
 - Prefer absolute paths. Shell state — working directory, environment variables, functions — does NOT persist between calls; each call starts a fresh shell from the user's profile.
 - Prefer the dedicated tools over shell utilities: use `read_file` instead of `cat`/`head`/`tail`, `grep` instead of `grep`/`sed`/`awk` for searching, and `edit`/`write_file` instead of `sed`/`echo` redirects. Only fall back to the shell utility if a dedicated tool genuinely cannot do the task.
 - Commands run under a permission model (allow / deny / ask). A denied command means the user declined it — adjust your approach, don't retry the same command verbatim.
+- A non-zero exit code is a failure, not a denial. If a command fails with "No such file or directory", compare every path in the command against the absolute path given in the project context before retrying — a typo in a path will fail identically every time. Do not retry a failed command verbatim; fix the root cause or change approach.
 - `timeout` is in seconds (default 300). The command is killed if it exceeds the timeout; there is no background execution, so avoid launching long-running or blocking processes.
 
 # Git
