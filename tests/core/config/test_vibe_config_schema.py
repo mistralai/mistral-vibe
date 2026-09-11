@@ -111,6 +111,10 @@ def test_default_agent_is_accept_edits() -> None:
     assert VibeConfigSchema().default_agent == "accept-edits"
 
 
+def test_file_watcher_for_autocomplete_is_enabled_by_default() -> None:
+    assert VibeConfigSchema().file_watcher_for_autocomplete is True
+
+
 def test_smart_approve_is_not_offered_by_default() -> None:
     config = VibeConfigSchema()
     assert config.smart_approve_offered() is False

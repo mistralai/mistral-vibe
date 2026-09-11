@@ -10,9 +10,11 @@ from vibe.core.git.worktree.record import (
     CLAIMS_DIR_NAME,
     HOLDERS_DIR_NAME,
     RECORD_FILENAME,
+    RECOVERY_FILENAME,
     WorktreeClaim,
     WorktreeRecord,
     WorktreeRecordError,
+    WorktreeRecoveryRecord,
     _claims_root,
     managed_bucket_name,
 )
@@ -54,6 +56,31 @@ def test_record_keeps_base_commit(tmp_path: Path) -> None:
     loaded = _claim().read()
     assert loaded is not None
     assert loaded.base_commit == "abc123"
+
+
+def test_recovery_round_trips(tmp_path: Path) -> None:
+    record = _record(repo_root=tmp_path).model_copy(update={"base_commit": "abc123"})
+    recovery = WorktreeRecoveryRecord.new(
+        record, snapshot_ref="refs/vibe/reaped/feature"
+    )
+
+    _claim().write_recovery(recovery)
+
+    assert _claim().read_recovery() == recovery
+    assert _claim().has_recovery() is True
+
+
+def test_deleting_active_record_preserves_recovery(tmp_path: Path) -> None:
+    record = _record(repo_root=tmp_path).model_copy(update={"base_commit": "abc123"})
+    _claim().write(record)
+    _claim().write_recovery(
+        WorktreeRecoveryRecord.new(record, snapshot_ref="refs/vibe/reaped/feature")
+    )
+
+    _claim().delete()
+
+    assert _claim().read() is None
+    assert (_claim().directory / RECOVERY_FILENAME).is_file()
 
 
 def test_record_ignores_unknown_future_fields(tmp_path: Path) -> None:
@@ -205,11 +232,13 @@ def test_holder_lock_is_reference_counted(tmp_path: Path) -> None:
     assert _claim().holders() == frozenset()
 
 
-def test_starting_marker_is_live_only_while_held(tmp_path: Path) -> None:
+def test_starting_marker_is_exclusive_and_live_only_while_held(tmp_path: Path) -> None:
     _claim().write(_record(repo_root=tmp_path))
 
     _claim().mark_starting()
     assert _claim().is_starting() is True
+    with pytest.raises(WorktreeRecordError, match="already active"):
+        _claim().mark_starting()
 
     _claim().finish_starting()
     assert _claim().is_starting() is False

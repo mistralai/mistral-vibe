@@ -19,14 +19,9 @@ import time
 from typing import Any, Final, Literal, Never, Protocol, assert_never, cast
 from uuid import uuid4
 
-from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
-    RustHarnessConfig,
-)
-import mistralai_vibe_local_harness.session_protocol as harness_session_protocol  # pyright: ignore[reportMissingImports]
-
-# `mistralai-vibe-local-harness` is an optional extra, so an environment that never
-# installs it — CI's type-check job included — cannot resolve these.
-from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+from mistralai_vibe_local_harness.protocol import RustHarnessConfig
+import mistralai_vibe_local_harness.session_protocol as harness_session_protocol
+from mistralai_vibe_local_harness.session_protocol import (
     Event as HarnessEvent,
     PublicSession as HarnessPublicSession,
     PublicSessionState as HarnessPublicSessionState,
@@ -42,7 +37,7 @@ from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[r
     TurnQueueResumeParams as HarnessTurnQueueResumeParams,
     TurnQueueUpdatedEvent as HarnessTurnQueueUpdatedEvent,
 )
-from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+from mistralai_vibe_local_harness.vibe import (
     CLASSIFICATION_EVENT_TYPE,
     CompiledHooks,
     ConnectorGatewayClient as HarnessConnectorGatewayClient,
@@ -71,13 +66,8 @@ from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissing
     UnifiedHarnessSessionBackend,
     UnifiedHarnessSessionBackendHost,
 )
-from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-    SessionPin,
-    sha256_json,
-)
-from mistralai_vibe_local_harness.vibe.plugins import (  # pyright: ignore[reportMissingImports]
-    SessionPluginBinding,
-)
+from mistralai_vibe_local_harness.vibe._storage import SessionPin, sha256_json
+from mistralai_vibe_local_harness.vibe.plugins import SessionPluginBinding
 from pydantic import ValidationError
 
 from vibe import __version__
@@ -1189,6 +1179,15 @@ class UnifiedHarnessBackendHostAdapter:
         self, params: SessionListParams, key: _MergedListingKey
     ) -> _MergedListing:
         options = SessionOptions(cwd=params.cwd)
+        requested_cwd = (
+            Path(params.cwd).expanduser().resolve() if params.cwd is not None else None
+        )
+        retained_repository = (
+            requested_cwd
+            if requested_cwd is not None
+            and not self._worktrees.is_managed(requested_cwd)
+            else None
+        )
         # Listing sessions has never needed a credential; the legacy path
         # answers it through structurally loaded configuration without credential
         # validation.
@@ -1198,8 +1197,10 @@ class UnifiedHarnessBackendHostAdapter:
         # filesystem scan, so reading them in sequence would add the smaller
         # to the larger for nothing.
         (unified_items, continue_session_id), legacy_items = await asyncio.gather(
-            self._sweep_unified_sessions(params, options),
-            self._list_legacy_sessions(params, context.config_orchestrator.config),
+            self._sweep_unified_sessions(params, options, retained_repository),
+            self._list_legacy_sessions(
+                params, context.config_orchestrator.config, retained_repository
+            ),
         )
 
         # Merge and sort by (updated_at, session_id) descending. Session IDs are
@@ -1215,7 +1216,10 @@ class UnifiedHarnessBackendHostAdapter:
         )
 
     async def _sweep_unified_sessions(
-        self, params: SessionListParams, options: SessionOptions
+        self,
+        params: SessionListParams,
+        options: SessionOptions,
+        retained_repository: Path | None,
     ) -> tuple[list[PublicSession], str | None]:
         """Every unified session matching the request, and the continue pointer."""
         items: list[PublicSession] = []
@@ -1226,7 +1230,13 @@ class UnifiedHarnessBackendHostAdapter:
                 self._host.list(
                     limit=_SESSION_LISTING_PAGE,
                     cursor=cursor,
-                    cwd=_session_cwd(options) if params.cwd is not None else None,
+                    cwd=(
+                        None
+                        if retained_repository is not None
+                        else _session_cwd(options)
+                        if params.cwd is not None
+                        else None
+                    ),
                     root_session_id=params.root_session_id,
                     parent_session_id=params.parent_session_id,
                 )
@@ -1240,10 +1250,27 @@ class UnifiedHarnessBackendHostAdapter:
             if result.next_cursor is None or not result.items:
                 break
             cursor = result.next_cursor
+        if retained_repository is not None:
+            items = [
+                session
+                for session in items
+                if self._session_cwd_matches(session.cwd, retained_repository)
+            ]
+            listed_ids = {session.id for session in items}
+            if continue_session_id not in listed_ids:
+                latest = max(
+                    items,
+                    key=lambda session: (session.updated_at, session.id),
+                    default=None,
+                )
+                continue_session_id = latest.id if latest is not None else None
         return items, continue_session_id
 
     async def _list_legacy_sessions(
-        self, params: SessionListParams, config: VibeConfigSchema
+        self,
+        params: SessionListParams,
+        config: VibeConfigSchema,
+        retained_repository: Path | None,
     ) -> list[PublicSession]:
         """Every legacy session matching the request, in one filesystem read.
 
@@ -1258,10 +1285,36 @@ class UnifiedHarnessBackendHostAdapter:
             # Projected on the worker thread too: an untitled session still
             # reads its transcript for a preview, which must not run on the
             # event loop.
-            return await asyncio.to_thread(_legacy_public_sessions, config, params.cwd)
+            sessions = await asyncio.to_thread(
+                _legacy_public_sessions,
+                config,
+                None if retained_repository is not None else params.cwd,
+            )
         except OSError:
             logger.debug("Legacy session listing failed; returning unified-only")
             return []
+        if retained_repository is None:
+            return sessions
+        return [
+            session
+            for session in sessions
+            if self._session_cwd_matches(session.cwd, retained_repository)
+        ]
+
+    def _session_cwd_matches(
+        self, session_cwd: str | None, requested_cwd: Path
+    ) -> bool:
+        if session_cwd is None:
+            return False
+        cwd = Path(session_cwd).expanduser().resolve()
+        if cwd == requested_cwd:
+            return True
+        mapping = self._worktrees.retained_repository_mapping(cwd)
+        return (
+            mapping is not None
+            and requested_cwd.is_relative_to(mapping.root)
+            and mapping.cwd.is_relative_to(requested_cwd)
+        )
 
     async def read(self, params: SessionReadParams) -> SessionReadResponse:
         options = SessionOptions()
@@ -1690,11 +1743,16 @@ class UnifiedHarnessBackendHostAdapter:
         skips every persisted hook or binds the wrong project's hooks (§7 as-built).
         """
         stored_cwd = await _harness_call(self._host.session_cwd(session_id))
+        restored = False
+        if stored_cwd is not None:
+            restored = await self._worktrees.restore(Path(stored_cwd))
         pinned_options = _with_session_cwd(options, stored_cwd)
         resolution = await self._worktrees.resolve_for_start(pinned_options)
         try:
-            if stored_cwd is not None and stored_cwd != _session_cwd(options):
-                if options.trust_workspace:
+            if stored_cwd is not None and (
+                restored or stored_cwd != _session_cwd(options)
+            ):
+                if options.trust_workspace and stored_cwd != _session_cwd(options):
                     # The first build recorded an ephemeral --trust grant for the caller cwd on
                     # the process-wide trust store. Its ancestor walk would still trust the pinned
                     # (often descendant) session cwd, so revoke that one grant before rebuilding.

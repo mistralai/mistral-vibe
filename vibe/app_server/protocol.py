@@ -1456,6 +1456,14 @@ class WorkspaceWorktreeListResponse(ProtocolModel):
     # must take this rather than joining the root itself, because a path this
     # omits is one a move would refuse.
     repository_cwd: str | None = None
+    # The same repository-relative position without requiring it to exist in
+    # the main checkout. Used to associate retained sessions with projects;
+    # unlike repository_cwd, it is not necessarily a valid move destination.
+    repository_mapped_cwd: str | None = None
+    # The repository the listing was taken from. Pair with
+    # repository_mapped_cwd so a nested repository is not treated as part of
+    # a parent project just because its path sits underneath it.
+    repository_root: str | None = None
 
 
 class WorkspaceWorktreePruneParams(ProtocolModel):

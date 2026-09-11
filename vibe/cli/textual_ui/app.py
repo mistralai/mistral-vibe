@@ -146,6 +146,7 @@ from vibe.cli.textual_ui.quit_manager import QuitManager
 from vibe.cli.textual_ui.scheduled_loop_runner import ScheduledLoopCommands
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
+from vibe.cli.textual_ui.widgets.branch_created_message import BranchCreatedMessage
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputBody, ChatInputContainer
 from vibe.cli.textual_ui.widgets.chat_input.input_kinds import (
     Bash,
@@ -4009,6 +4010,31 @@ class VibeApp(App):  # noqa: PLR0904
         self._on_session_title_changed(renamed_title)
         await self._mount_and_scroll(
             UserCommandMessage(f'Session renamed to "{renamed_title}".')
+        )
+
+    async def _branch_session(self, cmd_args: str = "", **kwargs: Any) -> None:
+        old_session_id = self.app_server.session_id
+        try:
+            response = await self.app_server.resources.sessions.fork(
+                entry_id=None, attach=False
+            )
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to branch session: {e}", collapsed=self._tools_collapsed
+                )
+            )
+            return
+
+        new_session_id = response.state.session.id
+        self.app_server.resources.telemetry.record(
+            "vibe.session_branched",
+            {"source_session_id": old_session_id, "new_session_id": new_session_id},
+        )
+        await self._mount_and_scroll(
+            BranchCreatedMessage(
+                old_session_id=old_session_id, new_session_id=new_session_id
+            )
         )
 
     async def _log_level_command(self, **kwargs: Any) -> None:

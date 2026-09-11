@@ -32,7 +32,7 @@ pytest.importorskip("mistralai_vibe_local_harness.vibe")
 # port at module scope -- the service implements it, so importing the service
 # is importing it. `mistralai-vibe-local-harness` is an optional extra, and an
 # environment without it must skip this module rather than fail to collect it.
-from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+from mistralai_vibe_local_harness.vibe import (
     ProviderAuthRequired,
     ProviderCredentialSnapshot,
     invalid_api_key_message,

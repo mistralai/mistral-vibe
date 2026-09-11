@@ -100,6 +100,9 @@ install: `uv tool install mistral-vibe`.
   falls back to latest in cwd).
 - `vibe --resume [SESSION_ID]`: specific session; without an id, opens a picker.
 - In-session: `/resume` (alias `/continue`).
+- `/branch` - Fork the current conversation into a new resumable session,
+  leaving this session unchanged. Resume the copy in another terminal with
+  `vibe --resume <id>` (the id is printed when the branch is created).
 
 #### Session titles
 
@@ -166,7 +169,7 @@ active_model = "mistral-medium-3.5"  # Model alias to pin; omit or set "" to fol
 theme = "auto"  # Follow terminal background, then OS light/dark preference
 disable_welcome_banner_animation = false
 autocopy_to_clipboard = true  # Enable automatic copying of selected text to clipboard
-file_watcher_for_autocomplete = false
+file_watcher_for_autocomplete = true  # Refresh @ suggestions after workspace changes
 ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
 show_greeting = true  # Show "Hello {name}" greeting below the banner at startup (Mistral providers, once per 24h)
 log_level = "WARNING"  # Optional. DEBUG | INFO | WARNING | ERROR | CRITICAL — log level for ~/.vibe/logs/vibe.log
@@ -854,10 +857,13 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 
 ## File Mentions (`@`)
 
-Type `@` in the chat input to autocomplete files and folders from the
-project tree. Pressing Tab/Enter inserts the chosen path. Your message text
-is sent as-is (the `@path` stays in the prompt); behavior then depends on
-the mention kind:
+Type `@` in the chat input to autocomplete files and folders. A bare `@`
+lists non-hidden immediate children directly from the filesystem for fast
+browsing. Once you type a path character, Git workspaces use tracked and
+non-ignored untracked paths, including nested `.gitignore` rules; outside Git
+the picker falls back to the project tree. Pressing Tab/Enter inserts the
+chosen path. Your message text is sent as-is (the `@path` stays in the prompt);
+behavior then depends on the mention kind:
 
 - **Text files** trigger a synthetic `read_file` tool call injected right
   after your message, so the file content arrives as a fresh tool result
@@ -882,11 +888,11 @@ Image attachments:
 - Out-of-project paths work via `@/abs/path/to.png` (the picker only
   suggests project files, but the `@`-parser accepts absolute paths).
   Drag-and-drop from Finder into Terminal, iTerm2, or Ghostty is
-  intercepted at paste time: if the pasted content is a single bare
-  path to an image file (raw, `\\ `-escaped, or quoted), the input
-  automatically prepends `@` (and quotes paths containing spaces).
-  Non-image paths are pasted verbatim so non-image use cases are not
-  affected.
+  intercepted at paste time: if the pasted content is a standalone existing
+  absolute or home-relative file or folder (or a newline-delimited list of
+  them), the input automatically prepends `@` and quotes paths containing
+  spaces. This applies to text files, folders, and images; pasted prose,
+  relative paths, and missing paths are left unchanged.
 - **Image copy/paste from the clipboard** (**macOS only** for now):
   writes the image to `<session_dir>/attachments/clipboard-<ts>.png`
   (or the system temp dir when no session is active) and inserts an
@@ -930,9 +936,9 @@ voice, proxy) require idle, then write through the app server directly after
 the user confirms the picker.
 
 Commands not on the side-channel allowlist (e.g. `/clear`, `/compact`,
-`/rewind`, `/resume`, `/reload`, `/leanstall`, `/unleanstall`, `/teleport`,
-`/remote-project`, `/retry`, `/plugins`, `/reload-plugins`) are rejected while busy and can be retried when
-the session is idle.
+`/rewind`, `/resume`, `/branch`, `/reload`, `/leanstall`, `/unleanstall`,
+`/teleport`, `/remote-project`, `/retry`, `/plugins`, `/reload-plugins`) are rejected while busy and can be
+retried when the session is idle.
 
 While the queue is non-empty and the agent is busy, pressing **Up**
 enters queue selection mode: the last queued item is highlighted and

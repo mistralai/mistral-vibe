@@ -563,7 +563,7 @@ class TestBootstrapDiscovery:
 
     @respx.mock
     @pytest.mark.asyncio
-    async def test_skips_http_connectors(self) -> None:
+    async def test_trusts_server_capability_filter(self) -> None:
         payload = _make_bootstrap_response([
             _make_connector_payload(
                 name="shared", protocol="http", tools=[_make_tool_payload("request")]
@@ -577,10 +577,9 @@ class TestBootstrapDiscovery:
         registry = ConnectorRegistry(api_key="test-key")
         tools = await registry.get_tools_async()
 
-        assert "connector_shared_search" in tools
-        assert "connector_shared_2_search" not in tools
-        assert "connector_shared_request" not in tools
-        assert registry.get_connector_names() == ["shared"]
+        assert "connector_shared_request" in tools
+        assert "connector_shared_2_search" in tools
+        assert registry.get_connector_names() == ["shared", "shared_2"]
 
     @respx.mock
     @pytest.mark.asyncio
@@ -1183,6 +1182,7 @@ class TestAuthActionablediscovery:
         called_url = str(route.calls.last.request.url)
         assert "include_auth_actionable_connectors=true" in called_url
         assert "builtin_connectors=web_search" in called_url
+        assert "supports_mcp=true" in called_url
 
     @respx.mock
     @pytest.mark.asyncio

@@ -77,7 +77,7 @@ class SessionLogger:  # noqa: PLR0904
         self.session_id = session_id
         self.session_start_time = utc_now().isoformat()
 
-        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.save_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
         if session_dir is not None:
             self.resume_existing_session(session_id, session_dir)
             return
@@ -382,7 +382,14 @@ class SessionLogger:  # noqa: PLR0904
     def _persist_messages_sync(messages: list[dict], session_dir: Path) -> None:
         messages_filepath = session_dir / "messages.jsonl"
         try:
-            with messages_filepath.open("a", encoding="utf-8") as f:
+            # Session logs hold raw tool results, so the file is created
+            # owner-only. 0o600 requests no group/other bits and umask can
+            # only clear bits, so no follow-up chmod is needed. An existing
+            # file (a resumed session) keeps its current mode.
+            descriptor = os.open(
+                messages_filepath, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600
+            )
+            with os.fdopen(descriptor, "a", encoding="utf-8") as f:
                 for message in messages:
                     f.write(json.dumps(message, ensure_ascii=False) + "\n")
                 f.flush()
@@ -484,9 +491,11 @@ class SessionLogger:  # noqa: PLR0904
     ) -> None:
         metadata_path = session_dir / METADATA_FILENAME
 
-        # If the session directory does not exist, create it
+        # If the session directory does not exist, create it owner-only; the
+        # creation mode alone suffices (see _persist_messages_sync). An
+        # existing directory (a resumed session) keeps its current mode.
         try:
-            session_dir.mkdir(parents=True, exist_ok=True)
+            session_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
         except OSError as e:
             raise RuntimeError(
                 f"Failed to create session directory at {session_dir}: {type(e).__name__}: {e}"

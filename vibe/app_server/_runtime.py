@@ -100,6 +100,7 @@ from vibe.core.session.session_lease import SessionLease
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.skills.models import SkillInfo
+from vibe.core.system_prompt import get_agents_md_section
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.telemetry.types import LaunchContext
 from vibe.core.tools.manager import ToolManager
@@ -126,14 +127,25 @@ def _command_environment_mode() -> _CommandEnvironmentMode:
     return "powershell"
 
 
-def _build_unified_system_instructions(config: VibeConfigSchema) -> str:
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
-        build_vibe_code_system_instructions,
-    )
+def _build_unified_system_instructions(
+    config: VibeConfigSchema, harness_files: HarnessFilesManager
+) -> str:
+    from mistralai_vibe_local_harness.vibe import build_vibe_code_system_instructions
 
     # The Vibe config layer resolves the GrowthBook system-prompt variant before
     # the experimental Runtime is composed. The SDK owns the corresponding text.
-    return build_vibe_code_system_instructions(variant=config.system_prompt_id)
+    # AGENTS.md docs are host-composed custom instructions: the harness core
+    # never loads them, so parity with the legacy prompt is restored here. The
+    # core appends its capability sections after this text, keeping the docs
+    # above skills/plugins in the final prompt.
+    instructions = build_vibe_code_system_instructions(variant=config.system_prompt_id)
+    if config.include_project_context:
+        agents_md_section = get_agents_md_section(
+            harness_files.load_user_doc(), harness_files.load_project_docs()
+        )
+        if agents_md_section:
+            instructions = f"{instructions}\n\n{agents_md_section}"
+    return instructions
 
 
 def _build_launch_context_from_services(
@@ -186,9 +198,7 @@ def _utility_provider_route(
     """
     if not enabled or provider_cfg.name == session_provider_name:
         return None
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
-        LocalProviderRoute,
-    )
+    from mistralai_vibe_local_harness.vibe import LocalProviderRoute
 
     return LocalProviderRoute(
         provider=provider_cfg.name,
@@ -205,10 +215,8 @@ def _utility_provider_route(
 
 
 if TYPE_CHECKING:
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
-        RustRuntimeBuiltinToolName,
-    )
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.protocol import RustRuntimeBuiltinToolName
+    from mistralai_vibe_local_harness.vibe import (
         LocalProviderRoute,
         ProviderCredentialProvider,
     )
@@ -1098,10 +1106,8 @@ class HarnessProcess:
         require_api_key: bool = True,
         entrypoint: AgentEntrypoint = "cli",
     ) -> UnifiedSessionContext:
-        from mistralai_vibe_local_harness import (  # pyright: ignore[reportMissingImports]
-            HarnessSession,
-        )
-        from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
+        from mistralai_vibe_local_harness import HarnessSession
+        from mistralai_vibe_local_harness.protocol import (
             RustAutomaticCompactionPolicy,
             RustContextSettings,
             RustDisabledCompactionPolicy,
@@ -1119,7 +1125,7 @@ class HarnessProcess:
             RustTurnSettings,
             RustUnixCommandEnvironment,
         )
-        from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+        from mistralai_vibe_local_harness.vibe import (
             LegacyImportSource,
             LegacySessionReference as HarnessLegacySessionReference,
             LocalModelRoute,
@@ -1349,7 +1355,9 @@ class HarnessProcess:
                 ),
                 core_config=RustHarnessConfig(
                     task_id="runtime-template",
-                    system_instructions=_build_unified_system_instructions(config),
+                    system_instructions=_build_unified_system_instructions(
+                        config, harness_files
+                    ),
                     settings=RustHarnessSettings(
                         turn=RustTurnSettings(max_iterations=max_iterations),
                         context=RustContextSettings(compaction=compaction_policy),
@@ -1970,9 +1978,7 @@ def _foreign_hook_definitions(
     ``"user"`` and a project hook the session cwd, so a persisted project binding cannot be
     matched by a same-named user hook on a resume where project trust has since been lost.
     """
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
-        ForeignHookDefinition,
-    )
+    from mistralai_vibe_local_harness.vibe import ForeignHookDefinition
 
     user_names = _user_hook_names(harness_files)
     cwd_source = str(cwd)
@@ -2381,9 +2387,7 @@ def _load_unified_import(
     if not (session_root / "CURRENT").is_file():
         return None
     try:
-        from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-            UnifiedSessionStore,
-        )
+        from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
     except ImportError as exc:
         raise RuntimeInvalidMigrationSourceError(
             session_id,

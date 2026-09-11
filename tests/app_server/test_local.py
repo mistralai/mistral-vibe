@@ -53,6 +53,7 @@ from vibe.app_server.protocol import (
     ProtocolErrorCode,
     RuntimeReadParams,
     RuntimeReadResponse,
+    SessionContinueParams,
     SessionDeleteParams,
     SessionHistoryListParams,
     SessionListParams,
@@ -1325,6 +1326,192 @@ async def test_session_start_cleans_created_worktree_when_cancelled_mid_resoluti
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("params", "session_id", "continue_latest"),
+    [
+        (
+            SessionResumeParams(
+                session_id="short-id", agent_config=SessionOptions(cwd="/requested")
+            ),
+            "short-id",
+            False,
+        ),
+        (
+            SessionContinueParams(agent_config=SessionOptions(cwd="/requested")),
+            None,
+            True,
+        ),
+    ],
+)
+async def test_open_runtime_restores_legacy_session_cwd(
+    params: SessionResumeParams | SessionContinueParams,
+    session_id: str | None,
+    continue_latest: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[runtime.RootOpenRequest] = []
+
+    async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
+        requests.append(request)
+        return cast(AgentLoop, object())
+
+    host_handler = HostRequestHandler(HarnessFilesManager(sources=()))
+    open_target = AsyncMock(return_value=("canonical-id", "/stored"))
+    monkeypatch.setattr(host_handler, "legacy_open_target", open_target)
+    controller = LegacySessionRuntimeController(
+        open_root=open_root,
+        runtime_factory=runtime.AgentRuntimeFactory(),
+        host_handler=host_handler,
+        stage_root=None,
+        services=_FakeSessionBackendServices(),
+    )
+    restore = AsyncMock(return_value=True)
+    monkeypatch.setattr(controller._worktrees, "restore", restore)
+
+    opened = await controller._open_runtime(
+        params, session_id, continue_latest=continue_latest
+    )
+
+    open_target.assert_awaited_once_with(session_id, "/requested")
+    restore.assert_awaited_once_with(Path("/stored"))
+    assert opened.worktree_resolution.options.cwd == "/stored"
+    assert requests[0].options.cwd == "/stored"
+    assert requests[0].session_id == "canonical-id"
+    assert requests[0].continue_latest is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_continue_and_list_include_a_retained_worktree_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_cwd = (tmp_path / "project").resolve()
+    _init_repo(project_cwd)
+    worktree = _prepare_auto(project_cwd, prompt="Retained session")
+    _finish_worktree_start(worktree)
+    (worktree.root / "saved.txt").write_text("saved\n")
+    assert ManagedWorktree.prune(limit=0) == 1
+    older = ResumeSessionInfo(
+        session_id="older-project",
+        cwd=str(project_cwd),
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    retained = ResumeSessionInfo(
+        session_id="newer-retained",
+        cwd=str(worktree.root),
+        updated_at="2026-01-02T00:00:00+00:00",
+    )
+
+    def list_sessions(
+        _config: VibeConfigSchema, cwd: str | None
+    ) -> list[ResumeSessionInfo]:
+        if cwd is None:
+            return [retained, older]
+        requested = Path(cwd).expanduser().resolve()
+        return [
+            session
+            for session in (retained, older)
+            if Path(session.cwd).resolve() == requested
+        ]
+
+    config = build_test_vibe_config()
+    handler = HostRequestHandler(HarnessFilesManager(sources=()))
+    monkeypatch.setattr(handler, "_load_config", AsyncMock(return_value=config))
+    monkeypatch.setattr(host_module, "list_local_resume_sessions", list_sessions)
+    monkeypatch.setattr(host_module.last_session_pointer, "load", lambda _config: None)
+
+    target = await handler.legacy_open_target(None, str(project_cwd))
+    listed = host_module.project_session_list(
+        config, SessionListParams(cwd=str(project_cwd))
+    )
+
+    assert target == ("newer-retained", str(worktree.root))
+    assert [session.id for session in listed.items] == [
+        "newer-retained",
+        "older-project",
+    ]
+    assert listed.continue_session_id == "newer-retained"
+
+
+@pytest.mark.asyncio
+async def test_legacy_continue_excludes_retained_nested_repository_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_cwd = (tmp_path / "project").resolve()
+    _init_repo(project_cwd)
+    nested_repo_cwd = project_cwd / "vendor" / "nested"
+    nested_repo_cwd.mkdir(parents=True)
+    _init_repo(nested_repo_cwd)
+    worktree = _prepare_auto(nested_repo_cwd, prompt="Nested retained session")
+    _finish_worktree_start(worktree)
+    (worktree.root / "saved.txt").write_text("saved\n")
+    assert ManagedWorktree.prune(limit=0) == 1
+    parent = ResumeSessionInfo(
+        session_id="parent-project",
+        cwd=str(project_cwd),
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    retained = ResumeSessionInfo(
+        session_id="newer-nested-retained",
+        cwd=str(worktree.root),
+        updated_at="2026-01-02T00:00:00+00:00",
+    )
+
+    def list_sessions(
+        _config: VibeConfigSchema, cwd: str | None
+    ) -> list[ResumeSessionInfo]:
+        if cwd is None:
+            return [retained, parent]
+        requested = Path(cwd).expanduser().resolve()
+        return [
+            session
+            for session in (retained, parent)
+            if Path(session.cwd).resolve() == requested
+        ]
+
+    handler = HostRequestHandler(HarnessFilesManager(sources=()))
+    monkeypatch.setattr(
+        handler, "_load_config", AsyncMock(return_value=build_test_vibe_config())
+    )
+    monkeypatch.setattr(host_module, "list_local_resume_sessions", list_sessions)
+    monkeypatch.setattr(host_module.last_session_pointer, "load", lambda _config: None)
+
+    parent_target = await handler.legacy_open_target(None, str(project_cwd))
+    nested_target = await handler.legacy_open_target(None, str(nested_repo_cwd))
+
+    assert parent_target == ("parent-project", str(project_cwd))
+    assert nested_target == ("newer-nested-retained", str(worktree.root))
+
+
+@pytest.mark.asyncio
+async def test_open_runtime_maps_ambiguous_legacy_id_to_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def open_root(_request: runtime.RootOpenRequest) -> AgentLoop:
+        raise AssertionError("runtime should not open for an ambiguous session ID")
+
+    host_handler = HostRequestHandler(HarnessFilesManager(sources=()))
+    monkeypatch.setattr(
+        host_handler,
+        "legacy_open_target",
+        AsyncMock(side_effect=ValueError("Legacy session ID is ambiguous: abc")),
+    )
+    controller = LegacySessionRuntimeController(
+        open_root=open_root,
+        runtime_factory=runtime.AgentRuntimeFactory(),
+        host_handler=host_handler,
+        stage_root=None,
+        services=_FakeSessionBackendServices(),
+    )
+
+    with pytest.raises(RequestFailure) as exc_info:
+        await controller._open_runtime(SessionResumeParams(session_id="abc"), "abc")
+
+    assert exc_info.value.code is ProtocolErrorCode.INVALID_PARAMS
+    assert exc_info.value.data == {"kind": "configuration"}
+    assert str(exc_info.value) == "Legacy session ID is ambiguous: abc"
+
+
+@pytest.mark.asyncio
 async def test_open_runtime_maps_git_errors_to_invalid_params(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1476,6 +1663,61 @@ async def test_passive_host_reports_the_repository_counterpart(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_passive_host_reports_the_counterpart_of_a_retained_worktree(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path, prompt="Retain this worktree")
+    _finish_worktree_start(worktree)
+    retained_cwd = worktree.root / "packages" / "api"
+    retained_cwd.mkdir(parents=True)
+    (retained_cwd / "saved.txt").write_text("saved\n")
+    assert ManagedWorktree.prune(limit=0) == 1
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/git/worktrees/list",
+        WorkspaceWorktreeListParams(
+            cwd=str(worktree.root / "packages" / "api")
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    response = cast(WorkspaceWorktreeListResponse, result.response)
+    assert response.repository_cwd is None
+    assert response.repository_mapped_cwd == str(tmp_path / "packages" / "api")
+    assert response.repository_root == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_retained_worktree_listing_ignores_a_repository_above_its_leftover_path(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    repo_root = tmp_path / "project"
+    _init_repo(repo_root)
+    worktree = _prepare_auto(repo_root, prompt="Retain this worktree")
+    _finish_worktree_start(worktree)
+    retained_cwd = worktree.root / "packages" / "api"
+    retained_cwd.mkdir(parents=True)
+    (retained_cwd / "saved.txt").write_text("saved\n")
+    assert ManagedWorktree.prune(limit=0) == 1
+    retained_cwd.mkdir(parents=True)
+    _init_repo(config_dir.parent)
+    handler = HostRequestHandler(HarnessFilesManager(sources=("user",)))
+
+    result = await handler.dispatch(
+        "workspace/git/worktrees/list",
+        WorkspaceWorktreeListParams(cwd=str(retained_cwd)).model_dump(
+            mode="json", by_alias=True
+        ),
+    )
+
+    response = cast(WorkspaceWorktreeListResponse, result.response)
+    assert response.repository_cwd is None
+    assert response.repository_mapped_cwd == str(repo_root / "packages" / "api")
+    assert response.repository_root == str(repo_root)
+
+
+@pytest.mark.asyncio
 async def test_passive_host_reports_no_counterpart_outside_the_main_checkout(
     tmp_path: Path,
 ) -> None:
@@ -1529,6 +1771,8 @@ async def test_passive_host_lists_no_worktrees_without_git(
         "worktrees": [],
         "repositoryBranch": None,
         "repositoryCwd": None,
+        "repositoryMappedCwd": None,
+        "repositoryRoot": None,
     }
 
 
@@ -1696,6 +1940,8 @@ async def test_passive_host_lists_no_worktrees_for_non_git_root(tmp_path: Path) 
         "worktrees": [],
         "repositoryBranch": None,
         "repositoryCwd": None,
+        "repositoryMappedCwd": None,
+        "repositoryRoot": None,
     }
 
 

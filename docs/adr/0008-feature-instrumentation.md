@@ -6,6 +6,12 @@ Every feature must ship with analytics instrumentation. Telemetry is not optiona
 
 Before creating new events, search the event registry (`datalake-dbt/event_registry/<service>.yml`) and neighboring services for existing events that already capture the same or similar user action. Extend an existing event with new properties rather than creating a parallel one. Only create a new event when nothing existing fits.
 
+The event registry is a discovery and verification aid, not a manual schema
+contract: `datalake-dbt` refreshes it automatically from observed production
+events. Do not add hand-written registry entries or open a registry-only PR
+for a newly emitted event. Verify that the automated refresh has discovered
+the event after deployment.
+
 Every event must carry the standardized metadata block (`properties.metadata`).
 
 ## Rationale
@@ -16,6 +22,8 @@ Features without telemetry are invisible to product and data teams. Fragmenting 
 
 - When implementing any feature, use the `instrument-feature-analytics` skill to plan the telemetry.
 - Search existing events broadly before defining new ones.
+- Do not manually edit the event registry; rely on its automated refresh after
+  the event is observed in production.
 - Verify instrumentation locally (`DEBUG_LEVEL=1 uv run vibe`), then in staging (`logs_events_staging`), then in production (`logs_events`).
 
 ## Flag To User When

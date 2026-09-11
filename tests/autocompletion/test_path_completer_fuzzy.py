@@ -67,11 +67,17 @@ def test_fuzzy_matches_word_boundaries_preferred(file_tree: Path) -> None:
     assert "@src/models.py" in results
 
 
-def test_fuzzy_matches_empty_pattern_shows_all(file_tree: Path) -> None:
-    results = PathCompleter().get_completions("@", cursor_pos=1)
+def test_bare_at_lists_current_directory_without_workspace_discovery(
+    file_tree: Path,
+) -> None:
+    completer = PathCompleter()
 
-    assert "@README.md" in results
-    assert "@src/" in results
+    assert completer.get_completions("@", cursor_pos=1) == [
+        "@config/",
+        "@README.md",
+        "@src/",
+    ]
+    assert completer._indexer.stats.rebuilds == 0
 
 
 def test_fuzzy_matches_hidden_files_only_with_dot(file_tree: Path) -> None:
@@ -115,6 +121,36 @@ def test_fuzzy_matches_multiple_files_with_same_pattern(file_tree: Path) -> None
 def test_fuzzy_matches_no_results_when_no_match(file_tree: Path) -> None:
     completer = PathCompleter()
     assert completer.get_completions("@xyz123", cursor_pos=7) == []
+
+
+def test_searches_entries_beyond_the_former_fixed_scan_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entries = [
+        IndexEntry(
+            rel=f"generated/file_{index}.txt",
+            rel_lower=f"generated/file_{index}.txt",
+            name=f"file_{index}.txt",
+            path=Path(f"generated/file_{index}.txt"),
+            is_dir=False,
+            ascii_mask=build_ascii_mask(f"generated/file_{index}.txt"),
+        )
+        for index in range(32_000)
+    ]
+    entries.append(
+        IndexEntry(
+            rel="src/needle.py",
+            rel_lower="src/needle.py",
+            name="needle.py",
+            path=Path("src/needle.py"),
+            is_dir=False,
+            ascii_mask=build_ascii_mask("src/needle.py"),
+        )
+    )
+    completer = PathCompleter()
+    monkeypatch.setattr(completer._indexer, "get_index", lambda *_: entries)
+
+    assert "@src/needle.py" in completer.get_completions("@needle", cursor_pos=7)
 
 
 def test_fuzzy_matches_directory_traversal(file_tree: Path) -> None:
@@ -333,7 +369,7 @@ def test_prioritizes_exact_path_prefix_before_fuzzy_search_limit(
         make_entry("ts/apps/cloud/AGENTS.md"),
     ]
     completer = PathCompleter(max_entries_to_process=3)
-    monkeypatch.setattr(completer._indexer, "get_index", lambda _: entries)
+    monkeypatch.setattr(completer._indexer, "get_index", lambda *_: entries)
 
     results = completer.get_completions("@ts/cloudA", cursor_pos=10)
 

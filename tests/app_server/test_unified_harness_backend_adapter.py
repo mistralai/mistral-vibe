@@ -4,10 +4,12 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 import contextlib
 from dataclasses import replace
+from datetime import UTC, datetime
 import json
 import logging
 from pathlib import Path
 import re
+import shutil
 import time
 import tomllib
 from types import SimpleNamespace
@@ -138,6 +140,8 @@ from vibe.core.config import MCPStdio, SessionLoggingConfig, VibeConfigSchema
 from vibe.core.config.admin_config import AdminConfigApplyResult, AdminConfigOutcome
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.experiments.active import ExperimentSurface
+from vibe.core.git.worktree.record import WorktreeClaim, WorktreeRecoveryRecord
+from vibe.core.paths import WORKTREES_DIR
 from vibe.core.session.session_interop import (
     InvalidLegacyInteropSourceError,
     export_legacy_committed_history,
@@ -154,12 +158,8 @@ from vibe.core.types import LLMMessage, Role, ScheduledLoop
 from vibe.user_content import UserDisplayContent, UserTextResource
 
 if TYPE_CHECKING:
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
-        JsonObject,
-    )
-    from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-        SessionPin,
-    )
+    from mistralai_vibe_local_harness.session_protocol import JsonObject
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
 
     # Imported for typing only: the module pulls in the optional Harness
     # extra, and these tests skip rather than fail when it is absent.
@@ -210,9 +210,7 @@ class _RecordingSession:
         # the turn starts and reconfigures them through its own command queue.
         # A double that accepted it anyway would let a caller that has to stay
         # off this path mid-turn pass here and fail in front of a user.
-        from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
-            HarnessTurnConflictError,
-        )
+        from mistralai_vibe_local_harness.vibe import HarnessTurnConflictError
 
         if self.active_turn_id is not None:
             raise HarnessTurnConflictError(self.active_turn_id)
@@ -233,7 +231,7 @@ class _RecordingSession:
         return SimpleNamespace(response=SimpleNamespace(turn=turn), after_response=None)
 
     async def enqueue_turn(self, params: Any) -> Any:
-        from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+        from mistralai_vibe_local_harness.session_protocol import (
             TurnEnqueueResponse as HarnessTurnEnqueueResponse,
         )
 
@@ -244,7 +242,7 @@ class _RecordingSession:
         )
 
     async def replace_queued_turn(self, params: Any) -> Any:
-        from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+        from mistralai_vibe_local_harness.session_protocol import (
             TurnQueueReplaceResponse as HarnessTurnQueueReplaceResponse,
         )
 
@@ -282,7 +280,7 @@ class _RecordingSession:
         rather than tracking what it injected. The double keeps that loop
         closed: what goes out through a turn comes back as a user message.
         """
-        from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+        from mistralai_vibe_local_harness.session_protocol import (
             IdleSessionStatus,
             LatestPublicHistoryPage,
             PublicSession as HarnessPublicSession,
@@ -345,9 +343,7 @@ def _stub_core_config() -> Any:
     ``_apply_derivation`` reads ``core_config.capabilities`` to push the skill
     catalogue, so a ``None`` here would only ever prove the stub is a stub.
     """
-    from mistralai_vibe_local_harness.vibe._host import (  # pyright: ignore[reportMissingImports]
-        _core_config,
-    )
+    from mistralai_vibe_local_harness.vibe._host import _core_config
 
     return _core_config("session-1")
 
@@ -359,9 +355,7 @@ def _stub_adapter_config() -> Any:
     a placeholder here fails on attribute access rather than on anything the
     test is about.
     """
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
-        LocalRuntimeAdapterConfig,
-    )
+    from mistralai_vibe_local_harness.vibe import LocalRuntimeAdapterConfig
 
     return LocalRuntimeAdapterConfig()
 
@@ -457,11 +451,11 @@ def test_unified_command_environment_follows_platform_shell_support(
 
 def test_unified_connector_state_flattens_remote_tool_descriptions() -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.vibe import (
         ConnectorRouteSnapshot,
         ConnectorSourceState,
     )
-    from mistralai_vibe_local_harness.vibe._connector_models import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.vibe._connector_models import (
         ConnectorToolDescriptor,
     )
 
@@ -602,9 +596,7 @@ async def test_unified_runtime_enables_large_output_offloading(
     """
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
-        RustFilesystemLargeOutputPolicy,
-    )
+    from mistralai_vibe_local_harness.protocol import RustFilesystemLargeOutputPolicy
 
     from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
 
@@ -730,9 +722,7 @@ async def test_unified_adapter_tracks_open_callbacks_for_delivery_lifecycle(
     tmp_path: Path,
 ) -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe._session import (  # pyright: ignore[reportMissingImports]
-        _approval_callback,
-    )
+    from mistralai_vibe_local_harness.vibe._session import _approval_callback
 
     class FakeSession:
         session_id = "session-1"
@@ -787,9 +777,7 @@ async def test_unified_adapter_routes_child_callback_through_the_local_host(
     """
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe._session import (  # pyright: ignore[reportMissingImports]
-        _approval_callback,
-    )
+    from mistralai_vibe_local_harness.vibe._session import _approval_callback
 
     callback = _approval_callback(
         session_id="session-child",
@@ -901,9 +889,7 @@ async def test_unified_adapter_records_only_an_approval_that_outlives_the_call(
     are indistinguishable downstream unless the difference is kept here.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe._session import (  # pyright: ignore[reportMissingImports]
-        _approval_callback,
-    )
+    from mistralai_vibe_local_harness.vibe._session import _approval_callback
 
     from vibe.app_server.protocol import CallbackResult, CallbackResultParams
 
@@ -982,7 +968,7 @@ async def test_unified_harness_projects_the_session_config_as_its_runtime() -> N
 
 def test_unified_image_projection_is_a_valid_public_message() -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.protocol import (
         RustIdleTurn,
         RustImageContentBlock,
         RustNoNextAction,
@@ -990,7 +976,7 @@ def test_unified_image_projection_is_a_valid_public_message() -> None:
         RustTextContentBlock,
         RustTurnStartedObservation,
     )
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         TURN_QUEUE_MAX_ITEMS,
         HistoryCursor,
         IdleSessionStatus,
@@ -999,12 +985,8 @@ def test_unified_image_projection_is_a_valid_public_message() -> None:
         PublicSessionState as HarnessPublicSessionState,
         TurnQueue as HarnessTurnQueue,
     )
-    from mistralai_vibe_local_harness.vibe._projection import (  # pyright: ignore[reportMissingImports]
-        SessionProjector,
-    )
-    from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-        ProjectionStateV1,
-    )
+    from mistralai_vibe_local_harness.vibe._projection import SessionProjector
+    from mistralai_vibe_local_harness.vibe._storage import ProjectionStateV1
 
     session_id = "019ffb1e-741d-7f90-84df-ef66011876ca"
     transition = RustSessionTransition(
@@ -1076,7 +1058,7 @@ async def test_unified_harness_history_resource_reads_the_backend_snapshot() -> 
 @pytest.mark.parametrize("failed", [False, True])
 def test_unified_tool_result_projection_is_a_valid_public_effect(failed: bool) -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.protocol import (
         RustIdleTurn,
         RustNoNextAction,
         RustProtocolError,
@@ -1086,7 +1068,7 @@ def test_unified_tool_result_projection_is_a_valid_public_effect(failed: bool) -
         RustToolResultCommittedObservation,
         RustToolSuccessResult,
     )
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         TURN_QUEUE_MAX_ITEMS,
         HistoryCursor,
         IdleSessionStatus,
@@ -1095,12 +1077,8 @@ def test_unified_tool_result_projection_is_a_valid_public_effect(failed: bool) -
         PublicSessionState as HarnessPublicSessionState,
         TurnQueue as HarnessTurnQueue,
     )
-    from mistralai_vibe_local_harness.vibe._projection import (  # pyright: ignore[reportMissingImports]
-        SessionProjector,
-    )
-    from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-        ProjectionStateV1,
-    )
+    from mistralai_vibe_local_harness.vibe._projection import SessionProjector
+    from mistralai_vibe_local_harness.vibe._storage import ProjectionStateV1
 
     session_id = "019ffb1e-741d-7f90-84df-ef66011876ca"
     result = (
@@ -1162,14 +1140,14 @@ def test_unified_tool_result_projection_is_a_valid_public_effect(failed: bool) -
 
 def test_unified_shell_result_projection_uses_public_output_shape() -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.protocol import (
         RustIdleTurn,
         RustNoNextAction,
         RustSessionTransition,
         RustToolResultCommittedObservation,
         RustToolSuccessResult,
     )
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         TURN_QUEUE_MAX_ITEMS,
         HistoryCursor,
         IdleSessionStatus,
@@ -1178,12 +1156,8 @@ def test_unified_shell_result_projection_uses_public_output_shape() -> None:
         PublicSessionState as HarnessPublicSessionState,
         TurnQueue as HarnessTurnQueue,
     )
-    from mistralai_vibe_local_harness.vibe._projection import (  # pyright: ignore[reportMissingImports]
-        SessionProjector,
-    )
-    from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-        ProjectionStateV1,
-    )
+    from mistralai_vibe_local_harness.vibe._projection import SessionProjector
+    from mistralai_vibe_local_harness.vibe._storage import ProjectionStateV1
 
     session_id = "019ffb1e-741d-7f90-84df-ef66011876ca"
     projector = SessionProjector(
@@ -1256,14 +1230,14 @@ def test_unified_shell_result_projection_uses_public_output_shape() -> None:
 
 def test_unified_tool_discovery_projection_is_a_visible_effect() -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.protocol import (
         RustCompletedTurn,
         RustNoNextAction,
         RustSessionTransition,
         RustToolDiscoveryFinishedObservation,
         RustToolDiscoverySummary,
     )
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         HistoryCursor,
         IdleSessionStatus,
         LatestPublicHistoryPage,
@@ -1271,12 +1245,8 @@ def test_unified_tool_discovery_projection_is_a_visible_effect() -> None:
         PublicSessionState as HarnessPublicSessionState,
         TurnQueue as HarnessTurnQueue,
     )
-    from mistralai_vibe_local_harness.vibe._projection import (  # pyright: ignore[reportMissingImports]
-        SessionProjector,
-    )
-    from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-        ProjectionStateV1,
-    )
+    from mistralai_vibe_local_harness.vibe._projection import SessionProjector
+    from mistralai_vibe_local_harness.vibe._storage import ProjectionStateV1
 
     from vibe.app_server._unified_harness_backend_adapter import _project_history_entry
 
@@ -1337,7 +1307,7 @@ def test_unified_tool_discovery_projection_is_a_visible_effect() -> None:
 
 
 def _approval_action(turn_id: str) -> Any:
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.protocol import (
         RustRuntimeBuiltinToolCall,
         RustRuntimeBuiltinToolCallAction,
     )
@@ -1364,7 +1334,7 @@ def test_unified_turn_error_maps_internal_provider_code_to_public_backend_error(
     harness_code: str, expected: TurnErrorCode
 ):
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         FailedPublicTurn as HarnessFailedPublicTurn,
         PublicError as HarnessPublicError,
     )
@@ -1403,9 +1373,7 @@ async def test_unified_stale_turn_errors_match_legacy_protocol_codes(
     active_turn_id: str | None, expected_code: ProtocolErrorCode, expected_message: str
 ) -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
-        HarnessStaleTurnError,
-    )
+    from mistralai_vibe_local_harness.vibe import HarnessStaleTurnError
 
     from vibe.app_server._unified_harness_backend_adapter import _harness_call
 
@@ -1735,7 +1703,7 @@ def test_mid_turn_graft_carries_the_classifier_provider() -> None:
     against the active provider -- every gated call came back unverifiable.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.vibe import (
         LocalProviderRoute,
         LocalRuntimeAdapterConfig,
         StaticProviderCredentials,
@@ -3557,7 +3525,7 @@ def test_agent_ceiling_without_overrides_matches_the_session_catalogue() -> None
     ],
 )
 def test_unified_system_instructions_use_the_selected_prompt_variant(
-    system_prompt_id: str, expected_phrases: tuple[str, ...]
+    tmp_path: Path, system_prompt_id: str, expected_phrases: tuple[str, ...]
 ) -> None:
     """*Prepare*: Vibe configuration contains a system-prompt experiment variant.
     *Do*: Resolve Unified system instructions through the Vibe composition seam.
@@ -3565,13 +3533,90 @@ def test_unified_system_instructions_use_the_selected_prompt_variant(
     """
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.core.config.harness_files import HarnessFilesManager
+
     config = build_test_vibe_config(system_prompt_id=system_prompt_id)
+    harness_files = HarnessFilesManager(sources=("user", "project")).for_session(
+        tmp_path
+    )
 
     # Do
-    instructions = runtime_module._build_unified_system_instructions(config)
+    instructions = runtime_module._build_unified_system_instructions(
+        config, harness_files
+    )
 
     # Assert
     assert all(phrase in instructions for phrase in expected_phrases)
+
+
+def test_unified_system_instructions_include_agents_md_docs(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """*Prepare*: A user AGENTS.md and a project AGENTS.md exist on disk.
+    *Do*: Resolve Unified system instructions through the Vibe composition seam.
+    *Assert*: Both docs are appended after the SDK template, user before project.
+    """
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.core.config.harness_files import HarnessFilesManager
+
+    (config_dir / "AGENTS.md").write_text("# User doc", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Project doc", encoding="utf-8")
+    harness_files = HarnessFilesManager(sources=("user", "project")).for_session(
+        tmp_path
+    )
+    harness_files.trust_store.trust_for_session(tmp_path)
+    # The test config builder opts out of project context by default; opt back
+    # in and pin the variant so the ordering assertion is template-independent.
+    config = build_test_vibe_config(
+        include_project_context=True, system_prompt_id="cli"
+    )
+
+    # Do
+    instructions = runtime_module._build_unified_system_instructions(
+        config, harness_files
+    )
+
+    # Assert
+    assert "# User doc" in instructions
+    assert "## Project instructions (checked into the codebase)" in instructions
+    assert f"Contents of {tmp_path}/AGENTS.md" in instructions
+    assert "# Project doc" in instructions
+    assert (
+        instructions.index("## Instruction hierarchy")
+        < instructions.index("## User instructions")
+        < instructions.index("## Project instructions (checked into the codebase)")
+    )
+
+
+def test_unified_system_instructions_skip_agents_md_docs_when_context_is_disabled(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """*Prepare*: AGENTS.md docs exist but include_project_context is disabled.
+    *Do*: Resolve Unified system instructions through the Vibe composition seam.
+    *Assert*: The instructions carry the template only, no docs section.
+    """
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.core.config.harness_files import HarnessFilesManager
+
+    (config_dir / "AGENTS.md").write_text("# User doc", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Project doc", encoding="utf-8")
+    harness_files = HarnessFilesManager(sources=("user", "project")).for_session(
+        tmp_path
+    )
+    harness_files.trust_store.trust_for_session(tmp_path)
+    config = build_test_vibe_config(include_project_context=False)
+
+    # Do
+    instructions = runtime_module._build_unified_system_instructions(
+        config, harness_files
+    )
+
+    # Assert
+    assert "You are Mistral Vibe" in instructions
+    assert "## User instructions" not in instructions
+    assert "## Project instructions" not in instructions
 
 
 # Adapter tests that install a plugin from the vibe_sdk fixtures live in
@@ -3758,16 +3803,14 @@ async def test_unified_flush_events_does_not_wait_before_event_stream_starts(
     tmp_path: Path,
 ) -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         IdleSessionStatus,
         PublicSession as HarnessPublicSession,
         PublicSessionState as HarnessPublicSessionState,
         SessionSnapshot as HarnessSessionSnapshot,
         TurnQueue as HarnessTurnQueue,
     )
-    from mistralai_vibe_local_harness.vibe._session import (  # pyright: ignore[reportMissingImports]
-        HarnessSessionSubscription,
-    )
+    from mistralai_vibe_local_harness.vibe._session import HarnessSessionSubscription
 
     class FakeHarnessSession:
         session_id = "session-1"
@@ -3817,7 +3860,7 @@ async def test_unified_flush_events_tracks_queue_event_watermarks(
     """
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         Event as HarnessEvent,
         IdleSessionStatus,
         PublicSession as HarnessPublicSession,
@@ -3826,9 +3869,7 @@ async def test_unified_flush_events_tracks_queue_event_watermarks(
         TurnQueue as HarnessTurnQueue,
         TurnQueueUpdatedEvent as HarnessTurnQueueUpdatedEvent,
     )
-    from mistralai_vibe_local_harness.vibe._session import (  # pyright: ignore[reportMissingImports]
-        HarnessSessionSubscription,
-    )
+    from mistralai_vibe_local_harness.vibe._session import HarnessSessionSubscription
 
     class FakeHarnessSession:
         session_id = "session-1"
@@ -3903,7 +3944,7 @@ async def test_unified_adapter_preserves_canonical_queue_entries(
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         Event as HarnessEvent,
         IdleSessionStatus,
         PublicSession as HarnessPublicSession,
@@ -3918,9 +3959,7 @@ async def test_unified_adapter_preserves_canonical_queue_entries(
         TurnQueueReplaceResponse as HarnessTurnQueueReplaceResponse,
         TurnQueueUpdatedEvent as HarnessTurnQueueUpdatedEvent,
     )
-    from mistralai_vibe_local_harness.vibe._session import (  # pyright: ignore[reportMissingImports]
-        HarnessSessionSubscription,
-    )
+    from mistralai_vibe_local_harness.vibe._session import HarnessSessionSubscription
 
     class Result:
         def __init__(self, response: object) -> None:
@@ -4081,7 +4120,7 @@ def test_unified_state_updates_preserve_the_subscription_history_window(
 ) -> None:
     """A full-state update must not replay history omitted from the subscription."""
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         IdleSessionStatus,
         LatestPublicHistoryPage,
         PublicSession as HarnessPublicSession,
@@ -4175,7 +4214,7 @@ async def test_unified_root_subscription_translates_child_session_events(
     """
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         IdleSessionStatus,
         InProgressPublicTurn,
         PublicSession as HarnessPublicSession,
@@ -4184,9 +4223,7 @@ async def test_unified_root_subscription_translates_child_session_events(
         SessionSnapshot as HarnessSessionSnapshot,
         TurnQueue as HarnessTurnQueue,
     )
-    from mistralai_vibe_local_harness.vibe._session import (  # pyright: ignore[reportMissingImports]
-        HarnessSessionSubscription,
-    )
+    from mistralai_vibe_local_harness.vibe._session import HarnessSessionSubscription
 
     root_id = "session-root"
     child_id = "session-child"
@@ -4277,7 +4314,7 @@ def test_unified_subagent_analytics_emits_one_content_free_terminal_event(
     """
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         IdleSessionStatus,
         LatestPublicHistoryPage,
         PublicSession as HarnessPublicSession,
@@ -4392,9 +4429,7 @@ def test_request_sent_forwarding_maps_call_type_and_drains(
     *Assert*: One ``vibe.request_sent`` per payload, call-type mapped, then empty.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
-        RequestSentTelemetry,
-    )
+    from mistralai_vibe_local_harness.vibe import RequestSentTelemetry
 
     telemetry = TelemetryClient(
         config_getter=lambda: build_test_vibe_config(enable_telemetry=True),
@@ -4550,7 +4585,7 @@ def test_ordinary_tool_call_finished_emits_once_with_file_metrics(
     *Assert*: One ``tool_call_finished`` with the legacy name and file metrics.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         IdleSessionStatus,
         LatestPublicHistoryPage,
         PublicSession as HarnessPublicSession,
@@ -4673,7 +4708,7 @@ def test_compaction_telemetry_emits_auto_compact_and_failed(
     *Assert*: One ``auto_compact_triggered`` (failure) and one ``compaction_failed``.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         IdleSessionStatus,
         LatestPublicHistoryPage,
         PublicSession as HarnessPublicSession,
@@ -4729,7 +4764,7 @@ def test_manual_compaction_skips_auto_compact_triggered(
 ) -> None:
     """A user-initiated compaction is not the auto path, so no auto event fires."""
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         IdleSessionStatus,
         LatestPublicHistoryPage,
         PublicSession as HarnessPublicSession,
@@ -4774,7 +4809,7 @@ def test_context_gauge_retained_across_a_usageless_snapshot(
     *Assert*: the size is retained (not zeroed), so the auto event reports it.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         IdleSessionStatus,
         LatestPublicHistoryPage,
         PublicSession as HarnessPublicSession,
@@ -4838,16 +4873,14 @@ async def test_unified_flush_events_returns_after_an_event_carrying_a_signal(
     a signal the forwarder does not record hangs the request that published it.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         IdleSessionStatus,
         PublicSession as HarnessPublicSession,
         PublicSessionState as HarnessPublicSessionState,
         SessionSnapshot as HarnessSessionSnapshot,
         TurnQueue as HarnessTurnQueue,
     )
-    from mistralai_vibe_local_harness.vibe._session import (  # pyright: ignore[reportMissingImports]
-        HarnessSessionSubscription,
-    )
+    from mistralai_vibe_local_harness.vibe._session import HarnessSessionSubscription
 
     stream_open = asyncio.Event()
 
@@ -5338,13 +5371,11 @@ async def test_clear_preserves_compiled_hook_bindings_and_handlers(
     tmp_path: Path,
 ) -> None:
     vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.vibe import (
         ForeignHookDefinition,
         compile_foreign_hooks,
     )
-    from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-        UnifiedSessionStore,
-    )
+    from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
 
     from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
 
@@ -5634,6 +5665,60 @@ async def test_fork_rejects_a_new_worktree_request() -> None:
     harness.fork.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_resume_restores_the_stored_worktree_before_building_its_context(
+    tmp_path: Path,
+) -> None:
+    vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
+
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    events: list[tuple[str, Path]] = []
+
+    inner = _test_session_runtime_builder(config)
+
+    async def recording(
+        options: SessionOptions,
+        *,
+        require_api_key: bool = True,
+        entrypoint: Any = "cli",
+    ) -> Any:
+        events.append(("build", Path(options.cwd or Path.cwd()).resolve()))
+        return await inner(
+            options, require_api_key=require_api_key, entrypoint=entrypoint
+        )
+
+    host = adapt_harness_host(vibe_runtime.create_harness_host(), recording)
+    started = await host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=str(project)))
+    )
+    events.clear()
+
+    async def restore(cwd: Path) -> bool:
+        events.append(("restore", cwd))
+        return True
+
+    cast(Any, host)._worktrees.restore = restore
+
+    await host.resume(
+        SessionResumeParams(
+            session_id=started.backend.session_id,
+            agent_config=SessionOptions(cwd=str(project)),
+        )
+    )
+    await host.shutdown()
+
+    assert events == [
+        ("build", project.resolve()),
+        ("restore", project.resolve()),
+        ("build", project.resolve()),
+    ]
+
+
 def test_foreign_hook_definitions_preserve_a_zero_timeout(tmp_path: Path) -> None:
     # A configured timeout of 0 is an explicit fast-fail; it must not be coerced to the
     # 60s default (the `or 60.0` footgun).
@@ -5814,9 +5899,7 @@ def test_hooks_toml_on_disk_compiles_to_bindings(tmp_path: Path) -> None:
     # runs. Regression guard for the bug where the mapping read result.runtime_hooks
     # (which the fs loader never populates) instead of result.hooks.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
-        compile_foreign_hooks,
-    )
+    from mistralai_vibe_local_harness.vibe import compile_foreign_hooks
 
     from vibe.app_server._runtime import _foreign_hook_definitions
     from vibe.core.config.harness_files import HarnessFilesManager
@@ -5867,9 +5950,7 @@ def test_untrusted_workspace_yields_no_hooks(tmp_path: Path) -> None:
     # Trust boundary: a project hooks.toml is ignored unless the cwd is trusted, so an
     # untrusted workspace compiles to no bindings even though the file exists on disk.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
-        compile_foreign_hooks,
-    )
+    from mistralai_vibe_local_harness.vibe import compile_foreign_hooks
 
     from vibe.app_server._runtime import _foreign_hook_definitions
     from vibe.core.config.harness_files import HarnessFilesManager
@@ -6204,9 +6285,7 @@ async def test_unified_resume_unpins_an_unavailable_running_mode(
     started = await first_host.start(
         SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path), agent="ask"))
     )
-    from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-        SessionPin,
-    )
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
 
     session_id = started.backend.session_id
     assert isinstance(started.backend, SessionBackendRuntimeView)
@@ -6396,7 +6475,7 @@ async def test_unified_resume_imports_quiescent_legacy_history(
         for message in round_trip_history
         if message.role is not Role.system
     ] == [Role.user, Role.assistant]
-    from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.vibe._storage import (
         LegacyInteropSourceV1,
         UnifiedSessionStore,
     )
@@ -6460,12 +6539,10 @@ async def test_legacy_resume_imports_quiescent_unified_history(
     tmp_path: Path, use_short_id: bool
 ) -> None:
     vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         SessionStartParams as HarnessSessionStartParams,
     )
-    from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-        SessionPin,
-    )
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
 
     config = build_test_vibe_config(
         session_logging=SessionLoggingConfig(
@@ -6556,13 +6633,191 @@ async def test_unified_list_filters_use_stored_cwd_and_fork_lineage(
     assert other.backend.session_id not in {session.id for session in by_cwd.items}
 
 
+@pytest.mark.asyncio
+async def test_unified_list_includes_retained_worktree_sessions(tmp_path: Path) -> None:
+    project_cwd = (tmp_path / "project").resolve()
+    project_cwd.mkdir()
+    worktree_root = WORKTREES_DIR.path.resolve() / "project-test" / "retained-worktree"
+    worktree_cwd = worktree_root / "packages" / "app"
+    worktree_cwd.mkdir(parents=True)
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        )
+    )
+    legacy = build_test_agent_loop(config=config, cwd=worktree_cwd)
+    legacy.messages.append(LLMMessage(role=Role.user, content="legacy retained"))
+    await legacy.session_logger.save_interaction(
+        legacy.messages,
+        legacy.stats,
+        legacy.config,
+        legacy.tool_manager,
+        legacy.agent_profile,
+    )
+    legacy_id = legacy.session_id
+    await legacy.aclose()
+
+    host = _harness_backend_host(config)
+    started = await host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=str(worktree_cwd)))
+    )
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=started.backend.session_id,
+            message=[TextContentBlock(text="persist retained session")],
+        )
+    )
+    await started.backend.shutdown()
+    WorktreeClaim(bucket="project-test", name="retained-worktree").write_recovery(
+        WorktreeRecoveryRecord(
+            name="retained-worktree",
+            branch="vibe/retained-worktree",
+            repo_root=project_cwd,
+            base_commit="0" * 40,
+            snapshot_ref="refs/vibe/reaped/retained-worktree",
+            removed_at=datetime.now(UTC),
+        )
+    )
+    shutil.rmtree(worktree_root)
+
+    listed = await host.list(SessionListParams(cwd=str(project_cwd)))
+    await host.shutdown()
+
+    harnesses = {session.id: session.harness for session in listed.items}
+    assert harnesses[started.backend.session_id] == "unified"
+    assert harnesses[legacy_id] == "legacy"
+
+
+@pytest.mark.asyncio
+async def test_unified_list_excludes_retained_nested_repository_sessions(
+    tmp_path: Path,
+) -> None:
+    project_cwd = (tmp_path / "project").resolve()
+    nested_repo_cwd = project_cwd / "vendor" / "nested"
+    nested_repo_cwd.mkdir(parents=True)
+    worktree_root = WORKTREES_DIR.path.resolve() / "nested-test" / "retained"
+    worktree_cwd = worktree_root / "packages" / "app"
+    worktree_cwd.mkdir(parents=True)
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        )
+    )
+    legacy = build_test_agent_loop(config=config, cwd=worktree_cwd)
+    legacy.messages.append(LLMMessage(role=Role.user, content="legacy nested"))
+    await legacy.session_logger.save_interaction(
+        legacy.messages,
+        legacy.stats,
+        legacy.config,
+        legacy.tool_manager,
+        legacy.agent_profile,
+    )
+    legacy_id = legacy.session_id
+    await legacy.aclose()
+
+    host = _harness_backend_host(config)
+    started = await host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=str(worktree_cwd)))
+    )
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=started.backend.session_id,
+            message=[TextContentBlock(text="persist nested retained session")],
+        )
+    )
+    await started.backend.shutdown()
+    WorktreeClaim(bucket="nested-test", name="retained").write_recovery(
+        WorktreeRecoveryRecord(
+            name="retained",
+            branch="vibe/retained",
+            repo_root=nested_repo_cwd,
+            base_commit="0" * 40,
+            snapshot_ref="refs/vibe/reaped/retained",
+            removed_at=datetime.now(UTC),
+        )
+    )
+    shutil.rmtree(worktree_root)
+
+    parent_list = await host.list(SessionListParams(cwd=str(project_cwd)))
+    nested_list = await host.list(SessionListParams(cwd=str(nested_repo_cwd)))
+    await host.shutdown()
+
+    retained_ids = {started.backend.session_id, legacy_id}
+    assert retained_ids.isdisjoint(session.id for session in parent_list.items)
+    assert parent_list.continue_session_id not in retained_ids
+    assert retained_ids <= {session.id for session in nested_list.items}
+
+
+@pytest.mark.asyncio
+async def test_unified_list_uses_latest_matching_session_for_continue(
+    tmp_path: Path,
+) -> None:
+    vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.session_protocol import (
+        IdleSessionStatus as HarnessIdleSessionStatus,
+        PublicSession as HarnessPublicSession,
+    )
+    from mistralai_vibe_local_harness.vibe._host import (
+        HarnessSessionListItem,
+        HarnessSessionListResult,
+    )
+
+    from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
+
+    project = tmp_path / "project"
+    project.mkdir()
+    older_id = "019ffb1e-741d-7f90-84df-ef66011876c1"
+    newer_id = "019ffb1e-741d-7f90-84df-ef66011876c2"
+    outside_id = "019ffb1e-741d-7f90-84df-ef66011876c3"
+
+    def item(session_id: str, cwd: Path, updated_at: int) -> HarnessSessionListItem:
+        return HarnessSessionListItem(
+            session=HarnessPublicSession(
+                id=session_id,
+                status=HarnessIdleSessionStatus(),
+                created_at=updated_at,
+                updated_at=updated_at,
+            ),
+            cwd=str(cwd),
+        )
+
+    real_host = vibe_runtime.create_harness_host()
+
+    class FakeHost:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real_host, name)
+
+        async def list(self, **_kwargs: Any) -> HarnessSessionListResult:
+            return HarnessSessionListResult(
+                items=(
+                    item(older_id, project, 1),
+                    item(newer_id, project, 2),
+                    item(outside_id, tmp_path / "outside", 3),
+                ),
+                continue_session_id=outside_id,
+            )
+
+    host = adapt_harness_host(
+        FakeHost(),
+        _test_session_runtime_builder(
+            build_test_vibe_config(
+                session_logging=SessionLoggingConfig(
+                    enabled=True, save_dir=str(tmp_path / "sessions")
+                )
+            )
+        ),
+    )
+
+    listed = await host.list(SessionListParams(cwd=str(project)))
+
+    assert listed.continue_session_id == newer_id
+
+
 def test_legacy_and_unified_hosts_share_the_same_lease_namespace(
     tmp_path: Path,
 ) -> None:
     vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-        SessionLease as HarnessLease,
-    )
+    from mistralai_vibe_local_harness.vibe._storage import SessionLease as HarnessLease
 
     session_id = "019ffb1e-741d-7f90-84df-ef66011876ca"
     legacy = SessionLease(tmp_path, session_id).acquire()
@@ -6667,15 +6922,13 @@ def _test_session_runtime_builder(
         del require_api_key
         del entrypoint
 
-        from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+        from mistralai_vibe_local_harness.vibe import (
             CompiledHooks,
             LegacyImportSource,
             LegacySessionReference as HarnessLegacySessionReference,
             LocalRuntimeAdapterConfig,
         )
-        from mistralai_vibe_local_harness.vibe._host import (  # pyright: ignore[reportMissingImports]
-            _core_config,
-        )
+        from mistralai_vibe_local_harness.vibe._host import _core_config
 
         from vibe.app_server._plugins import (
             UnifiedPluginProvider,
@@ -7100,9 +7353,7 @@ def test_a_harness_hook_notice_entry_is_a_valid_public_notice() -> None:
     # client (CLI, Le Chat, ACP) as the same "[<hook>] <content>" line the legacy
     # backend shows. Feeds the real runtime builder to the real client validator.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe._projection import (  # pyright: ignore[reportMissingImports]
-        public_notice_entry,
-    )
+    from mistralai_vibe_local_harness.vibe._projection import public_notice_entry
 
     from vibe.app_server.models import (
         HookNoticeDetail,
@@ -7335,7 +7586,7 @@ class _SubscribingSession(_RecordingSession):
         self._context_usage = context_usage
 
     async def subscribe(self, _params: Any) -> Any:
-        from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+        from mistralai_vibe_local_harness.session_protocol import (
             IdleSessionStatus as HarnessIdleSessionStatus,
             LatestPublicHistoryPage,
             PublicSession as HarnessPublicSession,

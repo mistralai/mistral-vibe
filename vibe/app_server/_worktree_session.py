@@ -21,7 +21,13 @@ from pathlib import Path
 
 from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server.protocol import ProtocolErrorCode, SessionOptions
-from vibe.core.git.worktree import ManagedWorktree, PendingSessionHold, PreparedWorktree
+from vibe.core.git.errors import GitError
+from vibe.core.git.worktree import (
+    ManagedWorktree,
+    PendingSessionHold,
+    PreparedWorktree,
+    RetainedRepositoryMapping,
+)
 from vibe.core.paths import dedup_paths
 from vibe.core.session.worktrees import (
     CreateNamedWorktree,
@@ -141,6 +147,23 @@ class SessionWorktrees:
         await self._lifecycle.cleanup(
             resolution.prepared_worktree, resolution.pending_hold
         )
+
+    async def restore(self, cwd: Path) -> bool:
+        try:
+            return await self._lifecycle.restore(cwd)
+        except GitError as exc:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
+
+    @staticmethod
+    def retained_repository_mapping(cwd: Path) -> RetainedRepositoryMapping | None:
+        managed = ManagedWorktree.at(cwd)
+        if managed is None:
+            return None
+        return managed.retained_repository_mapping(cwd)
+
+    @staticmethod
+    def is_managed(cwd: Path) -> bool:
+        return ManagedWorktree.at(cwd) is not None
 
     @staticmethod
     def reject_input(options: SessionOptions) -> None:

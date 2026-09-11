@@ -360,9 +360,7 @@ def _stored_active_model(
     session_root: Path, session_id: str, experimental_harness: bool
 ) -> str | None:
     if experimental_harness:
-        from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-            UnifiedSessionStore,
-        )
+        from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
 
         return (
             UnifiedSessionStore(session_root, session_id)
@@ -378,9 +376,7 @@ def _session_model_is_persisted(
     session_root: Path, session_id: str, experimental_harness: bool
 ) -> bool:
     if experimental_harness:
-        from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-            UnifiedSessionStore,
-        )
+        from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
 
         return UnifiedSessionStore(session_root, session_id).exists
     return any(session_root.glob(f"*_{session_id[:8]}/meta.json"))

@@ -107,7 +107,9 @@ _DEFAULT_BASE_URL = "https://api.mistral.ai"
 
 def _bootstrap_cache_key(api_key: str, server_url: str | None) -> str:
     base_url = server_url or _DEFAULT_BASE_URL
-    return hashlib.sha256(f"{base_url}\0{api_key}".encode()).hexdigest()
+    return hashlib.sha256(
+        f"{base_url}\0{api_key}\0supports_mcp=true".encode()
+    ).hexdigest()
 
 
 def _strip_none(value: Any) -> Any:
@@ -509,6 +511,7 @@ class ConnectorRegistry:
         params = {
             "include_auth_actionable_connectors": "true",
             "builtin_connectors": "web_search",
+            "supports_mcp": "true",
         }
         async with VibeAsyncHTTPClient(
             timeout=_BOOTSTRAP_TIMEOUT, verify=build_ssl_context()
@@ -607,13 +610,12 @@ class ConnectorRegistry:
 
             self._bootstrap_error = None
 
-            mcp_connectors = [
+            connectors = [
                 connector
                 for connector in data.get("connectors") or []
                 if isinstance(connector, dict)
-                and (not (protocol := connector.get("protocol")) or protocol == "mcp")
             ]
-            unique_connectors = _deduplicate_connectors(mcp_connectors)
+            unique_connectors = _deduplicate_connectors(connectors)
 
             cache: dict[str, dict[str, type[BaseTool]]] = {}
             all_tools: dict[str, type[BaseTool]] = {}

@@ -26,12 +26,8 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
-    RustRuntimeBuiltinToolName,
-)
-from mistralai_vibe_local_harness.vibe._permissions import (  # pyright: ignore[reportMissingImports]
-    PermissionOutcome,
-)
+from mistralai_vibe_local_harness.protocol import RustRuntimeBuiltinToolName
+from mistralai_vibe_local_harness.vibe._permissions import PermissionOutcome
 from pydantic import BaseModel
 
 from vibe.core.config import VibeConfigSchema

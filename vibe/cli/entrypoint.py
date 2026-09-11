@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 
 if sys.argv[1:2] == ["--internal-posix-pty-helper"]:
-    from mistralai_vibe_local_harness.vibe._processes._posix_helper import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.vibe._processes._posix_helper import (
         main as _pty_helper_main,
     )
 

@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import subprocess
 from typing import TYPE_CHECKING
 
 from vibe.cli.autocompletion.file_indexer.ignore_rules import IgnoreRules
@@ -53,26 +54,52 @@ class FileIndexStore:
         self._entries_by_rel: dict[str, IndexEntry] = {}
         self._ordered_entries: list[IndexEntry] | None = None
         self._root: Path | None = None
+        self._git_backed = False
+        self._dirty = False
 
     @property
     def root(self) -> Path | None:
         return self._root
 
+    @property
+    def is_git_backed(self) -> bool:
+        return self._git_backed
+
+    @property
+    def is_dirty(self) -> bool:
+        return self._dirty
+
     def clear(self) -> None:
         self._entries_by_rel.clear()
         self._ordered_entries = None
         self._root = None
+        self._git_backed = False
+        self._dirty = False
 
     def rebuild(
         self, root: Path, should_cancel: Callable[[], bool] | None = None
-    ) -> None:
+    ) -> bool:
         resolved_root = root.resolve()
-        self._ignore_rules.ensure_for_root(resolved_root)
-        entries = self._walk_directory(resolved_root, cancel_check=should_cancel)
+        git_entries = self._list_git_entries(resolved_root, should_cancel)
+        if should_cancel and should_cancel():
+            return False
+
+        if git_entries is None:
+            self._ignore_rules.ensure_for_root(resolved_root)
+            entries = self._walk_directory(resolved_root, cancel_check=should_cancel)
+            if entries is None:
+                return False
+            self._git_backed = False
+        else:
+            entries = git_entries
+            self._git_backed = True
+
         self._entries_by_rel = {entry.rel: entry for entry in entries}
         self._ordered_entries = entries
         self._root = resolved_root
+        self._dirty = False
         self._stats.rebuilds += 1
+        return True
 
     def snapshot(self) -> list[IndexEntry]:
         if not self._entries_by_rel:
@@ -86,6 +113,16 @@ class FileIndexStore:
         return list(self._ordered_entries)
 
     def apply_changes(self, changes: list[tuple[Change, Path]]) -> None:
+        if self._root is None:
+            return
+
+        if self._git_backed:
+            self._dirty = True
+            return
+
+        self._apply_non_git_changes(changes)
+
+    def _apply_non_git_changes(self, changes: list[tuple[Change, Path]]) -> None:
         from watchfiles import Change
 
         if self._root is None:
@@ -118,7 +155,10 @@ class FileIndexStore:
                 if dir_entry:
                     self._entries_by_rel[rel_str] = dir_entry
                     modified = True
-                for entry in self._walk_directory(path, rel_str):
+                entries = self._walk_directory(path, rel_str)
+                if entries is None:
+                    continue
+                for entry in entries:
                     self._entries_by_rel[entry.rel] = entry
                     modified = True
             else:
@@ -130,6 +170,95 @@ class FileIndexStore:
         if modified:
             self._ordered_entries = None
             self._stats.incremental_updates += 1
+
+    def mark_dirty(self) -> None:
+        if self._root is not None:
+            self._dirty = True
+
+    def _list_git_entries(
+        self, root: Path, should_cancel: Callable[[], bool] | None
+    ) -> list[IndexEntry] | None:
+        try:
+            process = subprocess.Popen(
+                [
+                    "git",
+                    "-C",
+                    os.fspath(root),
+                    "ls-files",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                    "-z",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            return None
+
+        stdout = b""
+        while True:
+            if should_cancel and should_cancel():
+                process.terminate()
+                process.communicate()
+                return None
+            try:
+                stdout, _ = process.communicate(timeout=0.01)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+
+        if process.returncode != 0:
+            return None
+
+        entries_by_rel: dict[str, IndexEntry] = {}
+        for raw_path in stdout.split(b"\0"):
+            if should_cancel and should_cancel():
+                return None
+            if not raw_path:
+                continue
+            try:
+                rel = raw_path.decode(errors="surrogateescape")
+            except UnicodeDecodeError:
+                continue
+            path = root / Path(rel)
+            if not path.exists():
+                continue
+            self._add_git_entry(entries_by_rel, rel, path)
+
+        return sorted(entries_by_rel.values(), key=lambda entry: entry.rel)
+
+    def _add_git_entry(
+        self, entries_by_rel: dict[str, IndexEntry], rel: str, path: Path
+    ) -> None:
+        parts = Path(rel).parts
+        for index in range(1, len(parts)):
+            parent_parts = parts[:index]
+            parent_rel = Path(*parent_parts).as_posix()
+            entries_by_rel.setdefault(
+                parent_rel,
+                self._new_entry(
+                    parent_rel,
+                    rootless_path=path.parents[len(parts) - index - 1],
+                    is_dir=True,
+                ),
+            )
+
+        normalized_rel = Path(rel).as_posix()
+        entries_by_rel[normalized_rel] = self._new_entry(
+            normalized_rel, rootless_path=path, is_dir=path.is_dir()
+        )
+
+    def _new_entry(self, rel: str, rootless_path: Path, is_dir: bool) -> IndexEntry:
+        rel_lower = rel.lower()
+        return IndexEntry(
+            rel=rel,
+            rel_lower=rel_lower,
+            name=rootless_path.name,
+            path=rootless_path,
+            is_dir=is_dir,
+            ascii_mask=build_ascii_mask(rel_lower),
+        )
 
     def _create_entry(
         self, rel_str: str, name: str, path: Path, is_dir: bool
@@ -151,13 +280,13 @@ class FileIndexStore:
         directory: Path,
         rel_prefix: str = "",
         cancel_check: Callable[[], bool] | None = None,
-    ) -> list[IndexEntry]:
+    ) -> list[IndexEntry] | None:
         results: list[IndexEntry] = []
         try:
             with os.scandir(directory) as iterator:
                 for entry in iterator:
                     if cancel_check and cancel_check():
-                        break
+                        return None
 
                     is_dir = entry.is_dir(follow_symlinks=False)
                     name = entry.name
@@ -171,9 +300,10 @@ class FileIndexStore:
                     results.append(index_entry)
 
                     if is_dir:
-                        results.extend(
-                            self._walk_directory(path, rel_str, cancel_check)
-                        )
+                        descendants = self._walk_directory(path, rel_str, cancel_check)
+                        if descendants is None:
+                            return None
+                        results.extend(descendants)
         except (PermissionError, OSError):
             pass
 

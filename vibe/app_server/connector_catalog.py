@@ -1319,6 +1319,7 @@ async def _fetch_bootstrap(base_url: str, api_key: str) -> object:
             params={
                 "include_auth_actionable_connectors": "true",
                 "builtin_connectors": "web_search",
+                "supports_mcp": "true",
             },
         )
         response.raise_for_status()
@@ -1510,8 +1511,6 @@ def _resolve_catalog(
     raw_ids: set[str] = set()
     prepared_connectors: list[tuple[str, str, _BootstrapConnector]] = []
     for raw_connector in parsed.connectors:
-        if raw_connector.protocol and raw_connector.protocol != "mcp":
-            continue
         raw_id = (raw_connector.id or "").strip()
         if not raw_id:
             continue

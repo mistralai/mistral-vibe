@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import json
 import os
 from pathlib import Path
+import stat
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1330,6 +1331,52 @@ class TestSessionLoggerSaveInteraction:
         loaded, metadata = SessionLoader.load_session(logger.session_dir)
         assert loaded == []
         assert metadata["total_messages"] == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+class TestSessionLogPermissions:
+    @pytest.mark.asyncio
+    async def test_new_session_log_is_owner_only(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        """A fresh session lands with an owner-only directory and files."""
+        logger = SessionLogger(session_config, "perm-session")
+        messages = [
+            LLMMessage(role=Role.user, content="hello"),
+            LLMMessage(role=Role.assistant, content="hi"),
+        ]
+        await logger.save_interaction(
+            messages=messages,
+            stats=AgentStats(steps=1),
+            config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+        assert logger.session_dir is not None
+        assert stat.S_IMODE(logger.session_dir.stat().st_mode) & 0o077 == 0
+        messages_mode = stat.S_IMODE(
+            (logger.session_dir / "messages.jsonl").stat().st_mode
+        )
+        assert messages_mode & 0o077 == 0
+        metadata_mode = stat.S_IMODE((logger.session_dir / "meta.json").stat().st_mode)
+        assert metadata_mode & 0o077 == 0
+
+        # A second save appends to the existing log without loosening it.
+        await logger.save_interaction(
+            messages=messages + [LLMMessage(role=Role.user, content="again")],
+            stats=AgentStats(steps=2),
+            config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+        messages_mode = stat.S_IMODE(
+            (logger.session_dir / "messages.jsonl").stat().st_mode
+        )
+        assert messages_mode & 0o077 == 0
 
 
 class TestSessionLoggerResetSession:

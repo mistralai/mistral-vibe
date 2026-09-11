@@ -14,7 +14,7 @@ pytest.importorskip("mistralai_vibe_local_harness.session_protocol")
 vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
 pytest.importorskip("mistralai_vibe_local_harness.vibe._processes._output")
 
-from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
+from mistralai_vibe_local_harness.protocol import (
     RustCompletionResult,
     RustCompletionResultPart,
     RustCompletionResultToolCallPart,
@@ -23,12 +23,8 @@ from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMis
     RustTextContentBlock,
     RustTokenUsage,
 )
-from mistralai_vibe_local_harness.vibe._processes._output import (  # pyright: ignore[reportMissingImports]
-    ProcessOutputStore,
-)
-from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-    UnifiedSessionStore,
-)
+from mistralai_vibe_local_harness.vibe._processes._output import ProcessOutputStore
+from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
 
 from vibe.app_server._runtime import HarnessProcess
 from vibe.app_server._session_backend_port import SessionBackend, SessionBackendHost

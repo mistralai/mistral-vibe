@@ -88,7 +88,7 @@ def test_classify_verdict_reaches_the_log_file(tmp_path: Path) -> None:
     *Assert*: The classifier's verdict line is written to the vibe log file.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.vibe import (
         ClassificationTier,
         ClassificationVerdict,
         LocalRuntimeAdapterConfig,

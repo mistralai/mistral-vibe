@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import subprocess
 import time
 
 import pytest
@@ -251,7 +252,7 @@ def test_shutdown_cleans_up_resources(
     assert file_indexer.get_index(Path(".")) == []
 
 
-def test_watcher_is_disabled_by_default(
+def test_watcher_is_disabled_without_an_enabled_callback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -268,6 +269,72 @@ def test_watcher_is_disabled_by_default(
         )
     finally:
         file_indexer.shutdown()
+
+
+def test_git_catalog_uses_nested_gitignore_and_keeps_untracked_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file_indexer: FileIndexer
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "tracked.py").write_text("", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.py"], check=True)
+    (tmp_path / "staged.py").write_text("", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "staged.py"], check=True)
+    (tmp_path / "untracked.py").write_text("", encoding="utf-8")
+    (tmp_path / "generated").mkdir()
+    (tmp_path / "generated" / ".gitignore").write_text("cache/\n", encoding="utf-8")
+    (tmp_path / "generated" / "cache").mkdir()
+    (tmp_path / "generated" / "cache" / "ignored.py").write_text("", encoding="utf-8")
+    (tmp_path / "generated" / "kept.py").write_text("", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    entries = {entry.rel for entry in file_indexer.get_index(Path("."))}
+
+    assert {
+        "tracked.py",
+        "staged.py",
+        "untracked.py",
+        "generated",
+        "generated/kept.py",
+    } <= entries
+    assert "generated/cache" not in entries
+    assert "generated/cache/ignored.py" not in entries
+
+
+def test_git_catalog_refreshes_lazily_after_watcher_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file_indexer: FileIndexer
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "tracked.py").write_text("", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.py"], check=True)
+    monkeypatch.chdir(tmp_path)
+    file_indexer.get_index(Path("."))
+    rebuilds_before = file_indexer.stats.rebuilds
+
+    (tmp_path / "new.py").write_text("", encoding="utf-8")
+    assert _wait_for(lambda: file_indexer._store.is_dirty)
+
+    assert "new.py" in _current_entries(file_indexer)
+    assert file_indexer.stats.rebuilds == rebuilds_before + 1
+
+
+def test_non_git_walk_stops_when_cancelled(tmp_path: Path) -> None:
+    from vibe.cli.autocompletion.file_indexer.ignore_rules import IgnoreRules
+    from vibe.cli.autocompletion.file_indexer.store import (
+        FileIndexStats,
+        FileIndexStore,
+    )
+
+    (tmp_path / "first.py").write_text("", encoding="utf-8")
+    (tmp_path / "second.py").write_text("", encoding="utf-8")
+    store = FileIndexStore(IgnoreRules(), FileIndexStats())
+    checks = 0
+
+    def should_cancel() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks > 1
+
+    assert store._walk_directory(tmp_path, cancel_check=should_cancel) is None
 
 
 def test_disabling_watcher_stops_runtime_updates(

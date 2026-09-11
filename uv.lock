@@ -813,7 +813,7 @@ wheels = [
 
 [[package]]
 name = "mistral-vibe"
-version = "2.25.2"
+version = "2.25.3"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -992,7 +992,7 @@ requires-dist = [
     { name = "mdit-py-plugins", specifier = "==0.5.0" },
     { name = "mdurl", specifier = "==0.1.2" },
     { name = "mistralai", specifier = "==2.6.0" },
-    { name = "mistralai-vibe-local-harness", specifier = "==0.4.3" },
+    { name = "mistralai-vibe-local-harness", specifier = "==0.4.5" },
     { name = "more-itertools", specifier = "==11.0.2" },
     { name = "opentelemetry-api", specifier = "==1.39.1" },
     { name = "opentelemetry-exporter-otlp-proto-common", specifier = "==1.39.1" },
@@ -1103,7 +1103,7 @@ wheels = [
 
 [[package]]
 name = "mistralai-vibe-local-harness"
-version = "0.4.3"
+version = "0.4.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1118,11 +1118,11 @@ dependencies = [
     { name = "truststore" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9a/34/c55289e1e52c10b11e683885145a8f0b9565fe07c6371b98e900eb125918/mistralai_vibe_local_harness-0.4.3-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:272476b29ae3dc85de4d453184a7a64026b5f9b66f30a1a279d28865859a7644", size = 25565981, upload-time = "2026-09-09T09:24:48.115Z" },
-    { url = "https://files.pythonhosted.org/packages/3e/1d/65ca54fcb18081f9fe14e23995e64f4bcfcb5cf075b94fbca80e5bf5554c/mistralai_vibe_local_harness-0.4.3-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:d528171fdb4ee45e9153842d1c68f9017504df36f3aac9dacef9467ae9b3d9c0", size = 24528876, upload-time = "2026-09-09T09:24:50.904Z" },
-    { url = "https://files.pythonhosted.org/packages/13/8f/d4b50a4904d19a811d06d988c4a821749fae1f1099028c0da95bec33146b/mistralai_vibe_local_harness-0.4.3-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:a5ddb108855c4b1710c6b3d9f2d90ccc219ff52ff2cd13eae2cc1ddda079b5b0", size = 23760393, upload-time = "2026-09-09T09:24:53.384Z" },
-    { url = "https://files.pythonhosted.org/packages/3a/21/00e5a45dc080ffda059976e03e04b8a8d3d8e795f14be12be83a31a0164a/mistralai_vibe_local_harness-0.4.3-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:25369308a4e8d78d180394843d5901b901dc7228eba7b920f94e8d2ae2dcb18c", size = 24802678, upload-time = "2026-09-09T09:24:56.279Z" },
-    { url = "https://files.pythonhosted.org/packages/9f/d4/3ddfb83508302238419d9f1a9fb8378bdc978ac20432e3409a99805c0efb/mistralai_vibe_local_harness-0.4.3-cp312-abi3-win_amd64.whl", hash = "sha256:2712e7fac993cfbffe718acf00cff0d323ebd0998435cf2990fc968a44d1ba3b", size = 24259132, upload-time = "2026-09-09T09:24:58.899Z" },
+    { url = "https://files.pythonhosted.org/packages/61/40/11c3efb6b747f84c3795658cd8228758f60dff8bae54262bc8c82bbdc6d8/mistralai_vibe_local_harness-0.4.5-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:6008687fd6e94aee2434cf91305da640b3181652281130909c0367fa669b20b5", size = 25571151, upload-time = "2026-09-10T19:11:50.601Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/b7/cc9debc3bd530852d146e599c273d045c3a6de68e7d3f326634b93616c31/mistralai_vibe_local_harness-0.4.5-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:9d8c36cd317f7bfbe1be59ee6ac88c07066bf8da2f06b5ba73873ed0f1fbf26c", size = 24535036, upload-time = "2026-09-10T19:11:53.89Z" },
+    { url = "https://files.pythonhosted.org/packages/5d/a5/7f4419c402ee0951420c7b7345153814bc94992af269ee9924f9b04b7dec/mistralai_vibe_local_harness-0.4.5-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:ae9cdd9a2ff35b18834ab9c4512eecdd37cbe8063a54e68d30041d9d1ef9a2d3", size = 23766186, upload-time = "2026-09-10T19:11:56.761Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/19/c5097ce107367a6011808eb237422c0420035434d7059b426ee3747b381e/mistralai_vibe_local_harness-0.4.5-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:4eafb4b13f8b038c5736665f6f51ecf5861d5a648e26405b8076cbf9cbcc8b5a", size = 24807784, upload-time = "2026-09-10T19:11:59.428Z" },
+    { url = "https://files.pythonhosted.org/packages/27/30/e27d0f07d008c358c56fb78d6435bc5f7304eced4aaf49fc4b97e96d1f52/mistralai_vibe_local_harness-0.4.5-cp312-abi3-win_amd64.whl", hash = "sha256:dde470ff81ae37387502655eb3762a5030e447ee510897e1962b887a1e6ab940", size = 24265245, upload-time = "2026-09-10T19:12:02.041Z" },
 ]
 
 [[package]]

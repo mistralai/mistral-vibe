@@ -22,9 +22,7 @@ from vibe.app_server._skills import (
 from vibe.core.skills.models import SkillInfo, SkillScope, SkillSource
 
 if TYPE_CHECKING:
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
-        RustPluginContextDefinition,
-    )
+    from mistralai_vibe_local_harness.protocol import RustPluginContextDefinition
 
 pytest.importorskip("mistralai_vibe_local_harness.protocol")
 
@@ -55,7 +53,7 @@ def _write_skill(root: Path, name: str) -> Path:
 
 def _plugin_context(*skills: tuple[str, str]) -> RustPluginContextDefinition:
     """A ``toolkit`` plugin context owning ``(alias, path)`` skills."""
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.protocol import (
         RustHarnessCapabilitySet,
         RustPluginContextDefinition,
         RustSkillDefinition,

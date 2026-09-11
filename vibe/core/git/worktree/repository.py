@@ -19,6 +19,8 @@ from vibe.core.git.worktree.naming import (
 from vibe.core.git.worktree.record import (
     WorktreeClaim,
     WorktreeRecord,
+    WorktreeRecordError,
+    WorktreeRecoveryRecord,
     managed_bucket_name,
     worktree_prune_lock,
 )
@@ -32,7 +34,7 @@ _AUTO_WORKTREE_BRANCH_PREFIX = "vibe/"
 _MAX_AUTO_WORKTREE_ATTEMPTS = 100
 # Under `refs/vibe/` rather than `refs/heads/`, so a snapshot never appears in
 # the branch picker, in `git branch`, or as something to push. It is a way back
-# to work removed by explicit session deletion, not a development branch.
+# to work removed by explicit deletion or automatic retention.
 SNAPSHOT_REF_PREFIX = "refs/vibe/reaped"
 _RESERVED_WORKTREE_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"}
@@ -104,46 +106,15 @@ class PreparedWorktree:
             new_commit_count=new_commit_count,
         )
 
-    def inspect_for_prune(self) -> WorktreePruneState:
-        """Whether automatic retention can remove this checkout safely."""
-        git = _git_python()
-        try:
-            repo = git.repo(self.root)
-            status_lines = (
-                _unhooked(repo)
-                .status("--porcelain", "--untracked-files=all")
-                .splitlines()
-            )
-            unpushed_commit_count = int(
-                repo.git.rev_list("--count", "HEAD", "--not", "--remotes").strip()
-            )
-        except (
-            git.invalid_git_repository_error,
-            git.git_command_error,
-            ValueError,
-        ) as e:
-            raise WorktreeError(f"Failed to inspect worktree {self.name!r}: {e}") from e
-
-        return WorktreePruneState(
-            has_uncommitted_changes=any(
-                not line.startswith("??") for line in status_lines
-            ),
-            has_untracked_files=any(line.startswith("??") for line in status_lines),
-            unpushed_commit_count=unpushed_commit_count,
-        )
-
     def snapshot(self) -> str:
         """Commit this worktree's whole state to a ref nothing checks out.
 
         Returns the ref. Raises when the state could not be saved, which is
         the caller's signal to keep the worktree instead of removing it.
 
-        Explicit session deletion can remove a worktree even when work was left
-        behind, and that is only defensible because the work survives somewhere.
-        Untracked files are in: an agent that wrote a file and never staged it
-        produced exactly the state a user would most regret losing. Ignored files
-        are out, for the same reason `git add` leaves them -- a snapshot that
-        included `node_modules` would cost more than the work it saved.
+        Explicit deletion and automatic retention can remove a worktree even
+        when work was left behind. Untracked files are included; ignored files
+        are not.
 
         Written through a second index, so the worktree's own is untouched: a
         failure here aborts the removal, and the worktree the user is then left
@@ -210,6 +181,12 @@ class LinkedWorktree:
     repo_root: Path
 
 
+@dataclass(frozen=True)
+class RetainedRepositoryMapping:
+    root: Path
+    cwd: Path
+
+
 class WorktreeReleaseOutcome(StrEnum):
     REMOVED = auto()
     KEPT_DIRTY = auto()
@@ -257,35 +234,6 @@ class WorktreeCleanupState:
         return tuple(reasons)
 
 
-@dataclass(frozen=True)
-class WorktreePruneState:
-    has_uncommitted_changes: bool
-    has_untracked_files: bool
-    unpushed_commit_count: int
-
-    @property
-    def is_safe(self) -> bool:
-        return (
-            not self.has_uncommitted_changes
-            and not self.has_untracked_files
-            and self.unpushed_commit_count == 0
-        )
-
-    @property
-    def reasons(self) -> tuple[str, ...]:
-        reasons: list[str] = []
-        if self.has_uncommitted_changes:
-            reasons.append("uncommitted changes")
-        if self.has_untracked_files:
-            reasons.append("untracked files")
-        if self.unpushed_commit_count:
-            noun = "commit" if self.unpushed_commit_count == 1 else "commits"
-            reasons.append(
-                f"{self.unpushed_commit_count} {noun} not pushed to a remote"
-            )
-        return tuple(reasons)
-
-
 class WorktreeRepository:
     """The managed worktrees of one git repository.
 
@@ -304,8 +252,10 @@ class WorktreeRepository:
     # those handles past app-server teardown.
     @classmethod
     @contextmanager
-    def open(cls, base: Path) -> Iterator[WorktreeRepository]:
-        git = GitRepo.open(base)
+    def open(
+        cls, base: Path, *, repository_root: Path | None = None
+    ) -> Iterator[WorktreeRepository]:
+        git = GitRepo.open(base if repository_root is None else repository_root)
         try:
             yield cls(git, base)
         finally:
@@ -344,6 +294,10 @@ class WorktreeRepository:
             return None
 
     @property
+    def repository_mapped_cwd(self) -> Path:
+        return self._paths.repo_root / self._relative_base
+
+    @property
     def bucket(self) -> str:
         paths = self._paths
         return managed_bucket_name(paths.repo_root, paths.common_git_dir)
@@ -371,6 +325,11 @@ class WorktreeRepository:
 
         paths = self._paths
         target = self.worktree_root / name
+        claim = WorktreeClaim(bucket=self.bucket, name=name)
+        if claim.has_recovery() and not target.exists():
+            raise WorktreeError(
+                f"Worktree {name!r} is reserved by a retained session snapshot."
+            )
 
         # mkdir is the atomic claim here for the reason _claim_auto_name gives,
         # and for one more: without it two callers for the same name both write
@@ -405,7 +364,6 @@ class WorktreeRepository:
             ) from e
 
         branch_created = not self._git.branch_exists(branch)
-        claim = WorktreeClaim(bucket=self.bucket, name=name)
         record = WorktreeRecord.new(
             name=name,
             branch=branch,
@@ -538,9 +496,11 @@ class WorktreeRepository:
         target: Path,
         *,
         branch_created: bool,
+        start_point: str | None = None,
     ) -> PreparedWorktree:
         branch = record.branch
-        start_point = self._base_ref() if branch_created else None
+        if branch_created and start_point is None:
+            start_point = self._base_ref()
         try:
             self._git.add_worktree(
                 target, branch, branch_created=branch_created, start_point=start_point
@@ -558,6 +518,75 @@ class WorktreeRepository:
             raise
         claim.write(record.model_copy(update={"base_commit": prepared.base_commit}))
         return prepared
+
+    def restore(
+        self, claim: WorktreeClaim, recovery: WorktreeRecoveryRecord
+    ) -> PreparedWorktree:
+        if claim.bucket != self.bucket or claim.name != recovery.name:
+            raise WorktreeError(
+                "Worktree recovery metadata does not match its repository."
+            )
+
+        target = self.worktree_root / claim.name
+        try:
+            claim.mark_starting()
+        except WorktreeRecordError as exc:
+            raise WorktreeError(
+                f"Worktree restore is already in progress for {target}."
+            ) from exc
+
+        reserved = False
+        try:
+            branch = self._available_recovery_branch(recovery.branch)
+            record = WorktreeRecord.new(
+                name=claim.name,
+                branch=branch,
+                repo_root=self._paths.repo_root,
+                branch_created=True,
+            )
+            try:
+                target.mkdir(parents=True)
+                reserved = True
+            except FileExistsError as exc:
+                raise WorktreeError(
+                    f"Cannot restore occupied worktree path {target}."
+                ) from exc
+            except OSError as exc:
+                raise WorktreeError(
+                    f"Failed to reserve worktree path {target}: {exc}"
+                ) from exc
+            claim.write(record)
+        except BaseException:
+            claim.finish_starting()
+            if reserved:
+                with suppress(OSError):
+                    target.rmdir()
+            raise
+
+        try:
+            restored = self._create(
+                claim,
+                record,
+                target,
+                branch_created=True,
+                start_point=recovery.snapshot_ref,
+            )
+        except BaseException:
+            claim.finish_starting()
+            raise
+        return restored
+
+    def _available_recovery_branch(self, preferred: str) -> str:
+        if not self._git.branch_exists(preferred):
+            return preferred
+        base = f"{preferred}-restored"
+        for suffix in range(1, _MAX_AUTO_WORKTREE_ATTEMPTS + 1):
+            candidate = base if suffix == 1 else f"{base}-{suffix}"
+            if not self._git.branch_exists(candidate):
+                return candidate
+        raise WorktreeError(
+            f"Unable to find an unused recovery branch for {preferred!r}."
+        )
 
     def _build_prepared(
         self,
@@ -593,7 +622,8 @@ class WorktreeRepository:
         worktree_root = self.worktree_root
         for name in _auto_worktree_candidates(base_name):
             branch = f"{_AUTO_WORKTREE_BRANCH_PREFIX}{name}"
-            if self._git.branch_exists(branch):
+            claim = WorktreeClaim(bucket=self.bucket, name=name)
+            if self._git.branch_exists(branch) or claim.has_recovery():
                 continue
             target = worktree_root / name
             try:
@@ -683,6 +713,19 @@ class ManagedWorktree:
     def root(self) -> Path:
         return WORKTREES_DIR.path.resolve() / self.claim.bucket / self.claim.name
 
+    def retained_repository_mapping(
+        self, cwd: Path
+    ) -> RetainedRepositoryMapping | None:
+        recovery = self.claim.read_recovery()
+        if recovery is None:
+            return None
+        try:
+            relative = cwd.expanduser().resolve().relative_to(self.root.resolve())
+            root = recovery.repo_root.expanduser().resolve()
+            return RetainedRepositoryMapping(root=root, cwd=root / relative)
+        except (OSError, RuntimeError, ValueError):
+            return None
+
     def hold_for_attachment(self) -> PendingSessionHold | None:
         """Prevent pruning until a resolved worktree gains its session holder."""
         holder_id = f"attach-{uuid4().hex}"
@@ -719,7 +762,7 @@ class ManagedWorktree:
 
     @classmethod
     def prune(cls, limit: int) -> int:
-        """Remove oldest managed worktrees whose complete state is on a remote."""
+        """Snapshot and remove oldest inactive managed worktrees."""
         if limit < 0:
             raise ValueError("limit must be non-negative")
 
@@ -742,10 +785,10 @@ class ManagedWorktree:
                 if claim.is_starting():
                     continue
                 try:
-                    release = cls(claim=claim).prune_if_pushed()
+                    release = cls(claim=claim)._prune_with_snapshot()
                 except (GitError, OSError) as exc:
                     logger.warning(
-                        "Keeping managed worktree %s/%s: retention check failed",
+                        "Keeping managed worktree %s/%s: retention cleanup failed",
                         claim.bucket,
                         claim.name,
                         exc_info=exc,
@@ -810,6 +853,14 @@ class ManagedWorktree:
     def release(self, session_id: str | None = None) -> WorktreeRelease:
         record = self.claim.read()
         if record is None:
+            if (
+                session_id is None
+                and (recovery := self.claim.read_recovery()) is not None
+            ):
+                self._discard_retained_snapshot(recovery)
+                return WorktreeRelease(
+                    WorktreeReleaseOutcome.REMOVED, branch=recovery.branch
+                )
             return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
         if self.root.is_dir() and self.claim.is_starting():
             return WorktreeRelease(
@@ -832,8 +883,22 @@ class ManagedWorktree:
 
         return self._release_unheld(record)
 
-    def prune_if_pushed(self) -> WorktreeRelease:
-        """Remove this worktree only when no local Git work would be lost."""
+    def _discard_retained_snapshot(self, recovery: WorktreeRecoveryRecord) -> None:
+        self.claim.delete_recovery()
+        git = _git_python()
+        try:
+            with git.repo(recovery.repo_root) as repository:
+                repository.git.update_ref("-d", recovery.snapshot_ref)
+        except (
+            git.invalid_git_repository_error,
+            git.no_such_path_error,
+            git.git_command_error,
+        ) as exc:
+            logger.warning(
+                "Failed to delete retained snapshot %s: %s", recovery.snapshot_ref, exc
+            )
+
+    def _prune_with_snapshot(self) -> WorktreeRelease:
         record = self.claim.read()
         if record is None:
             return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
@@ -859,34 +924,93 @@ class ManagedWorktree:
             created=True,
             branch_created=record.branch_created,
         )
-        state = prepared.inspect_for_prune()
-        if not state.is_safe:
-            release = WorktreeRelease(
-                WorktreeReleaseOutcome.KEPT_DIRTY,
-                root=root,
-                branch=record.branch,
-                reasons=state.reasons,
+        try:
+            snapshot = prepared.snapshot()
+        except (WorktreeError, OSError) as exc:
+            logger.warning(
+                "Keeping worktree %s: retention snapshot failed", root, exc_info=exc
             )
-        elif late := self.claim.holders():
-            logger.info(
-                "Keeping worktree %s: %d session(s) joined during inspection",
-                root,
-                len(late),
+            return WorktreeRelease(
+                WorktreeReleaseOutcome.KEPT_DIRTY, root=root, branch=record.branch
             )
+
+        late = self.claim.holders()
+        if self.claim.is_starting() or late:
+            logger.info("Keeping worktree %s: claimed during inspection", root)
             release = WorktreeRelease(
                 WorktreeReleaseOutcome.KEPT_IN_USE, root=root, branch=record.branch
             )
         else:
+            self.claim.write_recovery(
+                WorktreeRecoveryRecord.new(record, snapshot_ref=snapshot)
+            )
             prepared.remove(delete_branch=record.branch_created)
             self.claim.delete()
-            logger.info("Pruned remote-backed worktree %s", root)
+            logger.info("Pruned worktree %s after saving %s", root, snapshot)
             release = WorktreeRelease(
                 WorktreeReleaseOutcome.REMOVED,
                 root=root,
                 branch=record.branch,
                 branch_deleted=record.branch_created,
+                snapshot_ref=snapshot,
             )
         return release
+
+    def restore(self, cwd: Path) -> bool:
+        requested = cwd.expanduser().resolve()
+        root = self.root
+        try:
+            requested.relative_to(root)
+        except ValueError as exc:
+            raise WorktreeError(
+                f"Path {requested} is outside worktree {root}."
+            ) from exc
+
+        with worktree_prune_lock():
+            return self._restore_locked(requested, root)
+
+    def _restore_locked(self, requested: Path, root: Path) -> bool:
+        recovery = self.claim.read_recovery()
+        if recovery is None:
+            return False
+        if self.claim.is_starting():
+            raise WorktreeError(f"Worktree restore is already in progress for {root}.")
+
+        # A restore interrupted between mkdir and recording its claim can leave
+        # only the empty path reservation behind. Remove that reservation so
+        # recovery can be retried, while failing closed for occupied paths.
+        try:
+            if not root.is_symlink() and root.is_dir() and not any(root.iterdir()):
+                root.rmdir()
+        except OSError as exc:
+            raise WorktreeError(
+                f"Cannot restore occupied worktree path {root}."
+            ) from exc
+
+        if root.exists():
+            record = self.claim.read()
+            if record is None or record.base_commit is None:
+                raise WorktreeError(f"Cannot restore occupied worktree path {root}.")
+            with WorktreeRepository.open(record.repo_root) as repository:
+                _validate_existing_worktree(
+                    root, record.branch, repository._paths.common_git_dir
+                )
+            _ensure_saved_directory(requested)
+            self.claim.delete_recovery()
+            return False
+
+        with WorktreeRepository.open(recovery.repo_root) as repository:
+            repository.restore(self.claim, recovery)
+        try:
+            _ensure_saved_directory(requested)
+            self.claim.delete_recovery()
+        except BaseException:
+            self.claim.finish_starting()
+            raise
+        logger.info(
+            "Restored retained worktree %s from %s", root, recovery.snapshot_ref
+        )
+        return True
 
     def _release_unheld(self, record: WorktreeRecord) -> WorktreeRelease:
         root = self.root
@@ -1047,6 +1171,19 @@ def _worktree_root(repo_root: Path, common_git_dir: Path) -> Path:
             f"Managed worktree root {target_root} resolves outside {managed_root}."
         )
     return target_root
+
+
+def _ensure_saved_directory(requested: Path) -> None:
+    # Git does not store empty directories or ignored-only trees. Recreate a
+    # missing saved cwd before consuming the recovery record.
+    if requested.is_dir():
+        return
+    try:
+        requested.mkdir(parents=True)
+    except OSError as exc:
+        raise WorktreeError(
+            f"Restored worktree does not contain the saved directory {requested}."
+        ) from exc
 
 
 def _validate_existing_worktree(

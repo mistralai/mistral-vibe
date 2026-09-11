@@ -102,12 +102,21 @@ async def test_connector_bootstrap_processing_runs_off_the_event_loop(
 
     # Assert
     assert payload == {"connectors": []}
+    client.get.assert_awaited_once_with(
+        "https://api.example.test/v1/connectors/bootstrap",
+        headers={"Authorization": "Bearer secret"},
+        params={
+            "include_auth_actionable_connectors": "true",
+            "builtin_connectors": "web_search",
+            "supports_mcp": "true",
+        },
+    )
     assert construction_threads[0] != event_loop_thread
     assert parsing_threads[0] != event_loop_thread
 
 
 @pytest.mark.asyncio
-async def test_connector_catalog_skips_explicit_non_mcp_connectors(
+async def test_connector_catalog_trusts_server_capability_filter(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
@@ -131,6 +140,7 @@ async def test_connector_catalog_skips_explicit_non_mcp_connectors(
     assert catalog is not None
     assert [connector.raw_id for connector in catalog.connectors] == [
         "empty",
+        "http",
         "legacy",
         "mcp",
     ]

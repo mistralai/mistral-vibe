@@ -7,7 +7,7 @@ import subprocess
 import pytest
 
 from vibe.core.config import ProjectContextConfig
-from vibe.core.system_prompt import ProjectContextProvider
+from vibe.core.system_prompt import ProjectContextProvider, get_agents_md_section
 
 
 @pytest.mark.skipif(os.name == "nt", reason="fake git shell script is POSIX-only")
@@ -83,3 +83,33 @@ def test_fetch_git_status_does_not_execute_malicious_fsmonitor_hook(
     assert "Current branch:" in status
     assert "Git operations timed out" not in status
     assert "Not a git repository" not in status
+
+
+def test_get_agents_md_section_returns_none_without_docs() -> None:
+    assert get_agents_md_section("", []) is None
+    assert get_agents_md_section("   \n   ", []) is None
+
+
+def test_get_agents_md_section_renders_user_and_project_docs() -> None:
+    section = get_agents_md_section("# User doc", [(Path("/repo"), "# Project doc")])
+    assert section is not None
+    assert section.startswith("Codebase and user instructions are shown below.")
+    assert "## User instructions" in section
+    assert "# User doc" in section
+    assert "## Project instructions (checked into the codebase)" in section
+    assert "Contents of /repo/AGENTS.md" in section
+    assert "# Project doc" in section
+    # Legacy ordering: user doc first, project docs after, wrapper text last.
+    assert (
+        section.index("## User instructions")
+        < section.index("## Project instructions (checked into the codebase)")
+        < section.index("IMPORTANT: this context may or may not be relevant")
+    )
+
+
+def test_get_agents_md_section_renders_project_docs_only() -> None:
+    section = get_agents_md_section("", [(Path("/repo"), "# Project doc")])
+    assert section is not None
+    assert "## User instructions" not in section
+    assert "## Project instructions (checked into the codebase)" in section
+    assert "Contents of /repo/AGENTS.md" in section

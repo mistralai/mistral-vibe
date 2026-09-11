@@ -22,7 +22,7 @@ from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
 from vibe.cli.textual_ui.widgets.chat_input.paste_path import (
-    maybe_prepend_at_for_image_path,
+    maybe_prepend_at_for_path,
     rewrite_bare_image_paths_in_text,
 )
 from vibe.cli.textual_ui.widgets.vscode_compat import patch_vscode_space
@@ -375,7 +375,7 @@ class ChatTextArea(TextArea):
         # second time and double-insert). TextArea._on_paste in the same
         # MRO still runs inside this dispatch cycle and performs the
         # single insertion using the mutated text.
-        event.text = maybe_prepend_at_for_image_path(event.text)
+        event.text = maybe_prepend_at_for_path(event.text)
         # Empty paste = either truly empty clipboard, or clipboard holds
         # image bytes the terminal cannot deliver as text. The app handler
         # peeks the OS clipboard in a worker and, if it finds image bytes,

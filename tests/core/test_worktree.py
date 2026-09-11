@@ -18,7 +18,6 @@ import pytest
 from vibe.core.git.errors import GitError
 import vibe.core.git.repo as git_repo_module
 from vibe.core.git.worktree import (
-    SNAPSHOT_REF_PREFIX,
     LinkedWorktree,
     ManagedWorktree,
     PreparedWorktree,
@@ -564,21 +563,11 @@ def _age_claim(claim: WorktreeClaim, minutes: int) -> None:
     )
 
 
-def _push_worktree(repo: Repo, worktree: PreparedWorktree, remote: Path) -> None:
-    if "origin" not in repo.remotes:
-        repo.create_remote("origin", str(remote))
-    worktree_repo = _track_repo(Repo(worktree.root))
-    worktree_repo.git.push("--set-upstream", "origin", worktree.branch)
-
-
-def test_prune_removes_the_oldest_remote_backed_worktree(tmp_path: Path) -> None:
+def test_prune_snapshots_and_removes_the_oldest_worktree(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path / "repo")
-    remote = tmp_path / "remote.git"
-    _track_repo(Repo.init(remote, bare=True))
     oldest = _prepare_auto(Path(repo.working_dir), suggested_name="oldest")
     newest = _prepare_auto(Path(repo.working_dir), suggested_name="newest")
     _finish_starts(oldest, newest)
-    _push_worktree(repo, oldest, remote)
     _age_claim(_claim(repo, oldest.name), 30)
 
     removed = ManagedWorktree.prune(limit=1)
@@ -586,20 +575,17 @@ def test_prune_removes_the_oldest_remote_backed_worktree(tmp_path: Path) -> None
     assert removed == 1
     assert not oldest.root.exists()
     assert newest.root.is_dir()
-    assert f"{SNAPSHOT_REF_PREFIX}/{oldest.name}" not in {
-        ref.path for ref in repo.references
-    }
+    recovery = _claim(repo, oldest.name).read_recovery()
+    assert recovery is not None
+    saved = repo.commit(recovery.snapshot_ref)
+    assert saved.parents[0].hexsha == oldest.base_commit
 
 
 def test_prune_with_zero_removes_all_unheld_worktrees(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path / "repo")
-    remote = tmp_path / "remote.git"
-    _track_repo(Repo.init(remote, bare=True))
     first = _prepare_auto(Path(repo.working_dir), suggested_name="first")
     second = _prepare_auto(Path(repo.working_dir), suggested_name="second")
     _finish_starts(first, second)
-    _push_worktree(repo, first, remote)
-    _push_worktree(repo, second, remote)
 
     removed = ManagedWorktree.prune(limit=0)
 
@@ -608,15 +594,36 @@ def test_prune_with_zero_removes_all_unheld_worktrees(tmp_path: Path) -> None:
     assert not second.root.exists()
 
 
+def test_explicit_release_discards_a_retained_snapshot(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="retained")
+    _finish_starts(worktree)
+    (worktree.root / "saved.txt").write_text("recover me\n")
+    claim = _claim(repo, worktree.name)
+
+    assert ManagedWorktree.prune(limit=0) == 1
+    recovery = claim.read_recovery()
+    assert recovery is not None
+    assert repo.commit(recovery.snapshot_ref).hexsha
+
+    assert (
+        _release(worktree.root, "closed-session").outcome
+        is WorktreeReleaseOutcome.KEPT_UNMANAGED
+    )
+    assert claim.read_recovery() is not None
+    assert _release(worktree.root).outcome is WorktreeReleaseOutcome.REMOVED
+
+    assert claim.read_recovery() is None
+    assert not claim.directory.exists()
+    with pytest.raises(GitCommandError):
+        repo.git.show_ref("--verify", recovery.snapshot_ref)
+
+
 def test_prune_keeps_a_worktree_that_has_not_been_held_yet(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path / "repo")
-    remote = tmp_path / "remote.git"
-    _track_repo(Repo.init(remote, bare=True))
     starting = _prepare_auto(Path(repo.working_dir), suggested_name="starting")
     removable = _prepare_auto(Path(repo.working_dir), suggested_name="removable")
     _finish_starts(removable)
-    _push_worktree(repo, starting, remote)
-    _push_worktree(repo, removable, remote)
 
     removed = ManagedWorktree.prune(limit=0)
 
@@ -702,23 +709,19 @@ def test_concurrent_prunes_do_not_remove_below_the_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _init_repo(tmp_path / "repo")
-    remote = tmp_path / "remote.git"
-    _track_repo(Repo.init(remote, bare=True))
     oldest = _prepare_auto(Path(repo.working_dir), suggested_name="oldest")
     newest = _prepare_auto(Path(repo.working_dir), suggested_name="newest")
     _finish_starts(oldest, newest)
-    _push_worktree(repo, oldest, remote)
-    _push_worktree(repo, newest, remote)
     _age_claim(_claim(repo, oldest.name), 30)
     inspection_started = Event()
     release_inspection = Event()
-    inspect = PreparedWorktree.inspect_for_prune
+    snapshot = PreparedWorktree.snapshot
 
-    def pause_inspection(prepared: PreparedWorktree) -> Any:
+    def pause_snapshot(prepared: PreparedWorktree) -> str:
         if prepared.name == oldest.name:
             inspection_started.set()
             assert release_inspection.wait(timeout=5)
-        return inspect(prepared)
+        return snapshot(prepared)
 
     real_prune_lock = worktree_module.worktree_prune_lock
     lock_attempts = 0
@@ -735,7 +738,7 @@ def test_concurrent_prunes_do_not_remove_below_the_limit(
         with real_prune_lock():
             yield
 
-    monkeypatch.setattr(PreparedWorktree, "inspect_for_prune", pause_inspection)
+    monkeypatch.setattr(PreparedWorktree, "snapshot", pause_snapshot)
     monkeypatch.setattr(worktree_module, "worktree_prune_lock", observe_prune_lock)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -800,7 +803,7 @@ def test_prune_keeps_an_active_empty_reservation(tmp_path: Path) -> None:
     target.rmdir()
 
 
-def test_prune_keeps_a_populated_incomplete_reservation(tmp_path: Path) -> None:
+def test_prune_snapshots_a_populated_incomplete_reservation(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     worktree = _prepare_auto(tmp_path, suggested_name="interrupted")
     claim = _claim(repo, worktree.name)
@@ -811,8 +814,11 @@ def test_prune_keeps_a_populated_incomplete_reservation(tmp_path: Path) -> None:
 
     ManagedWorktree.prune(limit=0)
 
-    assert worktree.root.is_dir()
-    assert claim.read() is not None
+    assert not worktree.root.exists()
+    assert claim.read() is None
+    recovery = claim.read_recovery()
+    assert recovery is not None
+    assert repo.commit(recovery.snapshot_ref).hexsha
 
 
 def test_prune_keeps_a_populated_incomplete_reservation_without_gitlink(
@@ -841,42 +847,39 @@ def test_prune_keeps_a_populated_incomplete_reservation_without_gitlink(
     assert "vibe/interrupted" in (head.name for head in repo.heads)
 
 
-def test_prune_keeps_worktrees_with_unpushed_commits(tmp_path: Path) -> None:
+def test_prune_snapshots_worktrees_with_unpushed_commits(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path / "repo")
-    remote = tmp_path / "remote.git"
-    _track_repo(Repo.init(remote, bare=True))
     unpushed = _prepare_auto(Path(repo.working_dir), suggested_name="unpushed")
-    pushed = _prepare_auto(Path(repo.working_dir), suggested_name="pushed")
     newest = _prepare_auto(Path(repo.working_dir), suggested_name="newest")
-    _finish_starts(unpushed, pushed, newest)
+    _finish_starts(unpushed, newest)
     unpushed_repo = _track_repo(Repo(unpushed.root))
     (unpushed.root / "local.txt").write_text("local\n")
     unpushed_repo.index.add(["local.txt"])
     unpushed_repo.index.commit("local only")
     _age_claim(_claim(repo, unpushed.name), 30)
-    _age_claim(_claim(repo, pushed.name), 20)
-    _push_worktree(repo, pushed, remote)
 
-    removed = ManagedWorktree.prune(limit=2)
+    removed = ManagedWorktree.prune(limit=1)
 
     assert removed == 1
-    assert unpushed.root.is_dir()
-    assert not pushed.root.exists()
+    assert not unpushed.root.exists()
     assert newest.root.is_dir()
+    recovery = _claim(repo, unpushed.name).read_recovery()
+    assert recovery is not None
+    saved = repo.commit(recovery.snapshot_ref)
+    assert saved.tree["local.txt"].data_stream.read() == b"local\n"
+    assert saved.parents[0].message.strip() == "local only"
 
 
-def test_prune_keeps_dirty_untracked_and_held_worktrees(tmp_path: Path) -> None:
+def test_prune_snapshots_dirty_and_untracked_but_keeps_held_worktrees(
+    tmp_path: Path,
+) -> None:
     repo = _init_repo(tmp_path / "repo")
-    remote = tmp_path / "remote.git"
-    _track_repo(Repo.init(remote, bare=True))
     dirty = _prepare_auto(Path(repo.working_dir), suggested_name="dirty")
     untracked = _prepare_auto(Path(repo.working_dir), suggested_name="untracked")
     held = _prepare_auto(Path(repo.working_dir), suggested_name="held")
     removable = _prepare_auto(Path(repo.working_dir), suggested_name="removable")
     newest = _prepare_auto(Path(repo.working_dir), suggested_name="newest")
     _finish_starts(dirty, untracked, held, removable, newest)
-    for worktree in (dirty, untracked, held, removable):
-        _push_worktree(repo, worktree, remote)
     (dirty.root / "file.txt").write_text("changed\n")
     (untracked.root / "untracked.txt").write_text("local\n")
     _hold(held.root, "session-a")
@@ -885,28 +888,423 @@ def test_prune_keeps_dirty_untracked_and_held_worktrees(tmp_path: Path) -> None:
     _age_claim(_claim(repo, held.name), 30)
     _age_claim(_claim(repo, removable.name), 20)
 
-    removed = ManagedWorktree.prune(limit=4)
+    removed = ManagedWorktree.prune(limit=3)
 
-    assert removed == 1
-    assert dirty.root.is_dir()
-    assert untracked.root.is_dir()
+    assert removed == 2
+    assert not dirty.root.exists()
+    assert not untracked.root.exists()
     assert held.root.is_dir()
-    assert not removable.root.exists()
+    assert removable.root.is_dir()
     assert newest.root.is_dir()
+    dirty_recovery = _claim(repo, dirty.name).read_recovery()
+    untracked_recovery = _claim(repo, untracked.name).read_recovery()
+    assert dirty_recovery is not None
+    assert untracked_recovery is not None
+    assert (
+        repo.commit(dirty_recovery.snapshot_ref).tree["file.txt"].data_stream.read()
+        == b"changed\n"
+    )
+    assert (
+        repo
+        .commit(untracked_recovery.snapshot_ref)
+        .tree["untracked.txt"]
+        .data_stream.read()
+        == b"local\n"
+    )
+
+
+def test_prune_keeps_a_worktree_when_snapshot_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    kept = _prepare_auto(Path(repo.working_dir), suggested_name="kept")
+    removed = _prepare_auto(Path(repo.working_dir), suggested_name="removed")
+    _finish_starts(kept, removed)
+    _age_claim(_claim(repo, kept.name), 30)
+    _age_claim(_claim(repo, removed.name), 20)
+    snapshot = PreparedWorktree.snapshot
+
+    def fail_oldest(prepared: PreparedWorktree) -> str:
+        if prepared.name == kept.name:
+            raise WorktreeError("no room on device")
+        return snapshot(prepared)
+
+    monkeypatch.setattr(PreparedWorktree, "snapshot", fail_oldest)
+
+    removed_count = ManagedWorktree.prune(limit=1)
+
+    assert removed_count == 1
+    assert kept.root.is_dir()
+    assert _claim(repo, kept.name).read_recovery() is None
+    assert not removed.root.exists()
+
+
+def test_restore_recreates_a_pruned_worktree_from_its_snapshot(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="restore-me")
+    _finish_starts(worktree)
+    nested = worktree.root / "packages" / "app"
+    nested.mkdir(parents=True)
+    (nested / "saved.txt").write_text("recover me\n")
+
+    assert ManagedWorktree.prune(limit=0) == 1
+    assert not worktree.root.exists()
+
+    managed = ManagedWorktree.at(nested)
+    assert managed is not None
+    assert managed.restore(nested) is True
+
+    assert (nested / "saved.txt").read_text() == "recover me\n"
+    assert _claim(repo, worktree.name).read_recovery() is None
+    restored_record = _claim(repo, worktree.name).read()
+    assert restored_record is not None
+    assert restored_record.branch == worktree.branch
+
+
+def test_restore_recreates_a_missing_empty_nested_cwd(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="restore-me")
+    _finish_starts(worktree)
+    nested = worktree.root / "packages" / "app"
+    nested.mkdir(parents=True)
+
+    assert ManagedWorktree.prune(limit=0) == 1
+    assert not worktree.root.exists()
+
+    managed = ManagedWorktree.at(nested)
+    assert managed is not None
+    assert managed.restore(nested) is True
+
+    assert nested.is_dir()
+    assert _claim(repo, worktree.name).read_recovery() is None
+
+
+def test_restore_keeps_recovery_when_the_saved_directory_cannot_be_recreated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="restore-me")
+    _finish_starts(worktree)
+    nested = (worktree.root / "packages" / "app").resolve()
+    nested.mkdir(parents=True)
+
+    assert ManagedWorktree.prune(limit=0) == 1
+    mkdir = Path.mkdir
+
+    def fail_saved_directory(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path == nested:
+            raise OSError("cannot recreate saved directory")
+        mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_saved_directory)
+    managed = ManagedWorktree.at(nested)
+    assert managed is not None
+    with pytest.raises(WorktreeError, match="does not contain the saved directory"):
+        managed.restore(nested)
+
+    assert worktree.root.is_dir()
+    assert _claim(repo, worktree.name).read_recovery() is not None
+    assert _claim(repo, worktree.name).is_starting() is False
+
+
+def test_restore_replaces_an_empty_leftover_when_cwd_is_nested(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="restore-me")
+    _finish_starts(worktree)
+    nested = worktree.root / "packages" / "app"
+    nested.mkdir(parents=True)
+    (nested / "saved.txt").write_text("recover me\n")
+
+    assert ManagedWorktree.prune(limit=0) == 1
+    worktree.root.mkdir(parents=True)
+
+    managed = ManagedWorktree.at(nested)
+    assert managed is not None
+    assert managed.restore(nested) is True
+
+    assert (nested / "saved.txt").read_text() == "recover me\n"
+    assert _claim(repo, worktree.name).read_recovery() is None
+
+
+def test_restore_rejects_an_occupied_leftover_checkout_directory(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="restore-me")
+    _finish_starts(worktree)
+    (worktree.root / "saved.txt").write_text("recover me\n")
+
+    assert ManagedWorktree.prune(limit=0) == 1
+    worktree.root.mkdir(parents=True)
+    occupied = worktree.root / "unrelated.txt"
+    occupied.write_text("do not replace\n")
+
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    with pytest.raises(WorktreeError, match="occupied worktree path"):
+        managed.restore(worktree.root)
+
+    assert occupied.read_text() == "do not replace\n"
+    assert _claim(repo, worktree.name).read_recovery() is not None
+
+
+def test_restore_keeps_an_active_empty_reservation(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="restore-me")
+    _finish_starts(worktree)
+    (worktree.root / "saved.txt").write_text("recover me\n")
+
+    assert ManagedWorktree.prune(limit=0) == 1
+    claim = _claim(repo, worktree.name)
+    claim.mark_starting()
+    worktree.root.mkdir(parents=True)
+
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    with pytest.raises(WorktreeError, match="already in progress"):
+        managed.restore(worktree.root)
+
+    assert worktree.root.is_dir()
+    assert claim.read_recovery() is not None
+    claim.finish_starting()
+    worktree.root.rmdir()
+
+
+def test_concurrent_restore_keeps_the_completed_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="restore-me")
+    _finish_starts(worktree)
+    (worktree.root / "saved.txt").write_text("recover me\n")
+    assert ManagedWorktree.prune(limit=0) == 1
+
+    reserved = Event()
+    release = Event()
+    pause_lock = Lock()
+    paused = False
+    mkdir = Path.mkdir
+
+    def pause_first_reservation(path: Path, *args: Any, **kwargs: Any) -> None:
+        nonlocal paused
+        mkdir(path, *args, **kwargs)
+        if path != worktree.root:
+            return
+        with pause_lock:
+            first = not paused
+            paused = True
+        if first:
+            reserved.set()
+            assert release.wait(timeout=5)
+
+    monkeypatch.setattr(Path, "mkdir", pause_first_reservation)
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(managed.restore, worktree.root)
+        assert reserved.wait(timeout=5)
+        second = executor.submit(managed.restore, worktree.root)
+        release.set()
+        assert first.result(timeout=10) is True
+        assert second.result(timeout=10) is False
+
+    record = _claim(repo, worktree.name).read()
+    assert record is not None
+    assert record.base_commit is not None
+    assert (worktree.root / "saved.txt").read_text() == "recover me\n"
+    _claim(repo, worktree.name).finish_starting()
+
+
+def test_prune_keeps_a_worktree_when_restore_starts_during_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="busy")
+    _finish_starts(worktree)
+    claim = _claim(repo, worktree.name)
+    snapshot = PreparedWorktree.snapshot
+
+    def start_restore_during_snapshot(prepared: PreparedWorktree) -> str:
+        claim.mark_starting()
+        return snapshot(prepared)
+
+    monkeypatch.setattr(PreparedWorktree, "snapshot", start_restore_during_snapshot)
+
+    assert ManagedWorktree.prune(limit=0) == 0
+    assert worktree.root.is_dir()
+    assert claim.read() is not None
+    assert claim.read_recovery() is None
+    claim.finish_starting()
+
+
+def test_restore_waits_for_in_flight_prune(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="restore-me")
+    _finish_starts(worktree)
+    (worktree.root / "saved.txt").write_text("recover me\n")
+    snapshot_started = Event()
+    finish_snapshot = Event()
+    restore_started = Event()
+    restore_entered = Event()
+    snapshot = PreparedWorktree.snapshot
+    restore_locked = ManagedWorktree._restore_locked
+
+    def pause_snapshot(prepared: PreparedWorktree) -> str:
+        snapshot_started.set()
+        assert finish_snapshot.wait(timeout=5)
+        return snapshot(prepared)
+
+    def observe_restore(managed: ManagedWorktree, requested: Path, root: Path) -> bool:
+        restore_entered.set()
+        return restore_locked(managed, requested, root)
+
+    monkeypatch.setattr(PreparedWorktree, "snapshot", pause_snapshot)
+    monkeypatch.setattr(ManagedWorktree, "_restore_locked", observe_restore)
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+
+    def run_restore() -> bool:
+        restore_started.set()
+        return managed.restore(worktree.root)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        prune = executor.submit(ManagedWorktree.prune, 0)
+        assert snapshot_started.wait(timeout=5)
+        restore = executor.submit(run_restore)
+        assert restore_started.wait(timeout=5)
+        assert not restore_entered.is_set()
+        finish_snapshot.set()
+        assert prune.result(timeout=10) == 1
+        assert restore.result(timeout=10) is True
+
+    assert restore_entered.is_set()
+    assert (worktree.root / "saved.txt").read_text() == "recover me\n"
+    assert _claim(repo, worktree.name).read_recovery() is None
+    _claim(repo, worktree.name).finish_starting()
+
+
+def test_restore_does_not_drop_a_completed_claim_when_the_path_is_occupied(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="restore-me")
+    _finish_starts(worktree)
+    (worktree.root / "saved.txt").write_text("recover me\n")
+
+    assert ManagedWorktree.prune(limit=0) == 1
+    claim = _claim(repo, worktree.name)
+    recovery = claim.read_recovery()
+    assert recovery is not None
+    with WorktreeRepository.open(Path(repo.working_dir)) as repository:
+        repository.restore(claim, recovery)
+        claim.finish_starting()
+        claim.write_recovery(recovery)
+        with pytest.raises(WorktreeError, match="occupied worktree path"):
+            repository.restore(claim, recovery)
+
+    restored = claim.read()
+    assert restored is not None
+    assert restored.base_commit is not None
+    _hold(worktree.root, "session-a")
+    assert _holders(worktree.root) == frozenset({"session-a"})
+    assert (worktree.root / "saved.txt").read_text() == "recover me\n"
+
+
+def test_restore_discards_stale_recovery_for_a_completed_checkout(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="restore-me")
+    _finish_starts(worktree)
+    (worktree.root / "saved.txt").write_text("recover me\n")
+
+    assert ManagedWorktree.prune(limit=0) == 1
+    claim = _claim(repo, worktree.name)
+    recovery = claim.read_recovery()
+    assert recovery is not None
+    with WorktreeRepository.open(Path(repo.working_dir)) as repository:
+        repository.restore(claim, recovery)
+    claim.write_recovery(recovery)
+    claim.finish_starting()
+
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    assert managed.restore(worktree.root) is False
+
+    assert (worktree.root / "saved.txt").read_text() == "recover me\n"
+    assert claim.read_recovery() is None
+
+
+def test_restore_does_not_leave_a_directory_when_the_branch_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="restore-me")
+    _finish_starts(worktree)
+    (worktree.root / "saved.txt").write_text("recover me\n")
+    assert ManagedWorktree.prune(limit=0) == 1
+
+    def fail_branch(_repository: WorktreeRepository, preferred: str) -> str:
+        raise WorktreeError(
+            f"Unable to find an unused recovery branch for {preferred!r}."
+        )
+
+    monkeypatch.setattr(WorktreeRepository, "_available_recovery_branch", fail_branch)
+
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    with pytest.raises(WorktreeError, match="unused recovery branch"):
+        managed.restore(worktree.root)
+
+    assert not worktree.root.exists()
+    assert _claim(repo, worktree.name).read_recovery() is not None
+
+
+def test_restore_releases_starting_marker_when_recovery_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="restore-me")
+    _finish_starts(worktree)
+    assert ManagedWorktree.prune(limit=0) == 1
+    claim = _claim(repo, worktree.name)
+
+    delete_recovery = WorktreeClaim.delete_recovery
+
+    def fail_delete_recovery(candidate: WorktreeClaim) -> None:
+        if candidate == claim:
+            raise OSError("disk full")
+        delete_recovery(candidate)
+
+    monkeypatch.setattr(WorktreeClaim, "delete_recovery", fail_delete_recovery)
+    managed = ManagedWorktree(claim=claim)
+
+    with pytest.raises(OSError, match="disk full"):
+        managed.restore(worktree.root)
+
+    assert claim.is_starting() is False
+
+
+def test_auto_name_does_not_reuse_a_retained_snapshot(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="reserved")
+    _finish_starts(worktree)
+    assert ManagedWorktree.prune(limit=0) == 1
+
+    replacement = _prepare_auto(Path(repo.working_dir), suggested_name=worktree.name)
+
+    assert replacement.name == "reserved-2"
 
 
 def test_prune_applies_the_limit_across_repositories(tmp_path: Path) -> None:
     first_repo = _init_repo(tmp_path / "first")
     second_repo = _init_repo(tmp_path / "second")
-    first_remote = tmp_path / "first-remote.git"
-    second_remote = tmp_path / "second-remote.git"
-    _track_repo(Repo.init(first_remote, bare=True))
-    _track_repo(Repo.init(second_remote, bare=True))
     oldest = _prepare_auto(Path(first_repo.working_dir), suggested_name="oldest")
     newest = _prepare_auto(Path(second_repo.working_dir), suggested_name="newest")
     _finish_starts(oldest, newest)
-    _push_worktree(first_repo, oldest, first_remote)
-    _push_worktree(second_repo, newest, second_remote)
     _age_claim(_claim(first_repo, oldest.name), 30)
 
     removed = ManagedWorktree.prune(limit=1)

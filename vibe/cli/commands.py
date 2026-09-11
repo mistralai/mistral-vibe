@@ -210,6 +210,15 @@ class CommandRegistry:
                 description="Rewind to a previous message (or press Esc twice)",
                 handler="_start_rewind_mode",
             ),
+            "branch": Command(
+                aliases=frozenset(["/branch"]),
+                description=(
+                    "Fork the current conversation into a new resumable session, "
+                    "leaving this session unchanged. Resume the copy with "
+                    "`vibe --resume <id>`."
+                ),
+                handler="_branch_session",
+            ),
             "retry": Command(
                 aliases=frozenset(["/retry"]),
                 description=(

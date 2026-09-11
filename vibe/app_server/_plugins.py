@@ -69,18 +69,18 @@ from vibe.core.skills.models import SkillInfo, SkillScope
 from vibe.core.tools.models import ToolPermission
 
 if TYPE_CHECKING:
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.protocol import (
         RustAgentTypeDefinition,
         RustKnowledgeFolderDefinition,
         RustPluginContextDefinition,
         RustRuntimeBuiltinToolName,
         RustSkillDefinition,
     )
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.session_protocol import (
         PluginInfo as HarnessPluginInfo,
         ResolvedPluginDefinition,
     )
-    from mistralai_vibe_local_harness.vibe.plugins import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.vibe.plugins import (
         DeclaredAgentTypeProfile,
         PinnedPlugins,
         RestoredPlugins,
@@ -242,9 +242,7 @@ def requested_plugin_definitions(
     Only plugins that survived resolution are named. Pinning a dropped one would
     record a package the session never had.
     """
-    from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
-        ResolvedPluginDefinition,
-    )
+    from mistralai_vibe_local_harness.session_protocol import ResolvedPluginDefinition
 
     return [
         ResolvedPluginDefinition(
@@ -371,7 +369,7 @@ class UnifiedPluginProvider:
         that produced the request digested with. Deriving it here from
         anything else would reintroduce the mismatch it exists to prevent.
         """
-        from mistralai_vibe_local_harness.vibe.plugins import (  # pyright: ignore[reportMissingImports]
+        from mistralai_vibe_local_harness.vibe.plugins import (
             PinnedPackage,
             PinnedPlugins,
         )
@@ -444,9 +442,7 @@ class UnifiedPluginProvider:
     def _project(self, bound: SessionPlugins) -> SessionPluginProjection:
         # Both halves out of the same resolve: an advertised agent type with no
         # profile is a name the model can call and the Runtime cannot spawn.
-        from mistralai_vibe_local_harness.vibe.plugins import (  # pyright: ignore[reportMissingImports]
-            SessionPluginProjection,
-        )
+        from mistralai_vibe_local_harness.vibe.plugins import SessionPluginProjection
 
         definitions = tuple(core_plugins(bound))
         agents = list(bound.materialized.resolution.agents)
@@ -472,7 +468,7 @@ class UnifiedPluginProvider:
         has not bound answers with an empty catalogue: a read is not the place
         to raise, and "nothing is bound" is an answer.
         """
-        from mistralai_vibe_local_harness.session_protocol import (  # pyright: ignore[reportMissingImports]
+        from mistralai_vibe_local_harness.session_protocol import (
             PluginInfo as HarnessPluginInfo,
         )
 
@@ -554,7 +550,7 @@ def _pinned_snapshot(blob: bytes | None) -> ResolvedPluginSnapshot | None:
     if not blob:
         return None
 
-    from mistralai_vibe_local_harness.vibe.plugins import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.vibe.plugins import (
         PluginRestoreDiagnostic,
         PluginRestoreDiagnosticCode,
         PluginRestoreError,
@@ -887,7 +883,7 @@ def core_plugins(plugins: SessionPlugins) -> list[RustPluginContextDefinition]:
     turns rather than run anything. The tool catalogue still reaches the
     snapshot and ``plugin/info``.
     """
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.protocol import (
         RustHarnessCapabilitySet,
         RustPluginContextDefinition,
     )
@@ -921,9 +917,7 @@ def _core_skills(
     resolver assigned. The path is the runtime path, which for a foreign format
     is the SKILL.md synthesized during resolution.
     """
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
-        RustSkillDefinition,
-    )
+    from mistralai_vibe_local_harness.protocol import RustSkillDefinition
 
     grouped: dict[str, list[RustSkillDefinition]] = defaultdict(list)
     for alias, skill in skills.items():
@@ -953,9 +947,7 @@ def _core_knowledge(
     never reads the plugin tree itself. It is read-only: a plugin publishes
     knowledge, it does not host a scratchpad.
     """
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
-        RustKnowledgeFolderDefinition,
-    )
+    from mistralai_vibe_local_harness.protocol import RustKnowledgeFolderDefinition
 
     grouped: dict[str, list[RustKnowledgeFolderDefinition]] = defaultdict(list)
     for definition in definitions:
@@ -976,9 +968,7 @@ def _core_agents(
     definitions: Iterable[PluginAgentDefinition],
 ) -> Mapping[str, list[RustAgentTypeDefinition]]:
     """Group plugin agent types by owning plugin."""
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
-        RustAgentTypeDefinition,
-    )
+    from mistralai_vibe_local_harness.protocol import RustAgentTypeDefinition
 
     grouped: dict[str, list[RustAgentTypeDefinition]] = defaultdict(list)
     for definition in _agent_definitions(definitions):
@@ -1025,9 +1015,7 @@ def declared_agent_profiles(
     # Vibe to read. ``active_model`` and ``safety`` are deliberately not carried: the
     # first is a widening, since the policy ceiling grants exactly one completion, and
     # the second gates nothing today.
-    from mistralai_vibe_local_harness.vibe.plugins import (  # pyright: ignore[reportMissingImports]
-        DeclaredAgentTypeProfile,
-    )
+    from mistralai_vibe_local_harness.vibe.plugins import DeclaredAgentTypeProfile
 
     from vibe.app_server._runtime import rust_agent_tool_ceiling
 

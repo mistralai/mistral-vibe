@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from vibe.utils.images import IMAGE_EXTENSIONS
+from vibe.utils.platform import is_windows
 
 _QUOTES: frozenset[str] = frozenset({"'", '"'})
 _PATH_ROOTS: frozenset[str] = frozenset({"/", "~"})
 _TOKEN_BOUNDARY_CHARS: frozenset[str] = frozenset("(<[")
+_UNQUOTED_MENTION_PATH_CHARS: frozenset[str] = frozenset("._/\\-()[]{}~")
 _MIN_QUOTED_LEN = 2
 
 
@@ -20,6 +22,22 @@ def maybe_prepend_at_for_image_path(pasted: str) -> str:
     if not _is_image_file(candidate):
         return pasted
     return f"@{_quote_if_needed(candidate)}"
+
+
+def maybe_prepend_at_for_path(pasted: str) -> str:
+    """Turn a standalone pasted path, or a newline-delimited path list, into mentions."""
+    lines = [line.strip() for line in pasted.splitlines() if line.strip()]
+    if not lines:
+        return pasted
+
+    mentions: list[str] = []
+    for line in lines:
+        mention = _path_mention(line)
+        if mention is None:
+            return pasted
+        mentions.append(mention)
+
+    return " ".join(mentions)
 
 
 def rewrite_bare_image_paths_in_text(text: str) -> str:
@@ -59,11 +77,36 @@ def _is_image_file(candidate: str) -> bool:
     )
 
 
+def _path_mention(text: str) -> str | None:
+    if text.startswith("@"):
+        return None
+    candidate = _unescape_spaces(_strip_matched_quotes(text))
+    if not candidate:
+        return None
+    try:
+        path = Path(candidate).expanduser()
+    except RuntimeError:
+        return None
+    if not path.is_absolute() or not path.exists():
+        return None
+    return f"@{_quote_if_needed(candidate)}"
+
+
 def _quote_if_needed(path: str) -> str:
-    return f"'{path}'" if " " in path else path
+    if all(char.isalnum() or char in _UNQUOTED_MENTION_PATH_CHARS for char in path):
+        return path
+
+    if "'" not in path:
+        return f"'{path}'"
+    if '"' not in path:
+        return f'"{path}"'
+    escaped_path = path.replace("'", "\\'")
+    return f"'{escaped_path}'"
 
 
 def _unescape_spaces(text: str) -> str:
+    if is_windows():
+        return text
     return text.replace("\\ ", " ")
 
 

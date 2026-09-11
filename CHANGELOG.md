@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.25.3] - 2026-09-11
+
+### Added
+
+- New `/branch` command forks the current conversation into a new resumable session, leaving the current session unchanged. Resume the copy in another terminal with `vibe --resume <id>`.
+
+### Changed
+
+- Bump the local harness runtime to v0.4.5.
+- Make @ file mentions use Git-aware discovery and accept standalone pasted files and folders.
+
+### Fixed
+
+- Retained chats remain readable and restore their worktrees when work resumes.
+- New session logs are no longer readable by other users on POSIX systems.
+- AGENTS.md instructions now load into the system prompt under the experimental unified harness.
+
 ## [2.25.2] - 2026-09-10
 
 ### Added

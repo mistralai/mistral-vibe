@@ -119,6 +119,7 @@ from vibe.core.session.saved_sessions import (
     relocate_saved_session,
     update_saved_session_title,
 )
+from vibe.core.session.session_interop import resolve_legacy_session_reference
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.skills.manager import SkillManager
 from vibe.core.skills.models import SkillSource
@@ -172,6 +173,27 @@ class HostRequestHandler:
 
     def handles(self, method: str) -> bool:
         return method in _HOST_METHODS
+
+    async def legacy_open_target(
+        self, session_id: str | None, cwd: str | None
+    ) -> tuple[str, str | None] | None:
+        config = await self._load_config(None if session_id is not None else cwd)
+        if session_id is not None:
+            reference = await asyncio.to_thread(
+                resolve_legacy_session_reference, session_id, config.session_logging
+            )
+            if reference is None:
+                return None
+            return reference.session_id, reference.cwd or None
+
+        sessions = await asyncio.to_thread(_continue_resume_sessions, config, cwd)
+        target_id = _continue_session_id(config, sessions)
+        if target_id is None:
+            return None
+        target = next(
+            session for session in sessions if session.session_id == target_id
+        )
+        return target.session_id, target.cwd or None
 
     async def dispatch(self, method: str, raw_params: dict[str, Any]) -> DispatchResult:
         try:
@@ -597,7 +619,7 @@ def config_schema_response() -> ConfigSchemaReadResponse:
 def project_session_list(
     config: VibeConfigSchema, params: SessionListParams
 ) -> SessionListResponse:
-    sessions = list_local_resume_sessions(config, params.cwd)
+    sessions = _continue_resume_sessions(config, params.cwd)
     roots = _session_roots(sessions)
     filtered = [
         session
@@ -655,6 +677,42 @@ def _continue_session_id(
     return filtered[0].session_id
 
 
+def _continue_resume_sessions(
+    config: VibeConfigSchema, cwd: str | None
+) -> list[ResumeSessionInfo]:
+    sessions = list_local_resume_sessions(config, cwd)
+    if cwd is None:
+        return sessions
+
+    requested = Path(cwd).expanduser().resolve()
+    listed_ids = {session.session_id for session in sessions}
+    sessions.extend(
+        session
+        for session in list_local_resume_sessions(config, None)
+        if session.session_id not in listed_ids
+        and _resume_session_cwd_matches(session.cwd, requested)
+    )
+    sessions.sort(
+        key=lambda session: (session.updated_at, session.session_id), reverse=True
+    )
+    return sessions
+
+
+def _resume_session_cwd_matches(session_cwd: str, requested_cwd: Path) -> bool:
+    cwd = Path(session_cwd).expanduser().resolve()
+    if cwd == requested_cwd:
+        return True
+    managed = ManagedWorktree.at(cwd)
+    if managed is None:
+        return False
+    mapping = managed.retained_repository_mapping(cwd)
+    return (
+        mapping is not None
+        and requested_cwd.is_relative_to(mapping.root)
+        and mapping.cwd.is_relative_to(requested_cwd)
+    )
+
+
 def _session_roots(sessions: list[ResumeSessionInfo]) -> dict[str, str]:
     parents = {session.session_id: session.parent_session_id for session in sessions}
     roots: dict[str, str] = {}
@@ -707,13 +765,31 @@ def worktree_list_response(
     cwd: Path, include_details: bool = False
 ) -> WorkspaceWorktreeListResponse:
     repository_cwd: Path | None = None
+    repository_mapped_cwd: Path | None = None
+    repository_root: Path | None = None
+    listing_cwd = cwd
     try:
-        with WorktreeRepository.open(cwd) as repository:
+        with ExitStack() as stack:
+            managed = ManagedWorktree.at(cwd)
+            mapping = (
+                managed.retained_repository_mapping(cwd)
+                if managed is not None
+                else None
+            )
+            if mapping is not None:
+                listing_cwd = mapping.cwd
+                repository = stack.enter_context(
+                    WorktreeRepository.open(mapping.cwd, repository_root=mapping.root)
+                )
+            else:
+                repository = stack.enter_context(WorktreeRepository.open(cwd))
             worktrees = repository.linked()
             # Not gated behind the details flag: it is two stat calls on a
             # repository that is already open, where the details cost a merge
             # base per branch and a second repository object.
             repository_cwd = repository.repository_counterpart
+            repository_mapped_cwd = repository.repository_mapped_cwd
+            repository_root = repository.root
     except GitRepositoryNotFoundError:
         logger.debug("Skipping worktree listing for non-git path=%s", cwd)
         worktrees = ()
@@ -724,12 +800,18 @@ def worktree_list_response(
         worktrees = ()
 
     details = (
-        _worktree_details(cwd, worktrees) if include_details and worktrees else None
+        _worktree_details(listing_cwd, worktrees)
+        if include_details and worktrees
+        else None
     )
     changes = details.changes if details else {}
     return WorkspaceWorktreeListResponse(
         repository_branch=details.repository_branch if details else None,
         repository_cwd=str(repository_cwd) if repository_cwd is not None else None,
+        repository_mapped_cwd=(
+            str(repository_mapped_cwd) if repository_mapped_cwd is not None else None
+        ),
+        repository_root=str(repository_root) if repository_root is not None else None,
         worktrees=[
             WorkspaceLinkedWorktree(
                 name=worktree.name,

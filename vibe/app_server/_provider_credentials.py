@@ -18,9 +18,7 @@ import asyncio
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
-# `mistralai-vibe-local-harness` is an optional extra, so an environment that never
-# installs it — CI's type-check job included — cannot resolve these.
-from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+from mistralai_vibe_local_harness.vibe import (
     ProviderAuthRequired,
     ProviderCredentialResult,
     ProviderCredentialSnapshot,
@@ -33,9 +31,7 @@ from vibe.utils.api_keys import resolve_api_key_with_origin
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
-        ProviderRejectionReason,
-    )
+    from mistralai_vibe_local_harness.vibe import ProviderRejectionReason
 
     from vibe.core.config import ProviderConfig, VibeConfigSchema
     from vibe.core.config.orchestrator import ConfigOrchestrator

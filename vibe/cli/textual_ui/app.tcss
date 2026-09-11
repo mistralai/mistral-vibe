@@ -865,6 +865,19 @@ StatusMessage {
     text-wrap: wrap;
 }
 
+.branch-created-message {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+.branch-created-message .status-indicator-text {
+    width: auto;
+    max-width: 100%;
+    text-wrap: wrap;
+}
+
 .tool-group {
     width: 100%;
     height: auto;

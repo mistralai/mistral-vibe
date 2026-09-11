@@ -553,7 +553,7 @@ class VibeConfigSchema(ConfigSchema):
         description="Show greeting at startup (Mistral providers only, once per 24h).",
     )
     autocopy_to_clipboard: Annotated[bool, WithReplaceMerge()] = True
-    file_watcher_for_autocomplete: Annotated[bool, WithReplaceMerge()] = False
+    file_watcher_for_autocomplete: Annotated[bool, WithReplaceMerge()] = True
     ask_confirmation_on_exit: Annotated[bool, WithReplaceMerge()] = True
     displayed_workdir: Annotated[str, WithReplaceMerge()] = ""
     context_warnings: Annotated[bool, WithReplaceMerge()] = False

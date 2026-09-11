@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
@@ -66,14 +67,15 @@ def make_controller(
     return controller, view
 
 
-def test_lists_root_entries(file_tree: Path) -> None:
+def test_bare_at_lists_current_directory(file_tree: Path) -> None:
     controller, view = make_controller()
 
     controller.on_text_changed("@", cursor_index=1)
 
     suggestions, selected = view.suggestions[-1]
     assert selected == 0
-    assert [s.label for s in suggestions] == ["@README.md", "@src/"]
+    assert [suggestion.label for suggestion in suggestions] == ["@README.md", "@src/"]
+    assert controller.can_handle("@", cursor_index=1)
 
 
 def test_suggests_hidden_entries_only_with_dot_prefix(file_tree: Path) -> None:
@@ -161,7 +163,7 @@ def test_navigates_and_cycles_across_suggestions(file_tree: Path) -> None:
     assert selected_index == 0
 
 
-def test_limits_suggestions_to_ten(file_tree: Path) -> None:
+def test_keeps_all_matches_available_for_navigation(file_tree: Path) -> None:
     (file_tree / "src" / "core" / "extra").mkdir(parents=True)
     [
         (file_tree / "src" / "core" / "extra" / f"extra_file_{i}.py").write_text(
@@ -173,7 +175,7 @@ def test_limits_suggestions_to_ten(file_tree: Path) -> None:
 
     controller.on_text_changed("@src/core/extra/", cursor_index=16)
     suggestions, selected_index = view.suggestions[-1]
-    assert len(suggestions) == 10
+    assert len(suggestions) == 12
     assert [s.label for s in suggestions] == [
         "@src/core/extra/extra_file_1.py",
         "@src/core/extra/extra_file_10.py",
@@ -185,8 +187,16 @@ def test_limits_suggestions_to_ten(file_tree: Path) -> None:
         "@src/core/extra/extra_file_5.py",
         "@src/core/extra/extra_file_6.py",
         "@src/core/extra/extra_file_7.py",
+        "@src/core/extra/extra_file_8.py",
+        "@src/core/extra/extra_file_9.py",
     ]
     assert selected_index == 0
+
+    for _ in range(11):
+        controller.on_key(events.Key("down", None), "@src/core/extra/", 16)
+
+    _, selected_index = view.suggestions[-1]
+    assert selected_index == 11
 
 
 def test_does_not_handle_when_cursor_at_beginning_of_input(file_tree: Path) -> None:
@@ -212,7 +222,8 @@ def test_does_handle_when_cursor_after_the_at_symbol_even_in_the_middle_of_the_i
     controller, _ = make_controller()
 
     assert controller.can_handle("@file", cursor_index=1)
-    assert controller.can_handle("hello @file", cursor_index=7)
+    assert controller.can_handle("@file", cursor_index=2)
+    assert controller.can_handle("hello @file", cursor_index=8)
 
 
 def test_lists_immediate_children_when_path_ends_with_slash(file_tree: Path) -> None:
@@ -234,7 +245,7 @@ def test_respects_max_entries_to_process_limit(file_tree: Path) -> None:
 
     controller, view = make_controller(max_entries_to_process=10)
 
-    controller.on_text_changed("@", cursor_index=1)
+    controller.on_text_changed("@f", cursor_index=2)
 
     suggestions, _ = view.suggestions[-1]
     assert len(suggestions) <= 10
@@ -246,7 +257,7 @@ def test_respects_target_matches_limit_for_listing(file_tree: Path) -> None:
 
     controller, view = make_controller(target_matches=5)
 
-    controller.on_text_changed("@", cursor_index=1)
+    controller.on_text_changed("@item", cursor_index=5)
 
     suggestions, _ = view.suggestions[-1]
     assert len(suggestions) <= 5
@@ -262,3 +273,21 @@ def test_respects_target_matches_limit_for_fuzzy_search(file_tree: Path) -> None
 
     suggestions, _ = view.suggestions[-1]
     assert len(suggestions) <= 5
+
+
+def test_only_the_latest_query_can_render_results(file_tree: Path) -> None:
+    controller, view = make_controller()
+    query = ("@src", 4)
+    controller._last_query = query
+    controller._generation = 2
+    stale = Future[list[CompletionEntry]]()
+    stale.set_result([CompletionEntry("@stale.py", "")])
+
+    controller._handle_completion_result(stale, query, generation=1)
+
+    assert view.suggestions == []
+    current = Future[list[CompletionEntry]]()
+    current.set_result([CompletionEntry("@src/main.py", "")])
+    controller._handle_completion_result(current, query, generation=2)
+
+    assert view.suggestions[-1][0][0].label == "@src/main.py"

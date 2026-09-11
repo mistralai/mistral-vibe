@@ -349,6 +349,33 @@ def _get_tool_aware_os_system_prompt(tool_manager: ToolManager | None) -> str:
     )
 
 
+def get_agents_md_section(
+    user_doc: str, project_docs: list[tuple[Path, str]]
+) -> str | None:
+    """Render user-level and project AGENTS.md docs as one prompt section.
+
+    ``user_doc`` is the user-level doc from ``$VIBE_HOME/AGENTS.md``;
+    ``project_docs`` are ``(directory, content)`` pairs ordered outermost-first
+    from each open project root up to its trust root. Returns ``None`` when no
+    doc has content, so callers can skip the section entirely.
+    """
+    doc_sections: list[str] = []
+    if user_doc.strip():
+        doc_sections.append(
+            f"## User instructions\n\nContents of {VIBE_HOME.path}/AGENTS.md (user-level instructions):\n\n{user_doc.strip()}"
+        )
+    if project_docs:
+        doc_sections.append("## Project instructions (checked into the codebase)")
+    for doc_dir, doc_content in project_docs:
+        doc_sections.append(
+            f"Contents of {doc_dir}/AGENTS.md:\n\n{doc_content.strip()}"
+        )
+    if not doc_sections:
+        return None
+    template = UtilityPrompt.AGENTS_DOC.read()
+    return Template(template).safe_substitute(sections="\n\n".join(doc_sections))
+
+
 def get_universal_system_prompt(
     config: VibeConfigSchema,
     skill_manager: SkillManager,
@@ -414,24 +441,10 @@ def get_universal_system_prompt(
                 + dirs_lines
             )
 
-        user_doc = harness_files.load_user_doc()
-        project_docs = harness_files.load_project_docs()
-
-        doc_sections: list[str] = []
-        if user_doc.strip():
-            doc_sections.append(
-                f"## User instructions\n\nContents of {VIBE_HOME.path}/AGENTS.md (user-level instructions):\n\n{user_doc.strip()}"
-            )
-        if project_docs:
-            doc_sections.append("## Project instructions (checked into the codebase)")
-        for doc_dir, doc_content in project_docs:
-            doc_sections.append(
-                f"Contents of {doc_dir}/AGENTS.md:\n\n{doc_content.strip()}"
-            )
-        if doc_sections:
-            template = UtilityPrompt.AGENTS_DOC.read()
-            sections.append(
-                Template(template).safe_substitute(sections="\n\n".join(doc_sections))
-            )
+        agents_md_section = get_agents_md_section(
+            harness_files.load_user_doc(), harness_files.load_project_docs()
+        )
+        if agents_md_section:
+            sections.append(agents_md_section)
 
     return "\n\n".join(sections)

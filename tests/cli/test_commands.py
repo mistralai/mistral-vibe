@@ -182,6 +182,17 @@ class TestCommandRegistry:
         assert cmd.handler == "_rename_session"
         assert cmd_args == "Better title"
 
+    def test_branch_command_registration(self) -> None:
+        registry = CommandRegistry()
+        assert registry.get_command_name("/branch") == "branch"
+        result = registry.parse_command("/branch")
+        assert result is not None
+        _, cmd, cmd_args = result
+        assert cmd.handler == "_branch_session"
+        assert cmd_args == ""
+        assert cmd.side_channel is False
+        assert cmd.exits is False
+
     def test_parse_command_keeps_args_for_no_arg_commands(self) -> None:
         registry = CommandRegistry()
         result = registry.parse_command("/help extra")
