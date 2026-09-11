@@ -3,8 +3,8 @@
 Contract-level rather than backend-level on purpose. Both halves of this used
 to live inside the legacy runtime, so the unified harness silently ignored
 every `worktree` a client sent and never marked one as occupied -- the
-composer's pick reached a backend that had never heard of it, and the sweep
-that reclaims abandoned worktrees could not tell a live one from a stale one.
+composer's pick reached a backend that had never heard of it, and retention
+cleanup could not tell a live checkout from an inactive one.
 These run against whichever backend the suite is pointed at, so that cannot
 come back.
 """
@@ -12,21 +12,26 @@ come back.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection
+from collections.abc import Callable
+import json
 from pathlib import Path
 
 from git import Repo
+import httpx
 import pytest
+import respx
 
 from tests.app_server.backend_contract.conftest import connect_backend_contract_host
+from vibe.app_server.events import CallbackRequested
 from vibe.app_server.protocol import (
+    AppServerResponseError,
     AutoWorktreeInput,
     ClientCapabilities,
     NewWorktreeInput,
     SessionOptions,
 )
 from vibe.app_server.session import AppServerSession
-from vibe.core.git.worktree import ManagedWorktree, WorktreeRepository
+from vibe.core.git.worktree import ManagedWorktree
 
 
 def _cwd(session: AppServerSession) -> Path:
@@ -35,6 +40,13 @@ def _cwd(session: AppServerSession) -> Path:
     cwd = session.state.session.cwd
     assert cwd is not None
     return Path(cwd)
+
+
+async def _settled_cwd(session: AppServerSession, base: Path) -> Path:
+    async with asyncio.timeout(5):
+        while (cwd := _cwd(session)) == base:
+            await asyncio.sleep(0.01)
+    return cwd
 
 
 def _init_repo(root: Path) -> Repo:
@@ -63,7 +75,7 @@ async def test_a_session_starts_in_the_worktree_it_asked_for(
     )
     try:
         session = await connection.host.start_session()
-        cwd = _cwd(session)
+        cwd = await _settled_cwd(session, tmp_path)
 
         # Somewhere else entirely, not the directory the request named.
         assert cwd != tmp_path
@@ -91,7 +103,7 @@ async def test_an_auto_worktree_is_still_a_worktree(
     )
     try:
         session = await connection.host.start_session()
-        cwd = _cwd(session)
+        cwd = await _settled_cwd(session, tmp_path)
 
         assert cwd != tmp_path
         assert cwd.is_dir()
@@ -122,12 +134,83 @@ async def test_a_session_without_a_worktree_runs_where_it_was_told(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("file_location", ["extra", "checkout"])
+async def test_a_worktree_preserves_extra_roots_but_not_the_original_checkout(
+    tmp_path: Path,
+    experimental_harness: bool,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    file_location: str,
+) -> None:
+    checkout = tmp_path / "checkout"
+    _init_repo(checkout)
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    document = tmp_path / file_location / "notes.md"
+    document.write_text("The release name is copper-finch.")
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "read-1",
+                        "index": 0,
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({
+                                "path" if experimental_harness else "file_path": str(
+                                    document
+                                )
+                            }),
+                        },
+                    }
+                ],
+            ),
+            backend_contract_mistral_response("done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(
+            cwd=str(checkout),
+            workspace_roots=[str(checkout), str(extra)],
+            worktree=AutoWorktreeInput(),
+            enabled_tools=["read_file"],
+        ),
+        capabilities=ClientCapabilities(callback_kinds=["approval"]),
+    )
+    try:
+        session = await connection.host.start_session()
+        approvals = []
+        # The first turn also waits for deferred worktree setup on Unified.
+        async for event in session.act("Read the file"):
+            if isinstance(event, CallbackRequested):
+                approvals.append(event.callback)
+                await session.deny_callback(event.callback)
+
+        assert _cwd(session) != checkout
+        if file_location == "checkout":
+            assert len(approvals) == 1
+        else:
+            assert not approvals
+        payload = json.loads(backend_contract_mistral_api.calls[-1].request.content)
+        read_contents = any(
+            message["role"] == "tool"
+            and "copper-finch" in json.dumps(message["content"])
+            for message in payload["messages"]
+        )
+        assert read_contents == (file_location == "extra")
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
 async def test_a_session_holds_its_worktree_and_lets_go_on_close(
     tmp_path: Path, experimental_harness: bool
 ) -> None:
-    # The hold is what the claim sweep reads to tell a worktree in use from one
-    # abandoned. A backend that never marks its own is a backend whose live
-    # checkouts the sweep is free to delete.
+    # The hold is what retention pruning reads to avoid deleting a live
+    # worktree. A backend that never marks its own can lose its active checkout.
     _init_repo(tmp_path)
     connection = await connect_backend_contract_host(
         experimental_harness,
@@ -141,7 +224,7 @@ async def test_a_session_holds_its_worktree_and_lets_go_on_close(
     session = await connection.host.start_session()
     try:
         session_id = session.state.session.id
-        managed = ManagedWorktree.at(_cwd(session))
+        managed = ManagedWorktree.at(await _settled_cwd(session, tmp_path))
         assert managed is not None
 
         assert session_id in managed.holders()
@@ -157,45 +240,85 @@ async def test_a_session_holds_its_worktree_and_lets_go_on_close(
 
 
 @pytest.mark.asyncio
-async def test_attaching_a_session_sweeps_the_repository_for_abandoned_worktrees(
-    tmp_path: Path, experimental_harness: bool, monkeypatch: pytest.MonkeyPatch
+async def test_the_first_tool_call_runs_inside_the_worktree(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    experimental_harness: bool,
+    tmp_path: Path,
 ) -> None:
-    """Whether the sweep runs, not what it removes.
-
-    What it removes is `tests/core/test_worktree.py`'s subject and needs a claim
-    aged past the grace period to say anything. What differs between backends is
-    simply whether attaching a session runs it at all: legacy did and the
-    unified harness did not, so worktrees accumulated there forever.
-    """
     _init_repo(tmp_path)
-    swept: asyncio.Queue[tuple[Path, tuple[Path, ...]]] = asyncio.Queue()
-    loop = asyncio.get_running_loop()
-
-    def record(base: Path, *, in_use: Collection[Path]) -> None:
-        # Called on a worker thread, so the queue is fed from the loop's side.
-        loop.call_soon_threadsafe(swept.put_nowait, (base, tuple(in_use)))
-
-    monkeypatch.setattr(WorktreeRepository, "sweep_claims", record)
-
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "bash-1",
+                        "index": 0,
+                        "function": {
+                            "name": "bash",
+                            "arguments": json.dumps({
+                                "command": "touch marker",
+                                "timeout_seconds": 5,
+                            }),
+                        },
+                    }
+                ],
+            ),
+            backend_contract_mistral_response("done"),
+        ]
+    )
     connection = await connect_backend_contract_host(
         experimental_harness,
         session_options=SessionOptions(
             cwd=str(tmp_path),
             workspace_roots=[str(tmp_path)],
-            worktree=NewWorktreeInput(branch="jun/swept", name="swept"),
+            worktree=NewWorktreeInput(branch="jun/gated", name="gated"),
+            enabled_tools=["bash"],
+            auto_approve=True,
+        ),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        session = await connection.host.open_session()
+
+        _ = [event async for event in session.act("leave a marker")]
+
+        cwd = _cwd(session)
+        assert cwd != tmp_path
+        assert (cwd / "marker").exists()
+        assert not (tmp_path / "marker").exists()
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_a_worktree_that_cannot_be_raised_refuses_the_turn(
+    tmp_path: Path, experimental_harness: bool
+) -> None:
+    """A session that asked to be isolated does not quietly run unisolated.
+
+    Skipped on legacy, which raises the worktree before the session exists and
+    so fails the start instead -- the same refusal, one step earlier.
+    """
+    if not experimental_harness:
+        pytest.skip("the legacy runtime fails the start instead")
+
+    # No repository here, so there is nothing to raise a worktree from.
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            worktree=NewWorktreeInput(branch="jun/nowhere", name="nowhere"),
         ),
         capabilities=ClientCapabilities(),
     )
     try:
         session = await connection.host.start_session()
 
-        # The sweep is scheduled rather than awaited, so the session is usable
-        # while it runs. Waiting on it is the test's problem, not the caller's.
-        base, in_use = await asyncio.wait_for(swept.get(), timeout=5)
-
-        assert base == _cwd(session)
-        # Passed rather than defaulted: a sweep told nothing is in use is free
-        # to delete every worktree a saved session would have resumed into.
-        assert isinstance(in_use, tuple)
+        assert _cwd(session) == tmp_path
+        with pytest.raises(AppServerResponseError):
+            _ = [event async for event in session.act("write something")]
     finally:
         await connection.host.close()

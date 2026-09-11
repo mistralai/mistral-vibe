@@ -70,7 +70,10 @@ def discover_session_skills(
     plugin_contexts: Iterable[RustPluginContextDefinition],
     skill_tool_available: bool,
 ) -> tuple[list[ConfigIssue], SkillProjection]:
-    manager = SkillManager(config, harness_files=harness_files)
+    # The Python builtins reach a unified session as skills of the shipped
+    # `vibe` plugin, so loading them here too would offer each one twice under
+    # two names.
+    manager = SkillManager(config, harness_files=harness_files, include_builtins=False)
     issues = [
         ConfigIssue(file=str(issue.file), message=issue.message)
         for issue in sorted(

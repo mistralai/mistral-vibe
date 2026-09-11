@@ -5,7 +5,9 @@ import codecs
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server.models import (
+    MANUAL_SHELL_TOOL_NAME,
     CancelledEffectState,
     CompletedEffectState,
     EffectCallDisplay,
@@ -17,21 +19,87 @@ from vibe.app_server.models import (
     ShellEffectDetail,
     ShellEffectInput,
 )
-from vibe.app_server.protocol import ShellRunParams, ShellRunResponse
+from vibe.app_server.protocol import ProtocolErrorCode, ShellRunParams, ShellRunResponse
+from vibe.core.config import VibeConfigSchema
 from vibe.core.types import ManualShellContext
 from vibe.core.utils import kill_async_subprocess
 from vibe.core.utils.shell import spawn_shell_command
 
 type ShellOutputObserver = Callable[[str], Awaitable[None]]
 
+DEFAULT_MAX_OUTPUT_BYTES = 16_000
+
 
 class ShellConflictError(RuntimeError):
     pass
 
 
+def manual_shell_output_limit(config: VibeConfigSchema) -> int:
+    """How much of a manual `!` command's output the model may see.
+
+    The legacy backend reads the resolved ``bash`` tool config off its
+    ``AgentLoop``; the Unified Harness has no such loop, so it reads the same
+    setting straight off the layered config.
+    """
+    raw = config.tools.get("bash") or {}
+    limit = raw.get("max_output_bytes")
+    if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+        return limit
+    return DEFAULT_MAX_OUTPUT_BYTES
+
+
+def resolve_workspace_cwd(root: Path, requested_cwd: str | None) -> str:
+    """Confine a manual `!` command to the workspace it was launched in."""
+    root = root.resolve()
+    cwd = Path(requested_cwd).expanduser().resolve() if requested_cwd else root
+    if not cwd.is_dir():
+        raise RequestFailure(
+            ProtocolErrorCode.INVALID_PARAMS,
+            f"Shell working directory does not exist: {cwd}",
+        )
+    try:
+        cwd.relative_to(root)
+    except ValueError as exc:
+        raise RequestFailure(
+            ProtocolErrorCode.FORBIDDEN,
+            f"Shell working directory is outside the workspace: {cwd}",
+        ) from exc
+    return str(cwd)
+
+
+def manual_shell_context(result: ShellRunResponse, *, max_output_bytes: int) -> str:
+    """The context block the model reads after the user runs `!<command>`."""
+    stdout = _cap_output(result.stdout, max_output_bytes)
+    stderr = _cap_output(result.stderr, max_output_bytes)
+    sections = [
+        "Manual `!` command result from the user. Use this as context only.",
+        f"Command: `{result.command}`",
+        f"Working directory: `{result.cwd}`",
+    ]
+    if result.timed_out:
+        sections.append("Status: timed out")
+    elif result.interrupted:
+        sections.append("Status: interrupted by user")
+    else:
+        sections.append(f"Exit code: {result.exit_code}")
+    if stdout:
+        sections.append(f"Stdout:\n```text\n{stdout.rstrip()}\n```")
+    if stderr:
+        sections.append(f"Stderr:\n```text\n{stderr.rstrip()}\n```")
+    if not stdout and not stderr:
+        sections.append("Output:\n```text\n(no output)\n```")
+    return "\n\n".join(sections)
+
+
+def _cap_output(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n... [truncated]"
+
+
 def shell_effect_detail(command: str) -> EffectDetail:
     return ShellEffectDetail(
-        tool_name="shell",
+        tool_name=MANUAL_SHELL_TOOL_NAME,
         input=ShellEffectInput(command=command),
         display=EffectCallDisplay(
             summary=f"shell: {command}",
@@ -194,6 +262,9 @@ class ShellController:
             timed_out=timed_out,
             interrupted=interrupted,
         )
+
+    def is_running(self, operation_id: str) -> bool:
+        return operation_id in self._operations
 
     async def interrupt(self, operation_id: str) -> bool:
         if operation_id not in self._operations:

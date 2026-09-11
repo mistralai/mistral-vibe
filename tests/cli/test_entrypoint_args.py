@@ -44,6 +44,19 @@ def test_experimental_harness_flag_is_parseable(
     assert args.experimental_harness is True
 
 
+def test_smart_approve_enables_the_experimental_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Smart approve is a Unified Harness classify gate with no legacy equivalent, so
+    # --smart-approve must turn on the experimental harness rather than relabel a
+    # legacy session that runs ordinary permissions.
+    args = _parse(monkeypatch, ["--smart-approve"])
+
+    assert args.smart_approve is True
+    assert args.experimental_harness is True
+    assert args.agent == "smart-approve"
+
+
 def test_experimental_harness_is_hidden_without_package(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

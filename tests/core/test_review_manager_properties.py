@@ -17,8 +17,6 @@ from __future__ import annotations
 from pathlib import Path
 import random
 
-import pytest
-
 from vibe.core.checkpoints import (
     Checkpointer,
     CheckpointRecorder,
@@ -164,48 +162,52 @@ def _disk(tmp: Path) -> dict[str, str]:
 SEEDS = range(80)
 
 
-@pytest.mark.parametrize("seed", SEEDS)
-def test_revert_all_restores_every_original(seed: int, tmp_path: Path) -> None:
-    rng = random.Random(seed)
-    originals, turns, _final = gen_scenario(rng)
-    mgr, _ = _replay(tmp_path, originals, turns)
+def test_revert_all_restores_every_original(tmp_path: Path) -> None:
+    for seed in SEEDS:
+        seed_path = tmp_path / str(seed)
+        seed_path.mkdir()
+        rng = random.Random(seed)
+        originals, turns, _final = gen_scenario(rng)
+        mgr, _ = _replay(seed_path, originals, turns)
 
-    mgr.revert_review(AllTarget())
+        mgr.revert_review(AllTarget())
 
-    assert _disk(tmp_path) == originals, f"seed={seed}: revert-all != originals"
-
-
-@pytest.mark.parametrize("seed", SEEDS)
-def test_approve_all_leaves_disk_unchanged(seed: int, tmp_path: Path) -> None:
-    rng = random.Random(seed)
-    originals, turns, final = gen_scenario(rng)
-    mgr, _ = _replay(tmp_path, originals, turns)
-
-    before = _disk(tmp_path)
-    assert before == final, f"seed={seed}: replay disk != generated final state"
-
-    mgr.approve_review(AllTarget())
-
-    assert _disk(tmp_path) == final, f"seed={seed}: approve-all changed disk"
+        assert _disk(seed_path) == originals, f"seed={seed}: revert-all != originals"
 
 
-@pytest.mark.parametrize("seed", SEEDS)
-def test_incremental_per_turn_revert_restores_originals(
-    seed: int, tmp_path: Path
-) -> None:
-    rng = random.Random(seed)
-    # Agent-only turns: reverting every agent turn should reach the pristine
-    # original. (With between-turn user edits those local layers correctly
-    # survive per-turn reverts, so that case is covered by revert-all instead.)
-    originals, turns, _final = gen_scenario(rng, with_user_edits=False)
-    mgr, _ = _replay(tmp_path, originals, turns)
+def test_approve_all_leaves_disk_unchanged(tmp_path: Path) -> None:
+    for seed in SEEDS:
+        seed_path = tmp_path / str(seed)
+        seed_path.mkdir()
+        rng = random.Random(seed)
+        originals, turns, final = gen_scenario(rng)
+        mgr, _ = _replay(seed_path, originals, turns)
 
-    # Revert each turn on its own, persisting between — the manager's real flow
-    # and the exact shape that surfaced the deletion-duplication bug.
-    turn_ids = [rt.owner for rt in mgr.review_state().scopes]
-    for turn_id in turn_ids:
-        mgr.revert_review(ScopeTarget(owner=turn_id))
+        before = _disk(seed_path)
+        assert before == final, f"seed={seed}: replay disk != generated final state"
 
-    assert _disk(tmp_path) == originals, (
-        f"seed={seed}: per-turn revert != originals (turn_ids={turn_ids})"
-    )
+        mgr.approve_review(AllTarget())
+
+        assert _disk(seed_path) == final, f"seed={seed}: approve-all changed disk"
+
+
+def test_incremental_per_turn_revert_restores_originals(tmp_path: Path) -> None:
+    for seed in SEEDS:
+        seed_path = tmp_path / str(seed)
+        seed_path.mkdir()
+        rng = random.Random(seed)
+        # Agent-only turns: reverting every agent turn should reach the pristine
+        # original. (With between-turn user edits those local layers correctly
+        # survive per-turn reverts, so that case is covered by revert-all instead.)
+        originals, turns, _final = gen_scenario(rng, with_user_edits=False)
+        mgr, _ = _replay(seed_path, originals, turns)
+
+        # Revert each turn on its own, persisting between — the manager's real flow
+        # and the exact shape that surfaced the deletion-duplication bug.
+        turn_ids = [rt.owner for rt in mgr.review_state().scopes]
+        for turn_id in turn_ids:
+            mgr.revert_review(ScopeTarget(owner=turn_id))
+
+        assert _disk(seed_path) == originals, (
+            f"seed={seed}: per-turn revert != originals (turn_ids={turn_ids})"
+        )

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from vibe.core.vibe_code_project import (
     ProjectPickerContext,
-    VibeCodeProjectLink,
+    RemoteProjectLink,
     suggested_project_name,
 )
 from vibe.utils.repository import normalize_repo_url, repo_url_label
@@ -12,7 +12,7 @@ from vibe.utils.repository import normalize_repo_url, repo_url_label
 CURRENT_REPO_URL = "https://github.com/mistralai/mistral-vibe.git"
 
 
-def _context(saved_link: VibeCodeProjectLink | None = None) -> ProjectPickerContext:
+def _context(saved_link: RemoteProjectLink | None = None) -> ProjectPickerContext:
     return ProjectPickerContext(
         repo_root=Path("/repo/mistral-vibe"),
         repo_url=CURRENT_REPO_URL,
@@ -21,8 +21,8 @@ def _context(saved_link: VibeCodeProjectLink | None = None) -> ProjectPickerCont
     )
 
 
-def _link(project_id: str, repo_url: str = CURRENT_REPO_URL) -> VibeCodeProjectLink:
-    return VibeCodeProjectLink(
+def _link(project_id: str, repo_url: str = CURRENT_REPO_URL) -> RemoteProjectLink:
+    return RemoteProjectLink(
         repo_root=Path("/repo/mistral-vibe"),
         repo_url=repo_url,
         project_id=project_id,

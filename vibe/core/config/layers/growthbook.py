@@ -12,38 +12,54 @@ from vibe.core.config.models import ModelConfig
 from vibe.core.config.types import EMPTY_CONFIG_SNAPSHOT, LayerConfigSnapshot
 from vibe.core.experiments.active import ExperimentName
 
-type GrowthbookConfigMapper = Callable[[str], str | bool | None]
+type GrowthbookConfigMapper = Callable[[object], str | bool | None]
 
 
-def _map_system_prompt_variant(variant: str) -> str | None:
-    # Imported lazily: this runs only once GrowthBook variants have been fetched
-    # (post first paint), so pulling vibe.core.prompts (~15ms) at module import
-    # would needlessly weigh down the pre-paint config-stack import.
+_ON_TOKENS = frozenset({"on", "true"})  # accept boolean and string authoring
+
+
+def _map_on(value: object) -> bool | None:
+    """Map a boolean rollout flag to True, or None when off/unset."""
+    if value is True:
+        return True
+    if isinstance(value, str) and value.strip().lower() in _ON_TOKENS:
+        return True
+    return None
+
+
+def _map_system_prompt_variant(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    # Lazy import: keeps vibe.core.prompts off the pre-paint config-stack import.
     from vibe.core.prompts import load_system_prompt
 
     try:
-        load_system_prompt(variant)
+        load_system_prompt(value)
     except ValueError:
         return None
-    return variant
+    return value
 
 
-def _map_default_routing_model(variant: str) -> str | None:
-    try:
-        payload = json.loads(variant)
-    except (json.JSONDecodeError, TypeError):
-        return None
+def _as_json_value(value: object) -> object:
+    """Parse a JSON-string value; pass typed (json-feature) values through."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _map_default_routing_model(value: object) -> str | None:
+    payload = _as_json_value(value)
     if not isinstance(payload, dict):
         return None
     active_model = payload.get("active_model")
     return active_model if isinstance(active_model, str) and active_model else None
 
 
-def _map_routed_model_config(variant: str) -> str | None:
-    try:
-        payload = json.loads(variant)
-    except (json.JSONDecodeError, TypeError):
-        return None
+def _map_routed_model_config(value: object) -> str | None:
+    payload = _as_json_value(value)
     if not isinstance(payload, dict):
         return None
     model_config = payload.get("model_config")
@@ -52,17 +68,13 @@ def _map_routed_model_config(variant: str) -> str | None:
     return json.dumps(model_config)
 
 
-def _map_routed_extra_models(variant: str) -> str | None:
-    """Extract the extra-models list from the exposure experiment payload.
+def _map_routed_extra_models(value: object) -> str | None:
+    """Extract the extra-models list from the exposure payload.
 
-    Accepts either a bare JSON array of model definitions or an object with a
-    ``models`` array. Returns a JSON-array string of model-definition objects,
-    or ``None`` when the payload carries no models.
+    Accepts a bare list of model definitions or an object with a ``models``
+    array. Returns a JSON-array string, or None when there are no models.
     """
-    try:
-        payload = json.loads(variant)
-    except (json.JSONDecodeError, TypeError):
-        return None
+    payload = _as_json_value(value)
     if isinstance(payload, dict):
         payload = payload.get("models")
     if not isinstance(payload, list):
@@ -87,15 +99,20 @@ GROWTHBOOK_CONFIG_MAPPINGS: Final[
     ExperimentName.MANAGED_SHELL_TOOLS: (
         (
             "managed_shell_tools_enabled",
-            lambda variant: True if variant == "managed" else None,
+            lambda value: (
+                True
+                if value is True
+                or (
+                    isinstance(value, str)
+                    and value.strip().lower() in {"managed", "true"}
+                )
+                else None
+            ),
         ),
     ),
-    ExperimentName.REGISTRY_SKILLS: (
-        (
-            "experimental_enable_registry_skills",
-            lambda variant: True if variant == "on" else None,
-        ),
-    ),
+    ExperimentName.SMART_APPROVE: (("smart_approve_available", _map_on),),
+    ExperimentName.SMART_APPROVE_DEFAULT: (("smart_approve_default", _map_on),),
+    ExperimentName.REGISTRY_SKILLS: (("experimental_enable_registry_skills", _map_on),),
 }
 
 
@@ -104,9 +121,9 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
 
     def __init__(self, *, name: str = NAME) -> None:
         super().__init__(name=name)
-        self._variants: dict[str, str] = {}
+        self._variants: dict[str, object] = {}
 
-    def set_variants(self, variants: Mapping[str, str]) -> None:
+    def set_variants(self, variants: Mapping[str, object]) -> None:
         """Receive config-scoped variants, not telemetry assignments."""
         self._variants = dict(variants)
 

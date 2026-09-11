@@ -18,6 +18,7 @@ class BuiltinAgentName(StrEnum):
     ASK = "ask"
     PLAN = "plan"
     ACCEPT_EDITS = "accept-edits"
+    SMART_APPROVE = "smart-approve"
     AUTO_APPROVE = "auto-approve"
     EXPLORE = "explore"
     LEAN = "lean"
@@ -96,6 +97,16 @@ AUTO_APPROVE = AgentProfile(
     AgentSafety.YOLO,
     overrides={"bypass_tool_permissions": True, "disabled_tools": ["exit_plan_mode"]},
 )
+SMART_APPROVE = AgentProfile(
+    BuiltinAgentName.SMART_APPROVE,
+    "Smart Approve",
+    "Classifies each tool call and auto-runs the safe ones, prompting only for risky ones",
+    AgentSafety.SMART,
+    # No static permission overrides: a model classifier gates each call via the
+    # runtime "classify" tool mode (Unified Harness only). The runtime derives that
+    # gate from the active agent; see build_unified_session_context / _rust_tool_modes.
+    overrides={"disabled_tools": ["exit_plan_mode"]},
+)
 
 EXPLORE = AgentProfile(
     name=BuiltinAgentName.EXPLORE,
@@ -154,6 +165,7 @@ BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.ASK: ASK,
     BuiltinAgentName.PLAN: PLAN,
     BuiltinAgentName.ACCEPT_EDITS: ACCEPT_EDITS,
+    BuiltinAgentName.SMART_APPROVE: SMART_APPROVE,
     BuiltinAgentName.AUTO_APPROVE: AUTO_APPROVE,
     BuiltinAgentName.EXPLORE: EXPLORE,
     BuiltinAgentName.LEAN: LEAN,

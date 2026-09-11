@@ -17,17 +17,23 @@ from vibe.app_server.models import (
     PublicTurn,
     PublicTurnQueue,
     PublicTurnStatus,
+    TextContentBlock,
 )
 from vibe.app_server.protocol import (
     SERVER_METHODS,
     AgentConfig,
+    AppServerResponseError,
     CallbackResult,
     CallbackResultError,
     CallbackResultResponse,
     EventWatermarkResponse,
     InitializeParams,
+    InvalidParamsData,
+    InvalidParamsIssue,
     MessageAnnotations,
     PageRequest,
+    ProtocolError,
+    ProtocolErrorCode,
     SessionContinueResponse,
     SessionEmbeddedResourceContentBlock,
     SessionForkResponse,
@@ -50,8 +56,11 @@ from vibe.app_server.protocol import (
     TurnQueueReplaceParams,
     TurnQueueReplaceResponse,
     TurnQueueResumeResponse,
+    TurnQueueSteerParams,
+    TurnQueueSteerResponse,
     TurnQueueUpdatedParams,
     TurnStartResponse,
+    TurnSteerParams,
     TurnSteerResponse,
     TurnUserInputEntry,
 )
@@ -412,6 +421,30 @@ def test_canonical_enqueue_accepts_context_user_content_and_annotations() -> Non
     }
 
 
+def test_turn_steer_preserves_user_display_content() -> None:
+    """*Prepare*: Host-owned display metadata for a steered user message.
+    *Do*: Serialize the typed `turn/steer` request.
+    *Assert*: The display metadata remains in the camel-case wire payload.
+    """
+    # Prepare
+    display = UserDisplayContent(
+        version="1", host="code-local", content=[{"type": "text", "text": "display"}]
+    )
+
+    # Do
+    params = TurnSteerParams(
+        session_id="session-1",
+        expected_turn_id="turn-1",
+        message=[TextContentBlock(text="model input")],
+        user_display_content=display,
+    )
+
+    # Assert
+    assert params.model_dump(mode="json", by_alias=True)["userDisplayContent"] == (
+        display.model_dump(mode="json", by_alias=True)
+    )
+
+
 def test_canonical_enqueue_requires_the_user_entry_to_be_last() -> None:
     with pytest.raises(ValidationError, match="final turn input entry"):
         TurnEnqueueParams(
@@ -429,11 +462,12 @@ def test_canonical_enqueue_requires_the_user_entry_to_be_last() -> None:
 
 def test_turn_queue_methods_are_advertised() -> None:
     assert {
-        "app_server/session/turn/enqueue",
-        "app_server/session/turn/queue/read",
-        "app_server/session/turn/queue/remove",
-        "app_server/session/turn/queue/replace",
-        "app_server/session/turn/queue/resume",
+        "session/turn/enqueue",
+        "session/turn/queue/read",
+        "session/turn/queue/remove",
+        "session/turn/queue/replace",
+        "session/turn/queue/steer",
+        "session/turn/queue/resume",
     }.issubset(SERVER_METHODS)
     assert {
         "turn/enqueue",
@@ -456,6 +490,20 @@ def test_turn_queue_command_results_are_minimal() -> None:
     }
     assert TurnQueueRemoveResponse().model_dump(mode="json") == {}
     assert TurnQueueResumeResponse().model_dump(mode="json") == {}
+    assert TurnQueueSteerParams(
+        session_id="session-1", queue_item_id="queue-1", expected_turn_id="turn-1"
+    ).model_dump(mode="json") == {
+        "sessionId": "session-1",
+        "queueItemId": "queue-1",
+        "expectedTurnId": "turn-1",
+    }
+    assert TurnQueueSteerResponse(
+        queue_item_id="queue-1", turn_id="turn-1", last_event_id=7
+    ).model_dump(mode="json") == {
+        "queueItemId": "queue-1",
+        "turnId": "turn-1",
+        "lastEventId": 7,
+    }
 
 
 @pytest.mark.parametrize(
@@ -557,3 +605,108 @@ def test_an_mcp_source_names_its_owning_plugin_without_breaking_older_clients() 
                 "plugin_name": "figma",
             },
         )
+
+
+def test_response_error_message_surfaces_invalid_params_detail() -> None:
+    """A validation rejection must name the offending field and reason.
+
+    The generic ``"Invalid request parameters"`` string on its own hides the
+    only useful part of the failure, so the rendered message folds in the
+    field path and the validator message.
+    """
+    error = ProtocolError(
+        code=ProtocolErrorCode.INVALID_PARAMS,
+        message="Invalid request parameters",
+        data=InvalidParamsData(
+            error_count=1,
+            issues=[
+                InvalidParamsIssue(
+                    path=["agentConfig", "mcpServers", 0, "url"],
+                    message="Field required",
+                )
+            ],
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    exc = AppServerResponseError(error)
+
+    text = str(exc)
+    assert "Invalid request parameters" in text
+    assert "agentConfig.mcpServers.0.url" in text
+    assert "Field required" in text
+    # The structured detail stays reachable for programmatic handling.
+    assert exc.error.code is ProtocolErrorCode.INVALID_PARAMS
+
+
+def test_response_error_message_lists_every_issue() -> None:
+    error = ProtocolError(
+        code=ProtocolErrorCode.INVALID_PARAMS,
+        message="Invalid request parameters",
+        data=InvalidParamsData(
+            error_count=2,
+            issues=[
+                InvalidParamsIssue(path=["sessionId"], message="Field required"),
+                InvalidParamsIssue(
+                    path=["session_id"], message="Extra inputs are not permitted"
+                ),
+            ],
+        ).model_dump(mode="json", by_alias=True),
+    )
+
+    text = str(AppServerResponseError(error))
+
+    assert "sessionId: Field required" in text
+    assert "session_id: Extra inputs are not permitted" in text
+
+
+def test_response_error_message_preserves_plain_errors() -> None:
+    """Errors without invalid-params detail keep their original message."""
+    error = ProtocolError(code=ProtocolErrorCode.NOT_FOUND, message="No such session")
+
+    assert str(AppServerResponseError(error)) == "No such session"
+
+
+def test_validate_backend_wire_ignores_unknown_fields() -> None:
+    """Reading backend output tolerates fields the client does not know (ADR 0014)."""
+    from vibe.app_server._model import validate_backend_wire
+    from vibe.app_server.models import TokenUsage
+
+    result = validate_backend_wire(
+        TokenUsage,
+        {"inputTokens": 1, "outputTokens": 2, "totalTokens": 3, "cachedInputTokens": 4},
+    )
+
+    assert result.input_tokens == 1
+    assert result.output_tokens == 2
+    assert result.total_tokens == 3
+
+
+def test_validate_backend_wire_respects_model_defaults() -> None:
+    from vibe.app_server._model import validate_backend_wire
+    from vibe.app_server.models import TokenUsage
+
+    result = validate_backend_wire(TokenUsage, {"inputTokens": 5})
+
+    assert result.input_tokens == 5
+    assert result.output_tokens == 0
+    assert result.total_tokens == 0
+
+
+def test_validate_backend_wire_still_rejects_bad_known_fields() -> None:
+    """Tolerance is only for unknown fields — real type errors still surface."""
+    from vibe.app_server._model import validate_backend_wire
+    from vibe.app_server.models import TokenUsage
+
+    with pytest.raises(ValidationError):
+        validate_backend_wire(TokenUsage, {"inputTokens": "not-an-int"})
+
+
+def test_validate_backend_wire_still_requires_fields_without_defaults() -> None:
+    """A field the harness dropped that the client needs is a real break."""
+    from vibe.app_server._model import ProtocolModel, validate_backend_wire
+
+    class _Needs(ProtocolModel):
+        required_value: int
+
+    with pytest.raises(ValidationError):
+        validate_backend_wire(_Needs, {"unrelated": 1})

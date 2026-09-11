@@ -31,6 +31,7 @@ from vibe.app_server.protocol import (
     ConnectorsReadParams,
     ConnectorsReadResponse,
     ProtocolErrorCode,
+    SessionReadyWaitParams,
     SessionStartParams,
     SessionStartResponse,
     SessionStopParams,
@@ -78,7 +79,9 @@ async def _open_connector_session(
 ) -> tuple[AppServerSession, respx.Route]:
     bootstrap_route = respx_mock.get(f"{MISTRAL_BASE_URL}{CONNECTORS_BOOTSTRAP_PATH}")
     bootstrap_route.mock(return_value=httpx.Response(200, json=payload))
-    return await connection.host.open_session(), bootstrap_route
+    session = await connection.host.open_session()
+    await session.resources.runtime.wait_until_ready()
+    return session, bootstrap_route
 
 
 def _source(response: ConnectorCatalogReadResponse, alias: str):
@@ -1002,6 +1005,9 @@ async def test_connector_authorization_acknowledges_before_notifications_and_com
             )
         )
         session_id = started.state.session.id
+        await backend_contract_connection.client.request(
+            "session/ready/wait", SessionReadyWaitParams(session_id=session_id)
+        )
         await backend_contract_connection.client.request(
             "connector_catalog/toggle",
             ConnectorCatalogToggleParams(

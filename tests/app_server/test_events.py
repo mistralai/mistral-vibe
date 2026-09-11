@@ -192,13 +192,62 @@ def test_snapshot_reconciliation_replays_missing_stream_updates() -> None:
     ) == completed.model_dump(mode="json", by_alias=True)
 
 
+def test_reconnect_replays_steered_user_before_later_output_and_queue_update() -> None:
+    queued = _queued_turn("queue-1", "message-1", "steer me")
+    previous = _projection().state.model_copy(
+        update={"turn_queue": PublicTurnQueue(items=[queued])}, deep=True
+    )
+    steered = PublicMessageEntry(
+        id="message-1",
+        session_id="session-1",
+        turn_id="turn-1",
+        role="user",
+        content=[TextContentBlock(text="steer me")],
+        source="turn_steer",
+        generation_status=PublicEntryGenerationStatus.COMPLETED,
+        created_at=2,
+        updated_at=2,
+    )
+    later = PublicMessageEntry(
+        id="assistant-1",
+        session_id="session-1",
+        turn_id="turn-1",
+        role="assistant",
+        content=[TextContentBlock(text="after steer")],
+        generation_status=PublicEntryGenerationStatus.COMPLETED,
+        created_at=3,
+        updated_at=3,
+    )
+    current = previous.model_copy(
+        update={
+            "event_id": 4,
+            "history": [steered, later],
+            "turn_queue": PublicTurnQueue(),
+        },
+        deep=True,
+    )
+
+    events = reconcile_snapshot(previous, current)
+
+    assert [type(event) for event in events] == [
+        SessionSnapshot,
+        HistoryEntryAdded,
+        HistoryEntryAdded,
+        TurnQueueUpdated,
+    ]
+    added = [event.entry for event in events if isinstance(event, HistoryEntryAdded)]
+    assert [entry.id for entry in added] == ["message-1", "assistant-1"]
+    assert isinstance(added[0], PublicMessageEntry)
+    assert added[0].source == "turn_steer"
+
+
 def test_turn_queue_update_replaces_public_queue_state() -> None:
     projection = _projection()
     queue = PublicTurnQueue(
         items=[_queued_turn("queue-1", "message-1", "next")], paused=True
     )
     notification = Notification(
-        method="turn_queue_updated",
+        method="turn/queueUpdated",
         params=TurnQueueUpdatedParams(
             event_id=1, session_id="session-1", queue=queue, emitted_at=2
         ).model_dump(mode="json", by_alias=True),
@@ -218,7 +267,7 @@ def test_turn_queue_read_does_not_overwrite_newer_notification() -> None:
     )
     after_event_id = projection.last_event_id
     notification = Notification(
-        method="turn_queue_updated",
+        method="turn/queueUpdated",
         params=TurnQueueUpdatedParams(
             event_id=1, session_id="session-1", queue=PublicTurnQueue(), emitted_at=2
         ).model_dump(mode="json", by_alias=True),
@@ -238,7 +287,7 @@ def test_enqueue_reconciliation_only_skips_a_retired_queue_item() -> None:
         update={"created_at": 2}
     )
     first_update = Notification(
-        method="turn_queue_updated",
+        method="turn/queueUpdated",
         params=TurnQueueUpdatedParams(
             event_id=1,
             session_id="session-1",
@@ -247,7 +296,7 @@ def test_enqueue_reconciliation_only_skips_a_retired_queue_item() -> None:
         ).model_dump(mode="json", by_alias=True),
     )
     second_update = Notification(
-        method="turn_queue_updated",
+        method="turn/queueUpdated",
         params=TurnQueueUpdatedParams(
             event_id=2,
             session_id="session-1",

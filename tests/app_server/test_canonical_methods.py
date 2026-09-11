@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from tests.conftest import build_test_agent_loop
@@ -43,6 +45,29 @@ async def test_wire_rejects_snake_case_params() -> None:
         await session.close()
 
     assert excinfo.value.error.code is ProtocolErrorCode.INVALID_PARAMS
+
+
+@pytest.mark.asyncio
+async def test_wire_invalid_params_are_logged_with_field_detail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A rejected request must leave a server-side trace naming the field.
+
+    Without this, a validation rejection surfaces only as the generic
+    ``"Invalid request parameters"`` and the actual offending field is lost —
+    the failure mode that made a real resume crash impossible to diagnose.
+    """
+    client, session = await _session_with_history()
+    try:
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(AppServerResponseError):
+                await client.request("session/read", {"session_id": session.session_id})
+    finally:
+        await session.close()
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "session/read" in logged
+    assert "sessionId" in logged
 
 
 @pytest.mark.asyncio
@@ -190,3 +215,23 @@ async def test_plugin_procedures_are_not_implemented_on_the_legacy_backend(
         await session.close()
 
     assert excinfo.value.error.code is ProtocolErrorCode.NOT_IMPLEMENTED
+
+
+@pytest.mark.asyncio
+async def test_queued_steering_is_not_implemented_on_the_legacy_backend() -> None:
+    """*Prepare*: An attached session using the Legacy backend.
+    *Do*: Request atomic queued steering through the public session client.
+    *Assert*: The server reports that the selected backend does not support it.
+    """
+    # Prepare
+    _client, session = await _session_with_history()
+
+    # Do
+    try:
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await session.steer_queued_turn("queue-1", "turn-1")
+    finally:
+        await session.close()
+
+    # Assert
+    assert exc_info.value.error.code is ProtocolErrorCode.NOT_IMPLEMENTED

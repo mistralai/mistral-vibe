@@ -1,0 +1,15 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "vibe",
+  "version": "1.0.0",
+  "description": "Skills and components shipped with the Vibe CLI.",
+  "author": {
+    "name": "Mistral AI"
+  },
+  "extensions": {
+    "ai.mistral.vibe": {
+      "schemaVersion": 1,
+      "toolNamespace": "vibe"
+    }
+  }
+}

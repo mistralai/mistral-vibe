@@ -543,13 +543,25 @@ class MCPCatalogService:
     async def _plugin_authorization_changed(
         self, context: _CatalogContext, name: str
     ) -> tuple[MCPCatalogMutationResponse, bool]:
-        # Convergence stops here rather than going through the MCP control
-        # port: that port routes by config-owned name, and a plugin's source id
-        # names nothing it could suspend. State is read only to reproject with.
+        # The plugin catalog is refreshed, then the harness is told to
+        # re-resolve the authorization reference it holds for this server.
+        # Without that the harness keeps the pre-change reference and ``resolve``
+        # returns ``invalid`` until a session restart.
         if context.plugin_mcp is None or context.control is None:
             return MCPCatalogMutationResponse(runtime=None), False
         await context.plugin_mcp.refresh(name)
-        state = await context.control.read_mcp()
+        descriptor_revision = self._authentication.descriptor_revision(name)
+        state: SessionMCPState | None = None
+        try:
+            state = await context.control.authorization_changed(
+                name=name, descriptor_revision=descriptor_revision
+            )
+        except Exception:
+            self._record_convergence_error(context, frozenset({name}))
+            raise
+        self._clear_convergence_errors(context, frozenset({name}))
+        if state is None:
+            state = await context.control.read_mcp()
         return (
             MCPCatalogMutationResponse(
                 runtime=self._runtime(context, self._project(context, state))

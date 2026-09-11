@@ -42,9 +42,11 @@ async def test_skills_installed_projects_registry_pin() -> None:
 async def test_catalog_reports_unauthenticated_instead_of_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from vibe.app_server import _resources
+    from vibe.app_server import _skills_service
 
-    monkeypatch.setattr(_resources, "has_registry_endpoint", _no_endpoint, raising=True)
+    monkeypatch.setattr(
+        _skills_service, "has_registry_endpoint", _no_endpoint, raising=True
+    )
     config = build_test_vibe_config(experimental_enable_registry_skills=True)
     session = await create_test_app_server_session(build_test_agent_loop(config=config))
     try:

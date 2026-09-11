@@ -64,6 +64,7 @@ class _StubEvalClient(RemoteEvalClient):
 
 class _RecordingSession:
     session_id = "session-1"
+    cwd: str | None = None
 
     def __init__(self, *, active_turn_id: str | None = None) -> None:
         self.active_turn_id = active_turn_id
@@ -157,10 +158,7 @@ async def _build_adapter(
     context = replace(built, experiment_manager=ExperimentManager(client=client))
     _stub_identity_and_whoami(monkeypatch, context)
     adapter = UnifiedHarnessBackendAdapter(
-        cast(Any, session),
-        str(tmp_path),
-        context,
-        context.derive(UnifiedSessionSettings()),
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
     )
     return adapter, client
 

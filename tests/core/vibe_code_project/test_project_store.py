@@ -5,7 +5,11 @@ import tomllib
 
 import tomli_w
 
-from vibe.core.vibe_code_project import VibeCodeProjectLink, VibeProjectsStore
+from vibe.core.vibe_code_project import (
+    LocalProjectLink,
+    RemoteProjectLink,
+    VibeProjectsStore,
+)
 
 
 def _link(
@@ -13,10 +17,20 @@ def _link(
     repo_root: Path,
     project_id: str = "project-1",
     repo_url: str = "https://github.com/mistralai/mistral-vibe.git",
-) -> VibeCodeProjectLink:
-    return VibeCodeProjectLink(
+) -> RemoteProjectLink:
+    return RemoteProjectLink(
         repo_root=repo_root,
         repo_url=repo_url,
+        project_id=project_id,
+        project_name="Mistral Vibe",
+    )
+
+
+def _local_link(
+    *, directory_path: Path, project_id: str = "project-1"
+) -> LocalProjectLink:
+    return LocalProjectLink(
+        directory_path=directory_path,
         project_id=project_id,
         project_name="Mistral Vibe",
     )
@@ -44,6 +58,32 @@ def test_projects_store_upserts_and_reads_remote_project(tmp_path: Path) -> None
                 "kind": "remote",
                 "repo_root": str(repo_root.resolve()),
                 "repo_url": "https://github.com/mistralai/mistral-vibe.git",
+                "project_id": "project-1",
+                "project_name": "Mistral Vibe",
+            }
+        ],
+    }
+
+
+def test_projects_store_upserts_and_reads_local_project(tmp_path: Path) -> None:
+    path = tmp_path / "projects.toml"
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    store = VibeProjectsStore(path)
+
+    store.upsert_remote_project(_link(repo_root=repo_root, project_id="remote"))
+    store.upsert_project_link(_local_link(directory_path=repo_root))
+
+    assert store.get_project_link(repo_root=repo_root) == _local_link(
+        directory_path=repo_root
+    )
+    assert store.get_remote_project(repo_root=repo_root) is None
+    assert _read_toml(path) == {
+        "version": 1,
+        "projects": [
+            {
+                "kind": "local",
+                "directory_path": str(repo_root.resolve()),
                 "project_id": "project-1",
                 "project_name": "Mistral Vibe",
             }

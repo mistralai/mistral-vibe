@@ -439,3 +439,31 @@ def test_denying_the_skill_tool_denies_plugin_skills_too(tmp_path: Path) -> None
     # Withheld from Core, not from the user: `/toolkit:deploy` injects the body
     # out of the payload map without Core ever loading the skill itself.
     assert "toolkit:deploy" in {skill.name for skill in denied.catalogue}
+
+
+def test_a_unified_session_takes_the_builtins_from_the_plugin_not_from_python(
+    tmp_path: Path,
+) -> None:
+    """Prepare a session whose only plugin is the shipped ``vibe`` one.
+
+    Do discover the catalogue.
+
+    Assert no Python builtin came through as a root skill. They reach a unified
+    session as ``vibe:`` plugin skills, so loading them here as well would offer
+    each one twice, under two names, out of two copies free to disagree.
+    """
+    from vibe.core.config import VibeConfigSchema
+    from vibe.core.config.harness_files import HarnessFilesManager
+    from vibe.core.skills.builtins import BUILTIN_SKILLS
+
+    _, projection = discover_session_skills(
+        VibeConfigSchema,
+        harness_files=HarnessFilesManager(sources=(), cwd=tmp_path),
+        plugin_skills={},
+        plugin_contexts=[],
+        skill_tool_available=True,
+    )
+
+    offered = {definition.name for definition in projection.definitions}
+    assert offered.isdisjoint(BUILTIN_SKILLS)
+    assert {skill.name for skill in projection.catalogue}.isdisjoint(BUILTIN_SKILLS)

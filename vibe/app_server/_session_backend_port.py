@@ -61,13 +61,15 @@ from vibe.app_server.protocol import (
     TurnQueueReplaceResponse,
     TurnQueueResumeParams,
     TurnQueueResumeResponse,
+    TurnQueueSteerParams,
+    TurnQueueSteerResponse,
     TurnStartParams,
     TurnStartResponse,
     TurnSteerParams,
     TurnSteerResponse,
 )
 
-type SessionBackendKind = Literal["python", "rust"]
+type SessionBackendKind = Literal["legacy", "unified"]
 type MCPAuthorizationReason = Literal["missing", "expired", "rejected", "invalid"]
 type ConnectorAuthAction = Literal["none", "oauth", "credentials_setup", "unknown"]
 type MCPCatalogOwner = Literal["config", "plugin"]
@@ -441,6 +443,15 @@ class SessionBackend(Protocol):
     ) -> SessionBackendResult[SessionCompactResponse]: ...
 
     async def shutdown(self) -> None: ...
+
+
+@runtime_checkable
+class SessionBackendQueuedTurnSteering(Protocol):
+    """Optional atomic transfer of an accepted queued Turn into the active Turn."""
+
+    async def steer_queued_turn(
+        self, params: TurnQueueSteerParams
+    ) -> SessionBackendResult[TurnQueueSteerResponse]: ...
 
 
 @runtime_checkable

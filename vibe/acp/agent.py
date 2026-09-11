@@ -339,6 +339,18 @@ class SessionDeleteRequest(BaseModel):
     session_id: str = Field(alias="sessionId", min_length=1)
 
 
+class SessionIdRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+    session_id: str = Field(alias="sessionId", min_length=1)
+
+
+class LogLevelWriteRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+    session_id: str = Field(alias="sessionId", min_length=1)
+    session_override: str | None = Field(default=None, alias="sessionOverride")
+    config_level: str | None = Field(default=None, alias="configLevel")
+
+
 class ForkSessionParams(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
     message_id: str | None = Field(default=None, alias="messageId")
@@ -1052,7 +1064,7 @@ class VibeAcpAgent(AcpAgent):
         return ResumeSessionResponse()
 
     @override
-    async def ext_method(self, method: str, params: dict) -> dict:
+    async def ext_method(self, method: str, params: dict) -> dict:  # noqa: PLR0912
         match method:
             case "auth/status":
                 state = self._auth.status()
@@ -1126,6 +1138,10 @@ class VibeAcpAgent(AcpAgent):
                 result = await self._connectors_extension(method, params)
             case _ if method.startswith("projectLinks/"):
                 result = await self._project_links_extension(method, params)
+            case _ if method.startswith("identity/") or method.startswith("account/"):
+                result = await self._whoami_extension(method, params)
+            case _ if method.startswith("logLevel/"):
+                result = await self._log_level_extension(method, params)
             case _:
                 raise NotImplementedMethodError(method)
         return result
@@ -1204,6 +1220,80 @@ class VibeAcpAgent(AcpAgent):
             raise InvalidRequestError(str(exc)) from exc
         except ProjectLinksInternalError as exc:
             raise InternalError(str(exc)) from exc
+        return result
+
+    # -- whoami (identity + account) ----------------------------------------
+
+    async def _whoami_extension(self, method: str, params: dict) -> dict:
+        try:
+            request = SessionIdRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(f"Invalid ACP whoami request: {exc}") from exc
+        session = self._get_session(request.session_id)
+        try:
+            match method:
+                case "identity/read":
+                    identity = await session.app_server.resources.identity.read()
+                    result: dict[str, Any] = (
+                        identity.model_dump(mode="json") if identity else {}
+                    )
+                case "account/read":
+                    account = await session.app_server.resources.account.read()
+                    result = account.model_dump(mode="json")
+                case _:
+                    raise NotImplementedMethodError(method)
+        except AppServerResponseError as exc:
+            raise InvalidRequestError(exc.error.message) from exc
+        return result
+
+    # -- log level -----------------------------------------------------------
+
+    async def _log_level_extension(self, method: str, params: dict) -> dict:
+        from vibe.observability.logging import (
+            get_log_level_chain,
+            set_config_log_level,
+            set_session_override,
+        )
+
+        match method:
+            case "logLevel/read":
+                chain = get_log_level_chain()
+                result = {
+                    "session": chain.session,
+                    "env": chain.env,
+                    "config": chain.config,
+                    "effective": chain.effective,
+                }
+            case "logLevel/write":
+                try:
+                    request = LogLevelWriteRequest.model_validate(params)
+                except ValidationError as exc:
+                    raise InvalidRequestError(
+                        f"Invalid ACP log level write request: {exc}"
+                    ) from exc
+                if "sessionOverride" in params:
+                    set_session_override(request.session_override)
+                if "configLevel" in params:
+                    session = self._get_session(request.session_id)
+                    if request.config_level is not None:
+                        await session.app_server.resources.config.update(
+                            {"log_level": request.config_level}, reload_runtime=True
+                        )
+                        set_config_log_level(request.config_level)
+                    else:
+                        await session.app_server.resources.config.update(
+                            {"log_level": None}, reload_runtime=True
+                        )
+                        set_config_log_level(None)
+                chain = get_log_level_chain()
+                result = {
+                    "session": chain.session,
+                    "env": chain.env,
+                    "config": chain.config,
+                    "effective": chain.effective,
+                }
+            case _:
+                raise NotImplementedMethodError(method)
         return result
 
     async def _delete_session(self, session_id: str) -> None:
@@ -1513,6 +1603,18 @@ class VibeAcpAgent(AcpAgent):
                     used=stats.context_tokens,
                     size=runtime.context_window,
                     cost=cost,
+                    **{
+                        "_meta": {
+                            "steps": stats.steps,
+                            "promptTokens": stats.session_prompt_tokens,
+                            "completionTokens": stats.session_completion_tokens,
+                            "cachedTokens": stats.session_cached_tokens,
+                            "totalTokens": stats.session_total_llm_tokens,
+                            "tokensPerSecond": stats.tokens_per_second,
+                            "lastTurnDuration": stats.last_turn_duration,
+                            "lastTurnTotalTokens": stats.last_turn_total_tokens,
+                        }
+                    },
                 ),
             )
 

@@ -25,7 +25,7 @@ from vibe.core.llm.backend.openai_responses import (
     OpenAIResponsesStreamError,
 )
 from vibe.core.llm.backend.reasoning_adapter import ReasoningAdapter
-from vibe.core.llm.exceptions import BackendErrorBuilder
+from vibe.core.llm.exceptions import BackendErrorBuilder, ModelCall
 from vibe.core.tracing import (
     model_call_span,
     set_model_call_http_status,
@@ -50,13 +50,14 @@ from vibe.core.utils import (
     async_retry,
 )
 from vibe.core.utils.sse import iter_sse_lines
-from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.api_keys import resolve_api_key_with_origin
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 if TYPE_CHECKING:
     from opentelemetry import trace
 
     from vibe.core.config import ModelConfig, ProviderConfig
+    from vibe.utils.api_keys import ApiKeyOrigin
 
 
 class OpenAIAdapter(APIAdapter):
@@ -377,6 +378,23 @@ class GenericBackend:
             self._owns_client = True
         return self._client
 
+    def _resolve_credential(
+        self, api_style: str
+    ) -> tuple[str | None, ApiKeyOrigin | None]:
+        """The key this call will send, and the origin that describes it.
+
+        One lookup, so the reported origin always belongs to the credential the
+        provider refused. Vertex mints a Google ADC token and never sends the
+        configured key, so it has no origin a user could act on.
+        """
+        resolved = resolve_api_key_with_origin(self._provider.api_key_env_var)
+        if resolved is None:
+            return None, None
+        api_key, origin = resolved
+        if api_style == "vertex-anthropic":
+            return api_key, None
+        return api_key, origin
+
     async def complete(
         self,
         *,
@@ -389,9 +407,8 @@ class GenericBackend:
         extra_headers: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
     ) -> LLMChunk:
-        api_key = resolve_api_key(self._provider.api_key_env_var)
-
         api_style = getattr(self._provider, "api_style", "openai")
+        api_key, api_key_origin = self._resolve_credential(api_style)
         adapter = _get_adapter(api_style)
 
         req = adapter.prepare_request(
@@ -413,6 +430,16 @@ class GenericBackend:
 
         base = req.base_url or self._provider.api_base
         url = f"{base}{req.endpoint}"
+        call = ModelCall(
+            provider=self._provider.name,
+            endpoint=url,
+            model=model.name,
+            messages=messages,
+            temperature=temperature,
+            has_tools=bool(tools),
+            tool_choice=tool_choice,
+            api_key_origin=api_key_origin,
+        )
 
         async with self._model_call_span(
             model=model,
@@ -434,29 +461,10 @@ class GenericBackend:
             except httpx.HTTPStatusError as e:
                 set_model_call_http_status(span, e.response.status_code)
                 raise BackendErrorBuilder.build_http_error(
-                    provider=self._provider.name,
-                    endpoint=url,
-                    error=e,
-                    response=e.response,
-                    model=model.name,
-                    messages=messages,
-                    temperature=temperature,
-                    has_tools=bool(tools),
-                    tool_choice=tool_choice,
+                    call, error=e, response=e.response
                 ) from e
             except (httpx.RequestError, ssl.SSLError) as e:
-                raise BackendErrorBuilder.build_request_error(
-                    provider=self._provider.name,
-                    endpoint=url,
-                    error=e,
-                    model=model.name,
-                    messages=messages,
-                    temperature=temperature,
-                    has_tools=bool(tools),
-                    tool_choice=tool_choice,
-                ) from e
-
-            set_model_call_http_status(span, response.status_code)
+                raise BackendErrorBuilder.build_request_error(call, error=e) from e
             set_model_call_response_metadata(span, response.data)
             chunk = adapter.parse_response(response.data, self._provider)
             if chunk.usage is not None and _reports_usage(response.data):
@@ -479,9 +487,8 @@ class GenericBackend:
         extra_headers: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
     ) -> AsyncGenerator[LLMChunk, None]:
-        api_key = resolve_api_key(self._provider.api_key_env_var)
-
         api_style = getattr(self._provider, "api_style", "openai")
+        api_key, api_key_origin = self._resolve_credential(api_style)
         adapter = _get_adapter(api_style)
 
         req = adapter.prepare_request(
@@ -503,6 +510,16 @@ class GenericBackend:
 
         base = req.base_url or self._provider.api_base
         url = f"{base}{req.endpoint}"
+        call = ModelCall(
+            provider=self._provider.name,
+            endpoint=url,
+            model=model.name,
+            messages=messages,
+            temperature=temperature,
+            has_tools=bool(tools),
+            tool_choice=tool_choice,
+            api_key_origin=api_key_origin,
+        )
 
         async with self._model_call_span(
             model=model,
@@ -540,41 +557,18 @@ class GenericBackend:
                         yield chunk
             except OpenAIResponsesStreamError as e:
                 raise BackendErrorBuilder.build_stream_error(
-                    provider=self._provider.name,
-                    endpoint=url,
+                    call,
                     status=e.status,
                     error_type=e.error_type,
                     error_message=e.message,
-                    model=model.name,
-                    messages=messages,
-                    temperature=temperature,
-                    has_tools=bool(tools),
-                    tool_choice=tool_choice,
                 ) from e
             except httpx.HTTPStatusError as e:
                 set_model_call_http_status(span, e.response.status_code)
                 raise BackendErrorBuilder.build_http_error(
-                    provider=self._provider.name,
-                    endpoint=url,
-                    error=e,
-                    response=e.response,
-                    model=model.name,
-                    messages=messages,
-                    temperature=temperature,
-                    has_tools=bool(tools),
-                    tool_choice=tool_choice,
+                    call, error=e, response=e.response
                 ) from e
             except (httpx.RequestError, ssl.SSLError) as e:
-                raise BackendErrorBuilder.build_request_error(
-                    provider=self._provider.name,
-                    endpoint=url,
-                    error=e,
-                    model=model.name,
-                    messages=messages,
-                    temperature=temperature,
-                    has_tools=bool(tools),
-                    tool_choice=tool_choice,
-                ) from e
+                raise BackendErrorBuilder.build_request_error(call, error=e) from e
             if has_usage:
                 set_model_call_usage(
                     span,

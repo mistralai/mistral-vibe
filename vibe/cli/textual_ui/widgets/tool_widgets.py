@@ -4,9 +4,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Any, ClassVar
+from typing import Annotated, Any, ClassVar
 
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.content import Content
@@ -165,6 +165,12 @@ class ToolResultWidget[TResult: BaseModel](Static):
         if extra:
             yield NoMarkupStatic(extra, classes="tool-result-hint")
 
+    def _yield_warnings(self) -> Iterable[Widget]:
+        # Approval notes (e.g. smart approve's "Auto-approved: <reason>") and other
+        # per-result advisories, shown at the top of the unfolded body.
+        for warning in self.warnings:
+            yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
+
     def _yield_text(
         self, content: str, *, classes: str = "tool-result-detail"
     ) -> Iterable[Widget]:
@@ -179,6 +185,7 @@ class ToolResultWidget[TResult: BaseModel](Static):
             yield Markdown(_fenced_code_block(content.strip("\n"), ext))
 
     def compose(self) -> ComposeResult:
+        yield from self._yield_warnings()
         if self.result:
             lines = [
                 f"{field_name}: {value}"
@@ -193,6 +200,7 @@ class ToolResultWidget[TResult: BaseModel](Static):
 
 class GenericToolResultWidget(ToolResultWidget[GenericToolData]):
     def compose(self) -> ComposeResult:
+        yield from self._yield_warnings()
         if self.result and (text := _format_generic_result(self.result.data)):
             yield from self._yield_text(text)
         yield from self._footer()
@@ -214,6 +222,99 @@ def _format_generic_value(value: JsonValue) -> str:
     return str(value)
 
 
+class ProcessToolOutput(BaseModel):
+    """Typed output extracted from the process tool result envelope."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    tool_name: str
+    process_id: Annotated[str | None, Field(default=None, alias="processId")]
+    status: str | None = None
+    exit_code: Annotated[int | None, Field(default=None, alias="exitCode")]
+    output: str | None = None
+    bytes_available: Annotated[int | None, Field(default=None, alias="bytesAvailable")]
+    has_more: Annotated[bool, Field(default=False, alias="hasMore")]
+    truncated_before: Annotated[bool, Field(default=False, alias="truncatedBefore")]
+    processes: list[dict[str, Any]] | None = None
+    bytes_written: Annotated[int | None, Field(default=None, alias="bytesWritten")]
+
+
+_SHORT_PID_LEN = 8
+
+
+def _short_pid(process_id: str) -> str:
+    return (
+        process_id[-_SHORT_PID_LEN:] if len(process_id) > _SHORT_PID_LEN else process_id
+    )
+
+
+class ProcessResultWidget(ToolResultWidget[ProcessToolOutput]):
+    def compose(self) -> ComposeResult:
+        if not self.result:
+            yield from self._footer()
+            return
+        r = self.result
+        if r.tool_name in {"process.start", "process.stop"}:
+            yield from self._compose_start_stop(r)
+        elif r.tool_name == "process.output":
+            yield from self._compose_output(r)
+        elif r.tool_name == "process.list":
+            yield from self._compose_list(r)
+        elif r.tool_name == "process.write":
+            yield from self._compose_write(r)
+        else:
+            yield from self._footer()
+
+    def _compose_start_stop(self, r: ProcessToolOutput) -> ComposeResult:
+        lines: list[str] = []
+        if r.process_id:
+            lines.append(f"processId: {r.process_id}")
+        if r.status:
+            lines.append(f"status: {r.status}")
+        if r.exit_code is not None:
+            lines.append(f"exitCode: {r.exit_code}")
+        if lines:
+            yield from self._yield_text("\n".join(lines))
+        yield from self._footer()
+
+    def _compose_output(self, r: ProcessToolOutput) -> ComposeResult:
+        if r.output and r.output.strip():
+            yield from self._yield_text(r.output)
+        else:
+            yield NoMarkupStatic("(no output)", classes="tool-result-detail")
+        hints: list[str] = []
+        if r.bytes_available is not None and r.bytes_available > 0:
+            hints.append(f"{r.bytes_available} bytes available")
+        if r.has_more:
+            hints.append("more output pending")
+        if r.truncated_before:
+            hints.append("earlier output truncated")
+        yield from self._footer(" | ".join(hints) if hints else None)
+
+    def _compose_list(self, r: ProcessToolOutput) -> ComposeResult:
+        if r.processes:
+            lines = [
+                f"{_short_pid(p.get('processId', ''))}  {p.get('status', '?')}  {p.get('command', '?')}"
+                for p in r.processes
+            ]
+            yield from self._yield_text("\n".join(lines))
+        else:
+            yield NoMarkupStatic(
+                "(no background processes)", classes="tool-result-detail"
+            )
+        yield from self._footer()
+
+    def _compose_write(self, r: ProcessToolOutput) -> ComposeResult:
+        lines: list[str] = []
+        if r.bytes_written is not None:
+            lines.append(f"bytesWritten: {r.bytes_written}")
+        if r.status:
+            lines.append(f"status: {r.status}")
+        if lines:
+            yield from self._yield_text("\n".join(lines))
+        yield from self._footer()
+
+
 class BashApprovalWidget(ToolApprovalWidget[ShellInput]):
     def compose(self) -> ComposeResult:
         from textual.widgets import Markdown
@@ -226,6 +327,7 @@ class BashResultWidget(ToolResultWidget[ShellOutput]):
         return self.result.transcript.strip("\n") if self.result else ""
 
     def compose(self) -> ComposeResult:
+        yield from self._yield_warnings()
         if not self.result:
             yield from self._footer()
             return
@@ -256,6 +358,7 @@ class WriteFileResultWidget(ToolResultWidget[FileWriteOutput]):
     COLLAPSIBLE = False
 
     def compose(self) -> ComposeResult:
+        yield from self._yield_warnings()
         if not self.result:
             yield from self._footer()
             return
@@ -609,6 +712,9 @@ EFFECT_WIDGETS: dict[ToolEffectKind, EffectWidgets] = {
     ),
     ToolEffectKind.WEB_FETCH: EffectWidgets(
         output_model=WebFetchOutput, result=WebFetchResultWidget, linkify_result=True
+    ),
+    ToolEffectKind.PROCESS: EffectWidgets(
+        output_model=ProcessToolOutput, result=ProcessResultWidget
     ),
 }
 

@@ -282,7 +282,7 @@ class CoreRequestHandler:
     async def _dispatch(
         self, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult:
-        if method.startswith("app_server/session/turn/"):
+        if method.startswith("session/turn/"):
             return await self._dispatch_turn(method, raw_params)
         namespace = method.partition("/")[0]
         match namespace:
@@ -650,23 +650,23 @@ class CoreRequestHandler:
         response: ProtocolModel
         after_response: Callable[[], None] | None = None
         match method:
-            case "app_server/session/turn/enqueue":
+            case "session/turn/enqueue":
                 params = validate_wire(TurnEnqueueParams, raw_params)
                 self._require_attached(params.session_id)
                 result, after_response = self._turns.enqueue(params)
                 response = TurnEnqueueResponse(
                     queue_item_id=result.record.queued_turn.id
                 )
-            case "app_server/session/turn/queue/read":
+            case "session/turn/queue/read":
                 params = validate_wire(TurnQueueReadParams, raw_params)
                 self._require_attached(params.session_id)
                 response = TurnQueueReadResponse(queue=self._turns.queue_state)
-            case "app_server/session/turn/queue/remove":
+            case "session/turn/queue/remove":
                 params = validate_wire(TurnQueueRemoveParams, raw_params)
                 self._require_attached(params.session_id)
                 _, after_response = self._turns.remove_queued_turn(params.queue_item_id)
                 response = TurnQueueRemoveResponse()
-            case "app_server/session/turn/queue/replace":
+            case "session/turn/queue/replace":
                 params = validate_wire(TurnQueueReplaceParams, raw_params)
                 self._require_attached(params.session_id)
                 result, after_response = self._turns.replace_queued_turn(
@@ -675,7 +675,7 @@ class CoreRequestHandler:
                 response = TurnQueueReplaceResponse(
                     queue_item_id=result.record.queued_turn.id
                 )
-            case "app_server/session/turn/queue/resume":
+            case "session/turn/queue/resume":
                 params = validate_wire(TurnQueueResumeParams, raw_params)
                 self._require_attached(params.session_id)
                 after_response = self._turns.resume_queue()

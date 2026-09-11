@@ -5,15 +5,28 @@ from collections.abc import Awaitable, Callable
 
 import pytest
 
+from vibe.app_server.client import AppServerConnectionClosed
 from vibe.app_server.models import (
+    IdleSessionStatus,
     ImageAttachment,
     InlineImageSource,
     MentionStats,
     PreparedPrompt,
+    PublicEntryGenerationStatus,
+    PublicMessageEntry,
     PublicQueuedTurn,
+    PublicSession,
+    PublicSessionState,
     PublicTurnQueue,
+    TextContentBlock,
 )
-from vibe.app_server.protocol import SessionTextContentBlock, TurnUserInputEntry
+from vibe.app_server.protocol import (
+    AppServerResponseError,
+    ProtocolError,
+    ProtocolErrorCode,
+    SessionTextContentBlock,
+    TurnUserInputEntry,
+)
 from vibe.cli.commands import Command
 from vibe.cli.textual_ui.message_queue import (
     QueueController,
@@ -38,6 +51,18 @@ def _server_turn(
     )
 
 
+def _build_session_state(queue: PublicTurnQueue) -> PublicSessionState:
+    return PublicSessionState(
+        event_id=1,
+        session=PublicSession(
+            id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
+        ),
+        history=[],
+        turns=[],
+        turn_queue=queue,
+    )
+
+
 async def _noop_async(*_args, **_kwargs) -> None:
     return None
 
@@ -57,6 +82,8 @@ def _queue_controller(
     remove_queued_turn: Callable[[str], Awaitable[bool]] | None = None,
     resume_turn_queue: Callable[[], Awaitable[PublicTurnQueue]] | None = None,
     steer_turn: Callable[..., Awaitable[None]] | None = None,
+    steer_queued_turn: Callable[[str, str], Awaitable[None]] | None = None,
+    refresh_session_state: Callable[[], Awaitable[PublicSessionState]] | None = None,
     turn_has_started: Callable[[str], bool] = lambda _queue_item_id: False,
 ) -> QueueController:
     async def default_enqueue_turn(content: str, **kwargs) -> PublicQueuedTurn:
@@ -75,6 +102,9 @@ def _queue_controller(
     async def default_resume_turn_queue() -> PublicTurnQueue:
         return PublicTurnQueue()
 
+    async def default_refresh_session_state() -> PublicSessionState:
+        return _build_session_state(current_turn_queue())
+
     return QueueController(
         QueuePorts(
             mount_and_scroll=_noop_async,
@@ -84,6 +114,10 @@ def _queue_controller(
             remove_queued_turn=remove_queued_turn or default_remove_queued_turn,
             resume_turn_queue=resume_turn_queue or default_resume_turn_queue,
             steer_turn=steer_turn or _noop_async,
+            steer_queued_turn=steer_queued_turn or _noop_async,
+            refresh_session_state=(
+                refresh_session_state or default_refresh_session_state
+            ),
             turn_has_started=turn_has_started,
             set_loading_queue_count=lambda _count: None,
             maybe_show_feedback_bar=_noop_async,
@@ -141,6 +175,10 @@ async def _true() -> bool:
 
 async def _turn_queue(queue: PublicTurnQueue) -> PublicTurnQueue:
     return queue
+
+
+async def _refresh_session_state(queue: PublicTurnQueue) -> PublicSessionState:
+    return _build_session_state(queue)
 
 
 def _fake_side_channel_command() -> Command:
@@ -336,6 +374,8 @@ def _merging_controller(
     send_mention_telemetry=lambda _mentions, _message_id: None,
     send_skill_telemetry=lambda _skill_name: None,
     steer_turn: Callable[..., Awaitable[None]] | None = None,
+    steer_queued_turn: Callable[[str, str], Awaitable[None]] | None = None,
+    refresh_session_state: Callable[[], Awaitable[PublicSessionState]] | None = None,
     turn_has_started: Callable[[str], bool] = lambda _queue_item_id: False,
 ) -> tuple[QueueController, dict[str, list]]:
     """A controller whose fake server keeps a single live queue in sync.
@@ -343,11 +383,22 @@ def _merging_controller(
     ``enqueue``/``replace``/``remove`` mutate a shared ``PublicTurnQueue`` so the
     controller's post-call ``current_turn_queue`` refresh sees the real state.
     """
-    calls: dict[str, list] = {"enqueue": [], "replace": [], "remove": [], "steer": []}
+    calls: dict[str, list] = {
+        "enqueue": [],
+        "replace": [],
+        "remove": [],
+        "steer": [],
+        "steer_queued": [],
+    }
     queue = PublicTurnQueue()
 
     async def default_steer_turn(content, images=None, message_entry_id=None) -> None:
         calls["steer"].append((content, images, message_entry_id))
+
+    async def default_steer_queued_turn(
+        queue_item_id: str, expected_turn_id: str
+    ) -> None:
+        calls["steer_queued"].append((queue_item_id, expected_turn_id))
 
     async def enqueue_turn(content: str, **kwargs) -> PublicQueuedTurn:
         nonlocal queue
@@ -377,6 +428,9 @@ def _merging_controller(
         )
         return True
 
+    async def default_refresh_session_state() -> PublicSessionState:
+        return _build_session_state(queue)
+
     controller = QueueController(
         QueuePorts(
             mount_and_scroll=_noop_async,
@@ -386,6 +440,10 @@ def _merging_controller(
             remove_queued_turn=remove_queued_turn,
             resume_turn_queue=lambda: _turn_queue(queue),
             steer_turn=steer_turn or default_steer_turn,
+            steer_queued_turn=steer_queued_turn or default_steer_queued_turn,
+            refresh_session_state=(
+                refresh_session_state or default_refresh_session_state
+            ),
             turn_has_started=turn_has_started,
             set_loading_queue_count=lambda _count: None,
             maybe_show_feedback_bar=_noop_async,
@@ -595,6 +653,8 @@ async def test_append_promoted_mid_replace_requeues_new_prompt(
             remove_queued_turn=lambda _id: _true(),
             resume_turn_queue=lambda: _turn_queue(state["queue"]),
             steer_turn=_noop_async,
+            steer_queued_turn=_noop_async,
+            refresh_session_state=lambda: _refresh_session_state(state["queue"]),
             turn_has_started=turn_has_started,
             set_loading_queue_count=lambda _count: None,
             maybe_show_feedback_bar=_noop_async,
@@ -674,6 +734,8 @@ async def test_replace_error_removes_uncommitted_widget(
             remove_queued_turn=lambda _id: _true(),
             resume_turn_queue=lambda: _turn_queue(queue),
             steer_turn=_noop_async,
+            steer_queued_turn=_noop_async,
+            refresh_session_state=lambda: _refresh_session_state(queue),
             turn_has_started=lambda _queue_item_id: False,
             set_loading_queue_count=lambda _count: None,
             maybe_show_feedback_bar=_noop_async,
@@ -897,3 +959,304 @@ async def test_steer_pending_reports_prompt_telemetry() -> None:
 
     assert len(mentions) == 1
     assert skills == [None, "review"]
+
+
+@pytest.mark.asyncio
+async def test_atomic_steer_sends_only_queue_and_turn_ids() -> None:
+    controller, calls = _merging_controller()
+
+    await controller.enqueue_prompt("first")
+    await controller.enqueue_prompt("second")
+    widgets = controller.widgets
+    message_entry_id = widgets[0].history_entry_id
+    assert message_entry_id is not None
+
+    assert await controller.steer_pending(expected_turn_id="turn-1")
+
+    assert calls["steer_queued"] == [("item-1", "turn-1")]
+    assert calls["steer"] == []
+    assert calls["remove"] == []
+    assert controller.widgets == widgets
+    assert all(widget.pending for widget in widgets)
+    assert not controller.has_removable
+    assert controller.atomic_steer_in_flight
+
+    assert await controller.steering_history_added(message_entry_id)
+
+    assert controller.widgets == []
+    assert not controller.atomic_steer_in_flight
+    assert [widget.pending for widget in widgets] == [False, False]
+    assert [widget.get_content() for widget in widgets] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_atomic_steer_history_event_can_arrive_before_rpc_response() -> None:
+    controller: QueueController
+
+    async def steer_queued_turn(_queue_item_id: str, _turn_id: str) -> None:
+        message_entry_id = controller.widgets[0].history_entry_id
+        assert message_entry_id is not None
+        handled = asyncio.create_task(
+            controller.steering_history_added(message_entry_id)
+        )
+        assert await asyncio.wait_for(handled, timeout=1.0)
+
+    controller, _calls = _merging_controller(steer_queued_turn=steer_queued_turn)
+    await controller.enqueue_prompt("queued")
+    widget = controller.widgets[0]
+
+    assert await asyncio.wait_for(
+        controller.steer_pending(expected_turn_id="turn-1"), timeout=1.0
+    )
+
+    assert not widget.pending
+    assert controller.widgets == []
+
+
+@pytest.mark.asyncio
+async def test_atomic_steer_ignores_unrelated_history_entry() -> None:
+    controller, _calls = _merging_controller()
+    await controller.enqueue_prompt("queued")
+    widget = controller.widgets[0]
+
+    assert await controller.steer_pending(expected_turn_id="turn-1")
+
+    assert not await controller.steering_history_added("another-entry")
+    assert controller.widgets == [widget]
+    assert widget.pending
+
+
+@pytest.mark.asyncio
+async def test_atomic_steer_blocks_queue_mutations_until_history_event() -> None:
+    controller, _calls = _merging_controller()
+    await controller.enqueue_prompt("steering")
+    steering_widget = controller.widgets[0]
+    message_entry_id = steering_widget.history_entry_id
+    assert message_entry_id is not None
+
+    assert await controller.steer_pending(expected_turn_id="turn-1")
+
+    enqueue = asyncio.create_task(controller.enqueue_prompt("later"))
+    await asyncio.sleep(0)
+    assert not enqueue.done()
+    assert not await controller.pop_last()
+    assert not await controller.pop_at(0)
+    assert not await controller.update_prompt(0, "edited")
+
+    assert await controller.steering_history_added(message_entry_id)
+    await asyncio.wait_for(enqueue, timeout=1.0)
+
+    assert not steering_widget.pending
+    assert [widget.get_content() for widget in controller.widgets] == ["later"]
+
+
+@pytest.mark.asyncio
+async def test_atomic_steer_rejection_unlocks_without_reenqueueing() -> None:
+    """*Prepare*: A queued block whose atomic-steer RPC returns a server rejection.
+    *Do*: Attempt the steer, then enqueue another prompt.
+    *Assert*: The original item stays queued and accepts the later prompt.
+    """
+
+    # Prepare
+    async def failing_steer(_queue_item_id: str, _turn_id: str) -> None:
+        raise AppServerResponseError(
+            ProtocolError(
+                code=ProtocolErrorCode.INVALID_PARAMS, message="atomic steer rejected"
+            )
+        )
+
+    controller, calls = _merging_controller(steer_queued_turn=failing_steer)
+    await controller.enqueue_prompt("first")
+    await controller.enqueue_prompt("second")
+    widgets = controller.widgets
+
+    # Do
+    with pytest.raises(AppServerResponseError, match="atomic steer rejected"):
+        await controller.steer_pending(expected_turn_id="turn-1")
+    await asyncio.wait_for(controller.enqueue_prompt("later"), timeout=1.0)
+
+    # Assert
+    assert len(calls["enqueue"]) == 1
+    assert calls["remove"] == []
+    assert controller.widgets[:2] == widgets
+    assert [widget.get_content() for widget in controller.widgets] == [
+        "first",
+        "second",
+        "later",
+    ]
+    assert all(widget.pending for widget in controller.widgets)
+    assert controller.has_removable
+
+
+@pytest.mark.asyncio
+async def test_cancelled_atomic_steer_waits_for_server_outcome() -> None:
+    """*Prepare*: An atomic steer whose RPC and matching history event are blocked.
+    *Do*: Cancel the caller, then let the server-side outcome finish.
+    *Assert*: The RPC is not cancelled and the queue unlocks after the history event.
+    """
+    # Prepare
+    controller: QueueController
+    steer_started = asyncio.Event()
+    finish_steer = asyncio.Event()
+
+    async def blocking_steer(_queue_item_id: str, _turn_id: str) -> None:
+        steer_started.set()
+        await finish_steer.wait()
+        message_entry_id = controller.widgets[0].history_entry_id
+        assert message_entry_id is not None
+        assert await controller.steering_history_added(message_entry_id)
+
+    controller, calls = _merging_controller(steer_queued_turn=blocking_steer)
+    await controller.enqueue_prompt("queued")
+    request = asyncio.create_task(controller.steer_pending(expected_turn_id="turn-1"))
+    await asyncio.wait_for(steer_started.wait(), timeout=1.0)
+
+    # Do
+    request.cancel()
+    await asyncio.sleep(0)
+    request_stayed_pending = not request.done()
+    finish_steer.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(request, timeout=1.0)
+    await asyncio.wait_for(controller.enqueue_prompt("later"), timeout=1.0)
+
+    # Assert
+    assert request_stayed_pending
+    assert calls["remove"] == []
+    assert [widget.get_content() for widget in controller.widgets] == ["later"]
+    assert controller.has_removable
+
+
+@pytest.mark.asyncio
+async def test_atomic_steer_runtime_error_reconciles_before_unlocking() -> None:
+    """*Prepare*: An atomic steer with an unexpected local failure and queued snapshot.
+    *Do*: Attempt the steer, then enqueue another prompt.
+    *Assert*: The snapshot resolves the uncertain outcome before the queue unlocks.
+    """
+    # Prepare
+    refreshes = 0
+
+    async def failing_steer(_queue_item_id: str, _turn_id: str) -> None:
+        raise RuntimeError("atomic steer failed locally")
+
+    async def refresh_session_state() -> PublicSessionState:
+        nonlocal refreshes
+        refreshes += 1
+        return _build_session_state(
+            PublicTurnQueue(items=[_server_turn("item-1", "queued")])
+        )
+
+    controller, calls = _merging_controller(
+        steer_queued_turn=failing_steer, refresh_session_state=refresh_session_state
+    )
+    await controller.enqueue_prompt("queued")
+
+    # Do
+    with pytest.raises(RuntimeError, match="atomic steer failed locally"):
+        await controller.steer_pending(expected_turn_id="turn-1")
+    await asyncio.wait_for(controller.enqueue_prompt("later"), timeout=1.0)
+
+    # Assert
+    assert refreshes == 1
+    assert calls["remove"] == []
+    assert [widget.get_content() for widget in controller.widgets] == [
+        "queued",
+        "later",
+    ]
+    assert controller.has_removable
+
+
+@pytest.mark.asyncio
+async def test_snapshot_releases_atomic_steer_when_item_remains_queued() -> None:
+    """*Prepare*: An atomic steer whose connection closes with the item still queued.
+    *Do*: Receive the authoritative reconnect snapshot.
+    *Assert*: The snapshot unlocks the unchanged queued item without a local refresh.
+    """
+    # Prepare
+    refreshes = 0
+
+    async def disconnected_steer(_queue_item_id: str, _turn_id: str) -> None:
+        raise AppServerConnectionClosed("connection dropped")
+
+    async def refresh_session_state() -> PublicSessionState:
+        nonlocal refreshes
+        refreshes += 1
+        return _build_session_state(PublicTurnQueue())
+
+    controller, calls = _merging_controller(
+        steer_queued_turn=disconnected_steer,
+        refresh_session_state=refresh_session_state,
+    )
+    await controller.enqueue_prompt("queued")
+    widget = controller.widgets[0]
+    message_entry_id = widget.history_entry_id
+    assert message_entry_id is not None
+
+    # Do
+    with pytest.raises(AppServerConnectionClosed, match="connection dropped"):
+        await controller.steer_pending(expected_turn_id="turn-1")
+    locked_before_snapshot = not controller.has_removable
+
+    await controller.reconcile_snapshot(
+        PublicSessionState(
+            event_id=1,
+            session=PublicSession(
+                id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
+            ),
+            history=[],
+            turns=[],
+            turn_queue=PublicTurnQueue(
+                items=[
+                    _server_turn("item-1", "queued", message_entry_id=message_entry_id)
+                ]
+            ),
+        )
+    )
+
+    # Assert
+    assert locked_before_snapshot
+    assert refreshes == 0
+    assert len(calls["enqueue"]) == 1
+    assert calls["remove"] == []
+    assert controller.widgets == [widget]
+    assert widget.pending
+    assert controller.has_removable
+
+
+@pytest.mark.asyncio
+async def test_snapshot_finalizes_atomic_steer_already_in_history() -> None:
+    controller, calls = _merging_controller()
+    await controller.enqueue_prompt("queued")
+    widget = controller.widgets[0]
+    message_entry_id = widget.history_entry_id
+    assert message_entry_id is not None
+    assert await controller.steer_pending(expected_turn_id="turn-1")
+
+    await controller.reconcile_snapshot(
+        PublicSessionState(
+            event_id=2,
+            session=PublicSession(
+                id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=2
+            ),
+            history=[
+                PublicMessageEntry(
+                    id=message_entry_id,
+                    session_id="session-1",
+                    turn_id="turn-1",
+                    role="user",
+                    content=[TextContentBlock(text="queued")],
+                    source="turn_steer",
+                    generation_status=PublicEntryGenerationStatus.COMPLETED,
+                    created_at=2,
+                    updated_at=2,
+                )
+            ],
+            turns=[],
+            turn_queue=PublicTurnQueue(),
+        )
+    )
+
+    assert calls["remove"] == []
+    assert not widget.pending
+    assert controller.widgets == []
+    assert not controller.has_server_work

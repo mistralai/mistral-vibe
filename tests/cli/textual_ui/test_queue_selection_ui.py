@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from weakref import WeakKeyDictionary
 
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_app
+from tests.conftest import build_test_agent_loop, build_test_vibe_app, wait_until
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.cli.textual_ui.app import VibeApp
@@ -39,15 +38,6 @@ def vibe_app() -> VibeApp:
     return app
 
 
-async def _wait_until(pilot, predicate, timeout: float = 2.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        await pilot.pause(0.05)
-        if predicate():
-            return True
-    return False
-
-
 async def _enqueue_prompt(pilot, app: VibeApp, text: str) -> None:
     chat_input = app.query_one(ChatInputContainer)
     chat_input.value = text
@@ -59,7 +49,7 @@ async def _start_bash_and_wait_busy(pilot, app: VibeApp) -> None:
     chat_input = app.query_one(ChatInputContainer)
     chat_input.value = "keep the turn active"
     await pilot.press("enter")
-    assert await _wait_until(pilot, _BACKENDS[app].started[0].is_set, timeout=2.0)
+    assert await wait_until(pilot, _BACKENDS[app].started[0].is_set, timeout=2.0)
 
 
 @pytest.mark.asyncio
@@ -614,10 +604,10 @@ async def test_selection_exits_when_queue_drained_empty(vibe_app: VibeApp) -> No
 
         backend = _BACKENDS[vibe_app]
         backend.release[0].set()
-        assert await _wait_until(pilot, backend.started[1].is_set, timeout=2.0)
+        assert await wait_until(pilot, backend.started[1].is_set, timeout=2.0)
         # The drain reaches the client queue a few event-loop hops after the next
         # turn starts, so wait for it rather than asserting point-in-time.
-        assert await _wait_until(pilot, lambda: len(vibe_app._queue) == 0)
+        assert await wait_until(pilot, lambda: len(vibe_app._queue) == 0)
 
         # Next navigation re-syncs against the empty queue and exits selection.
         await pilot.press("up")
@@ -645,8 +635,8 @@ async def test_consumed_prompt_edit_copy_on_write_requeues_as_prompt(
 
         backend = _BACKENDS[vibe_app]
         backend.release[0].set()
-        assert await _wait_until(pilot, backend.started[1].is_set, timeout=2.0)
-        assert await _wait_until(pilot, lambda: len(vibe_app._queue) == 0)
+        assert await wait_until(pilot, backend.started[1].is_set, timeout=2.0)
+        assert await wait_until(pilot, lambda: len(vibe_app._queue) == 0)
 
         assert body.input_widget is not None
         body.input_widget.clear_text()

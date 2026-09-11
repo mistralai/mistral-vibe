@@ -12,6 +12,7 @@ from tests.conftest import (
     build_test_agent_loop,
     build_test_vibe_app,
     build_test_vibe_config,
+    wait_until,
 )
 from tests.mock.utils import mock_llm_chunk
 from tests.skills.conftest import create_skill
@@ -52,13 +53,13 @@ async def _block_agent_job(app: VibeApp, pilot) -> _BlockingBackend:
     backend = _blocking_backends[app]
     chat_input = app.query_one(ChatInputContainer)
     chat_input.post_message(ChatInputContainer.Submitted("block queue"))
-    assert await _wait_until(pilot, backend.started.is_set)
+    assert await wait_until(pilot, backend.started.is_set)
     # Wait until the client has handled TurnStarted, not just until the session
     # projection reports the turn active (that flag flips earlier, often before
     # backend.started returns). Only once TurnStarted is processed is the blocking
     # turn cleared from the optimistic len(app._queue), so a later follow-up count
     # is accurate instead of being inflated by the still-pending running turn.
-    assert await _wait_until(
+    assert await wait_until(
         pilot, lambda: not app._pending_turn and len(app._queue) == 0
     )
     return backend
@@ -66,7 +67,7 @@ async def _block_agent_job(app: VibeApp, pilot) -> _BlockingBackend:
 
 async def _release_agent_job(app: VibeApp, pilot, backend: _BlockingBackend) -> None:
     backend.release.set()
-    assert await _wait_until(pilot, lambda: not app._agent_job_active(), timeout=5.0)
+    assert await wait_until(pilot, lambda: not app._agent_job_active(), timeout=5.0)
 
 
 @pytest.fixture
@@ -109,15 +110,6 @@ async def _wait_for_error_message_containing(
     raise TimeoutError(
         f"ErrorMessage containing {text!r} did not appear within {timeout}s"
     )
-
-
-async def _wait_until(pilot, predicate, timeout: float = 2.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        await pilot.pause(0.05)
-    return False
 
 
 def _skill_effect_loaded(app: VibeApp, name: str) -> bool:
@@ -276,7 +268,7 @@ async def test_prompt_fires_at_mention_telemetry_when_its_turn_starts(
         try:
             chat_input = vibe_app_with_skills.query_one(ChatInputContainer)
             chat_input.post_message(ChatInputContainer.Submitted("read @example.py"))
-            await _wait_until(
+            await wait_until(
                 pilot,
                 lambda: any(
                     recorded.args and recorded.args[0] == "vibe.at_mention_inserted"
@@ -342,13 +334,13 @@ async def test_queued_head_skill_injects_skill_tool_message(
         try:
             chat_input.post_message(ChatInputContainer.Submitted("/my-skill"))
             chat_input.post_message(ChatInputContainer.Submitted("follow-up prompt"))
-            assert await _wait_until(
+            assert await wait_until(
                 pilot, lambda: len(vibe_app_with_skills._queue) == 2
             )
         finally:
             await _release_agent_job(vibe_app_with_skills, pilot, backend)
 
-        assert await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 len(vibe_app_with_skills._queue) == 0
@@ -378,7 +370,7 @@ async def test_skill_prompt_runs_after_following_bash_is_rejected(
         try:
             chat_input.post_message(ChatInputContainer.Submitted("/my-skill"))
             chat_input.post_message(ChatInputContainer.Submitted("!echo queued"))
-            assert await _wait_until(
+            assert await wait_until(
                 pilot,
                 lambda: (
                     len(vibe_app_with_skills._queue) == 1
@@ -392,7 +384,7 @@ async def test_skill_prompt_runs_after_following_bash_is_rejected(
         finally:
             await _release_agent_job(vibe_app_with_skills, pilot, backend)
 
-        assert await _wait_until(
+        assert await wait_until(
             pilot,
             lambda: (
                 len(vibe_app_with_skills._queue) == 0

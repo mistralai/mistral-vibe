@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
 import time
 
@@ -33,6 +34,14 @@ from vibe.core.types import (
     ResponseTooLongError,
 )
 from vibe.user_content import UserResource, render_user_resources
+
+# The statuses a provider refuses a credential with. Mirrors the Harness's
+# ``_REJECTION_REASONS`` so both backends classify a 403 the same way; neither
+# is worth a retry or a Sentry report.
+_REFUSED_CREDENTIAL_STATUSES = frozenset({
+    HTTPStatus.UNAUTHORIZED,
+    HTTPStatus.FORBIDDEN,
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,12 +142,19 @@ def public_error(exc: Exception) -> PublicError:  # noqa: PLR0912
             code = TurnErrorCode.INCOMPLETE_STREAM
         case BackendError() if exc.is_invalid_model:
             code = TurnErrorCode.INVALID_MODEL
+        case BackendError() if exc.status in _REFUSED_CREDENTIAL_STATUSES:
+            code = TurnErrorCode.INVALID_API_KEY
         case BackendError():
             code = TurnErrorCode.BACKEND_ERROR
         case RuntimeError() if (
             isinstance(cause := exc.__cause__, BackendError) and cause.is_invalid_model
         ):
             code = TurnErrorCode.INVALID_MODEL
+        case RuntimeError() if (
+            isinstance(cause := exc.__cause__, BackendError)
+            and cause.status in _REFUSED_CREDENTIAL_STATUSES
+        ):
+            code = TurnErrorCode.INVALID_API_KEY
         case RuntimeError() if isinstance(cause := exc.__cause__, BackendError):
             code = TurnErrorCode.BACKEND_ERROR
             details["provider"] = cause.provider

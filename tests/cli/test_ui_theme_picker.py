@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-import time
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -11,17 +9,6 @@ from tests.conftest import build_test_vibe_app, build_test_vibe_config
 from vibe.cli.textual_ui.app import BottomApp
 from vibe.cli.textual_ui.widgets.theme_picker import ThemePickerApp
 from vibe.config_values import AUTO_THEME
-
-
-async def _wait_until(
-    pilot, predicate: Callable[[], bool], timeout: float = 2.0
-) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        await pilot.pause(0.05)
-    return False
 
 
 @pytest.mark.asyncio

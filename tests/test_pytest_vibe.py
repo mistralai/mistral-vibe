@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
+from setproctitle import getproctitle
 
 import pytest_vibe
 
@@ -45,6 +49,33 @@ def test_generic_ci_var_does_not_unthrottle(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(pytest_vibe, "_available_cpu_count", lambda: 8)
 
     assert pytest_vibe.pytest_xdist_auto_num_workers() == 3
+
+
+def test_xdist_workers_do_not_update_process_titles() -> None:
+    assert not getproctitle().startswith("[pytest-xdist ")
+
+
+def test_only_local_controller_lowers_process_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    niceness_increments: list[int] = []
+    monkeypatch.setattr(
+        pytest_vibe.os, "nice", niceness_increments.append, raising=False
+    )
+
+    pytest_vibe.pytest_configure(cast(pytest.Config, SimpleNamespace()))
+    pytest_vibe.pytest_configure(
+        cast(
+            pytest.Config,
+            SimpleNamespace(
+                workerinput={}, pluginmanager=SimpleNamespace(get_plugins=set)
+            ),
+        )
+    )
+    monkeypatch.setenv("BUILDKITE", "true")
+    pytest_vibe.pytest_configure(cast(pytest.Config, SimpleNamespace()))
+
+    assert niceness_increments == [pytest_vibe._LOCAL_NICENESS]
 
 
 def test_worker_count_uses_environment_override(

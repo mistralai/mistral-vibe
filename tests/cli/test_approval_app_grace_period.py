@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 from textual import events
+from textual.app import App, ComposeResult
 
 from tests.stubs.app_config import build_test_app_config
 from vibe.app_server.models import (
@@ -14,6 +15,18 @@ from vibe.app_server.models import (
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 
 _TEST_GRACE_PERIOD_S = 0.5
+
+
+def _shell_approval(reason: str | None) -> ApprovalApp:
+    return ApprovalApp(
+        effect=ShellEffectDetail(
+            tool_name="bash",
+            input=ShellEffectInput(command="rm -rf build"),
+            display=EffectCallDisplay(summary="bash", status_text="Running"),
+        ),
+        config=build_test_app_config(),
+        reason=reason,
+    )
 
 
 @pytest.fixture
@@ -116,3 +129,32 @@ class TestVimKeybindings:
             assert approval_app.selected_option == 1
             approval_app.on_key(events.Key("k", "k"))
             assert approval_app.selected_option == 0
+
+
+class TestReasonRendering:
+    @pytest.mark.asyncio
+    async def test_reason_is_rendered_as_a_warning_line(self) -> None:
+        approval = _shell_approval("deletes the build directory")
+
+        class _Harness(App[None]):
+            def compose(self) -> ComposeResult:
+                yield approval
+
+        async with _Harness().run_test() as pilot:
+            await pilot.pause()
+
+            reason_widget = approval.query_one(".approval-reason")
+            assert "deletes the build directory" in str(reason_widget.render())
+
+    @pytest.mark.asyncio
+    async def test_no_reason_line_when_reason_is_absent(self) -> None:
+        approval = _shell_approval(None)
+
+        class _Harness(App[None]):
+            def compose(self) -> ComposeResult:
+                yield approval
+
+        async with _Harness().run_test() as pilot:
+            await pilot.pause()
+
+            assert not approval.query(".approval-reason")

@@ -239,7 +239,7 @@ Simply run `vibe` to enter the interactive chat loop.
 - **Todo View Toggle**: Press `Ctrl+T` to toggle the todo list view.
 - **Debug Console**: Press `Ctrl+\` to toggle the debug console.
 - **Agent Selection**: Press `Shift+Tab` to cycle through agents (ask, plan, ...).
-- **Queueing**: Prompts submitted while the agent is working are queued by the app server and run later as separate FIFO turns. Shell commands and non-side-channel slash commands require an idle session. `Ctrl+C` removes the newest queued prompt, `Escape` interrupts the active turn and pauses remaining prompts, and an empty `Enter` resumes them.
+- **Queueing**: Prompts submitted while the agent is working are queued by the app server. Empty `Enter` or `Ctrl+Enter` steers the queued prompts into the active turn; on Unified Harness sessions, this atomically consumes the stored queue item. `Ctrl+C` removes the newest queued prompt. `Escape` interrupts the active turn and pauses remaining prompts, and `Enter` resumes a paused queue. Shell commands and non-side-channel slash commands require an idle session.
 - **Exit**: Type `/exit`, `exit`, `quit`, `:q`, or `:quit` in the input box, or press `Ctrl+C` / `Ctrl+D` twice within ~1 second. Set `ask_confirmation_on_exit = false` (or toggle it in `/config`) to make `Ctrl+D` quit on the first press; `Ctrl+C` always requires confirmation.
 
 ### Copying & Text Selection
@@ -978,7 +978,7 @@ Valid levels: `DEBUG`, `INFO`, `WARNING` (default), `ERROR`, `CRITICAL`.
 
 Precedence: session override > `LOG_LEVEL` env var > `log_level` in config.toml > default.
 
-The `LOG_LEVEL` environment variable overrides the config value at startup. Use `DEBUG_MODE=true` to force `DEBUG` at startup (also enables `debugpy` under `vibe-acp`).
+The `LOG_LEVEL` environment variable overrides the config value at startup. Use `DEBUG_MODE=true` to force `DEBUG` at startup.
 
 ## Editors/IDEs
 

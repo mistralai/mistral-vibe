@@ -14,13 +14,13 @@ caller's request type.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Collection
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
 from vibe.core.git.worktree import (
     ManagedWorktree,
+    PendingSessionHold,
     PreparedWorktree,
     WorktreeError,
     WorktreeRepository,
@@ -56,23 +56,6 @@ type WorktreeRequest = (
 )
 
 
-# Every directory a saved session would resume into, asked of whoever holds
-# the sessions. The sweep needs it to tell an abandoned worktree from one
-# belonging to a session the user simply has not opened today: closing a
-# session drops its hold but leaves it on disk, so holders alone would read
-# every past session's checkout as unclaimed.
-#
-# Supplied rather than read here, because the two backends store sessions
-# differently by design -- the legacy index is a flat pair of files per
-# session, the harness keeps a generational journal under its own root -- and
-# a sweep that knew both layouts would carry a private detail of each.
-#
-# Raising is how a reader that cannot see its sessions says so. It abandons
-# the sweep for this run and keeps every worktree, which is the safe way to be
-# wrong: answering empty would let one unreadable listing delete them all.
-type ResumableDirectories = Callable[[], Awaitable[Collection[Path]]]
-
-
 @dataclass(frozen=True, slots=True)
 class ResolvedWorktree:
     """The directory a session will run in, and what raising it created.
@@ -84,19 +67,11 @@ class ResolvedWorktree:
 
     cwd: Path
     prepared: PreparedWorktree | None = None
+    pending_hold: PendingSessionHold | None = None
 
 
 class SessionWorktrees:
-    """Every worktree question a session has to answer.
-
-    One instance per host process, which is the lifetime the swept-bucket set
-    needs: longer would carry the answer across processes that may have left
-    worktrees behind, shorter would sweep on every attach.
-    """
-
-    def __init__(self) -> None:
-        self._swept_buckets: set[str] = set()
-        self._sweeps: set[asyncio.Task[None]] = set()
+    """Every worktree question a session has to answer."""
 
     # -- where a session starts -------------------------------------------
 
@@ -118,7 +93,17 @@ class SessionWorktrees:
                     raise WorktreeError(
                         f"Worktree is not linked to the local project: {requested}"
                     )
-                return ResolvedWorktree(cwd=requested)
+                managed = ManagedWorktree.at(requested)
+                pending_hold = (
+                    None if managed is None else managed.hold_for_attachment()
+                )
+                if (
+                    managed is not None
+                    and pending_hold is None
+                    and not requested.is_dir()
+                ):
+                    raise WorktreeError(f"Worktree is no longer available: {requested}")
+                return ResolvedWorktree(cwd=requested, pending_hold=pending_hold)
             case CreateNamedWorktree(name=name, branch=branch):
                 with WorktreeRepository.open(base_cwd) as repository:
                     created = repository.prepare(name, branch=branch)
@@ -127,7 +112,9 @@ class SessionWorktrees:
                     created = repository.prepare_auto(
                         prompt=prompt, suggested_name=suggested_name
                     )
-        return ResolvedWorktree(cwd=created.path, prepared=created)
+        return ResolvedWorktree(
+            cwd=created.path, prepared=created, pending_hold=created.pending_hold
+        )
 
     async def resolve_for_start(
         self, request: WorktreeRequest, base_cwd: Path
@@ -147,7 +134,8 @@ class SessionWorktrees:
             return await asyncio.shield(resolve)
         except asyncio.CancelledError:
             with suppress(BaseException):
-                await self.cleanup((await resolve).prepared)
+                resolved = await resolve
+                await self.cleanup(resolved.prepared, resolved.pending_hold)
             raise
 
     @staticmethod
@@ -163,7 +151,10 @@ class SessionWorktrees:
         return await suggest_worktree_name(request.prompt, cwd=base_cwd)
 
     @staticmethod
-    async def cleanup(worktree: PreparedWorktree | None) -> None:
+    async def cleanup(
+        worktree: PreparedWorktree | None,
+        pending_hold: PendingSessionHold | None = None,
+    ) -> None:
         """Undo what this start did, and only that.
 
         Takes what raising the worktree produced rather than the resolution it
@@ -173,6 +164,8 @@ class SessionWorktrees:
         Best effort throughout: the session has already failed, and a directory
         left behind is worth less than the error the caller is about to raise.
         """
+        if pending_hold is not None:
+            pending_hold.release()
         if worktree is None or not worktree.created:
             return
         try:
@@ -191,16 +184,20 @@ class SessionWorktrees:
     # -- who is standing in it ---------------------------------------------
 
     @staticmethod
-    def hold(cwd: Path, session_id: str) -> None:
+    def hold(
+        cwd: Path, session_id: str, pending_hold: PendingSessionHold | None = None
+    ) -> None:
         """Mark the worktree a session is standing in as occupied.
 
-        What the sweep reads to tell a worktree in use from one abandoned. A
-        session that never marks its own is a session whose checkout can be
-        deleted out from under it. `at` answers None for a directory Vibe did
-        not create, which is most of them, so this does nothing outside one.
+        Retention pruning reads this marker before deleting a worktree. A session
+        that never marks its own can lose its checkout. `at` answers None for a
+        directory Vibe did not create, which is most of them, so this does
+        nothing outside one.
         """
         if managed := ManagedWorktree.at(cwd):
-            managed.hold(session_id)
+            managed.hold(session_id, pending_hold)
+        elif pending_hold is not None:
+            pending_hold.release()
 
     @staticmethod
     def root(cwd: Path) -> Path | None:
@@ -222,42 +219,3 @@ class SessionWorktrees:
         """
         if managed := ManagedWorktree.at(cwd):
             managed.release_holder(session_id)
-
-    # -- the ones nobody is standing in -------------------------------------
-
-    def start_sweep(self, cwd: Path, resumable: ResumableDirectories) -> None:
-        """Sweep in the background, so attaching a session does not wait on it.
-
-        The task is held here rather than handed back. A caller that forgot to
-        keep a reference would have the sweep collected mid-run, and the callers
-        that would have to remember are the ones this exists to stop writing
-        things twice. It is also the wrong work to route through a backend's own
-        task tracking: the legacy runtime's tears the server down on an unhandled
-        error, and a sweep failing is explicitly not worth that -- it swallows
-        its own below.
-        """
-        task = asyncio.create_task(
-            self.sweep(cwd, resumable), name="vibe-worktree-claim-sweep"
-        )
-        self._sweeps.add(task)
-        task.add_done_callback(self._sweeps.discard)
-
-    async def sweep(self, cwd: Path, resumable: ResumableDirectories) -> None:
-        """Remove the worktrees of this repository no saved session resumes into."""
-        bucket: str | None = None
-        try:
-            bucket = await asyncio.to_thread(WorktreeRepository.bucket_for, cwd)
-            if bucket is None or bucket in self._swept_buckets:
-                return
-            # Marked before the work rather than after, so two sessions
-            # attaching in the same repository do not both sweep it, and
-            # dropped again below when the attempt failed. Marking only on
-            # success would sweep twice; never dropping would let one listing
-            # error cost every attach for the life of the process.
-            self._swept_buckets.add(bucket)
-            in_use = await resumable()
-            await asyncio.to_thread(WorktreeRepository.sweep_claims, cwd, in_use=in_use)
-        except Exception as exc:
-            if bucket is not None:
-                self._swept_buckets.discard(bucket)
-            logger.debug("Worktree claim sweep failed", exc_info=exc)

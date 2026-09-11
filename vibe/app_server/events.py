@@ -628,7 +628,7 @@ def _parse_event_params(notification: Notification) -> _KnownEventParams:
             params = validate_wire(TurnStartedParams, notification.params)
         case "turn/completed":
             params = validate_wire(TurnCompletedParams, notification.params)
-        case "turn_queue_updated":
+        case "turn/queueUpdated":
             params = validate_wire(TurnQueueUpdatedParams, notification.params)
         case "session/statsUpdated":
             params = validate_wire(StatsUpdatedParams, notification.params)

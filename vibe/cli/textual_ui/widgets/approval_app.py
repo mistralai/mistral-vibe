@@ -81,6 +81,7 @@ class ApprovalApp(VimNavigationMixin, Container):
         effect: EffectDetail,
         config: ConfigView,
         required_permissions: list[RequiredPermission] | None = None,
+        reason: str | None = None,
     ) -> None:
         super().__init__(id="approval-app")
         self.effect = effect
@@ -88,6 +89,7 @@ class ApprovalApp(VimNavigationMixin, Container):
         self.tool_args = effect_input_json(effect)
         self.config = config
         self.required_permissions = required_permissions or []
+        self.reason = reason
         self.selected_option = 0
         self.content_container: Vertical | None = None
         self.title_widget = NoMarkupStatic(
@@ -101,6 +103,8 @@ class ApprovalApp(VimNavigationMixin, Container):
     def compose(self) -> ComposeResult:
         with Vertical(id="approval-content"):
             yield self.title_widget
+            if self.reason:
+                yield NoMarkupStatic(f"⚠ {self.reason}", classes="approval-reason")
 
             with VerticalScroll(classes="approval-tool-info-scroll"):
                 self.tool_info_container = Vertical(

@@ -23,12 +23,15 @@ from vibe.core.vibe_code_project.project_store import (
     VibeProjectsStore,
 )
 from vibe.core.vibe_code_project.selection import (
+    LocalProjectLink,
+    ProjectLink,
     ProjectPickerContext,
     ProjectRepository,
+    RemoteProjectLink,
     VibeCodeProject,
-    VibeCodeProjectLink,
     is_project_linked_to_repo,
     is_saved_project_stale_error,
+    project_link_path,
     suggested_project_name,
 )
 from vibe.core.vibe_code_project.telemetry import (
@@ -43,14 +46,16 @@ __all__ = [
     "VIBE_CODE_PROJECT_PICKER_PAGE_LIMIT",
     "HeadlessProjectResolution",
     "HeadlessProjectResolutionSource",
+    "LocalProjectLink",
+    "ProjectLink",
     "ProjectPickerContext",
     "ProjectRepository",
+    "RemoteProjectLink",
     "TeleportProjectResolution",
     "VibeCodeProject",
     "VibeCodeProjectApiError",
     "VibeCodeProjectClient",
     "VibeCodeProjectCreateResult",
-    "VibeCodeProjectLink",
     "VibeCodeProjectLoadMoreResult",
     "VibeCodeProjectPage",
     "VibeCodeProjectPageFetcher",
@@ -65,5 +70,6 @@ __all__ = [
     "count_multi_repo_matches",
     "is_project_linked_to_repo",
     "is_saved_project_stale_error",
+    "project_link_path",
     "suggested_project_name",
 ]

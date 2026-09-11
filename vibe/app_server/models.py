@@ -9,6 +9,7 @@ from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
 from vibe.agents import AgentSafety, AgentType
 from vibe.app_server._effect_models import (
+    MANUAL_SHELL_TOOL_NAME as MANUAL_SHELL_TOOL_NAME,
     EffectDetail as EffectDetail,
     FileEditEffectBatchInput as FileEditEffectBatchInput,
     FileEditEffectChange as FileEditEffectChange,
@@ -27,6 +28,7 @@ from vibe.app_server._effect_models import (
     FileWriteEffectInput as FileWriteEffectInput,
     FileWriteEffectOutput as FileWriteEffectOutput,
     GenericEffectDetail as GenericEffectDetail,
+    ProcessEffectDetail as ProcessEffectDetail,
     ShellEffectDetail as ShellEffectDetail,
     ShellEffectInput as ShellEffectInput,
     ShellEffectOutput as ShellEffectOutput,
@@ -311,6 +313,9 @@ class ApprovalCallbackDetail(ProtocolModel):
         default_factory=lambda: list(ApprovalDecisionType)
     )
     related_entry_id: str | None = None
+    # Why approval is being requested (e.g. smart approve's risk reason); shown in the
+    # approval dialog. None for the static per-tool permission gate.
+    reason: str | None = None
 
 
 class UserInputCallbackDetail(ProtocolModel):
@@ -381,6 +386,7 @@ class TurnErrorCode(StrEnum):
     INCOMPLETE_STREAM = auto()
     BACKEND_ERROR = auto()
     INVALID_MODEL = auto()
+    INVALID_API_KEY = auto()
     INTERNAL_ERROR = auto()
 
 
@@ -476,7 +482,7 @@ class VibeCodeProject(ProtocolModel):
     is_read_only: bool = False
 
 
-class VibeCodeProjectLink(ProtocolModel):
+class RemoteProjectLink(ProtocolModel):
     repo_root: str
     repo_url: str
     project_id: str
@@ -487,7 +493,7 @@ class VibeCodePickerContext(ProtocolModel):
     repo_root: str
     repo_url: str
     repo_name: str
-    saved_link: VibeCodeProjectLink | None = None
+    saved_link: RemoteProjectLink | None = None
 
 
 class VibeCodeGitInfo(ProtocolModel):

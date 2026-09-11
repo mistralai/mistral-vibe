@@ -20,6 +20,8 @@ from vibe.core.llm.backend.generic import _get_adapter
 from vibe.core.llm.backend.vertex import VertexCredentials
 from vibe.core.llm.exceptions import BackendError, PayloadSummary
 from vibe.core.types import LLMMessage, Role
+import vibe.utils.api_keys as api_keys
+from vibe.utils.api_keys import ApiKeyOrigin, ApiKeySource
 
 if TYPE_CHECKING:
     from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -31,9 +33,9 @@ pytest.importorskip("mistralai_vibe_local_harness.vibe")
 # is importing it. `mistralai-vibe-local-harness` is an optional extra, and an
 # environment without it must skip this module rather than fail to collect it.
 from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
-    INVALID_API_KEY_MESSAGE,
     ProviderAuthRequired,
     ProviderCredentialSnapshot,
+    invalid_api_key_message,
 )
 
 from vibe.app_server._provider_credentials import ProviderCredentialService
@@ -114,6 +116,49 @@ async def test_resolution_reads_the_orchestrator_on_every_call() -> None:
     # A session opened against one provider must not keep speaking to it after
     # ``/config`` switches models mid-session.
     assert before.revision != after.revision
+
+
+def test_utility_credential_provider_targets_mistral_or_raises() -> None:
+    """The title credential port binds to the Mistral provider, and raises (→
+    auth-required) when none exists, so it never resolves the active key.
+    """
+    from vibe.app_server._runtime import _utility_credential_provider
+    from vibe.core.types import Backend
+
+    mistral = _provider("mistral", backend=Backend.MISTRAL)
+    anthropic = _provider("anthropic", api_style="anthropic")
+
+    on_mistral = _config(mistral, anthropic, active="anthropic")
+    assert _utility_credential_provider(on_mistral).name == "mistral"
+
+    no_mistral = _config(anthropic, active="anthropic")
+    with pytest.raises(ValueError):
+        _utility_credential_provider(no_mistral)
+
+
+@pytest.mark.asyncio
+async def test_select_provider_resolves_a_non_active_provider() -> None:
+    """*Prepare*: Two providers, the first active; a service bound to the second.
+    *Do*: Resolve.
+    *Assert*: The second provider's key is returned, not the active one's.
+
+    Background title generation uses this to run on the Mistral utility provider
+    while the session's active provider is something else.
+    """
+    orchestrator = _orchestrator(
+        _config(_provider("primary"), _provider("secondary"), active="primary")
+    )
+    service = ProviderCredentialService(
+        orchestrator,
+        select_provider=lambda config: next(
+            provider for provider in config.providers if provider.name == "secondary"
+        ),
+    )
+
+    result = await service.resolve()
+
+    assert isinstance(result, ProviderCredentialSnapshot)
+    assert result.token == "secondary-secret"
 
 
 @pytest.mark.asyncio
@@ -292,6 +337,36 @@ async def test_an_unresolvable_active_model_is_reported_not_raised() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_credential_says_which_source_it_came_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """*Prepare*: A provider key in the environment, then only in the keyring.
+    *Do*: Resolve each.
+    *Assert*: The snapshot names the source that answered.
+
+    The variable keys both sources, so it alone cannot say which one did. The
+    Harness cannot read Vibe's config, and this is what it puts in the message
+    a refused credential produces.
+    """
+    # Prepare
+    service = ProviderCredentialService(_orchestrator(_config(_provider("primary"))))
+
+    # Do
+    from_env = await service.resolve()
+    monkeypatch.delenv("PRIMARY_KEY")
+    monkeypatch.setattr(
+        api_keys, "get_api_key_from_keyring", lambda _key: "from-the-keyring"
+    )
+    from_keyring = await service.resolve()
+
+    # Assert
+    assert isinstance(from_env, ProviderCredentialSnapshot)
+    assert isinstance(from_keyring, ProviderCredentialSnapshot)
+    assert from_env.api_key_source == "env var PRIMARY_KEY"
+    assert from_keyring.api_key_source == "the keyring"
+
+
+@pytest.mark.asyncio
 async def test_the_revision_carries_nothing_of_the_credential() -> None:
     """*Prepare*: A resolved credential.
     *Do*: Read its revision.
@@ -390,14 +465,25 @@ async def test_vertex_headers_match_the_legacy_adapter() -> None:
     assert dict(resolved.headers) == legacy
 
 
-def test_the_unauthorized_message_is_the_legacy_sentence() -> None:
+@pytest.mark.parametrize(
+    "api_key_origin",
+    [
+        None,
+        ApiKeyOrigin(ApiKeySource.ENVIRONMENT, "PRIMARY_API_KEY"),
+        ApiKeyOrigin(ApiKeySource.KEYRING, "PRIMARY_API_KEY"),
+    ],
+)
+def test_the_unauthorized_message_is_the_legacy_sentence(
+    api_key_origin: ApiKeyOrigin | None,
+) -> None:
     """*Prepare*: A legacy ``BackendError`` for a 401.
     *Do*: Read the message the Harness returns for a rejected credential.
     *Assert*: They are the same sentence, character for character.
 
     Tier-2 pin: the sentence lives in ``BackendError._fmt`` on the legacy path
     and in the Harness on the Unified one, and a user must not be able to tell
-    which backend answered.
+    which backend answered. Both name the environment variable when the Host
+    read the credential from one.
     """
     # Prepare
     legacy = BackendError(
@@ -417,7 +503,9 @@ def test_the_unauthorized_message_is_the_legacy_sentence() -> None:
             has_tools=False,
             tool_choice=None,
         ),
+        api_key_origin=api_key_origin,
     )
 
     # Do / Assert
-    assert INVALID_API_KEY_MESSAGE == str(legacy)
+    described = api_key_origin.describe() if api_key_origin else None
+    assert invalid_api_key_message(described) == str(legacy)

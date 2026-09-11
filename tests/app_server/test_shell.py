@@ -8,7 +8,7 @@ from tests.conftest import build_test_agent_loop
 from tests.stubs.app_server import create_test_app_server_session
 from vibe.app_server._projection import project_history
 from vibe.app_server._session_resources import ShellTimelineEvent
-from vibe.app_server._shell_requests import _manual_shell_context
+from vibe.app_server._shell import manual_shell_context
 from vibe.app_server.events import HistoryEntryAdded, HistoryEntryUpdated
 from vibe.app_server.models import (
     CompletedEffectState,
@@ -38,7 +38,7 @@ def test_manual_shell_context_caps_stdout_and_stderr_independently() -> None:
         exit_code=1,
     )
 
-    context = _manual_shell_context(result, max_output_bytes=5)
+    context = manual_shell_context(result, max_output_bytes=5)
 
     assert context.count("[truncated]") == 2
     assert "oooooo" not in context

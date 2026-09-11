@@ -48,7 +48,7 @@ from vibe.core.config._defaults import (
 )
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.backend.base import MODEL_HTTP_KEEPALIVE_EXPIRY_SECONDS
-from vibe.core.llm.exceptions import BackendErrorBuilder
+from vibe.core.llm.exceptions import BackendErrorBuilder, ModelCall
 from vibe.core.types import (
     AvailableTool,
     Content,
@@ -62,7 +62,7 @@ from vibe.core.types import (
     ToolCall,
 )
 from vibe.core.utils import RetryObserver, RetryReason
-from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.api_keys import resolve_api_key_with_origin
 from vibe.utils.http import (
     VibeAsyncHTTPClient,
     build_ssl_context,
@@ -288,7 +288,12 @@ class MistralBackend:
         self._on_retry = on_retry
         self._loop: asyncio.AbstractEventLoop | None = None
         self._mapper = MistralMapper()
-        self._api_key = resolve_api_key(self._provider.api_key_env_var)
+        # Key and origin from the same lookup: the client is built once from
+        # this key, so an origin re-read per call could name a source the
+        # refused credential never came from.
+        resolved = resolve_api_key_with_origin(self._provider.api_key_env_var)
+        self._api_key = resolved[0] if resolved else None
+        self._api_key_origin = resolved[1] if resolved else None
 
         reasoning_field = getattr(provider, "reasoning_field_name", "reasoning_content")
         if reasoning_field != "reasoning_content":
@@ -453,6 +458,16 @@ class MistralBackend:
         extra_headers: dict[str, str] | None,
         metadata: dict[str, str] | None = None,
     ) -> LLMChunk:
+        call = ModelCall(
+            provider=self._provider.name,
+            endpoint=self._server_url,
+            model=model.name,
+            messages=messages,
+            temperature=temperature,
+            has_tools=bool(tools),
+            tool_choice=tool_choice,
+            api_key_origin=self._api_key_origin,
+        )
         try:
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
             response = await self._get_client().chat.complete_async(
@@ -507,27 +522,10 @@ class MistralBackend:
 
         except SDKError as e:
             raise BackendErrorBuilder.build_http_error(
-                provider=self._provider.name,
-                endpoint=self._server_url,
-                error=e,
-                response=e.raw_response,
-                model=model.name,
-                messages=messages,
-                temperature=temperature,
-                has_tools=bool(tools),
-                tool_choice=tool_choice,
+                call, error=e, response=e.raw_response
             ) from e
         except (httpx.RequestError, httpx.StreamError, ssl.SSLError) as e:
-            raise BackendErrorBuilder.build_request_error(
-                provider=self._provider.name,
-                endpoint=self._server_url,
-                error=e,
-                model=model.name,
-                messages=messages,
-                temperature=temperature,
-                has_tools=bool(tools),
-                tool_choice=tool_choice,
-            ) from e
+            raise BackendErrorBuilder.build_request_error(call, error=e) from e
 
     async def complete_streaming(
         self,
@@ -541,6 +539,16 @@ class MistralBackend:
         extra_headers: dict[str, str] | None,
         metadata: dict[str, str] | None = None,
     ) -> AsyncGenerator[LLMChunk, None]:
+        call = ModelCall(
+            provider=self._provider.name,
+            endpoint=self._server_url,
+            model=model.name,
+            messages=messages,
+            temperature=temperature,
+            has_tools=bool(tools),
+            tool_choice=tool_choice,
+            api_key_origin=self._api_key_origin,
+        )
         try:
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
 
@@ -608,24 +616,7 @@ class MistralBackend:
 
         except SDKError as e:
             raise BackendErrorBuilder.build_http_error(
-                provider=self._provider.name,
-                endpoint=self._server_url,
-                error=e,
-                response=e.raw_response,
-                model=model.name,
-                messages=messages,
-                temperature=temperature,
-                has_tools=bool(tools),
-                tool_choice=tool_choice,
+                call, error=e, response=e.raw_response
             ) from e
         except (httpx.RequestError, httpx.StreamError, ssl.SSLError) as e:
-            raise BackendErrorBuilder.build_request_error(
-                provider=self._provider.name,
-                endpoint=self._server_url,
-                error=e,
-                model=model.name,
-                messages=messages,
-                temperature=temperature,
-                has_tools=bool(tools),
-                tool_choice=tool_choice,
-            ) from e
+            raise BackendErrorBuilder.build_request_error(call, error=e) from e

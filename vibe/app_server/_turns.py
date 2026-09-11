@@ -821,7 +821,7 @@ class TurnController:  # noqa: PLR0904
             self._agent_loop.session_id if session_id is None else session_id
         )
         await self._notify(
-            "turn_queue_updated",
+            "turn/queueUpdated",
             TurnQueueUpdatedParams(
                 event_id=0,
                 session_id=target_session_id,

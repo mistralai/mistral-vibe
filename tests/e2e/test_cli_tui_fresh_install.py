@@ -9,6 +9,8 @@ import sys
 import pexpect
 import pytest
 
+pytest.importorskip("pty")
+
 from tests import TESTS_ROOT
 from tests.e2e.common import (
     ansi_tolerant_pattern,
@@ -52,6 +54,8 @@ def _install_fresh_wheel(tmp_path: Path, wheel_path: Path) -> Path:
             "install",
             "--no-config",
             "--refresh",
+            "--exclude-newer-package",
+            "mistralai-vibe-local-harness=false",
             "--python",
             str(python_path),
             str(wheel_path),

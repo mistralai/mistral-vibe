@@ -9,10 +9,10 @@ from vibe.core.teleport.git import GitRepoInfo
 from vibe.core.vibe_code_project import (
     ProjectPickerContext,
     ProjectRepository,
+    RemoteProjectLink,
     TeleportProjectResolution,
     VibeCodeProject,
     VibeCodeProjectApiError,
-    VibeCodeProjectLink,
     VibeCodeProjectPage,
     VibeCodeProjectPickerInitialData,
     VibeCodeProjectPickerService,
@@ -48,11 +48,11 @@ class TrackingProjectsStore(VibeProjectsStore):
         self.upsert_remote_project_threads: list[int] = []
         self.delete_remote_project_threads: list[int] = []
 
-    def get_remote_project(self, *, repo_root: Path) -> VibeCodeProjectLink | None:
+    def get_remote_project(self, *, repo_root: Path) -> RemoteProjectLink | None:
         self.get_remote_project_threads.append(threading.get_ident())
         return super().get_remote_project(repo_root=repo_root)
 
-    def upsert_remote_project(self, link: VibeCodeProjectLink) -> None:
+    def upsert_remote_project(self, link: RemoteProjectLink) -> None:
         self.upsert_remote_project_threads.append(threading.get_ident())
         super().upsert_remote_project(link)
 
@@ -135,7 +135,7 @@ async def test_load_initial_includes_saved_project_link(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     store = VibeProjectsStore(tmp_path / "projects.toml")
-    saved_link = VibeCodeProjectLink(
+    saved_link = RemoteProjectLink(
         repo_root=repo_root,
         repo_url="https://github.com/mistralai/mistral-vibe.git",
         project_id="mistral-vibe",
@@ -165,7 +165,7 @@ async def test_load_initial_reads_saved_project_link_off_event_loop(
     repo_root.mkdir()
     store = TrackingProjectsStore(tmp_path / "projects.toml")
     store.upsert_remote_project(
-        VibeCodeProjectLink(
+        RemoteProjectLink(
             repo_root=repo_root,
             repo_url="https://github.com/mistralai/mistral-vibe.git",
             project_id="mistral-vibe",
@@ -198,7 +198,7 @@ async def test_load_initial_for_teleport_skips_fetch_with_valid_saved_link(
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     store = VibeProjectsStore(tmp_path / "projects.toml")
-    saved_link = VibeCodeProjectLink(
+    saved_link = RemoteProjectLink(
         repo_root=repo_root,
         repo_url="https://github.com/mistralai/mistral-vibe.git",
         project_id="mistral-vibe",
@@ -260,7 +260,7 @@ async def test_load_initial_for_teleport_fetches_when_saved_link_for_different_r
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     store = VibeProjectsStore(tmp_path / "projects.toml")
-    stale_link = VibeCodeProjectLink(
+    stale_link = RemoteProjectLink(
         repo_root=repo_root,
         repo_url="https://github.com/other/repo.git",
         project_id="other-project",
@@ -398,7 +398,7 @@ async def test_create_project_requires_default_branch() -> None:
 def _initial_data(
     repo_root: Path,
     repo_url: str = "https://github.com/mistralai/mistral-vibe.git",
-    saved_link: VibeCodeProjectLink | None = None,
+    saved_link: RemoteProjectLink | None = None,
 ) -> VibeCodeProjectPickerInitialData:
     return VibeCodeProjectPickerInitialData(
         context=ProjectPickerContext(
@@ -415,8 +415,8 @@ def _link(
     repo_root: Path,
     repo_url: str = "https://github.com/mistralai/mistral-vibe.git",
     project_id: str = "proj-123",
-) -> VibeCodeProjectLink:
-    return VibeCodeProjectLink(
+) -> RemoteProjectLink:
+    return RemoteProjectLink(
         repo_root=repo_root,
         repo_url=repo_url,
         project_id=project_id,
@@ -567,7 +567,7 @@ async def test_headless_resolution_uses_single_exact_matching_project_and_saves_
         thread_id != event_loop_thread
         for thread_id in store.upsert_remote_project_threads
     )
-    assert store.get_remote_project(repo_root=repo_root) == VibeCodeProjectLink(
+    assert store.get_remote_project(repo_root=repo_root) == RemoteProjectLink(
         repo_root=repo_root,
         repo_url="https://github.com/mistralai/mistral-vibe.git",
         project_id="mistral-vibe",
@@ -598,7 +598,7 @@ async def test_headless_resolution_creates_project_when_no_match(
     assert fetcher.created == [
         ("mistral-vibe", "https://github.com/mistralai/mistral-vibe.git", "main")
     ]
-    assert store.get_remote_project(repo_root=repo_root) == VibeCodeProjectLink(
+    assert store.get_remote_project(repo_root=repo_root) == RemoteProjectLink(
         repo_root=repo_root,
         repo_url="https://github.com/mistralai/mistral-vibe.git",
         project_id="created",
@@ -641,7 +641,7 @@ async def test_headless_resolution_creates_project_for_single_multi_repo_match(
     assert fetcher.created == [
         ("mistral-vibe", "https://github.com/mistralai/mistral-vibe.git", "main")
     ]
-    assert store.get_remote_project(repo_root=repo_root) == VibeCodeProjectLink(
+    assert store.get_remote_project(repo_root=repo_root) == RemoteProjectLink(
         repo_root=repo_root,
         repo_url="https://github.com/mistralai/mistral-vibe.git",
         project_id="created",
@@ -680,7 +680,7 @@ async def test_headless_resolution_creates_project_when_matches_are_ambiguous(
     assert fetcher.created == [
         ("mistral-vibe", "https://github.com/mistralai/mistral-vibe.git", "main")
     ]
-    assert store.get_remote_project(repo_root=repo_root) == VibeCodeProjectLink(
+    assert store.get_remote_project(repo_root=repo_root) == RemoteProjectLink(
         repo_root=repo_root,
         repo_url="https://github.com/mistralai/mistral-vibe.git",
         project_id="created",

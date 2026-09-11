@@ -1,0 +1,1165 @@
+---
+name: "vibe"
+description: "Authoritative reference for Mistral Vibe \u2014 the CLI agent you (the model) are running inside.\n\nLOAD when the user:\n- asks anything about Vibe itself, even by indirect name (\"this CLI\", \"this tool\", \"you\");\n- wants to change, inspect, or reset their setup;\n- asks why the agent did or did not act;\n- asks how to make the CLI do X, where X lives, or what a flag/command/setting does;\n- asks any meta question about your own behavior;\n- is unsure whether a command, flag, env var, or file is in scope \u2014 this skill is the source of truth.\n\nSCOPE: config under `~/.vibe/` and project-local `.vibe/`; `VIBE_*` and `LOG_*` env vars; models and providers; agents and subagents; skills; tools and their permission model; every slash command and CLI flag; hooks; MCP servers; connectors; plugins; trusted folders; `@`-file mentions; logs; themes; voice."
+user-invocable: false
+---
+
+# Vibe CLI Self-Awareness
+
+You are running inside **Mistral Vibe**, a CLI coding agent built by Mistral AI.
+This skill gives you full knowledge of the application internals so you can help
+the user understand, configure, and troubleshoot their Vibe installation.
+
+## Going Deeper
+
+For facts not covered here, fetch the README:
+https://github.com/mistralai/mistral-vibe/blob/main/README.md
+It tracks the latest release, so check `vibe --version` before relying on it for
+anything version-specific. Point the user at
+https://docs.mistral.ai/vibe/code/overview for human-readable docs.
+
+## VIBE_HOME
+
+The user's Vibe home directory defaults to `~/.vibe` but can be overridden via
+the `VIBE_HOME` environment variable. All user-level configuration, skills, tools,
+agents, prompts, logs, and session data live here.
+
+### Directory Structure
+
+```
+~/.vibe/
+  config.toml          # Optional user configuration, created on first saved setting
+  hooks.toml           # User-level hook definitions
+  .env                 # API keys and credentials (dotenv format)
+  vibehistory          # Command history
+  trusted_folders.toml # Trust database for project folders
+  connector_bootstrap_cache.json # Short-lived connector discovery cache
+  agents/              # Custom agent profiles (*.toml)
+  prompts/             # Custom prompts (*.md)
+  skills/              # User-level skills (each skill is a subdirectory with SKILL.md)
+  tools/               # Custom tools (<name>.py); descriptions & overrides in tools/prompts/<name>.md
+  logs/
+    vibe.log           # Main log file
+    session/           # Session log files
+  plans/               # Session plans
+
+~/.agents/
+  skills/              # Additional user-level skills directory
+```
+
+### Project-Local Configuration
+
+When in a trusted folder, Vibe also looks for project-local configuration:
+- `.vibe/config.toml` - Project-specific config (overrides user config)
+- `.vibe/hooks.toml` - Project-specific hooks (requires trusted folder)
+- `.vibe/skills/` - Project-specific skills
+- `.vibe/tools/` - Project-specific tools (`<name>.py`); a `prompts/<name>.md` beside them sets or overrides the description of the tool named `<name>` — builtin, MCP, or custom (e.g. `.vibe/tools/prompts/bash.md` re-describes `bash`). Same `tools/*.py` + `tools/prompts/*.md` layout as the builtins.
+- `.vibe/agents/` - Project-specific agents
+- `.vibe/prompts/` - Project-specific prompts
+- `.agents/skills/` - Standard agent skills directory
+
+Custom Python tools will be deprecated in a future release. Recommend skills
+for new extensions. When a user asks for migration help, inspect the custom
+tool's behavior and replace it with an equivalent skill.
+
+### AGENTS.md Discovery
+
+`AGENTS.md` files provide directory-scoped instructions to the model. At startup,
+Vibe loads `~/.vibe/AGENTS.md` and every `AGENTS.md` from the project root up
+through the trust chain. `AGENTS.md` files in subdirectories are discovered
+lazily: when `read_file` reads a file below the project root, any `AGENTS.md`
+between the file's parent and the project root is injected into
+context.
+
+## Lifecycle: Exit, Update, Version, Resume
+
+### Exit
+
+Chat input (case-insensitive): `/exit`, `exit`, `quit`, `:q`, `:quit`.
+Keyboard: `Ctrl+C` / `Ctrl+D` — press twice within ~1s to quit. For `Ctrl+C`,
+the first press instead interrupts the running job or clears the input if either
+is present. Set `ask_confirmation_on_exit = false` to make `Ctrl+D` quit on the
+first press (also toggleable in `/config`); `Ctrl+C` always requires a second
+press. `Ctrl+Z` suspends on POSIX (resume with `fg`).
+
+### Update
+
+Vibe never updates silently. With `enable_update_checks = true` (default), it
+polls PyPI for `mistral-vibe` daily and prompts on the next launch when a
+newer release exists; accepting runs `uv tool upgrade mistral-vibe`, then
+`brew upgrade mistral-vibe` as a fallback. Disable via `enable_update_checks
+= false`. Run `vibe update` (equivalent to `vibe --check-upgrade`) to check
+immediately, prompt to install a newer version if one exists, and exit. Initial
+install: `uv tool install mistral-vibe`.
+
+### Version
+
+`vibe --version` (or `-v`) prints it and exits. Not shown anywhere in-session.
+
+### Resume
+
+- `vibe -c` / `--continue`: most recent session in this terminal (TTY-scoped;
+  falls back to latest in cwd).
+- `vibe --resume [SESSION_ID]`: specific session; without an id, opens a picker.
+- In-session: `/resume` (alias `/continue`).
+
+#### Session titles
+
+Each session has a `title` stored in `meta.json` (with `title_source`: `auto` or
+`manual`). A session stays untitled until a background LLM call generates a
+concise descriptive title (the `--resume` list shows a message preview until
+then). Automatic generation runs only for the interactive CLI; other clients
+(ACP, app server, programmatic) keep their own session management and fall back
+to the message preview. Title generation runs on the session's active
+model/provider — it substitutes a small fast Mistral model only when the active
+provider is already Mistral and the allowlist permits it, so titles never reach a
+new destination. The first title waits for the opening turn to finish (or a few
+model steps) so it isn't generated off a thin tool-call preamble. On that cheap
+fast model it also refreshes periodically and
+after each compaction; when it falls back to the (possibly expensive) active
+model it stays bounded — one title at the start plus one after a compaction, a
+couple at most — so a large model isn't re-invoked every few turns. The refresh
+keeps the opening intent and the latest exchange in view and feeds the previous
+title back so it refines rather than restarts. `/rename <title>` sets a `manual`
+title that auto-generation never overwrites. Set `session_logging.generate_titles
+= false` to turn automatic titles off (the `--resume` list and tab then use the
+message preview). The current title also drives the terminal tab/window title
+(OSC), updated on rename, auto-title changes, and resume; it never blocks a turn.
+
+#### Session storage & folder scoping
+
+Local sessions are written under `~/.vibe/logs/session/` (override with
+`session_logging.save_dir`). Each session records the `cwd` it ran in. The
+`/resume` picker, `--continue`, and bare `--resume` (no id) are **scoped to the
+current folder**: only sessions whose `cwd` matches where Vibe is launched are
+listed, so the same directory shows its own history and nothing else. Switch
+folders to see a different set. The explicit `--resume <SESSION_ID>` form is
+**not** folder-scoped: it resolves the session by id regardless of which folder
+it ran in.
+
+The first user message pins the resolved model alias to the session. Resuming
+keeps that model even if the configured default changes. `/model` uses the same
+config persistence target as other settings and also updates an existing
+session override immediately; the session file is synchronized when the next
+user message is sent. An explicit persistent target selected through `/config`
+changes only that layer. `/clear` starts an unpinned conversation that follows
+the current config again. If a selected model is no longer configured, Vibe
+falls back to the current default model.
+
+## Configuration (config.toml)
+
+The configuration file uses TOML format. When it does not exist, Vibe uses its
+built-in defaults and creates a sparse file on the first persisted setting.
+Settings can also be overridden via environment variables with the `VIBE_`
+prefix (e.g., `VIBE_ACTIVE_MODEL=local`).
+
+Custom prompt IDs are resolved from project-local `.vibe/prompts/` first, then
+from `~/.vibe/prompts/`, and finally from the built-in bundled prompts.
+
+### Key Settings
+
+```toml
+# Model selection
+active_model = "mistral-medium-3.5"  # Model alias to pin; omit or set "" to follow the server-routed default
+
+# UI preferences
+theme = "auto"  # Follow terminal background, then OS light/dark preference
+disable_welcome_banner_animation = false
+autocopy_to_clipboard = true  # Enable automatic copying of selected text to clipboard
+file_watcher_for_autocomplete = false
+ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
+show_greeting = true  # Show "Hello {name}" greeting below the banner at startup (Mistral providers, once per 24h)
+log_level = "WARNING"  # Optional. DEBUG | INFO | WARNING | ERROR | CRITICAL — log level for ~/.vibe/logs/vibe.log
+```
+
+### Copy and Text Selection
+
+- **Copy shortcuts**: `Ctrl+Y` and `Ctrl+Shift+C` both copy the current selection to the clipboard. When autocopy is enabled (default), releasing the mouse over a selection also copies automatically. Each successful copy flashes a brief inline "Copied to clipboard" notice.
+- **Multi-click selection**: Double-click selects a word, triple-click selects the current paragraph; dragging extends the selection at the same granularity.
+
+```toml
+# Behavior
+bypass_tool_permissions = false    # Skip tool approval prompts
+system_prompt_id = "cli"          # System prompt: "cli", "lean", or custom .md filename
+compaction_prompt_id = "compact"  # Compaction prompt: built-in "compact" or custom .md filename
+enable_telemetry = true
+enable_update_checks = true       # Daily PyPI check; prompts on next launch when a newer release exists
+enable_notifications = true
+enable_system_trust_store = false  # Use OS trust store for outbound HTTPS
+api_timeout = 720.0               # API request timeout in seconds
+api_retry_max_elapsed_time = 300.0  # Retry budget for retryable API failures in seconds
+auto_compact_threshold = 200000   # Fallback for models without their own threshold
+
+# Git commit behavior
+include_commit_signature = true   # Add "Co-Authored-By" to commits
+
+# System prompt composition
+include_model_info = true         # Include model name in system prompt
+include_project_context = true    # Include project context (git info, cwd) in system prompt
+include_prompt_detail = true      # Include OS info, tool prompts, skills, and agents in system prompt
+
+# Voice features
+voice_mode_enabled = false
+narrator_enabled = false
+active_transcribe_model = "voxtral-realtime"
+active_tts_model = "voxtral-tts"
+```
+
+### OpenTelemetry Tracing
+
+Set `enable_otel = true` to export traces for agent, model, and tool operations
+over OTLP/HTTP. `enable_telemetry` must also be enabled. With no explicit
+endpoint, Vibe derives the telemetry endpoint and API key from the configured
+Mistral provider, except public regional API hosts that do not serve telemetry.
+
+To use another collector, set `otel_endpoint` to its base URL; Vibe appends
+`/v1/traces`. Configure custom-collector authentication through the standard
+`OTEL_EXPORTER_OTLP_*` environment variables.
+
+`otel_redaction` controls client-side span attribute redaction: `default`
+redacts sensitive values, `strict` redacts sensitive attributes entirely, and
+`none` disables redaction. Use `none` only for a collector trusted to receive
+potentially sensitive prompt, response, and tool data.
+
+```toml
+enable_otel = true
+otel_endpoint = "https://collector.example.com:4318"
+otel_redaction = "default"
+```
+
+### Providers
+
+```toml
+[[providers]]
+name = "mistral"
+api_base = "https://api.mistral.ai/v1"
+api_key_env_var = "MISTRAL_API_KEY"
+backend = "mistral"
+
+[[providers]]
+name = "llamacpp"
+api_base = "http://127.0.0.1:8080/v1"
+api_key_env_var = ""
+extra_headers = { "X-Custom-Header" = "value" }  # optional per-provider HTTP headers
+emits_finish_reason = false  # set false for OpenAI-compatible endpoints that end
+                             # streams without a finish reason; avoids spurious
+                             # "incomplete stream" errors and retries (default true)
+```
+
+### Models
+
+```toml
+[[models]]
+name = "mistral-vibe-cli-latest"
+provider = "mistral"
+alias = "mistral-medium-3.5"
+temperature = 1.0
+input_price = 1.5
+output_price = 7.5
+cached_input_price = 0.15         # per million cached input tokens; omit to bill at input_price
+thinking = "high"                 # "off", "low", "medium", "high", "max"
+auto_compact_threshold = 200000
+supports_images = true            # vision-capable; allows @-mentioned images
+
+[[models]]
+name = "devstral"
+provider = "llamacpp"
+alias = "local"
+```
+
+### Tool Configuration
+
+```toml
+# Additional tool search paths
+tool_paths = ["/path/to/custom/tools"]
+
+# Enable only specific tools (glob and regex supported)
+enabled_tools = ["bash", "read_file", "grep"]
+
+# Disable specific tools after enabled_tools filtering
+disabled_tools = ["web_fetch"]
+
+# Per-tool configuration
+[tools.bash]
+allowlist = ["git", "npm", "python"]
+
+[tools.git_bash]
+permission = "ask"
+shell = "C:\Program Files\Git\bin\bash.exe"
+
+[tools.powershell]
+permission = "ask"
+shell = "powershell.exe"
+```
+
+The built-in shell surface is controlled by the `managed_shell_tools_enabled` config
+field and the `vibe_cli_managed_shell_tools` GrowthBook experiment. The default variant
+keeps the legacy one-shot `bash` tool, including its existing Windows behavior.
+The managed variant exposes OS-native shell tools:
+POSIX systems, including WSL where Vibe runs as Linux, get managed `bash`,
+`bash_output`, `bash_stdin`, `bash_sessions`, and `bash_log_file`; native Windows
+gets `git_bash`, `git_bash_output`, `git_bash_stdin`, `git_bash_sessions`, and
+`git_bash_log_file` when Git Bash is available. If Git Bash is unavailable,
+native Windows falls back to `powershell`, `powershell_output`,
+`powershell_stdin`, `powershell_sessions`, and `powershell_log_file`.
+
+Managed shell sessions return a `session_id`, inline output, a cursor for polling
+more output, and a log path under `~/.vibe/shell-tool/sessions/`. Long-running
+commands can be left alive with `background = true`, and interactive commands can
+be driven with the matching stdin tool.
+
+POSIX `bash` reads permissions, allowlists, and denylists from `[tools.bash]`.
+Native Windows `git_bash` reads them from `[tools.git_bash]`; native Windows
+`powershell` reads them from `[tools.powershell]`. Neither Windows tool reads
+`[tools.bash]`. Git Bash is preferred when Vibe can resolve a usable `bash.exe`
+from PATH, Git for Windows, or standard Git install locations. If Git Bash is
+unavailable, the PowerShell resolution order is `pwsh.exe`, then
+`powershell.exe`. `cmd.exe` is not used by the managed Windows shell tools.
+Output polling uses byte offset cursors
+(`cursor` / `next_cursor`), `max_bytes` caps per-call inline output, and
+`max_inline_bytes` configures the default cap.
+
+**Special case — `find` command:** Even if `find` is in the bash allowlist,
+Vibe detects `-exec`, `-execdir`, `-ok`, and `-okdir` predicates and will
+prompt for user permission before running the command.
+
+#### File Tool Permission Resolution
+
+File-based tools (`read`, `grep`, `write_file`, `edit`) resolve
+permissions in this order (first match wins):
+
+1. **Scratchpad** path → always allowed
+2. **denylist** glob match → always denied
+3. **allowlist** glob match → always allowed
+4. **sensitive_patterns** match → requires approval
+5. **Outside workdir** → requires approval (or denied if `permission = "never"`)
+6. **Default** → uses the tool's `permission` setting
+
+The **denylist** is checked before the allowlist — a path matching both lists
+is denied. Both are checked before the outside-workdir boundary, so the
+allowlist can still auto-approve access to directories outside the project.
+
+### Skill Configuration
+
+```toml
+# Additional skill search paths
+skill_paths = ["/path/to/custom/skills"]
+
+# Enable only specific skills
+enabled_skills = ["vibe", "custom-*"]
+
+# Disable specific skills
+disabled_skills = ["experimental-*"]
+```
+
+### Agent Configuration
+
+```toml
+# Additional agent search paths
+agent_paths = ["/path/to/custom/agents"]
+
+# Enable/disable agents
+enabled_agents = ["ask", "plan"]
+disabled_agents = ["auto-approve"]
+
+# Opt-in builtin agents (only affects agents with install_required=True, e.g. lean)
+installed_agents = ["lean"]
+
+# Agent profile to use when --agent is not passed
+# (default: "accept-edits"). Valid values: "ask", "plan", "accept-edits",
+# "auto-approve", "lean" (only when listed in installed_agents), or any
+# custom agent name from ~/.vibe/agents/ or .vibe/agents/. Subagents
+# (e.g. "explore") are rejected. Applies in both interactive and programmatic
+# (-p/--prompt) mode.
+default_agent = "plan"
+```
+
+### MCP Servers
+
+Remote MCP servers can be added non-interactively from the shell:
+
+```bash
+vibe mcp add mistralai \
+  --url https://api.mistral.ai/mcp \
+  --transport streamable-http \
+  --api-key-env MISTRAL_API_KEY
+
+vibe mcp add linear \
+  --url https://mcp.linear.app/mcp
+
+vibe mcp remove mistralai
+```
+
+Static auth is selected when `--api-key-env` or `--header` is provided.
+Otherwise the server uses OAuth and starts browser login by default. Pass
+`--no-login` to only persist the OAuth configuration. Run
+`vibe mcp add --help` for all supported authentication and timeout options.
+Use `vibe mcp remove <name>` to remove a server from the user configuration;
+stored OAuth credentials are deleted when available.
+
+Hosted OAuth MCP servers can also be added from inside Vibe:
+
+```text
+/mcp add https://mcp.linear.app/mcp
+/mcp add https://mcp.example.com/mcp --name docs --scope read --transport http --no-login
+```
+
+`/mcp add` is OAuth-only. It writes `auth.type = "oauth"` with optional
+scopes and starts login by default. It uses `transport = "streamable-http"`
+unless you pass `--transport http`. Pass `--no-login` to add the server without
+starting OAuth login. The shortcut supports `streamable-http` and `http`
+transports.
+
+```toml
+[[mcp_servers]]
+name = "my-server"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@my/mcp-server"]
+
+[[mcp_servers]]
+name = "remote-server"
+transport = "http"
+url = "https://mcp.example.com"
+
+[mcp_servers.auth]
+type = "static"
+api_key_env = "MCP_API_KEY"
+api_key_header = "Authorization"
+api_key_format = "Bearer {token}"
+
+[[mcp_servers]]
+name = "linear"
+transport = "streamable-http"
+url = "https://mcp.linear.app/mcp"
+
+[mcp_servers.auth]
+type = "oauth"
+scopes = ["read", "write"]
+# Optional: client_id = "pre-registered-public-client"
+# Optional: client_metadata_url = "https://example.com/client-metadata.json"
+# Optional: redirect_port = 47823
+```
+
+HTTP MCP servers can use either static auth or OAuth:
+
+- Static auth: legacy `api_key_env` / `headers` keys still work and are
+  promoted to `auth.type = "static"` internally.
+- OAuth auth: use `auth.type = "oauth"` with `scopes`. Vibe stores tokens
+  in the OS keyring under `mcp-oauth:<alias>:tokens`, dynamic client info
+  under `mcp-oauth:<alias>:client_info`, and config drift fingerprints under
+  `mcp-oauth:<alias>:fingerprint`.
+- Headless environments without an OS keyring cannot store OAuth tokens; use
+  static auth via `api_key_env` instead.
+- For SSH/remote browser callbacks, forward the loopback port:
+  `ssh -L 47823:127.0.0.1:47823 <host>`.
+
+### Connectors
+
+Mistral connectors are auto-discovered when the active provider is Mistral
+and the API key env var is set. Toggle the master switch or hide individual
+connectors / tools:
+
+The legacy backend keeps a discovered connector disabled until it has an
+explicit `[[connectors]]` entry. The Unified backend selected with
+`--experimental-harness` enables ready connectors by default in memory. It
+does not write that default to TOML, and the master switch plus explicit
+connector, tool, allowlist, and denylist settings always take precedence.
+
+```toml
+enable_connectors = true          # Master switch (default: true)
+
+[[connectors]]
+name = "github"
+disabled = true                   # Hide all tools from this connector
+
+[[connectors]]
+name = "linear"
+disabled_tools = ["delete_issue"] # Hide selected tools only
+```
+
+### Session Logging
+
+```toml
+[session_logging]
+enabled = true
+save_dir = ""                     # Defaults to ~/.vibe/logs/session
+session_prefix = "session"
+generate_titles = true            # Background LLM session titles; false uses the message preview
+```
+
+### Browser Sign-In
+
+Browser sign-in lets users authenticate through the browser during onboarding.
+Mistral providers use default browser sign-in URLs (`console.mistral.ai` /
+`api.mistral.ai`). Custom or renamed providers must configure both URLs:
+
+```toml
+[[providers]]
+browser_auth_base_url = "https://console.mistral.ai"
+browser_auth_api_base_url = "https://console.mistral.ai/api"
+```
+
+Split-horizon deployments (e.g. behind an SAP Cloud Connector) expose the
+console under a virtual host the CLI reaches but the server does not know about,
+so it returns sign-in/poll URLs on its own public host. Set
+`browser_auth_allow_origin_rewrite = true` on the provider to re-home the
+returned URLs onto the configured `browser_auth_base_url` /
+`browser_auth_api_base_url` origins instead of rejecting them for an origin
+mismatch (path traversal is still rejected). Only the origin (scheme, host,
+port) is rewritten; the returned URL's path must already sit under the
+configured base path, so the connector must preserve the server's path prefix.
+Point `browser_auth_base_url` at the browser-reachable console and
+`browser_auth_api_base_url` at the CLI-reachable API host. The interactive
+onboarding wizard's custom-domain screen also accepts an optional browser-auth
+API base URL and auto-enables this rewrite when its origin differs from the
+console origin:
+
+```toml
+[[providers]]
+browser_auth_base_url = "https://console.internal.example"
+browser_auth_api_base_url = "https://connector.internal.example:443/api"
+browser_auth_allow_origin_rewrite = true
+```
+
+Self-hosted deployments can point Vibe CLI upgrade and API-key links to their
+Le Chat web deployment, where the Vibe API key is managed:
+
+```toml
+vibe_base_url = "https://chat.mistral.ai"
+```
+
+Interactive setup can target a Mistral-compatible deployment instead of the
+default `console.mistral.ai` / `api.mistral.ai`. The final credential is always a
+Mistral API key. On the auth-method screen pick **Launch browser**, then
+**Other** on the sign-in-target screen, and enter a login domain to complete
+browser sign-in. This sets `browser_auth_base_url` (the entered domain) and
+derives `browser_auth_api_base_url` (`DOMAIN/api`). The overridden `mistral`
+provider is persisted to user config so subsequent runs reuse it.
+
+The wizard reads any custom `browser_auth_base_url` already in `config.toml`:
+choosing **Other** pre-fills that configured domain so it can be confirmed or
+edited. Choosing **Mistral AI** while a custom domain is configured warns first
+and requires pressing **Enter** again to confirm the reset to the default
+domain, which is then persisted.
+
+### Hooks
+
+Hooks let users run shell commands automatically at lifecycle events. They
+are always available — no flag is required; dropping a `hooks.toml` in place
+is enough.
+
+#### Config and hook types
+
+Hooks live in `hooks.toml` files (separate from `config.toml`), discovered in
+this order:
+
+1. `<project>/.vibe/hooks.toml` — loaded first, only when the folder is
+   trusted.
+2. `~/.vibe/hooks.toml` — loaded second.
+
+A duplicate `name` across the two files is reported as a config issue and the
+project entry wins. Config-load errors (invalid TOML, missing required
+fields) surface in the TUI as warnings and the offending hook is skipped.
+
+```toml
+[[hooks]]
+name = "lint"                       # Required: unique within the file.
+type = "post_agent"                 # Required: post_agent | pre_tool | post_tool.
+command = "eslint --quiet ."        # Required: shell command run in cwd.
+timeout = 60.0                      # Default: 60s for all hooks.
+description = "Run ESLint"          # Optional.
+
+[[hooks]]
+name = "deny-rm-rf"
+type = "pre_tool"
+match = "bash"                      # Tool-name matcher (tool hooks only, default "*").
+strict = true                       # Tool hooks only: escalate any failure to deny/clear.
+command = "uv run python /path/to/guard-bash"
+```
+
+| Type | When it runs |
+|---|---|
+| `post_agent` | Once per turn, after the agent finishes responding (no pending tool calls). |
+| `pre_tool` | Per tool call, before the user permission prompt. |
+| `post_tool` | Per tool call, **iff the tool body actually ran**. `tool_status` is `success`, `failure`, or `cancelled`. Does not fire when the tool never executed (`pre_tool` denial, user denial at the approval prompt, permission `NEVER`, or cancellation before the body started). |
+
+**Matcher syntax** (same as `enabled_tools`): fnmatch glob by default
+(`"bash"`, `"read_*"`, case-insensitive), or a regex full-match when the
+pattern starts with `re:` (`"re:(read_file|grep)"`). `match` is forbidden on
+`post_agent`.
+
+**Tool name conventions** for matchers:
+- Built-in tools use their bare name (`bash`, `read_file`, …); see the Tools
+  section above for the full list.
+- MCP tools: `{server-name}_{raw-tool-name}` (e.g. `linear_create-issue`).
+- Connector tools: `connector_{normalized-name}_{remote-tool-name}` (e.g.
+  `connector_Google_Drive_search_files`).
+- Subagents all route through `task`. Match with `match = "task"` and read
+  `tool_input.agent` to discriminate by subagent.
+
+Subagent invocations inherit the parent's hook config. Their hook events are
+logged to the subagent's session log and don't propagate to the parent's UI.
+
+#### Wire protocol
+
+Every hook is spawned in `cwd` and receives a JSON object on **stdin**
+discriminated by `hook_event_name`:
+
+```json
+// post_agent
+{"hook_event_name": "post_agent", "session_id": "...",
+ "parent_session_id": null, "transcript_path": "...", "cwd": "..."}
+
+// pre_tool
+{"hook_event_name": "pre_tool", "session_id": "...", "parent_session_id": null,
+ "transcript_path": "...", "cwd": "...",
+ "tool_name": "bash", "tool_call_id": "call_42",
+ "tool_input": {"command": "ls"}}
+
+// post_tool
+{"hook_event_name": "post_tool", "session_id": "...", "parent_session_id": null,
+ "transcript_path": "...", "cwd": "...",
+ "tool_name": "bash", "tool_call_id": "call_42",
+ "tool_input": {"command": "ls"},
+ "tool_status": "success",         // success | failure | cancelled
+ "tool_output": {"output": "..."},  // the tool's serialized result (success/cancelled); null otherwise
+ "tool_output_text": "...",         // current text the LLM will see; mutable by prior hooks
+ "tool_error": null,                // populated on failure/skipped
+ "duration_ms": 42.5}
+```
+
+`parent_session_id` is set when running inside a subagent. Exceeding
+`timeout` kills the whole process tree.
+
+A hook signals back via its **exit code** and **stdout** (stderr is reserved
+for diagnostics — Vibe never parses it for control):
+
+| Exit | Stdout | Behavior |
+|---|---|---|
+| `0` | empty | Pass through (no action). |
+| `0` | valid structured-response JSON object (schema below) | Act per the JSON fields. |
+| `0` | anything else (free-form text, broken JSON, scalar/array, schema mismatch) | Failure path (see below). The parse error is in the message. |
+| non-zero / timeout / spawn failure | — | Failure path. Reason taken from stderr, then stdout, then the exit code. |
+
+Structured-response schema:
+
+```json
+{
+  "decision": "allow" | "deny",          // optional; default "allow"
+  "reason": "string",                     // required when decision == "deny"
+  "system_message": "string",             // optional UI note
+  "hook_specific_output": {
+    "tool_input": { ... },                // pre_tool only
+    "additional_context": "string"        // post_tool only
+  }
+}
+```
+
+Unknown fields are tolerated at every level. Fields that aren't meaningful
+for the current hook type are silently ignored.
+
+**Don't self-name in `system_message` or `reason`** — the UI prefixes
+hook-end-event content with `[hook-name]` automatically, and `pre_tool`
+denials are wrapped as ``Tool 'X' was denied by hook 'Y': {reason}`` before
+the LLM sees them. A hook that writes ``"reason": "guard: refused..."``
+will produce ``hook 'guard': guard: refused...`` downstream.
+
+`decision: "deny"` per hook type:
+
+| Hook | Effect of `decision: "deny"` |
+|---|---|
+| `pre_tool` | Deny the tool call; `reason` is the tool error returned to the LLM. First deny short-circuits the remaining `pre_tool` hooks for this call. |
+| `post_tool` | Replace `tool_output_text` with `reason`. Pipeline continues; subsequent hooks see the replacement. |
+| `post_agent` | Inject `reason` as a retry user message. Capped at 3 retries per hook per user turn. |
+
+Event-specific payloads:
+
+- `hook_specific_output.tool_input` (`pre_tool`): full replacement of the
+  model's arguments. Vibe re-validates against the tool's schema **after each
+  rewriting hook** — the first invalid rewrite aborts the chain and
+  synthesizes a denial attributing the failure to that hook. Rewrites
+  compose: hook N receives `tool_input` as rewritten by hooks 1..N-1.
+- `hook_specific_output.additional_context` (`post_tool`): text appended
+  (with `
+`) to the current `tool_output_text`. Composes with a same-hook
+  `decision: "deny"`: deny replaces first, then `additional_context` is
+  appended to the replacement.
+
+**Failure path.** Any failure (non-zero exit, timeout, spawn failure,
+non-conforming stdout) emits a UI warning and lets the gated action proceed
+(fail open). With `strict = true` on a tool hook:
+
+| Hook | Strict failure escalates to |
+|---|---|
+| `pre_tool` | Deny the tool call with the failure reason. |
+| `post_tool` | Clear `tool_output_text` (replace with empty). |
+
+`strict` is forbidden on `post_agent`.
+
+#### Execution semantics
+
+- Hooks of the same type fire sequentially in load order (project file first,
+  then user file; declaration order within each file).
+- Tool calls within a single LLM turn run **concurrently**; each call's hook
+  chain runs serially but the chains run in parallel across calls. Hooks
+  that touch shared state (filesystem, env) must coordinate themselves.
+- `pre_tool` rewrites take effect everywhere downstream: the user
+  permission prompt sees the rewritten arguments, the tool runs with them,
+  and the assistant message is patched so subsequent LLM turns reflect what
+  actually ran.
+
+### Pattern Matching
+
+Tool, skill, and agent names support three matching modes:
+- **Exact**: `"bash"`, `"read_file"`
+- **Glob**: `"bash*"`, `"mcp_*"`
+- **Regex**: `"re:^serena_.*$"` (full match, case-insensitive)
+
+## CLI Parameters
+
+```
+vibe [PROMPT]                       # Start interactive session with optional prompt
+vibe -p TEXT / --prompt TEXT         # Programmatic mode using `default_agent`, one-shot, exit
+vibe -p TEXT --auto-approve          # Programmatic mode with all tool calls approved
+vibe -p TEXT --agent lean --yolo      # Lean mode with all tool calls approved
+vibe --agent NAME                   # Select agent profile (falls back to `default_agent` config)
+vibe --auto-approve / --yolo         # Approve all tool calls for the selected agent
+vibe --workdir DIR                  # Change working directory
+vibe --worktree NAME                # Create/reuse a git worktree under $VIBE_HOME/worktrees on branch NAME and run inside it. Auto-cleanup only for worktrees Vibe created this run and only after a session started; reused worktrees and attached (pre-existing) branches are kept unless confirmed. -p sessions keep worktrees. Ignored with --setup/--check-upgrade.
+vibe --worktree                     # Same, but Vibe picks an unused name from the prompt (a random slug when there is no prompt) on a vibe/<name> branch, and never reuses an existing worktree. The prompt must precede the flag or follow a `--`, since --worktree otherwise reads it as NAME.
+vibe --add-dir DIR                  # Extra working dir loaded for context (repeatable). Implicitly trusted.
+vibe --trust                        # Trust cwd for this invocation only (not persisted). Skips the trust prompt.
+vibe -c / --continue                # Continue most recent session in this terminal (TTY-scoped, falls back to latest in cwd)
+vibe --resume [SESSION_ID]          # Resume a specific session
+vibe -v / --version                 # Show version
+vibe --setup                        # Run onboarding/setup
+vibe update / vibe --check-upgrade  # Check for a Vibe update now, prompt to install it, and exit
+vibe --max-turns N                  # Max assistant turns (programmatic mode)
+vibe --max-price DOLLARS            # Max cost limit (programmatic mode)
+vibe --max-tokens N                 # Max total session tokens (programmatic mode)
+vibe --enabled-tools TOOL           # Enable specific tools (repeatable)
+vibe --disabled-tools TOOL          # Disable specific tools (repeatable)
+vibe --output text|json|streaming   # Output format (programmatic mode)
+```
+
+## Built-in Agents
+
+There are two kinds of agents:
+- **Agents** are user-facing profiles selectable via `--agent` or `Shift+Tab`.
+  They configure the model's behavior, tools, and system prompt.
+- **Subagents** are model-facing: the model can spawn them autonomously to delegate
+  subtasks (e.g. exploring the codebase). Users cannot select subagents directly.
+
+### Agents
+
+- **ask**: Requests approval for tool executions
+- **plan**: Planning-focused agent
+- **accept-edits**: Default agent; auto-approves file edits but asks for other tools
+- **auto-approve**: Auto-approves all tool calls
+- **lean**: Specialized Lean 4 proof assistant. Not available by default — must be
+  installed with `/leanstall` (removed with `/unleanstall`). Use `--agent lean
+  --auto-approve` or `--agent lean --yolo` to run Lean mode without tool prompts.
+
+### Subagents
+
+- **explore**: Read-only codebase exploration subagent with grep, file reading,
+  and skill loading. Spawned by the model, not selectable by the user.
+
+Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
+
+## Built-in Slash Commands
+
+- `/help` - Show help message
+- `/config` - Full-screen settings browser. Fields show their value and origin layer (default / TOML / env / override). Type to filter, arrows to move, Enter to edit; booleans toggle, closed-set fields (theme, models) pick from a list, scalars edit inline, complex fields open a JSON editor. The edit modal shows an inspector of the layers setting the field; edits persist to the user config (`~/.vibe/config.toml`) by default, `Tab` cycles the save target through the project config (`.vibe/config.toml`, when the project layer is active) and the ephemeral session override (until restart), and `Ctrl+R` clears the field one writable layer at a time toward the default. The `tools` field opens a grouped tool list with a per-tool config editor (permission, allow/deny lists, `Ctrl+E` for raw JSON). Enabling/disabling whole MCP servers or connectors stays in `/mcp`.
+- `/model` - Select active model
+- `/skills` - Browse and manage the skills available to this session. Lists the
+  installed ones alongside the shared skills you can add, and can import a
+  skill, pin it to a version or alias, convert it to a local copy, or remove it.
+  Registered only when `experimental_enable_registry_skills` is set.
+- `/thinking` - Select thinking level
+- `/theme` - Select Textual UI theme; `auto` follows terminal/OS appearance (persisted in config)
+- `/reload` - Reload configuration, agent instructions, and skills from disk
+- `/clear`, `/new` - Start a new conversation. Optionally pass a prompt to seed it
+- `/log` - Show path to current interaction log file
+- `/log-level` - Show or set the log level. `/log-level` prints the full chain
+  (session, env, config, effective); `/log-level set <LEVEL>` sets a
+  process-lifetime override; `/log-level set-global <LEVEL>` also persists to
+  config.toml; `/log-level unset` clears the session override. LEVEL is one of
+  DEBUG, INFO, WARNING, ERROR, CRITICAL.
+- `/debug` - Toggle debug console
+- `/compact` - Compact model context by summarizing. The session ID and visible
+  conversation stay intact; the auto title is refreshed to reflect the
+  compacted conversation (unless renamed manually).
+- `/rename <title>` - Set a manual session title. Persists to `meta.json`
+  (`title_source=manual`), updates the terminal tab title, and is never
+  overwritten by automatic title generation.
+- `/retry [additional instructions]` - Continue a model response interrupted by
+  a backend error without repeating text already shown. Optional instructions
+  are passed to the model for the continuation. Relevant error messages also
+  hint at this command.
+- `/status` - Display agent statistics
+- `/whoami` - Display the Mistral signed-in user, workspace, and plan
+- `/copy` - Copy the last agent message to the clipboard
+- `/paste-image` - Paste an image from the OS clipboard into the prompt.
+  **macOS only** — the command is not registered on Linux or Windows.
+- `/voice` - Configure voice settings
+- `/mcp` (or `/connectors`) - Display MCP servers and connector status. The
+  browser opens on the first item; press Up or Left to move into the fuzzy-search
+  bar, and Up again to wrap to the last item. Pass a server or connector name to
+  list its tools or open its auth panel when authentication is required
+- `/mcp add <url>` - Add a hosted OAuth MCP server. Supports `--name <alias>`,
+  repeatable `--scope <scope>`, `--transport <http|streamable-http>`, and
+  `--no-login`. Starts OAuth login by default. OAuth-only; use
+  `vibe mcp add <name> --url <url> --api-key-env <var>` for API-key/static auth.
+- `vibe mcp remove <name>` - Remove an MCP server from the user configuration
+  and delete its stored OAuth credentials when available.
+- `/mcp status` - Display MCP auth state (`ok`, `needs_auth`, `static`, `stdio`)
+- `/mcp login <alias>` - Start OAuth login for an MCP server
+- `/mcp logout <alias>` - Log out from an MCP server and delete stored OAuth
+  secrets
+- `/resume` (or `/continue`) - Browse and resume past sessions for the current
+  folder. The picker header shows the folder being listed. Press `d` twice to
+  delete a saved session; the active session cannot be deleted here.
+- `/rewind` - Rewind to a previous message. Also triggered by pressing `Esc`
+  twice on an empty input; if the input has content, the first double-`Esc`
+  clears it instead. In the rewind panel: `↑/↓` pick option, `Shift+↑/↓`
+  scroll, `←`/`Esc` edit previous message, `→` edit next message, `Enter`
+  accept, `q` quit.
+- `/loop <interval> <prompt>` - Schedule a recurring prompt (e.g. `/loop 30s ping`).
+  Intervals: `Ns/Nm/Nh/Nd`, minimum 30s, max 50 loops/session.
+  - `/loop` (or `/loop list` / `/loop ls`) - List current scheduled loops.
+  - `/loop cancel <id|all>` (aliases `rm`, `stop`, `delete`) - Cancel a loop.
+  - Loops fire only when the agent is idle and the input bar is focused. At
+    most one loop fires per poll. Overdue loops fire once on the next poll
+    (no catch-up); `next_fire_at` advances to `now + interval`.
+  - Loops are persisted in the session metadata (`loops` field of `meta.json`)
+    and restored on `--resume`/`--continue`.
+- `/proxy-setup` - Configure proxy and SSL certificate settings
+- `/leanstall` - Install the Lean 4 agent (leanstral)
+- `/unleanstall` - Uninstall the Lean 4 agent
+- `/plugins` - Display the plugins this session is running (experimental harness
+  mode only). Shows each plugin's name, scope, source format, content digest, and
+  components (skills, MCP servers, agents, hooks, knowledge, connectors, tools).
+  Press `r` inside the view to reload.
+- `/reload-plugins` - Re-pin this session's plugins and report what changed
+  (experimental harness mode only). Re-discovers plugins from disk, re-pins the
+  snapshot, and prints a diff of added, removed, and updated plugins.
+- `/data-retention` - Show data retention information
+- `/teleport` - Teleport session to Vibe Code Web (only available when Vibe Code is enabled)
+- `/remote-project` - Select the Vibe Code Web project for this repository (only
+  available when Vibe Code is enabled)
+- `/exit` - Exit the application
+
+## File Mentions (`@`)
+
+Type `@` in the chat input to autocomplete files and folders from the
+project tree. Pressing Tab/Enter inserts the chosen path. Your message text
+is sent as-is (the `@path` stays in the prompt); behavior then depends on
+the mention kind:
+
+- **Text files** trigger a synthetic `read_file` tool call injected right
+  after your message, so the file content arrives as a fresh tool result
+  every turn (no caching/dedup). The same limits as the `read_file` tool
+  apply (~2000 lines / 50 KB per call; larger files are truncated or
+  reported as an error result). Re-mentioning a file always re-reads it.
+- **Folders** are not read automatically — the path stays in your message
+  text and the agent can `read_file`/`grep` it on demand.
+- **Image files** (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) become image
+  attachments — sent alongside the prompt as native multimodal content for
+  vision-capable models.
+
+Image attachments:
+
+- Require `supports_images = true` on the active model in `config.toml`.
+  By default this is enabled only on `mistral-vibe-cli-latest`. Sending
+  images to a non-vision model raises a clear error and the message is
+  not added to the conversation.
+- Snapshotted into `<session_dir>/attachments/<sha1>.<ext>` so that
+  resumed sessions stay reproducible even if the source file is moved.
+- Capped at 10 MiB per image and 8 images per message.
+- Out-of-project paths work via `@/abs/path/to.png` (the picker only
+  suggests project files, but the `@`-parser accepts absolute paths).
+  Drag-and-drop from Finder into Terminal, iTerm2, or Ghostty is
+  intercepted at paste time: if the pasted content is a single bare
+  path to an image file (raw, `\ `-escaped, or quoted), the input
+  automatically prepends `@` (and quotes paths containing spaces).
+  Non-image paths are pasted verbatim so non-image use cases are not
+  affected.
+- **Image copy/paste from the clipboard** (**macOS only** for now):
+  writes the image to `<session_dir>/attachments/clipboard-<ts>.png`
+  (or the system temp dir when no session is active) and inserts an
+  `@<path>` token at the cursor. Two entry points:
+  1. `Ctrl+V` keybinding inside the prompt.
+  2. `/paste-image` slash command.
+
+  Uses `osascript` with a TIFF→PNG fallback via `sips`. On Linux and
+  Windows the binding and the slash command are not registered at all,
+  so the feature is invisible to users on those platforms.
+- Rendered in the chat bubble as one dim `attached image:` footer line
+  per image, linking each attachment to its snapshot. Clicking opens the
+  file with the OS default image viewer.
+
+## Input Queue
+
+Prompts submitted while the agent is running are accepted by the app server
+and merged into a single follow-up turn, so everything queued during one
+generation is delivered to the agent together (not one turn per prompt) once
+it finishes. Each queued prompt keeps its own message so it stays individually
+editable and removable. This includes plain prompts, `/skill ...`
+prompts, and prompts with `@` mentions. `!bash`, non-side-channel slash
+commands, and `&teleport` require an idle session and are rejected with a toast
+while busy. **Ctrl+C** removes the newest queued prompt (LIFO); **Esc**
+interrupts the active turn and pauses the remaining queue; pressing Enter
+(empty or not) on a paused queue resumes it.
+
+Allowlisted slash commands (`side_channel=True`) run immediately via a
+side channel while the agent or bash is busy. Only one side-channel command
+runs at a time. Commands that persist config changes (theme, model, thinking,
+voice, proxy) require idle, then write through the app server directly after
+the user confirms the picker.
+
+Commands not on the side-channel allowlist (e.g. `/clear`, `/compact`,
+`/rewind`, `/resume`, `/reload`, `/leanstall`, `/unleanstall`, `/teleport`,
+`/remote-project`, `/retry`, `/plugins`, `/reload-plugins`) are rejected while busy and can be retried when
+the session is idle.
+
+While the queue is non-empty and the agent is busy, pressing **Up**
+enters queue selection mode: the last queued item is highlighted and
+the input is locked (no cursor, no typing). **Up/Down** navigate
+between queued prompts, **Enter** loads the selected prompt into the input
+for editing (press Enter again to update it in-place), **Backspace**
+or **Delete** removes the selected item and moves selection to the
+next, and **Esc** exits selection mode and restores the original
+input text.
+
+## Plugins
+
+Plugins are bundled extension packages that can contribute skills, MCP servers,
+hooks, agents, knowledge, connectors, and tool libraries to a session. They are
+discovered from two locations:
+
+- `~/.vibe/plugins/` — user scope (global, available in every project)
+- `.vibe/plugins/` — project scope (requires trusted folder; overrides
+  user scope on name collisions)
+
+Each subdirectory inside a plugins directory is a single plugin root.
+
+### Plugin Manifest (`plugin.json`)
+
+Every plugin has a `plugin.json` manifest following the **Agent Plugins 1.0**
+schema (`https://agent-plugins.org/schemas/1.0.0/plugin.schema.json`):
+
+```json
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "description": "Optional description",
+  "author": { "name": "Author", "email": "a@b.com", "url": "https://..." },
+  "homepage": "https://...",
+  "repository": "https://...",
+  "license": "MIT",
+  "keywords": ["tag1"],
+  "extensions": {
+    "ai.mistral.vibe": {
+      "schemaVersion": 1,
+      "toolNamespace": "myNs",
+      "toolOverrides": {
+        "tool-name": { "name": "renamedTool", "exposure": "programmatic" }
+      }
+    }
+  }
+}
+```
+
+The `ai.mistral.vibe` extension is optional but gates all Vibe-specific
+components (hooks, knowledge, agents). `toolNamespace` is a
+TypeScript-identifier-safe string used to prefix all component names
+(e.g. `myNs:my-skill`). If omitted, it is derived from the plugin name.
+
+Reserved namespaces (rejected): `file_system`, `self`, `process`, `agent`,
+`vibe`.
+
+### Plugin Contents
+
+A plugin tree may contain any combination of:
+
+| Component | Location | Notes |
+|---|---|---|
+| Skills | `skills/<name>/SKILL.md` | Standard skill format |
+| MCP servers | `mcp.json` | `$schema` + `mcpServers` dict; stdio, streamable-http, sse |
+| Hooks | `ai.mistral.vibe/hooks.toml` | Max 128 hooks, 64 KiB |
+| Knowledge | `ai.mistral.vibe/knowledge/<name>/KNOWLEDGE.md` | Max 100 entries |
+| Agents | `ai.mistral.vibe/agents/*.toml` | One TOML per subagent |
+| Libraries | `libraries.json` | Node and Python library path aliases |
+| Connectors | `connectors.json` | Connector tool mappings |
+
+Environment variables `PLUGIN_ROOT` and `PLUGIN_DATA` are injected
+automatically into MCP server processes and are reserved.
+
+### Foreign Plugin Formats
+
+Vibe also adapts non-native plugin formats:
+
+| Format | Detection marker |
+|---|---|
+| Claude Code | `.claude-plugin/plugin.json` |
+| Codex | `.codex-plugin/plugin.json` |
+| Kimi Code | `.kimi.plugin.json` or `.kimi-plugin/plugin.json` |
+| OpenCode | `.opencode/plugins/`, `.opencode/skills/*/SKILL.md`, `opencode.json` |
+
+Adapted plugins can only contribute **skills** and **MCP servers** — hooks,
+knowledge, agents, libraries, and connectors are native-only. Executable code
+in foreign plugins (`.js`, `.ts`) is refused and reported as unsupported.
+
+### Plugin Pinning and Reload
+
+On session start, discovered plugins are resolved into a `ResolvedPluginSnapshot`
+— a portable, host-path-free, secret-free representation pinned to the session.
+This ensures resume/rewind reproducibility even if files change on disk.
+
+`/reload-plugins` re-discovers plugins from disk, builds a fresh snapshot, and
+prints a diff (`+` added, `-` removed, `~` updated). Tools that are no longer
+present after a reload are retained as unavailable routes so conversation
+history stays valid. Drift detection flags tools whose schema fingerprint changed
+between pin and live source.
+
+### Example Plugin Tree
+
+```
+my-plugin/
+├── plugin.json
+├── mcp.json
+├── skills/
+│   └── my-skill/
+│       └── SKILL.md
+└── ai.mistral.vibe/
+    ├── hooks.toml
+    ├── knowledge/
+    │   └── my-knowledge/
+    │       └── KNOWLEDGE.md
+    └── agents/
+        └── my-agent.toml
+```
+
+## Skills System
+
+Skills are specialized instruction sets the model can load on demand.
+Each skill is a directory containing a `SKILL.md` file with YAML frontmatter.
+
+### Skill File Format
+
+```markdown
+---
+name: my-skill
+description: What this skill does and when to use it.
+user-invocable: true
+allowed-tools: bash read
+---
+
+# Skill Instructions
+
+Detailed instructions for the model...
+```
+
+### Skill Search Order (first match wins)
+
+1. `skill_paths` from config.toml
+2. `.vibe/skills/` in trusted project directory
+3. `.agents/skills/` in trusted project directory
+4. `~/.vibe/skills/` (user global)
+5. `~/.agents/skills/` (user global, Agent Skills standard)
+
+### Invoking Skills
+
+Two entry points:
+- The model loads a skill on demand via the `skill` tool.
+- The user invokes a `user-invocable` skill by typing `/skill-name` (optionally
+  followed by extra instructions). The user turn stays the literal `/skill-name`
+  text; the skill is loaded programmatically and appears to the model as a
+  synthetic `skill` tool call and result immediately after that turn — the model
+  does not call the tool itself.
+
+Skills with `user-invocable: false` are model-only: they are hidden from the
+slash menu and `/skill-name` will not resolve them (it is treated as a plain
+prompt). The model can still load them via the `skill` tool.
+
+A `/` at the very start of the input opens the slash menu (commands and skills).
+A `/word` typed mid-prompt (not the first word) instead shows an inline ghost-text
+preview of the best-matching skill name; press `Tab` to accept it. Only skills are
+offered inline, and no popup is shown.
+
+## Environment Variables
+
+- `VIBE_HOME` - Override the Vibe home directory (default: `~/.vibe`)
+- `MISTRAL_API_KEY` - API key for Mistral provider
+- `VIBE_ACTIVE_MODEL` - Override active model
+- `VIBE_*` - Any config field can be overridden with the `VIBE_` prefix
+- `LOG_LEVEL` - Overrides `log_level` config for `$VIBE_HOME/logs/vibe.log`.
+  One of `DEBUG`, `INFO`, `WARNING` (default), `ERROR`, `CRITICAL`. Invalid values
+  fall back to `WARNING`. Use `/log-level` to change at runtime.
+- `LOG_MAX_BYTES` - Max size in bytes of `vibe.log` before rotation
+  (default: `10485760`, i.e. 10 MiB).
+- `DEBUG_MODE` - When `true`, forces `DEBUG`-level logging.
+- `VIBE_TYPING_GRACE_PERIOD_MS` - Milliseconds the agent waits for a typing
+  pause before showing tool-approval / ask-user-question dialogs (default:
+  `1000`). Set to `0` to disable. Negative or non-numeric values fall back
+  to the default.
+
+## API Keys (.env file)
+
+The `.env` file in VIBE_HOME stores API keys in dotenv format:
+
+```
+MISTRAL_API_KEY=your-key-here
+```
+
+This file is loaded on startup and its values are injected into the environment.
+
+## Trusted Folders
+
+Vibe uses a trust system to prevent executing project-local config from untrusted
+directories. The trust database is stored in `~/.vibe/trusted_folders.toml`.
+Project-local config (`.vibe/` directory) is only loaded when the current
+directory is explicitly trusted.
+
+Interactive mode prompts to trust unknown folders. The prompt targets the
+closest ancestor of the cwd (the cwd itself included) containing a `.git`
+entry; the search excludes the user's home directory and the filesystem
+root, and falls back to the cwd if no qualifying ancestor is found.
+Programmatic mode (`-p`/`--prompt`) never prompts: the folder is untrusted.
+Use `--trust` to trust cwd for the current invocation only (not persisted).
+`--trust` and `--worktree` both skip the prompt: they grant the workspace trust
+for the session, so there is no decision left to ask about. Without this a
+`--worktree` run would prompt on every launch, since each worktree is a
+directory the trust database has never seen.
+
+## Sensitive Files — DO NOT READ OR EDIT
+
+NEVER read, display, or edit any of these files:
+- `~/.vibe/.env` (or `$VIBE_HOME/.env`) — contains API keys and secrets
+- Any `.env`, `.env.*` file in the project or VIBE_HOME
+
+If the user asks to set or change an API key, instruct them to edit the `.env`
+file themselves. Do not offer to read it, write it, or display its contents.
+Do not use tools (read, write_file, bash cat/echo, etc.) to access these files.
+
+## How to Modify Configuration
+
+To help the user modify their Vibe configuration:
+
+1. **Read current config when present**: Read `~/.vibe/config.toml` (or the path
+   from `VIBE_HOME` if set). A missing file means Vibe is using built-in defaults.
+2. **Create a backup when present**: Before editing an existing file, copy it to
+   `config.toml.bak` in the same directory. This applies to any existing config
+   file you are about to modify (`config.toml`, `trusted_folders.toml`, agent
+   TOML files, etc.)
+3. **Edit the TOML file**: Make changes using the edit tool
+4. **Reload**: The user can run `/reload` to apply changes without restarting
+
+For API keys, tell the user to edit `~/.vibe/.env` directly — never read or
+write that file yourself.
+
+For project-specific configuration, create/edit `.vibe/config.toml` in the
+project root (the folder must be trusted first).

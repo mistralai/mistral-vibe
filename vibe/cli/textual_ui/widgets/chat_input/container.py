@@ -28,6 +28,7 @@ from vibe.cli.voice_manager.voice_manager_port import VoiceManagerPort
 SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
     AgentSafety.SAFE: "border-safe",
     AgentSafety.DESTRUCTIVE: "border-warning",
+    AgentSafety.SMART: "border-warning",
     AgentSafety.YOLO: "border-error",
 }
 

@@ -16,6 +16,24 @@ Wire-contract changes are additive and tolerant by default:
   "Self-hosted compatibility" with the skew window and fallback, and needs
   sign-off. It is never landed silently.
 
+The same policy governs the Unified Harness runtime. It ships with the client in
+production but can still skew — a self-hosted install, or a developer running a
+`--with-editable` runtime ahead of the client. Tolerance there is **directional**:
+
+- **Reading harness output** (session state, turn-queue responses, plugin info,
+  errors) ignores unknown fields, because the harness will add fields as it
+  evolves and an additive field must not crash the read. Use
+  `validate_backend_wire`, which drops unknown top-level keys before validating
+  while still enforcing the fields the client requires.
+- **Constructing harness input** (the `*Params` the client sends) stays strict
+  via `validate_wire`. If the harness makes a field required, the client cannot
+  invent it — that is a real incompatibility and must fail loudly so the client
+  is updated, not silently paper over it.
+
+`validate_backend_wire` only strips top-level keys; a new field on a *nested*
+model, or on a discriminated-union entry (e.g. history entries), still validates
+strictly and needs its own handling.
+
 ## Rationale
 
 Client and backend versions drift across deployments, so a strict client breaks

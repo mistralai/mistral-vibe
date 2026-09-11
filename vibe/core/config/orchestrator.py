@@ -30,6 +30,7 @@ from vibe.core.config.types import (
     ConflictStrategy,
 )
 from vibe.core.utils.concurrency import run_sync
+from vibe.observability.logging import logger
 
 
 class ConfigPatchValidationError(Exception):
@@ -207,6 +208,28 @@ class ConfigOrchestrator[S: ConfigSchema]:
             reason=reason,
             preflight=preflight,
         )
+
+    async def set_field_or_warn(
+        self,
+        path: str,
+        value: Any,
+        reason: str = "No reason",
+        *,
+        target_layer: str | None = None,
+        preflight: Callable[[S], Awaitable[None]] | None = None,
+    ) -> None:
+        """Write a field, logging rather than raising when it never reaches disk.
+
+        `set_field` returns its errors instead of raising, so a caller that
+        ignores the return value cannot tell a failed write from a successful
+        one. Use this where the write is a durable copy of state that already
+        holds in memory, and failing the caller would be worse than losing it.
+        """
+        failures = await self.set_field(
+            path, value, reason, target_layer=target_layer, preflight=preflight
+        )
+        if failures:
+            logger.warning("Failed to persist %s: %s", path, failures[0])
 
     async def mutate_field(
         self,

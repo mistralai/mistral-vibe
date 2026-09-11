@@ -168,6 +168,12 @@ async def _prune_shared(
     global manifest happens to pin too.
     """
     safe = await _prune_safe(active)
+    await _record_pins(key, roots)
+    keep = await asyncio.to_thread(_ledger.union)
+    await _store.prune(keep | safe, recheck=_ledger.union)
+
+
+async def _record_pins(key: str, roots: Sequence[Path] | None = None) -> None:
     shared = await _prune_safe(await _scoped_active([_manifest.global_manifest_path()]))
     await asyncio.to_thread(_ledger.record, _ledger.GLOBAL_KEY, shared)
     if key != _ledger.GLOBAL_KEY:
@@ -175,8 +181,22 @@ async def _prune_shared(
             await _scoped_active(await _manifest.project_manifest_paths(roots))
         )
         await asyncio.to_thread(_ledger.record, key, project)
-    keep = await asyncio.to_thread(_ledger.union)
-    await _store.prune(keep | safe, recheck=_ledger.union)
+
+
+async def publish_local_pins(roots: Sequence[Path] | None = None) -> None:
+    """Republish this repository's pins to the shared ledger.
+
+    A sibling repository prunes against the ledger to learn which versions this
+    one still claims. The ledger is otherwise only written during a session-start
+    sync, so a pin added or removed mid-session stays invisible and the sibling
+    can delete a body this repository just materialized.
+
+    ``roots`` resolves to the open project roots when omitted: an unresolved
+    ``None`` keys the write as ``global``, which drops this repository's own
+    project claims instead of recording them.
+    """
+    resolved = get_harness_files_manager().project_roots if roots is None else roots
+    await _record_pins(_ledger.repo_key(resolved), resolved)
 
 
 async def _scoped_active(paths: Sequence[Path]) -> set[tuple[str, int]]:

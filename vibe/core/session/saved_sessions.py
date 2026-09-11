@@ -114,11 +114,13 @@ async def relocate_saved_session(
 
 async def delete_saved_session(
     session_id: str, session_config: SessionLoggingConfig
-) -> None:
+) -> bool:
+    """Remove a saved session, reporting whether this store held one."""
     session_dir = _find_saved_session_dir(session_id, session_config)
     if session_dir is None:
         last_session_pointer.clear_matching(session_config, session_id)
-        return
+        return False
 
     await asyncio.to_thread(shutil.rmtree, session_dir)
     last_session_pointer.clear_matching(session_config, session_id)
+    return True

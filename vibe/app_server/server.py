@@ -30,6 +30,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendHostDelete,
     SessionBackendNotificationSink,
     SessionBackendOpenCallbacks,
+    SessionBackendQueuedTurnSteering,
     SessionBackendResult,
     SessionBackendRewindForkHost,
     SessionBackendRuntimeView,
@@ -98,8 +99,10 @@ from vibe.app_server.protocol import (
     TurnQueueRemoveParams,
     TurnQueueReplaceParams,
     TurnQueueResumeParams,
+    TurnQueueSteerParams,
     TurnStartParams,
     TurnSteerParams,
+    format_invalid_params_issues,
     validate_callback_acknowledgement,
     validate_json_rpc_envelope,
 )
@@ -154,11 +157,12 @@ _SESSION_BACKEND_METHODS = frozenset({
     "session/compact",
     "session/context/inject",
     "session/settings/update",
-    "app_server/session/turn/enqueue",
-    "app_server/session/turn/queue/read",
-    "app_server/session/turn/queue/remove",
-    "app_server/session/turn/queue/replace",
-    "app_server/session/turn/queue/resume",
+    "session/turn/enqueue",
+    "session/turn/queue/read",
+    "session/turn/queue/remove",
+    "session/turn/queue/replace",
+    "session/turn/queue/steer",
+    "session/turn/queue/resume",
     "turn/interrupt",
     "turn/start",
     "turn/steer",
@@ -654,19 +658,23 @@ class AppServer:
                 ),
             )
         except ValidationError as exc:
+            data = InvalidParamsData(
+                error_count=exc.error_count(),
+                issues=[
+                    InvalidParamsIssue(path=list(issue["loc"]), message=issue["msg"])
+                    for issue in exc.errors()
+                ],
+            ).model_dump(mode="json", by_alias=True)
+            logger.warning(
+                "Rejected %s: invalid request parameters: %s",
+                request.method,
+                format_invalid_params_issues(data) or "<no field detail>",
+            )
             return _ErrorDispatch(
                 ProtocolError(
                     code=ProtocolErrorCode.INVALID_PARAMS,
                     message="Invalid request parameters",
-                    data=InvalidParamsData(
-                        error_count=exc.error_count(),
-                        issues=[
-                            InvalidParamsIssue(
-                                path=list(issue["loc"]), message=issue["msg"]
-                            )
-                            for issue in exc.errors()
-                        ],
-                    ).model_dump(mode="json", by_alias=True),
+                    data=data,
                 )
             )
         except Exception as exc:
@@ -727,7 +735,9 @@ class AppServer:
             "config/schema",
             "session/history/get",
             "workspace/git/checkouts",
+            "workspace/git/worktrees/limit/update",
             "workspace/git/worktrees/list",
+            "workspace/git/worktrees/prune",
             "workspace/git/worktrees/remove",
             "workspace/trust/status",
             "workspace/trust/untrustedConfig",
@@ -1018,7 +1028,7 @@ class AppServer:
     async def _dispatch_backend_operation(
         self, root: SessionBackend, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult | None:
-        if method.startswith("app_server/session/turn/"):
+        if method.startswith("session/turn/"):
             return await self._dispatch_backend_turn(root, method, raw_params)
         match method.partition("/")[0]:
             case "session":
@@ -1067,23 +1077,32 @@ class AppServer:
     async def _dispatch_backend_turn(
         root: SessionBackend, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult | None:
-        if method == "app_server/session/turn/enqueue":
+        if method == "session/turn/enqueue":
             result = await root.enqueue_turn(
                 validate_wire(TurnEnqueueParams, raw_params)
             )
-        elif method == "app_server/session/turn/queue/read":
+        elif method == "session/turn/queue/read":
             result = await root.read_turn_queue(
                 validate_wire(TurnQueueReadParams, raw_params)
             )
-        elif method == "app_server/session/turn/queue/remove":
+        elif method == "session/turn/queue/remove":
             result = await root.remove_queued_turn(
                 validate_wire(TurnQueueRemoveParams, raw_params)
             )
-        elif method == "app_server/session/turn/queue/replace":
+        elif method == "session/turn/queue/replace":
             result = await root.replace_queued_turn(
                 validate_wire(TurnQueueReplaceParams, raw_params)
             )
-        elif method == "app_server/session/turn/queue/resume":
+        elif method == "session/turn/queue/steer":
+            if not isinstance(root, SessionBackendQueuedTurnSteering):
+                raise RequestFailure(
+                    ProtocolErrorCode.NOT_IMPLEMENTED,
+                    "The selected session backend does not support queued steering",
+                )
+            result = await root.steer_queued_turn(
+                validate_wire(TurnQueueSteerParams, raw_params)
+            )
+        elif method == "session/turn/queue/resume":
             result = await root.resume_turn_queue(
                 validate_wire(TurnQueueResumeParams, raw_params)
             )

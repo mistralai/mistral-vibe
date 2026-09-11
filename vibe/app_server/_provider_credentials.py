@@ -28,10 +28,10 @@ from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissing
 
 from vibe.core.types import Backend
 from vibe.observability.logging import logger
-from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.api_keys import resolve_api_key_with_origin
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
         ProviderRejectionReason,
@@ -39,6 +39,8 @@ if TYPE_CHECKING:
 
     from vibe.core.config import ProviderConfig, VibeConfigSchema
     from vibe.core.config.orchestrator import ConfigOrchestrator
+
+    ProviderSelector = Callable[[VibeConfigSchema], ProviderConfig]
 
 __all__ = ["ProviderCredentialService"]
 
@@ -58,8 +60,17 @@ class ProviderCredentialService:
     at the next model call without reopening the session.
     """
 
-    def __init__(self, orchestrator: ConfigOrchestrator[VibeConfigSchema]) -> None:
+    def __init__(
+        self,
+        orchestrator: ConfigOrchestrator[VibeConfigSchema],
+        *,
+        select_provider: ProviderSelector | None = None,
+    ) -> None:
         self._orchestrator = orchestrator
+        # Which provider a resolution targets. Defaults to the session's active
+        # provider; a caller can bind a second service to a different provider
+        # (e.g. the Mistral utility provider for background title generation).
+        self._select_provider = select_provider or _active_provider
         # The service caches no material of its own — ``resolve_api_key`` and
         # ``VertexCredentials`` already own whatever caching exists. All it
         # remembers is which revision a provider refused, so the same rejected
@@ -82,7 +93,7 @@ class ProviderCredentialService:
     async def _resolve(self) -> ProviderCredentialResult:
         config = self._orchestrator.config
         try:
-            provider = config.get_provider_for_model(config.get_active_model())
+            provider = self._select_provider(config)
         except ValueError as exc:
             return ProviderAuthRequired(reason="missing", provider="", message=str(exc))
 
@@ -118,7 +129,7 @@ class ProviderCredentialService:
     ) -> None:
         config = self._orchestrator.config
         try:
-            provider = config.get_provider_for_model(config.get_active_model())
+            provider = self._select_provider(config)
         except ValueError:
             return
 
@@ -146,10 +157,13 @@ class ProviderCredentialService:
 
     def _provider_name(self) -> str:
         try:
-            config = self._orchestrator.config
-            return config.get_provider_for_model(config.get_active_model()).name
+            return self._select_provider(self._orchestrator.config).name
         except Exception:
             return ""
+
+
+def _active_provider(config: VibeConfigSchema) -> ProviderConfig:
+    return config.get_provider_for_model(config.get_active_model())
 
 
 def _uses_vertex(provider: ProviderConfig) -> bool:
@@ -175,13 +189,19 @@ def _resolve_snapshot(provider: ProviderConfig) -> ProviderCredentialSnapshot | 
         # in the request body, not in a header, so a version header here would
         # be a credential the legacy path never sends.
         token = _vertex_access_token()
-        return _snapshot(provider, token, {"Authorization": f"Bearer {token}"})
+        return _snapshot(
+            provider, token, {"Authorization": f"Bearer {token}"}, api_key_source=None
+        )
 
-    env_var = provider.api_key_env_var
-    token = resolve_api_key(env_var) if env_var else None
-    if not token:
+    resolved = resolve_api_key_with_origin(provider.api_key_env_var)
+    if not resolved:
         return None
-    return _snapshot(provider, token, _headers(provider, token))
+    token, origin = resolved
+    # Described here rather than sent as a pair: the Harness owns the sentence,
+    # the Host owns what counts as a source.
+    return _snapshot(
+        provider, token, _headers(provider, token), api_key_source=origin.describe()
+    )
 
 
 def _headers(provider: ProviderConfig, token: str) -> Mapping[str, str]:
@@ -201,10 +221,17 @@ def _headers(provider: ProviderConfig, token: str) -> Mapping[str, str]:
 
 
 def _snapshot(
-    provider: ProviderConfig, token: str, headers: Mapping[str, str]
+    provider: ProviderConfig,
+    token: str,
+    headers: Mapping[str, str],
+    *,
+    api_key_source: str | None,
 ) -> ProviderCredentialSnapshot:
     return ProviderCredentialSnapshot(
-        token=token, headers=headers, revision=_revision(provider.name, token)
+        token=token,
+        headers=headers,
+        revision=_revision(provider.name, token),
+        api_key_source=api_key_source,
     )
 
 

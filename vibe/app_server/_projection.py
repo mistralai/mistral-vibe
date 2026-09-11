@@ -62,7 +62,7 @@ from vibe.app_server.models import (
     ToolSummary,
 )
 from vibe.core.agent_loop import AgentLoop
-from vibe.core.agents import AgentProfile
+from vibe.core.agents import AgentProfile, BuiltinAgentName
 from vibe.core.config import (
     ModelConfig,
     TranscribeClient,
@@ -125,8 +125,10 @@ def project_config_view(
         voice_mode_enabled=config.voice_mode_enabled,
         narrator_enabled=config.narrator_enabled,
         show_thinking_nodes=config.show_thinking_nodes,
+        worktree_limit=config.worktree_limit,
         enable_update_checks=config.enable_update_checks,
         enable_notifications=config.enable_notifications,
+        experimental_enable_tab_status=config.experimental_enable_tab_status,
         vibe_code_enabled=config.vibe_code_enabled,
         experimental_enable_registry_skills=config.experimental_enable_registry_skills,
         models=[
@@ -234,6 +236,28 @@ def project_agent_summaries(
     active: AgentProfile, available: Iterable[AgentProfile]
 ) -> tuple[AgentSummary, list[AgentSummary]]:
     return _project_agent(active), [_project_agent(profile) for profile in available]
+
+
+# Modes hidden from the Unified Harness mode picker/cycle. They stay selectable
+# (resume, pinned running mode, explicit ``--agent``/switch); only the list the
+# client offers is trimmed.
+_UNIFIED_HIDDEN_PICKER_AGENTS: frozenset[str] = frozenset({BuiltinAgentName.PLAN})
+
+
+def project_unified_agent_summaries(
+    active: AgentProfile, available: Iterable[AgentProfile]
+) -> tuple[AgentSummary, list[AgentSummary]]:
+    """Project agents for a Unified Harness client, hiding plan mode from the picker.
+
+    The active profile is always projected, so a session already running a hidden
+    mode still reports it; only the selectable list drops the hidden modes.
+    """
+    visible = [
+        profile
+        for profile in available
+        if profile.name not in _UNIFIED_HIDDEN_PICKER_AGENTS
+    ]
+    return project_agent_summaries(active, visible)
 
 
 def project_agents(agent_loop: AgentLoop) -> tuple[AgentSummary, list[AgentSummary]]:

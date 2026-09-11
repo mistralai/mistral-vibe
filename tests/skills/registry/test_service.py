@@ -858,3 +858,29 @@ def test_remove_skill_skips_a_symlinked_project_manifest(
 
     assert _service.remove_skill("sk", _service.SkillScope.PROJECT) is False
     assert not escaped.exists()
+
+
+@pytest.mark.asyncio
+async def test_publish_local_pins_records_this_repo_for_siblings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    project = tmp_path / "proj"
+    (project / ".vibe").mkdir(parents=True)
+    monkeypatch.setattr(
+        _service,
+        "get_harness_files_manager",
+        lambda: SimpleNamespace(project_roots=[project]),
+    )
+    recorded: list[tuple[str, set[tuple[str, int]]]] = []
+    monkeypatch.setattr(
+        _service._ledger, "record", lambda key, pins: recorded.append((key, set(pins)))
+    )
+
+    await _service.publish_local_pins()
+
+    assert recorded, "a mid-session pin change must republish this repo's claims"
+    keys = {key for key, _ in recorded}
+    assert keys - {_service._ledger.GLOBAL_KEY}, (
+        "the repo's own claim must be recorded under its own key: keying the "
+        "write as global drops the project pins a sibling prunes against"
+    )

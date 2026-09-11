@@ -15,6 +15,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackend,
     SessionBackendError,
     SessionBackendHost,
+    SessionBackendQueuedTurnSteering,
 )
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.events import HistoryEntryAdded, ServerWarning
@@ -65,15 +66,17 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "session/compact",
         "session/context/inject",
         "session/settings/update",
-        "app_server/session/turn/enqueue",
-        "app_server/session/turn/queue/read",
-        "app_server/session/turn/queue/remove",
-        "app_server/session/turn/queue/replace",
-        "app_server/session/turn/queue/resume",
+        "session/turn/enqueue",
+        "session/turn/queue/read",
+        "session/turn/queue/remove",
+        "session/turn/queue/replace",
+        "session/turn/queue/steer",
+        "session/turn/queue/resume",
         "turn/interrupt",
         "turn/start",
         "turn/steer",
     }
+    assert _protocol_members(SessionBackendQueuedTurnSteering) == {"steer_queued_turn"}
 
 
 def test_session_backend_host_contract_owns_session_selection() -> None:
@@ -182,6 +185,7 @@ async def test_app_server_root_is_the_legacy_session_backend() -> None:
         _accept_session_backend_host(host)
         _accept_session_backend(backend)
         assert isinstance(backend, LegacySessionBackend)
+        assert not isinstance(backend, SessionBackendQueuedTurnSteering)
 
         event_task = server._backend_event_task
         assert event_task is not None

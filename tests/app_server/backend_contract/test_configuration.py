@@ -54,6 +54,52 @@ async def test_config_updates_refresh_the_public_runtime_tool_catalog(
 
 
 @pytest.mark.asyncio
+async def test_active_model_update_preserves_usage_and_updates_prices(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    """*Prepare*: Configure prices and accumulate usage with the default model.
+    *Do*: Switch to the differently priced local model.
+    *Assert*: Usage totals remain while prices change to the new model's rates.
+    """
+    # Prepare
+    await backend_contract_session.resources.config.update(
+        {
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-latest",
+                    "input_price": 1.0,
+                    "output_price": 2.0,
+                }
+            ]
+        },
+        reload_runtime=True,
+    )
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("priced")
+    )
+    _ = [event async for event in backend_contract_session.act("count this turn")]
+    before = backend_contract_session.resources.runtime.stats
+    assert before.input_price_per_million == 1.0
+    assert before.output_price_per_million == 2.0
+
+    # Do
+    await backend_contract_session.resources.config.update(
+        {"active_model": "local"}, reload_runtime=True
+    )
+
+    # Assert
+    after = backend_contract_session.resources.runtime.stats
+    assert after.session_prompt_tokens == before.session_prompt_tokens
+    assert after.session_completion_tokens == before.session_completion_tokens
+    assert after.input_price_per_million == 0
+    assert after.output_price_per_million == 0
+
+
+@pytest.mark.asyncio
 async def test_config_subscribers_observe_updates_until_unsubscribed(
     backend_contract_session: AppServerSession,
 ) -> None:

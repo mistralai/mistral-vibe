@@ -200,15 +200,17 @@ Session creation and user execution are separate:
 - `session/stop` flushes and shuts down the attached runtime;
 - `turn/start` begins structured user input and may mark harness instructions as
   injected so they remain hidden from public history;
-- `app_server/session/turn/enqueue` accepts canonical `entries` containing
+- `session/turn/enqueue` accepts canonical `entries` containing
   context entries followed by at most one user entry as a separate future
   turn;
-- `app_server/session/turn/queue/read` reads the accepted queued turns;
-- `app_server/session/turn/queue/remove` removes one accepted queued turn by its stable queue item
+- `session/turn/queue/read` reads the accepted queued turns;
+- `session/turn/queue/remove` removes one accepted queued turn by its stable queue item
   ID;
-- `app_server/session/turn/queue/replace` replaces one accepted queued turn
+- `session/turn/queue/replace` replaces one accepted queued turn
   without changing its identity or FIFO position;
-- `app_server/session/turn/queue/resume` resumes automatic draining after an
+- `session/turn/queue/steer` atomically moves one accepted queued turn into
+  the expected active turn when the selected backend supports it;
+- `session/turn/queue/resume` resumes automatic draining after an
   interruption;
 - `turn/steer` adds input to the active turn; and
 - `turn/interrupt` interrupts the active turn.
@@ -220,17 +222,40 @@ new turn.
 Starting, steering, and queueing are different actions. `turn/start` begins
 work immediately and requires the session to be idle. `turn/steer` adds input
 to the expected active turn and never creates a future turn.
-`app_server/session/turn/enqueue`
+`session/turn/enqueue`
 accepts one future user turn and never changes the active turn. If queueing
 finds an idle, unpaused session, the server promotes exactly one queued item
 after returning the enqueue response. This makes a busy-submit race safe
 without changing `turn/start` semantics.
 
-Queue editing uses the `app_server/session/turn/queue/replace` Session
+Queue editing uses the `session/turn/queue/replace` Session
 procedure. It accepts the same typed entries as enqueue plus the target queue
 item ID. A successful replacement preserves the item's ID, creation time, and
 FIFO position. The enqueue request does not accept Vibe-only `message`,
 `messageEntryId`, or `replaceQueueItemId` fields.
+
+The Unified Harness implements `session/turn/queue/steer` as one server-owned
+operation. The request contains the session ID, queue item ID, and expected
+active turn ID. It does not resend message content. Under the session lifecycle
+lock, the backend reads the already-prepared queued content, submits it to Core
+as steering, retires that exact queue record, and publishes the queue update.
+Once Core accepts the steering command, queue retirement and publication do not
+yield to another session mutation.
+
+The operation has two outcomes:
+
+- On success, Core accepts the queued user content exactly once and the server
+  retires the exact queue item.
+- On failure, Core does not accept the steering command and the queue item is
+  unchanged.
+
+The queue item ID is also the retry identity for this operation. Repeating a
+successful request for the same expected turn returns the stored receipt
+without steering again. Reusing it with another expected turn is a conflict.
+A stale turn, a missing queue item, or unsupported queued context fails without
+changing the queue. The initial Unified implementation accepts the user entry
+used by the Vibe CLI and rejects queue items that also contain context entries.
+Legacy backends do not implement this operation.
 
 The accepted turn queue has these rules:
 
@@ -253,6 +278,15 @@ Promoting an item removes it from the queue before emitting `turn/started`.
 The resulting public turn keeps the queue item ID so clients can replace a
 pending message with the running turn. Queued input does not enter public
 history until its turn starts.
+
+Atomic queued steering uses the matching public user-history entry as its
+rendering boundary. The Unified adapter flushes events through the returned
+watermark before completing the request. Textual keeps the existing queued
+widgets pending until it receives a `history/entryAdded` event whose entry has
+`role = user`, `source = turn_steer`, and the queued message entry ID. It then
+marks those widgets sent in place instead of mounting or moving another user
+message. Sequential event handling therefore renders earlier output, the
+steered user message, and later output in that order.
 
 Terminal and promotion notifications have one order: `turn/completed`, then
 the queue update that records a pause or removes the promoted item, then the
@@ -342,7 +376,7 @@ process. The snapshot's `eventId` is its watermark. The client reducer:
 
 The core notification families are `session/snapshot`, session handoffs,
 `session/updated`, `history/entryAdded`, `history/entryUpdated`,
-`turn_queue_updated`, `turn/started`, `turn/completed`, and
+`turn/queueUpdated`, `turn/started`, `turn/completed`, and
 `session/statsUpdated`. Warnings, errors, and resource notifications remain
 typed rather than using a generic envelope.
 
@@ -425,6 +459,10 @@ resource APIs:
 
 - Textual renders and edits the server-owned prompt queue. It does not keep a
   second accepted queue or schedule queued work itself.
+- On Unified Harness sessions, Textual steers a queued block through
+  `session/turn/queue/steer`; it does not remove, reconstruct, or re-enqueue the
+  item. While that request is unresolved, later queue submissions wait and
+  edits or removals cannot overtake it.
 - Textual `!` commands and non-side-channel slash commands require an idle
   session. They are rejected while other work or accepted prompts are pending.
 - Other delivery surfaces use the same enqueue, read, remove, and resume
@@ -454,6 +492,12 @@ same live backend recovers them through the subscription snapshot or
 `session/read`. Stopping the session or restarting the app-server process
 discards them. Persisting queued turns across process restarts requires a
 separate storage decision and is not part of the initial queue implementation.
+
+If a connection drops during queued steering, Textual does not re-enqueue the
+message. It reconciles the replacement snapshot instead. A matching steering
+history entry means the operation succeeded; the unchanged queue item means it
+failed; and a turn carrying the queue item ID means normal queue promotion won
+the race.
 
 Transport detachment only removes that connection's subscriptions and callback
 claims. A successful `session/stop` is the delivery surface's durability and

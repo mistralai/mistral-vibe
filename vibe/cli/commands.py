@@ -178,21 +178,18 @@ class CommandRegistry:
                 ),
                 handler="_show_mcp",
             ),
-            # Withheld from this release: the handlers and `PluginsApp` behind
-            # them stay wired, only the two entry points are unregistered.
-            # Restore both entries to bring them back.
-            # "plugins": Command(
-            #     aliases=frozenset(["/plugins"]),
-            #     description="Display the plugins this session is running",
-            #     handler="_show_plugins",
-            #     is_available=lambda ctx: ctx.experimental_harness,
-            # ),
-            # "reload-plugins": Command(
-            #     aliases=frozenset(["/reload-plugins"]),
-            #     description="Re-pin this session's plugins and report what changed",
-            #     handler="_reload_plugins",
-            #     is_available=lambda ctx: ctx.experimental_harness,
-            # ),
+            "plugins": Command(
+                aliases=frozenset(["/plugins"]),
+                description="Display the plugins this session is running",
+                handler="_show_plugins",
+                is_available=lambda ctx: ctx.experimental_harness,
+            ),
+            "reload-plugins": Command(
+                aliases=frozenset(["/reload-plugins"]),
+                description="Re-pin this session's plugins and report what changed",
+                handler="_reload_plugins",
+                is_available=lambda ctx: ctx.experimental_harness,
+            ),
             "voice": Command(
                 aliases=frozenset(["/voice"]),
                 description="Configure voice settings",

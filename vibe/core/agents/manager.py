@@ -34,6 +34,10 @@ class AgentManager:
         self._registry = AgentRegistry(
             orchestrator, harness_files or get_harness_files_manager()
         )
+        # Agents chosen explicitly at startup (e.g. --smart-approve) stay in the
+        # picker/cycle for the whole session even when the rollout gate would hide
+        # them, so cycling away and back still returns to them.
+        self._forced_agents: set[str] = set()
 
         if custom_names := [n for n in self._discovered if n not in BUILTIN_AGENTS]:
             logger.info(
@@ -43,6 +47,13 @@ class AgentManager:
             )
 
         profile = self.available_agents.get(initial_agent)
+        if profile is None and initial_agent == BuiltinAgentName.SMART_APPROVE:
+            # Explicitly asking for smart-approve (--smart-approve / --agent) is a
+            # deliberate opt-in that bypasses the picker rollout gate. Remember the
+            # opt-in so it keeps offering the mode for the rest of the session.
+            profile = self._discovered.get(initial_agent)
+            if profile is not None:
+                self._forced_agents.add(initial_agent)
         if profile is None:
             if initial_agent in self._discovered:
                 raise ValueError(
@@ -83,6 +94,18 @@ class AgentManager:
         }
 
     def _is_agent_available(self, name: str, profile: AgentProfile) -> bool:
+        if name in self._forced_agents:
+            # An explicit startup selection keeps the agent in the picker/cycle for
+            # the whole session, regardless of the rollout gate.
+            return True
+        if (
+            name == BuiltinAgentName.SMART_APPROVE
+            and not self.config.smart_approve_offered()
+        ):
+            # Smart approve ships dark: it enters the picker/cycle only for a cohort
+            # the experiment (or config) has opted in. Explicit selection bypasses this
+            # in __init__.
+            return False
         if profile.install_required and name not in self.config.installed_agents:
             return False
         if enabled := self.config.enabled_agents:
@@ -122,6 +145,7 @@ class AgentManager:
             BuiltinAgentName.ASK,
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
+            BuiltinAgentName.SMART_APPROVE,
             BuiltinAgentName.AUTO_APPROVE,
         ]
         primary_agents = [

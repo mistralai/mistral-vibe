@@ -1,22 +1,22 @@
 """Session-less projectLinks controller.
 
-Owns the local-repo <-> Vibe Code Web project link lifecycle for delivery
+Owns the local-directory <-> Vibe Code Web project link lifecycle for delivery
 surfaces. Every method is stateless and keyed on the absolute `root_path` held
-by the caller. Responses intentionally carry `repoLocalPath` because this is a
-local app-server boundary; renderers can derive compact labels from the basename.
+by the caller. Git metadata is optional.
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from vibe.core.config import VibeConfigSchema, build_default_orchestrator
-from vibe.core.teleport.errors import (
-    ServiceTeleportError,
-    ServiceTeleportNotSupportedError,
-)
+from vibe.core.git.errors import GitError, GitRepositoryNotFoundError
+from vibe.core.git.remote import to_https_url
+from vibe.core.git.repo import GitRepo
+from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.vibe_code_project.client import VibeCodeProjectApiError
 from vibe.core.vibe_code_project.picker_service import (
     VibeCodeProjectPickerInitialData,
@@ -26,10 +26,12 @@ from vibe.core.vibe_code_project.picker_service import (
 )
 from vibe.core.vibe_code_project.project_store import VibeProjectsStore
 from vibe.core.vibe_code_project.selection import (
+    LocalProjectLink,
+    ProjectLink,
     ProjectPickerContext,
-    VibeCodeProject,
-    VibeCodeProjectLink,
+    RemoteProjectLink,
     normalize_repo_url,
+    project_link_path,
     rank_project_items,
 )
 from vibe.observability.logging import logger
@@ -37,6 +39,21 @@ from vibe.observability.sentry import capture_sentry_exception
 
 if TYPE_CHECKING:
     from vibe.core.teleport.git import GitRepoInfo
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectoryGitInfo:
+    github_repo_url: str | None
+    current_branch: str | None
+    default_branch: str | None
+    has_commits: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _InspectedDirectory:
+    path: Path
+    name: str
+    git: _DirectoryGitInfo | None
 
 
 class ProjectLinksError(Exception):
@@ -55,33 +72,75 @@ class ProjectLinksInternalError(ProjectLinksError):
     """An unexpected failure already reported to Sentry."""
 
 
-def _resolve_root_reject_reason(
-    exc: ServiceTeleportNotSupportedError,
-) -> Literal["not_git", "unsupported_remote", "no_commits"]:
-    message = str(exc).casefold()
-    if "git repository" in message:
-        return "not_git"
-    # A supported GitHub remote is confirmed before the commit check, so a
-    # commit-resolution failure means the repo has no commits yet — not an
-    # unsupported remote.
-    if "commit" in message:
-        return "no_commits"
-    return "unsupported_remote"
-
-
-def _candidate_match_kind(
-    project: VibeCodeProject,
-) -> Literal["exact_repo", "multi_repo"]:
-    return "exact_repo" if len(project.repositories) == 1 else "multi_repo"
-
-
-def _root_dict(repo_root: Path, git_info: GitRepoInfo) -> dict[str, Any]:
+def _inspection_dict(inspected: _InspectedDirectory) -> dict[str, Any]:
     return {
-        "repoLocalPath": str(repo_root),
-        "repoName": git_info.repo,
-        "currentBranch": git_info.branch,
-        "defaultBranch": git_info.default_branch,
+        "directoryPath": str(inspected.path),
+        "directoryName": inspected.name,
+        "git": (
+            {
+                "currentBranch": inspected.git.current_branch,
+                "defaultBranch": inspected.git.default_branch,
+                "githubRepoUrl": inspected.git.github_repo_url,
+                "hasCommits": inspected.git.has_commits,
+            }
+            if inspected.git is not None
+            else None
+        ),
     }
+
+
+def _read_inspected_directory(path: Path) -> _InspectedDirectory:
+    try:
+        directory_path = path.resolve(strict=True)
+    except OSError as exc:
+        raise ServiceTeleportError(str(exc)) from exc
+    if not directory_path.is_dir():
+        raise ServiceTeleportError("Not a directory")
+
+    plain_directory = _InspectedDirectory(
+        path=directory_path, name=directory_path.name, git=None
+    )
+    try:
+        repository = GitRepo.open(directory_path)
+        with repository:
+            status = repository.status()
+            github_remote = repository.github_remote()
+            has_commits = repository.has_commits()
+    except GitRepositoryNotFoundError:
+        return plain_directory
+    except GitError as exc:
+        raise ServiceTeleportError(str(exc)) from exc
+
+    repo_root = status.root.resolve()
+    return _InspectedDirectory(
+        path=repo_root,
+        name=repo_root.name,
+        git=_DirectoryGitInfo(
+            github_repo_url=(
+                to_https_url(github_remote.owner, github_remote.repo)
+                if github_remote is not None
+                else None
+            ),
+            current_branch=status.branch,
+            default_branch=status.base_branch,
+            has_commits=has_commits,
+        ),
+    )
+
+
+def _inspection_from_git_info(
+    repo_root: Path, git_info: GitRepoInfo
+) -> _InspectedDirectory:
+    return _InspectedDirectory(
+        path=repo_root,
+        name=repo_root.name,
+        git=_DirectoryGitInfo(
+            github_repo_url=git_info.remote_url,
+            current_branch=git_info.branch,
+            default_branch=git_info.default_branch,
+            has_commits=True,
+        ),
+    )
 
 
 def _candidate_page(
@@ -99,7 +158,6 @@ def _candidate_page(
         {
             "projectId": project.project_id,
             "name": project.name,
-            "matchKind": _candidate_match_kind(project),
             "recommended": recommend and index == 0,
         }
         for index, project in enumerate(ranked)
@@ -138,27 +196,23 @@ class ProjectLinksController:
         # Local-link metadata is local state, so listing it does not depend on a
         # configured Vibe Code API key.
         store = VibeProjectsStore()
-        links = await asyncio.to_thread(store.list_remote_projects)
-        groups: dict[str, list[VibeCodeProjectLink]] = {}
+        links = await asyncio.to_thread(store.list_project_links)
+        groups: dict[str, list[ProjectLink]] = {}
         for link in links:
             groups.setdefault(link.project_id, []).append(link)
 
-        projects = [
-            self._build_group(project_id, project_links)
-            for project_id, project_links in groups.items()
-        ]
+        projects = await asyncio.gather(
+            *(
+                asyncio.to_thread(self._build_group, project_id, project_links)
+                for project_id, project_links in groups.items()
+            )
+        )
         return {"projects": projects}
 
     async def resolve_root(self, root_path: str) -> dict[str, Any]:
         path = Path(root_path).expanduser()
         try:
-            git_info = await self._git_info(path)
-        except ServiceTeleportNotSupportedError as exc:
-            return {
-                "eligible": False,
-                "rejectReason": _resolve_root_reject_reason(exc),
-                "root": None,
-            }
+            inspected = await self._inspect_directory(path)
         except ServiceTeleportError:
             return {
                 "eligible": False,
@@ -166,39 +220,20 @@ class ProjectLinksController:
                 "root": None,
             }
 
-        repo_root = git_info.repo_root or path.resolve()
         return {
             "eligible": True,
             "rejectReason": None,
-            "root": _root_dict(repo_root, git_info),
+            "root": _inspection_dict(inspected),
         }
 
     async def inspect_root(self, root_path: str) -> dict[str, Any]:
         path = Path(root_path).expanduser()
         try:
-            git_info = await self._git_info(path)
-        except ServiceTeleportNotSupportedError as exc:
-            return {
-                "eligible": False,
-                "rejectReason": _resolve_root_reject_reason(exc),
-                "root": None,
-                "savedLink": None,
-                "staleLinkCleared": False,
-            }
+            inspected = await self._inspect_directory(path)
         except ServiceTeleportError:
             return {
                 "eligible": False,
                 "rejectReason": "nested_unresolvable",
-                "root": None,
-                "savedLink": None,
-                "staleLinkCleared": False,
-            }
-
-        repo_root = git_info.repo_root or path.resolve()
-        if not git_info.remote_url:
-            return {
-                "eligible": False,
-                "rejectReason": "unsupported_remote",
                 "root": None,
                 "savedLink": None,
                 "staleLinkCleared": False,
@@ -206,15 +241,21 @@ class ProjectLinksController:
 
         store = VibeProjectsStore()
         saved_link = await asyncio.to_thread(
-            store.get_remote_project, repo_root=repo_root
+            store.get_project_link, repo_root=inspected.path
         )
         stale_link_cleared = False
         stale_link_clear_failed = False
         saved_link_summary: dict[str, Any] | None = None
         if saved_link is not None:
-            if normalize_repo_url(saved_link.repo_url) == normalize_repo_url(
-                git_info.remote_url
-            ):
+            github_repo_url = (
+                inspected.git.github_repo_url if inspected.git is not None else None
+            )
+            link_matches = isinstance(saved_link, LocalProjectLink) or (
+                github_repo_url is not None
+                and normalize_repo_url(saved_link.repo_url)
+                == normalize_repo_url(github_repo_url)
+            )
+            if link_matches:
                 saved_link_summary = {
                     "projectId": saved_link.project_id,
                     "projectName": saved_link.project_name,
@@ -222,7 +263,7 @@ class ProjectLinksController:
             else:
                 try:
                     await asyncio.to_thread(
-                        store.delete_remote_project, repo_root=repo_root
+                        store.delete_project_link, repo_root=inspected.path
                     )
                     stale_link_cleared = True
                 except Exception as exc:
@@ -232,7 +273,7 @@ class ProjectLinksController:
         return {
             "eligible": True,
             "rejectReason": None,
-            "root": {**_root_dict(repo_root, git_info), "repoUrl": git_info.remote_url},
+            "root": _inspection_dict(inspected),
             "savedLink": saved_link_summary,
             "staleLinkCleared": stale_link_cleared,
             "staleLinkClearFailed": stale_link_clear_failed,
@@ -269,7 +310,7 @@ class ProjectLinksController:
             ),
         )
         return {
-            "root": _root_dict(repo_root, git_info),
+            "root": _inspection_dict(_inspection_from_git_info(repo_root, git_info)),
             "savedLink": saved_link_summary,
             "staleLinkCleared": stale_link_cleared,
             "candidates": candidates,
@@ -350,38 +391,56 @@ class ProjectLinksController:
         return self._link_dict(link, repo_root)
 
     async def save(
-        self, root_path: str, project_id: str, project_name: str, expected_repo_url: str
+        self,
+        root_path: str,
+        project_id: str,
+        project_name: str,
+        expected_github_repo_url: str | None,
     ) -> dict[str, Any]:
-        repo_root, git_info = await self._resolve_root(root_path)
-        if not git_info.remote_url:
-            raise ProjectLinksInvalidRequest(
-                "Not an eligible project root: unsupported_remote"
+        inspected = await self._resolve_inspection_root(root_path)
+        expected_github_repo_url = (
+            expected_github_repo_url.strip()
+            if expected_github_repo_url is not None
+            else None
+        )
+        github_repo_url = (
+            inspected.git.github_repo_url if inspected.git is not None else None
+        )
+
+        link: ProjectLink
+        if github_repo_url is None:
+            if expected_github_repo_url is not None:
+                raise ProjectLinksInvalidRequest(
+                    "The repository remote changed before the link could be saved."
+                )
+            link = LocalProjectLink(
+                directory_path=inspected.path,
+                project_id=project_id,
+                project_name=project_name,
             )
-        expected_repo_url = expected_repo_url.strip()
-        if not expected_repo_url:
-            raise ProjectLinksInvalidRequest("Expected repository URL is required.")
-        if normalize_repo_url(git_info.remote_url) != normalize_repo_url(
-            expected_repo_url
-        ):
-            raise ProjectLinksInvalidRequest(
-                "The repository remote changed before the link could be saved."
+        else:
+            if expected_github_repo_url is None or normalize_repo_url(
+                github_repo_url
+            ) != normalize_repo_url(expected_github_repo_url):
+                raise ProjectLinksInvalidRequest(
+                    "The repository remote changed before the link could be saved."
+                )
+            link = RemoteProjectLink(
+                repo_root=inspected.path,
+                repo_url=github_repo_url,
+                project_id=project_id,
+                project_name=project_name,
             )
 
-        link = VibeCodeProjectLink(
-            repo_root=repo_root,
-            repo_url=git_info.remote_url,
-            project_id=project_id,
-            project_name=project_name,
-        )
         store = VibeProjectsStore()
-        await asyncio.to_thread(store.upsert_remote_project, link)
-        return self._link_dict(link, repo_root)
+        await asyncio.to_thread(store.upsert_project_link, link)
+        return self._link_dict(link, inspected.path)
 
     async def unlink(self, root_path: str) -> dict[str, Any]:
         # Unlink only needs the store key (repo_root). For a live checkout the
         # git-resolved root matches how the link was stored.
         try:
-            repo_root, _ = await self._resolve_root(root_path)
+            inspected = await self._resolve_inspection_root(root_path)
         except ProjectLinksInvalidRequest:
             # Checkout moved/deleted: git resolution fails. Links are keyed on
             # the git-resolved root, which may be an ancestor of the path the
@@ -391,7 +450,7 @@ class ProjectLinksController:
             return await asyncio.to_thread(self._unlink_stale_root, root_path)
         store = VibeProjectsStore()
         try:
-            await asyncio.to_thread(store.delete_remote_project, repo_root=repo_root)
+            await asyncio.to_thread(store.delete_project_link, repo_root=inspected.path)
         except Exception as exc:
             _report_store_delete_failure(exc, "projectLinks/unlink")
         return {"unlinked": True}
@@ -400,18 +459,21 @@ class ProjectLinksController:
     def _unlink_stale_root(root_path: str) -> dict[str, Any]:
         raw = Path(root_path).expanduser().resolve()
         store = VibeProjectsStore()
-        # list_remote_projects() returns resolved repo_root paths, so both sides
+        # list_project_links() returns resolved paths, so both sides
         # are normalized before comparison.
         candidates = [
             link
-            for link in store.list_remote_projects()
-            if raw == link.repo_root or raw.is_relative_to(link.repo_root)
+            for link in store.list_project_links()
+            if raw == project_link_path(link)
+            or raw.is_relative_to(project_link_path(link))
         ]
         if candidates:
             # Closest (deepest) ancestor wins when projects are nested.
-            target = max(candidates, key=lambda link: len(link.repo_root.parts))
+            target = max(
+                candidates, key=lambda link: len(project_link_path(link).parts)
+            )
             try:
-                store.delete_remote_project(repo_root=target.repo_root)
+                store.delete_project_link(repo_root=project_link_path(target))
             except Exception as exc:
                 _report_store_delete_failure(exc, "projectLinks/unlink")
         return {"unlinked": True}
@@ -435,6 +497,9 @@ class ProjectLinksController:
             timeout=config.api_timeout,
         )
 
+    async def _inspect_directory(self, path: Path) -> _InspectedDirectory:
+        return await asyncio.to_thread(_read_inspected_directory, path)
+
     async def _git_info(self, repo_root: Path) -> GitRepoInfo:
         # Imported lazily so lightweight delivery-surface imports do not pull in gitpython.
         from vibe.core.teleport.git import GitRepository
@@ -453,6 +518,16 @@ class ProjectLinksController:
         repo_root = git_info.repo_root or path.resolve()
         return repo_root, git_info
 
+    async def _resolve_inspection_root(self, root_path: str) -> _InspectedDirectory:
+        path = Path(root_path).expanduser()
+        try:
+            inspected = await self._inspect_directory(path)
+        except ServiceTeleportError as exc:
+            raise ProjectLinksInvalidRequest(
+                f"Not an eligible project root: {exc}"
+            ) from exc
+        return inspected
+
     async def _load_initial(
         self,
         service: VibeCodeProjectPickerService,
@@ -465,22 +540,32 @@ class ProjectLinksController:
             raise self._api_error(exc, boundary_method) from exc
 
     def _build_group(
-        self, project_id: str, project_links: list[VibeCodeProjectLink]
+        self, project_id: str, project_links: list[ProjectLink]
     ) -> dict[str, Any]:
         # The Desktop loopback folds these onto the project's `repositories` as
-        # local-checkout entries; the absolute path is the display value.
+        # local-directory entries; the absolute path is the display value.
         return {
             "projectId": project_id,
-            "repoLocalPaths": [str(link.repo_root) for link in project_links],
+            "localLinks": [self._local_link_dict(link) for link in project_links],
         }
 
     @staticmethod
-    def _link_dict(link: VibeCodeProjectLink, repo_root: Path) -> dict[str, Any]:
+    def _local_link_dict(link: ProjectLink) -> dict[str, Any]:
+        path = project_link_path(link)
+        try:
+            with GitRepo.open(path) as repository:
+                has_commits = repository.has_commits()
+        except GitError:
+            has_commits = False
+        return {"directoryPath": str(path), "hasCommits": has_commits}
+
+    @staticmethod
+    def _link_dict(link: ProjectLink, directory_path: Path) -> dict[str, Any]:
         return {
             "link": {
                 "projectId": link.project_id,
                 "projectName": link.project_name,
-                "repoLocalPath": str(repo_root),
+                "directoryPath": str(directory_path),
             }
         }
 

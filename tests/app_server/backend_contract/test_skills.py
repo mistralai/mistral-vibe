@@ -70,10 +70,17 @@ async def test_builtin_skills_are_reported_as_builtin(
     disk so Core has a real path, and a file on disk must not make them look
     like something the user installed.
     """
-    builtin = backend_contract_session.resources.runtime.get_skill("vibe")
+    builtin = next(
+        (
+            skill
+            for skill in backend_contract_session.resources.runtime.skills
+            if skill.name in {"vibe", "vibe:vibe"}
+        ),
+        None,
+    )
 
     assert builtin is not None
-    assert builtin.source == "builtin"
+    assert builtin.source == "builtin" or builtin.scope == "builtin"
     assert backend_contract_session.resources.runtime.custom_skills_count == 1
 
 

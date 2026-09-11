@@ -9,6 +9,12 @@ from vibe.app_server._model import ProtocolModel
 from vibe.questions import UserQuestionRequest
 from vibe.utils.tool_presentation import EffectCallDisplay, ToolEffectKind
 
+# The ``tool_name`` on the effect behind a manual `!<command>`. A model's shell
+# call carries the real tool's name (``bash``, ``git_bash``, ``powershell``), so
+# this is what tells a user's own shell output apart from the agent's -- the
+# ``SHELL`` effect kind alone covers both.
+MANUAL_SHELL_TOOL_NAME = "shell"
+
 
 class ShellEffectInput(ProtocolModel):
     command: str
@@ -275,6 +281,11 @@ class WorktreeEffectDetail(_EffectDetailBase):
     input: WorktreeEffectInput | None = None
 
 
+class ProcessEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.PROCESS] = ToolEffectKind.PROCESS
+    input: JsonValue = None
+
+
 EffectDetail = Annotated[
     GenericEffectDetail
     | ShellEffectDetail
@@ -288,7 +299,8 @@ EffectDetail = Annotated[
     | WebFetchEffectDetail
     | SkillEffectDetail
     | SubagentEffectDetail
-    | WorktreeEffectDetail,
+    | WorktreeEffectDetail
+    | ProcessEffectDetail,
     Field(discriminator="kind"),
 ]
 

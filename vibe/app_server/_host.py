@@ -22,9 +22,9 @@ from vibe.app_server._project_links import (
     ProjectLinksInvalidRequest,
 )
 from vibe.app_server._projection import (
-    project_agent_summaries,
     project_config_view,
     project_message_history,
+    project_unified_agent_summaries,
 )
 from vibe.app_server._session_model import active_model_is_pinned
 from vibe.app_server._state import build_stored_public_state, history_page
@@ -82,8 +82,12 @@ from vibe.app_server.protocol import (
     WorkspaceTrustDecisionParams,
     WorkspaceTrustStatusParams,
     WorkspaceUntrustedConfigParams,
+    WorkspaceWorktreeLimitUpdateParams,
+    WorkspaceWorktreeLimitUpdateResponse,
     WorkspaceWorktreeListParams,
     WorkspaceWorktreeListResponse,
+    WorkspaceWorktreePruneParams,
+    WorkspaceWorktreePruneResponse,
     WorkspaceWorktreeRemoveParams,
     WorkspaceWorktreeRemoveResponse,
     WorktreeRemoveOutcome,
@@ -147,7 +151,9 @@ _HOST_METHODS = frozenset({
     "workspace/trust/untrustedConfig",
     "workspace/trust/status",
     "workspace/git/checkouts",
+    "workspace/git/worktrees/limit/update",
     "workspace/git/worktrees/list",
+    "workspace/git/worktrees/prune",
     "workspace/git/worktrees/remove",
 })
 
@@ -157,9 +163,11 @@ class HostRequestHandler:
         self,
         harness_files: HarnessFilesManager,
         startup_issue: ConfigIssue | None = None,
+        harness_selection_source: str | None = None,
     ) -> None:
         self._harness_files = harness_files
         self._startup_issue = startup_issue
+        self._harness_selection_source = harness_selection_source
         self._project_links = ProjectLinksController()
 
     def handles(self, method: str) -> bool:
@@ -277,7 +285,7 @@ class HostRequestHandler:
             orchestrator.config.default_agent,
             harness_files=self._harness_files.for_session(self._cwd(None)),
         )
-        active, available = project_agent_summaries(
+        active, available = project_unified_agent_summaries(
             agents.active_profile, agents.available_agents.values()
         )
         return AgentsListResponse(active=active, agents=available)
@@ -315,6 +323,7 @@ class HostRequestHandler:
             hooks_count=hooks_count,
             mcp_servers_total=mcp_servers_total,
             mcp_servers_enabled=mcp_servers_enabled,
+            harness_selection_source=self._harness_selection_source,
         )
 
     async def _dispatch_project_links(
@@ -369,7 +378,7 @@ class HostRequestHandler:
                         params.root_path,
                         params.project_id,
                         params.project_name,
-                        params.expected_repo_url,
+                        params.expected_github_repo_url,
                     )
                 )
             case "projectLinks/unlink":
@@ -419,6 +428,25 @@ class HostRequestHandler:
                     self._cwd(params.cwd),
                     params.include_details,
                 )
+            case "workspace/git/worktrees/limit/update":
+                params = validate_wire(WorkspaceWorktreeLimitUpdateParams, raw_params)
+                orchestrator = await self._load_orchestrator(None)
+                failures = await orchestrator.set_field(
+                    "/worktree_limit",
+                    params.limit,
+                    reason="desktop worktree retention setting",
+                )
+                response = WorkspaceWorktreeLimitUpdateResponse(
+                    limit=orchestrator.config.worktree_limit,
+                    failures=[str(failure) for failure in failures],
+                )
+            case "workspace/git/worktrees/prune":
+                validate_wire(WorkspaceWorktreePruneParams, raw_params)
+                orchestrator = await self._load_orchestrator(None)
+                removed = await asyncio.to_thread(
+                    ManagedWorktree.prune, orchestrator.config.worktree_limit
+                )
+                response = WorkspaceWorktreePruneResponse(removed=removed)
             case "workspace/git/checkouts":
                 checkouts = validate_wire(WorkspaceGitCheckoutsParams, raw_params)
                 response = await asyncio.to_thread(

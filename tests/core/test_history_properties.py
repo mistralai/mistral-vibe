@@ -121,40 +121,42 @@ def gen_chain(rng: random.Random, n_turns: int) -> tuple[str, str, Chain]:
 SEEDS = range(400)
 
 
-@pytest.mark.parametrize("seed", SEEDS)
-def test_anchors_and_fixed_point(seed: int) -> None:
-    rng = random.Random(seed)
-    v0, current, chain = gen_chain(rng, rng.randint(1, 6))
-    cur = st(current)
+def test_anchors_and_fixed_point() -> None:
+    for seed in SEEDS:
+        rng = random.Random(seed)
+        v0, current, chain = gen_chain(rng, rng.randint(1, 6))
+        cur = st(current)
 
-    # Identity: with no decisions, disk projects to itself.
-    assert build(chain).view({P: cur}).content(P) == cur, f"seed={seed}: identity"
+        # Identity: with no decisions, disk projects to itself.
+        assert build(chain).view({P: cur}).content(P) == cur, f"seed={seed}: identity"
 
-    ids = region_ids(build(chain), cur)
-    if not ids:
-        return
+        ids = region_ids(build(chain), cur)
+        if not ids:
+            continue
 
-    # Approve-all -> unchanged current; accepted baseline is also the full file.
-    cp = build(chain)
-    cp.decide_file(P, Decision.KEEP)
-    assert cp.view({P: cur}).content(P) == cur, f"seed={seed}: approve-all != current"
-    assert cp.view({P: cur}).accepted_baseline(P) == cur, (
-        f"seed={seed}: baseline != current"
-    )
-    assert cp.view({P: cur}).is_fully_reviewed(P)
+        # Approve-all -> unchanged current; accepted baseline is also the full file.
+        cp = build(chain)
+        cp.decide_file(P, Decision.KEEP)
+        assert cp.view({P: cur}).content(P) == cur, (
+            f"seed={seed}: approve-all != current"
+        )
+        assert cp.view({P: cur}).accepted_baseline(P) == cur, (
+            f"seed={seed}: baseline != current"
+        )
+        assert cp.view({P: cur}).is_fully_reviewed(P)
 
-    # Revert-all -> the pristine original.
-    cp = build(chain)
-    cp.decide_file(P, Decision.REVERT)
-    assert cp.view({P: cur}).content(P) == st(v0), f"seed={seed}: revert-all != v0"
-    assert cp.view({P: cur}).accepted_baseline(P) == st(v0)
-    assert cp.view({P: cur}).is_fully_reviewed(P)
+        # Revert-all -> the pristine original.
+        cp = build(chain)
+        cp.decide_file(P, Decision.REVERT)
+        assert cp.view({P: cur}).content(P) == st(v0), f"seed={seed}: revert-all != v0"
+        assert cp.view({P: cur}).accepted_baseline(P) == st(v0)
+        assert cp.view({P: cur}).is_fully_reviewed(P)
 
-    # Fixed point: re-projecting the reverted content is stable.
-    reverted = cp.view({P: cur}).content(P)
-    assert cp.view({P: reverted}).content(P) == reverted, (
-        f"seed={seed}: not a fixed point"
-    )
+        # Fixed point: re-projecting the reverted content is stable.
+        reverted = cp.view({P: cur}).content(P)
+        assert cp.view({P: reverted}).content(P) == reverted, (
+            f"seed={seed}: not a fixed point"
+        )
 
 
 def _run_actions(
@@ -181,45 +183,47 @@ def _run_actions(
     return cp.view({P: cur}).content(P)
 
 
-@pytest.mark.parametrize("seed", SEEDS)
-def test_incremental_persist_equals_batch(seed: int) -> None:
-    rng = random.Random(seed)
-    _v0, current, chain = gen_chain(rng, rng.randint(2, 6))
-    ids = region_ids(build(chain), st(current))
-    if not ids:
-        return
+def test_incremental_persist_equals_batch() -> None:
+    for seed in SEEDS:
+        rng = random.Random(seed)
+        _v0, current, chain = gen_chain(rng, rng.randint(2, 6))
+        ids = region_ids(build(chain), st(current))
+        if not ids:
+            continue
 
-    order = rng.sample(ids, len(ids))
-    actions = [(rid, rng.choice([Decision.KEEP, Decision.REVERT])) for rid in order]
+        order = rng.sample(ids, len(ids))
+        actions = [(rid, rng.choice([Decision.KEEP, Decision.REVERT])) for rid in order]
 
-    incremental = _run_actions(chain, current, actions, persist=True)
-    batch = _run_actions(chain, current, actions, persist=False)
-    assert incremental == batch, f"seed={seed}: incremental persist diverged from batch"
+        incremental = _run_actions(chain, current, actions, persist=True)
+        batch = _run_actions(chain, current, actions, persist=False)
+        assert incremental == batch, (
+            f"seed={seed}: incremental persist diverged from batch"
+        )
 
 
-@pytest.mark.parametrize("seed", SEEDS)
-def test_fully_decided_content_equals_baseline(seed: int) -> None:
-    rng = random.Random(seed)
-    _v0, current, chain = gen_chain(rng, rng.randint(1, 6))
-    cur = st(current)
-    cp = build(chain)
-    if not pending(cp, cur):
-        return
+def test_fully_decided_content_equals_baseline() -> None:
+    for seed in SEEDS:
+        rng = random.Random(seed)
+        _v0, current, chain = gen_chain(rng, rng.randint(1, 6))
+        cur = st(current)
+        cp = build(chain)
+        if not pending(cp, cur):
+            continue
 
-    # Decide every hunk (random keep/revert), persisting between each.
-    disk = cur
-    guard = 0
-    while pending(cp, disk):
-        rid = pending(cp, disk)[0]
-        cp.decide_region(P, rid, rng.choice([Decision.KEEP, Decision.REVERT]))
-        disk = cp.view({P: disk}).content(P)
-        guard += 1
-        assert guard < 100, f"seed={seed}: review never settled"
+        # Decide every hunk (random keep/revert), persisting between each.
+        disk = cur
+        guard = 0
+        while pending(cp, disk):
+            rid = pending(cp, disk)[0]
+            cp.decide_region(P, rid, rng.choice([Decision.KEEP, Decision.REVERT]))
+            disk = cp.view({P: disk}).content(P)
+            guard += 1
+            assert guard < 100, f"seed={seed}: review never settled"
 
-    # No pending hunks: the on-disk projection and the accepted baseline agree.
-    assert cp.view({P: disk}).content(P) == cp.view({P: disk}).accepted_baseline(P), (
-        f"seed={seed}: content != baseline once fully decided"
-    )
+        # No pending hunks: the on-disk projection and the accepted baseline agree.
+        assert cp.view({P: disk}).content(P) == cp.view({P: disk}).accepted_baseline(
+            P
+        ), f"seed={seed}: content != baseline once fully decided"
 
 
 def _disk_lines(state: FileState) -> list[str]:
@@ -264,26 +268,26 @@ def test_manual_edits_during_review_stay_projectable() -> None:
         assert cp.view({P: disk}).content(P) == st(v0), f"seed={seed}: revert-all != v0"
 
 
-@pytest.mark.parametrize("seed", SEEDS)
-def test_revert_cascades_to_dependents(seed: int) -> None:
-    rng = random.Random(seed)
-    _v0, current, chain = gen_chain(rng, rng.randint(2, 6))
-    cur = st(current)
-    view = build(chain).view({P: cur}).regions(P)
-    if not view:
-        return
+def test_revert_cascades_to_dependents() -> None:
+    for seed in SEEDS:
+        rng = random.Random(seed)
+        _v0, current, chain = gen_chain(rng, rng.randint(2, 6))
+        cur = st(current)
+        view = build(chain).view({P: cur}).regions(P)
+        if not view:
+            continue
 
-    cp = build(chain)
-    target = rng.choice(view)
-    cp.decide_region(P, target.region_id, Decision.REVERT)
-    decided = {tr.region_id: tr.decision for tr in cp.view({P: cur}).regions(P)}
+        cp = build(chain)
+        target = rng.choice(view)
+        cp.decide_region(P, target.region_id, Decision.REVERT)
+        decided = {tr.region_id: tr.decision for tr in cp.view({P: cur}).regions(P)}
 
-    # Every hunk built on the reverted one is dragged down with it.
-    for tr in view:
-        if target.region_id in tr.depends_on:
-            assert decided[tr.region_id] is Decision.REVERT, (
-                f"seed={seed}: dependent {tr.region_id} survived its dependency's revert"
-            )
+        # Every hunk built on the reverted one is dragged down with it.
+        for tr in view:
+            if target.region_id in tr.depends_on:
+                assert decided[tr.region_id] is Decision.REVERT, (
+                    f"seed={seed}: dependent {tr.region_id} survived its dependency's revert"
+                )
 
 
 # -- independent oracle: disjoint edits, arbitrary partial decisions ----------
@@ -334,28 +338,32 @@ def splice_oracle(
     return to_text(result)
 
 
-@pytest.mark.parametrize("seed", SEEDS)
-def test_disjoint_partial_decisions_match_splice_oracle(seed: int) -> None:
-    rng = random.Random(seed)
-    v0, edits = gen_disjoint(rng)
-    if not edits:
-        return
-    chain = build_disjoint(v0, edits)
-    current = chain[-1][2]
+def test_disjoint_partial_decisions_match_splice_oracle() -> None:
+    for seed in SEEDS:
+        rng = random.Random(seed)
+        v0, edits = gen_disjoint(rng)
+        if not edits:
+            continue
+        chain = build_disjoint(v0, edits)
+        current = chain[-1][2]
 
-    ordered = sorted(region_ids(build(chain), current), key=lambda r: r.version_index)
-    assert len(ordered) == len(edits), (
-        f"seed={seed}: expected one hunk per disjoint edit"
-    )
+        ordered = sorted(
+            region_ids(build(chain), current), key=lambda r: r.version_index
+        )
+        assert len(ordered) == len(edits), (
+            f"seed={seed}: expected one hunk per disjoint edit"
+        )
 
-    kept = {k for k in range(len(edits)) if rng.random() < 0.5}
-    cp = build(chain)
-    for k, region_id in enumerate(ordered):
-        cp.decide_region(P, region_id, Decision.KEEP if k in kept else Decision.REVERT)
+        kept = {k for k in range(len(edits)) if rng.random() < 0.5}
+        cp = build(chain)
+        for k, region_id in enumerate(ordered):
+            cp.decide_region(
+                P, region_id, Decision.KEEP if k in kept else Decision.REVERT
+            )
 
-    assert cp.view({P: current}).content(P) == st(splice_oracle(v0, edits, kept)), (
-        f"seed={seed}: partial decision != independent splice oracle (kept={sorted(kept)})"
-    )
+        assert cp.view({P: current}).content(P) == st(splice_oracle(v0, edits, kept)), (
+            f"seed={seed}: partial decision != independent splice oracle (kept={sorted(kept)})"
+        )
 
 
 # -- opaque (binary) files ----------------------------------------------------
@@ -381,30 +389,32 @@ def gen_binary_chain(
     return v0, cur, chain
 
 
-@pytest.mark.parametrize("seed", range(150))
-def test_binary_anchors_and_incremental(seed: int) -> None:
-    rng = random.Random(seed)
-    v0, current, chain = gen_binary_chain(rng, rng.randint(1, 5))
+def test_binary_anchors_and_incremental() -> None:
+    for seed in range(150):
+        rng = random.Random(seed)
+        v0, current, chain = gen_binary_chain(rng, rng.randint(1, 5))
 
-    assert build(chain).view({P: current}).content(P) == current, (
-        f"seed={seed}: identity"
-    )
+        assert build(chain).view({P: current}).content(P) == current, (
+            f"seed={seed}: identity"
+        )
 
-    cp = build(chain)
-    cp.decide_file(P, Decision.KEEP)
-    assert cp.view({P: current}).content(P) == current, f"seed={seed}: approve-all"
+        cp = build(chain)
+        cp.decide_file(P, Decision.KEEP)
+        assert cp.view({P: current}).content(P) == current, f"seed={seed}: approve-all"
 
-    cp = build(chain)
-    cp.decide_file(P, Decision.REVERT)
-    assert cp.view({P: current}).content(P) == v0, f"seed={seed}: revert-all != v0"
+        cp = build(chain)
+        cp.decide_file(P, Decision.REVERT)
+        assert cp.view({P: current}).content(P) == v0, f"seed={seed}: revert-all != v0"
 
-    ids = region_ids(build(chain), current)
-    if ids:
-        order = rng.sample(ids, len(ids))
-        actions = [(rid, rng.choice([Decision.KEEP, Decision.REVERT])) for rid in order]
-        inc = _run_actions_state(chain, current, actions, persist=True)
-        bat = _run_actions_state(chain, current, actions, persist=False)
-        assert inc == bat, f"seed={seed}: opaque incremental != batch"
+        ids = region_ids(build(chain), current)
+        if ids:
+            order = rng.sample(ids, len(ids))
+            actions = [
+                (rid, rng.choice([Decision.KEEP, Decision.REVERT])) for rid in order
+            ]
+            inc = _run_actions_state(chain, current, actions, persist=True)
+            bat = _run_actions_state(chain, current, actions, persist=False)
+            assert inc == bat, f"seed={seed}: opaque incremental != batch"
 
 
 def _run_actions_state(

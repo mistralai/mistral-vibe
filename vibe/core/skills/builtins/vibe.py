@@ -104,9 +104,10 @@ install: `uv tool install mistral-vibe`.
 #### Session titles
 
 Each session has a `title` stored in `meta.json` (with `title_source`: `auto` or
-`manual`). A session stays untitled until a background LLM call generates a
-concise descriptive title (the `--resume` list shows a message preview until
-then). Automatic generation runs only for the interactive CLI; other clients
+`manual`). When title generation is enabled (off by default), a session stays
+untitled until a background LLM call generates a concise descriptive title (the
+`--resume` list shows a message preview until then). Automatic generation runs
+only for the interactive CLI; other clients
 (ACP, app server, programmatic) keep their own session management and fall back
 to the message preview. Title generation runs on the session's active
 model/provider — it substitutes a small fast Mistral model only when the active
@@ -119,9 +120,10 @@ model it stays bounded — one title at the start plus one after a compaction, a
 couple at most — so a large model isn't re-invoked every few turns. The refresh
 keeps the opening intent and the latest exchange in view and feeds the previous
 title back so it refines rather than restarts. `/rename <title>` sets a `manual`
-title that auto-generation never overwrites. Set `session_logging.generate_titles
-= false` to turn automatic titles off (the `--resume` list and tab then use the
-message preview). The current title also drives the terminal tab/window title
+title that auto-generation never overwrites. Automatic titles are off by
+default; set `session_logging.generate_titles = true` to enable them (otherwise
+the `--resume` list and tab use the message preview). The current title also
+drives the terminal tab/window title
 (OSC), updated on rename, auto-title changes, and resume; it never blocks a turn.
 
 #### Session storage & folder scoping
@@ -178,11 +180,13 @@ log_level = "WARNING"  # Optional. DEBUG | INFO | WARNING | ERROR | CRITICAL —
 ```toml
 # Behavior
 bypass_tool_permissions = false    # Skip tool approval prompts
+worktree_limit = 15                # Maximum recent managed worktrees retained by Desktop; only clean, remote-backed, inactive worktrees are pruned
 system_prompt_id = "cli"          # System prompt: "cli", "lean", or custom .md filename
 compaction_prompt_id = "compact"  # Compaction prompt: built-in "compact" or custom .md filename
 enable_telemetry = true
 enable_update_checks = true       # Daily PyPI check; prompts on next launch when a newer release exists
 enable_notifications = true
+experimental_enable_tab_status = true  # Experimental: update the terminal tab title with state indicators (>> running, ? waiting)
 enable_system_trust_store = false  # Use OS trust store for outbound HTTPS
 api_timeout = 720.0               # API request timeout in seconds
 api_retry_max_elapsed_time = 300.0  # Retry budget for retryable API failures in seconds
@@ -483,7 +487,7 @@ disabled_tools = ["delete_issue"] # Hide selected tools only
 enabled = true
 save_dir = ""                     # Defaults to ~/.vibe/logs/session
 session_prefix = "session"
-generate_titles = true            # Background LLM session titles; false uses the message preview
+generate_titles = false           # Background LLM session titles (opt-in); default off uses the message preview
 ```
 
 ### Browser Sign-In
@@ -835,6 +839,13 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/proxy-setup` - Configure proxy and SSL certificate settings
 - `/leanstall` - Install the Lean 4 agent (leanstral)
 - `/unleanstall` - Uninstall the Lean 4 agent
+- `/plugins` - Display the plugins this session is running (experimental harness
+  mode only). Shows each plugin's name, scope, source format, content digest, and
+  components (skills, MCP servers, agents, hooks, knowledge, connectors, tools).
+  Press `r` inside the view to reload.
+- `/reload-plugins` - Re-pin this session's plugins and report what changed
+  (experimental harness mode only). Re-discovers plugins from disk, re-pins the
+  snapshot, and prints a diff of added, removed, and updated plugins.
 - `/data-retention` - Show data retention information
 - `/teleport` - Teleport session to Vibe Code Web (only available when Vibe Code is enabled)
 - `/remote-project` - Select the Vibe Code Web project for this repository (only
@@ -900,8 +911,17 @@ editable and removable. This includes plain prompts, `/skill ...`
 prompts, and prompts with `@` mentions. `!bash`, non-side-channel slash
 commands, and `&teleport` require an idle session and are rejected with a toast
 while busy. **Ctrl+C** removes the newest queued prompt (LIFO); **Esc**
-interrupts the active turn and pauses the remaining queue; pressing Enter
-(empty or not) on a paused queue resumes it.
+interrupts the active turn and pauses the remaining queue. While a turn is
+active, empty **Enter** or **Ctrl+Enter** steers the merged queued block into
+that turn. Unified Harness sessions do this atomically from the server-owned
+queue, so rapid input and subagent activity cannot split removal from steering.
+Pressing Enter (empty or not) on a paused queue resumes it instead.
+
+While a Unified queued steer is in flight, its widgets remain pending and
+pinned in place. Later queue submissions wait, and edits or removals cannot
+overtake the steer. The widgets become sent only when the matching user
+steering entry appears in public history. Reconnect uses the server snapshot to
+resolve an uncertain request and never re-enqueues it from client state.
 
 Allowlisted slash commands (`side_channel=True`) run immediately via a
 side channel while the agent or bash is busy. Only one side-channel command
@@ -911,7 +931,7 @@ the user confirms the picker.
 
 Commands not on the side-channel allowlist (e.g. `/clear`, `/compact`,
 `/rewind`, `/resume`, `/reload`, `/leanstall`, `/unleanstall`, `/teleport`,
-`/remote-project`, `/retry`) are rejected while busy and can be retried when
+`/remote-project`, `/retry`, `/plugins`, `/reload-plugins`) are rejected while busy and can be retried when
 the session is idle.
 
 While the queue is non-empty and the agent is busy, pressing **Up**
@@ -922,6 +942,116 @@ for editing (press Enter again to update it in-place), **Backspace**
 or **Delete** removes the selected item and moves selection to the
 next, and **Esc** exits selection mode and restores the original
 input text.
+
+## Plugins
+
+Plugins are bundled extension packages that can contribute skills, MCP servers,
+hooks, agents, knowledge, connectors, and tool libraries to a session. They are
+discovered from two locations:
+
+- `~/.vibe/plugins/` — user scope (global, available in every project)
+- `.vibe/plugins/` — project scope (requires trusted folder; overrides
+  user scope on name collisions)
+
+Each subdirectory inside a plugins directory is a single plugin root.
+
+### Plugin Manifest (`plugin.json`)
+
+Every plugin has a `plugin.json` manifest following the **Agent Plugins 1.0**
+schema (`https://agent-plugins.org/schemas/1.0.0/plugin.schema.json`):
+
+```json
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "description": "Optional description",
+  "author": { "name": "Author", "email": "a@b.com", "url": "https://..." },
+  "homepage": "https://...",
+  "repository": "https://...",
+  "license": "MIT",
+  "keywords": ["tag1"],
+  "extensions": {
+    "ai.mistral.vibe": {
+      "schemaVersion": 1,
+      "toolNamespace": "myNs",
+      "toolOverrides": {
+        "tool-name": { "name": "renamedTool", "exposure": "programmatic" }
+      }
+    }
+  }
+}
+```
+
+The `ai.mistral.vibe` extension is optional but gates all Vibe-specific
+components (hooks, knowledge, agents). `toolNamespace` is a
+TypeScript-identifier-safe string used to prefix all component names
+(e.g. `myNs:my-skill`). If omitted, it is derived from the plugin name.
+
+Reserved namespaces (rejected): `file_system`, `self`, `process`, `agent`,
+`vibe`.
+
+### Plugin Contents
+
+A plugin tree may contain any combination of:
+
+| Component | Location | Notes |
+|---|---|---|
+| Skills | `skills/<name>/SKILL.md` | Standard skill format |
+| MCP servers | `mcp.json` | `$schema` + `mcpServers` dict; stdio, streamable-http, sse |
+| Hooks | `ai.mistral.vibe/hooks.toml` | Max 128 hooks, 64 KiB |
+| Knowledge | `ai.mistral.vibe/knowledge/<name>/KNOWLEDGE.md` | Max 100 entries |
+| Agents | `ai.mistral.vibe/agents/*.toml` | One TOML per subagent |
+| Libraries | `libraries.json` | Node and Python library path aliases |
+| Connectors | `connectors.json` | Connector tool mappings |
+
+Environment variables `PLUGIN_ROOT` and `PLUGIN_DATA` are injected
+automatically into MCP server processes and are reserved.
+
+### Foreign Plugin Formats
+
+Vibe also adapts non-native plugin formats:
+
+| Format | Detection marker |
+|---|---|
+| Claude Code | `.claude-plugin/plugin.json` |
+| Codex | `.codex-plugin/plugin.json` |
+| Kimi Code | `.kimi.plugin.json` or `.kimi-plugin/plugin.json` |
+| OpenCode | `.opencode/plugins/`, `.opencode/skills/*/SKILL.md`, `opencode.json` |
+
+Adapted plugins can only contribute **skills** and **MCP servers** — hooks,
+knowledge, agents, libraries, and connectors are native-only. Executable code
+in foreign plugins (`.js`, `.ts`) is refused and reported as unsupported.
+
+### Plugin Pinning and Reload
+
+On session start, discovered plugins are resolved into a `ResolvedPluginSnapshot`
+— a portable, host-path-free, secret-free representation pinned to the session.
+This ensures resume/rewind reproducibility even if files change on disk.
+
+`/reload-plugins` re-discovers plugins from disk, builds a fresh snapshot, and
+prints a diff (`+` added, `-` removed, `~` updated). Tools that are no longer
+present after a reload are retained as unavailable routes so conversation
+history stays valid. Drift detection flags tools whose schema fingerprint changed
+between pin and live source.
+
+### Example Plugin Tree
+
+```
+my-plugin/
+├── plugin.json
+├── mcp.json
+├── skills/
+│   └── my-skill/
+│       └── SKILL.md
+└── ai.mistral.vibe/
+    ├── hooks.toml
+    ├── knowledge/
+    │   └── my-knowledge/
+    │       └── KNOWLEDGE.md
+    └── agents/
+        └── my-agent.toml
+```
 
 ## Skills System
 
@@ -981,8 +1111,7 @@ offered inline, and no popup is shown.
   fall back to `WARNING`. Use `/log-level` to change at runtime.
 - `LOG_MAX_BYTES` - Max size in bytes of `vibe.log` before rotation
   (default: `10485760`, i.e. 10 MiB).
-- `DEBUG_MODE` - When `true`, forces `DEBUG`-level logging. Under `vibe-acp`
-  it also attaches `debugpy` on `localhost:5678`.
+- `DEBUG_MODE` - When `true`, forces `DEBUG`-level logging.
 - `VIBE_TYPING_GRACE_PERIOD_MS` - Milliseconds the agent waits for a typing
   pause before showing tool-approval / ask-user-question dialogs (default:
   `1000`). Set to `0` to disable. Negative or non-numeric values fall back
@@ -1058,7 +1187,7 @@ LOAD when the user:
 - asks any meta question about your own behavior;
 - is unsure whether a command, flag, env var, or file is in scope — this skill is the source of truth.
 
-SCOPE: config under `~/.vibe/` and project-local `.vibe/`; `VIBE_*` and `LOG_*` env vars; models and providers; agents and subagents; skills; tools and their permission model; every slash command and CLI flag; hooks; MCP servers; connectors; trusted folders; `@`-file mentions; logs; themes; voice.""",
+SCOPE: config under `~/.vibe/` and project-local `.vibe/`; `VIBE_*` and `LOG_*` env vars; models and providers; agents and subagents; skills; tools and their permission model; every slash command and CLI flag; hooks; MCP servers; connectors; plugins; trusted folders; `@`-file mentions; logs; themes; voice.""",
     user_invocable=False,
     prompt=_PROMPT_TEMPLATE.replace("__VIBE_VERSION__", __version__),
     source=SkillSource.BUILTIN,

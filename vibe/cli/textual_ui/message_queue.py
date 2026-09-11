@@ -11,18 +11,22 @@ from uuid import uuid4
 
 from textual.widget import Widget
 
+from vibe.app_server import AppServerConnectionClosed
 from vibe.app_server.models import (
     FileImageSource,
     ImageAttachment,
     InlineImageSource,
     MentionStats,
     PreparedPrompt,
+    PublicMessageEntry,
     PublicQueuedTurn,
+    PublicSessionState,
     PublicTurnQueue,
     SessionImageContentBlock,
     SessionTextContentBlock,
     TurnUserInputEntry,
 )
+from vibe.app_server.protocol import AppServerResponseError
 from vibe.cli.textual_ui.widgets.messages import QueueHeaderMessage, UserMessage
 from vibe.observability.logging import logger
 from vibe.utils.paths import file_uri_to_path
@@ -91,6 +95,8 @@ class QueuePorts:
     remove_queued_turn: Callable[[str], Awaitable[bool]]
     resume_turn_queue: Callable[[], Awaitable[PublicTurnQueue]]
     steer_turn: Callable[..., Awaitable[None]]
+    steer_queued_turn: Callable[[str, str], Awaitable[None]]
+    refresh_session_state: Callable[[], Awaitable[PublicSessionState]]
     turn_has_started: Callable[[str], bool]
     set_loading_queue_count: Callable[[int], None]
     maybe_show_feedback_bar: Callable[[], Awaitable[None]]
@@ -126,6 +132,12 @@ class _MergedTurn:
     item_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _AtomicSteer:
+    queue_item_id: str
+    message_entry_id: str
+
+
 class QueueController:
     """Merge busy-time prompts into one app-server turn.
 
@@ -145,6 +157,9 @@ class QueueController:
         # promoted immediately, so they own their own queue item and never merge.
         self._optimistic: dict[str, _Pending] = {}
         self._header: QueueHeaderMessage | None = None
+        self._atomic_steer: _AtomicSteer | None = None
+        self._atomic_steer_settled = asyncio.Event()
+        self._atomic_steer_settled.set()
         # Serialize mutations so app-server events (sync / turn_started) cannot
         # interleave with an in-flight enqueue or replace.
         self._lock = asyncio.Lock()
@@ -163,7 +178,15 @@ class QueueController:
 
     @property
     def has_removable(self) -> bool:
-        return self._merged is not None and self._merged.item_id is not None
+        return (
+            self._merged is not None
+            and self._merged.item_id is not None
+            and self._atomic_steer is None
+        )
+
+    @property
+    def atomic_steer_in_flight(self) -> bool:
+        return self._atomic_steer is not None
 
     def __bool__(self) -> bool:
         return self._merged is not None or bool(self._optimistic)
@@ -204,38 +227,55 @@ class QueueController:
             prepared_prompt=prepared_prompt,
             message_entry_id=str(uuid4()),
         )
-        async with self._lock:
-            if optimistic_start and not self:
-                await self._enqueue_optimistic(prompt)
-            else:
-                await self._enqueue_merged(prompt)
+        while True:
+            await self._atomic_steer_settled.wait()
+            async with self._lock:
+                # Another steer can clear the event before this waiter acquires
+                # the lock, so the state must be checked again while serialized.
+                if self._atomic_steer is not None:
+                    continue
+                if optimistic_start and not self:
+                    await self._enqueue_optimistic(prompt)
+                else:
+                    await self._enqueue_merged(prompt)
+                return
 
     async def sync_server_queue(self, queue: PublicTurnQueue) -> None:
         async with self._lock:
-            self._server_queue = queue.model_copy(deep=True)
-            # Incremental queue updates never remove the merged block: promotion
-            # pops the queue item immediately before ``TurnStarted``, so a missing
-            # item does not mean the prompt was discarded. ``turn_started`` clears
-            # a promoted block and ``clear_server_queue`` clears a reset one.
-            known = set(self._optimistic)
-            if self._merged is not None and self._merged.item_id is not None:
-                known.add(self._merged.item_id)
-            for item in queue.items:
-                if item.id in known:
-                    continue
-                if self._ports.turn_has_started(item.id):
-                    continue
-                # A queued item we do not track yet: restore it as one block.
-                # The CLI only ever creates a single item, so this is the resume
-                # path, where the merged item is one combined user entry.
-                if self._merged is None:
-                    await self._restore_server_item(item)
-                    known.add(item.id)
+            await self._sync_server_queue_locked(queue)
 
-            if self._header is not None:
-                self._header.set_paused(self.paused)
-            await self._remove_header_if_empty()
-            self._push_loading_queue_count()
+    async def reconcile_snapshot(self, state: PublicSessionState) -> None:
+        """Resolve an uncertain atomic steer from authoritative session state."""
+        async with self._lock:
+            steering = self._atomic_steer
+            merged = self._merged
+            if steering is not None and merged is not None:
+                steered = any(
+                    isinstance(entry, PublicMessageEntry)
+                    and entry.role == "user"
+                    and entry.source == "turn_steer"
+                    and entry.id == steering.message_entry_id
+                    for entry in state.history or []
+                )
+                still_queued = any(
+                    item.id == steering.queue_item_id for item in state.turn_queue.items
+                )
+                started = any(
+                    turn.queue_item_id == steering.queue_item_id
+                    for turn in state.turns or []
+                )
+                if steered:
+                    await self._finish_atomic_steer_locked(merged)
+                elif still_queued:
+                    self._clear_atomic_steer()
+                elif started:
+                    await self._turn_started_locked(steering.queue_item_id)
+                else:
+                    await self._discard_merged()
+            elif steering is not None:
+                self._clear_atomic_steer()
+
+            await self._sync_server_queue_locked(state.turn_queue)
 
     async def clear_server_queue(self) -> None:
         """Forget queued prompts after a server-side session reset."""
@@ -248,6 +288,7 @@ class QueueController:
             self._server_queue = PublicTurnQueue()
             self._merged = None
             self._optimistic.clear()
+            self._clear_atomic_steer()
 
             removed: set[int] = set()
             for widget in widgets:
@@ -266,24 +307,108 @@ class QueueController:
     async def pop_last(self) -> bool:
         async with self._lock:
             merged = self._merged
-            if merged is None or merged.item_id is None or not merged.entries:
+            if (
+                self._atomic_steer is not None
+                or merged is None
+                or merged.item_id is None
+                or not merged.entries
+            ):
                 return False
             if self._ports.turn_has_started(merged.item_id):
                 return False
             return await self._drop_entry_locked(len(merged.entries) - 1)
 
-    async def steer_pending(self) -> bool:
+    async def steer_pending(self, *, expected_turn_id: str | None = None) -> bool:
         """Send the queued prompts into the active turn as steering.
 
-        Removes the merged queue item first so it cannot also promote as its own
-        turn, then steers its combined text/images into the running turn. If the
-        steer fails (e.g. the turn ended between the guard and the steer), the
-        block is re-enqueued so it still promotes as the next turn -- nothing is
-        delivered twice and nothing is lost. On success the queued widgets
-        un-pend so they read as sent messages. Returns True when a steer was
-        sent, False when there was nothing steerable (empty queue, or the merged
-        block already started).
+        Unified sessions atomically transfer the existing queue item. Legacy
+        sessions keep the remove/steer/re-enqueue fallback until they support
+        that operation. Returns True when a steer request was sent and False
+        when there was nothing steerable.
         """
+        if expected_turn_id is not None:
+            return await self._steer_pending_atomically(expected_turn_id)
+        return await self._steer_pending_legacy()
+
+    async def _steer_pending_atomically(self, expected_turn_id: str) -> bool:
+        async with self._lock:
+            merged = self._merged
+            if (
+                self._atomic_steer is not None
+                or merged is None
+                or merged.item_id is None
+            ):
+                return False
+            if self._ports.turn_has_started(merged.item_id):
+                await self._turn_started_locked(merged.item_id)
+                return False
+            steering = _AtomicSteer(merged.item_id, merged.message_entry_id)
+            self._atomic_steer = steering
+            self._atomic_steer_settled.clear()
+
+        # Do not hold the queue lock here. The RPC waits for its history event,
+        # and the event handler needs the same lock to finalize these widgets.
+        async def submit() -> None:
+            await self._ports.steer_queued_turn(
+                steering.queue_item_id, expected_turn_id
+            )
+
+        # Cancellation does not prove whether the server accepted the steer.
+        # Let the request settle so only a confirmed rejection unlocks locally.
+        request = asyncio.create_task(submit())
+        cancellation: asyncio.CancelledError | None = None
+        while not request.done():
+            try:
+                await asyncio.shield(request)
+            except asyncio.CancelledError as error:
+                cancellation = error
+            except Exception:
+                break
+
+        try:
+            request.result()
+        except AppServerResponseError:
+            await self._reject_atomic_steer()
+            if cancellation is not None:
+                raise cancellation
+            raise
+        except AppServerConnectionClosed:
+            if cancellation is not None:
+                raise cancellation
+            raise
+        except asyncio.CancelledError:
+            await self._reconcile_uncertain_atomic_steer()
+            if cancellation is not None:
+                raise cancellation
+            raise
+        except Exception:
+            await self._reconcile_uncertain_atomic_steer()
+            if cancellation is not None:
+                raise cancellation
+            raise
+
+        if cancellation is not None:
+            raise cancellation
+        return True
+
+    async def _reject_atomic_steer(self) -> None:
+        async with self._lock:
+            self._clear_atomic_steer()
+
+    async def _reconcile_uncertain_atomic_steer(self) -> None:
+        state = await self._ports.refresh_session_state()
+        await self.reconcile_snapshot(state)
+
+    async def steering_history_added(self, message_entry_id: str) -> bool:
+        """Finalize widgets when their accepted steer enters public history."""
+        async with self._lock:
+            merged = self._merged
+            if merged is None or merged.message_entry_id != message_entry_id:
+                return False
+            await self._finish_atomic_steer_locked(merged)
+            return True
+
+    async def _steer_pending_legacy(self) -> bool:
         async with self._lock:
             merged = self._merged
             if merged is None or merged.item_id is None:
@@ -340,6 +465,41 @@ class QueueController:
         merged.item_id = queued_turn.id
         self._server_queue = self._ports.current_turn_queue().model_copy(deep=True)
 
+    async def _sync_server_queue_locked(self, queue: PublicTurnQueue) -> None:
+        self._server_queue = queue.model_copy(deep=True)
+        # Incremental queue updates never remove the merged block: promotion
+        # pops the queue item immediately before ``TurnStarted``, so a missing
+        # item does not mean the prompt was discarded. ``turn_started`` clears
+        # a promoted block and ``clear_server_queue`` clears a reset one.
+        known = set(self._optimistic)
+        if self._merged is not None and self._merged.item_id is not None:
+            known.add(self._merged.item_id)
+        for item in queue.items:
+            if item.id in known:
+                continue
+            if self._ports.turn_has_started(item.id):
+                continue
+            # A queued item we do not track yet: restore it as one block.
+            # The CLI only ever creates a single item, so this is the resume
+            # path, where the merged item is one combined user entry.
+            if self._merged is None:
+                await self._restore_server_item(item)
+                known.add(item.id)
+
+        if self._header is not None:
+            self._header.set_paused(self.paused)
+        await self._remove_header_if_empty()
+        self._push_loading_queue_count()
+
+    async def _finish_atomic_steer_locked(self, merged: _MergedTurn) -> None:
+        for entry in merged.entries:
+            await entry.widget.set_pending(False)
+            self._report_prompt(entry.prompt)
+        self._merged = None
+        self._clear_atomic_steer()
+        await self._remove_header()
+        self._push_loading_queue_count()
+
     def queue_item_texts(self) -> list[tuple[int, str]]:
         return [
             (index, entry.prompt.content) for index, entry in enumerate(self._entries())
@@ -352,7 +512,11 @@ class QueueController:
     async def pop_at(self, index: int) -> bool:
         async with self._lock:
             merged = self._merged
-            if merged is None or merged.item_id is None:
+            if (
+                self._atomic_steer is not None
+                or merged is None
+                or merged.item_id is None
+            ):
                 return False
             if index < 0 or index >= len(merged.entries):
                 return False
@@ -369,7 +533,11 @@ class QueueController:
     ) -> bool:
         async with self._lock:
             merged = self._merged
-            if merged is None or merged.item_id is None:
+            if (
+                self._atomic_steer is not None
+                or merged is None
+                or merged.item_id is None
+            ):
                 return False
             if queue_index < 0 or queue_index >= len(merged.entries):
                 return False
@@ -552,6 +720,7 @@ class QueueController:
         if merged is None:
             return
         self._merged = None
+        self._clear_atomic_steer()
         for entry in merged.entries:
             await entry.widget.remove()
         await self._remove_header_if_empty()
@@ -574,6 +743,7 @@ class QueueController:
             await entry.widget.set_pending(False)
             self._report_prompt(entry.prompt)
         self._merged = None
+        self._clear_atomic_steer()
         await self._ports.maybe_show_feedback_bar()
         await self._reset_header_position()
         self._push_loading_queue_count()
@@ -715,6 +885,10 @@ class QueueController:
 
     def _push_loading_queue_count(self) -> None:
         self._ports.set_loading_queue_count(len(self))
+
+    def _clear_atomic_steer(self) -> None:
+        self._atomic_steer = None
+        self._atomic_steer_settled.set()
 
 
 @dataclass(frozen=True)
