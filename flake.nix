@@ -48,6 +48,25 @@
         untokenize = prev.untokenize.overrideAttrs (old: {
           buildInputs = (old.buildInputs or []) ++ final.resolveBuildSystem {setuptools = [];};
         });
+
+        # cryptography 50.0.0 dropped macOS x86_64 wheels, so Nix must
+        # build from sdist on that platform. The sdist uses maturin as
+        # its PEP 517 backend and links against OpenSSL / Apple frameworks.
+        cryptography = prev.cryptography.overrideAttrs (old: {
+          buildInputs = (old.buildInputs or [])
+            ++ final.resolveBuildSystem {maturin = [];}
+            ++ lib.optionals pkgs.stdenv.isLinux [pkgs.openssl]
+            ++ lib.optionals pkgs.stdenv.isDarwin [
+              pkgs.libiconv
+              pkgs.darwin.apple_sdk.frameworks.Security
+              pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
+            ];
+          nativeBuildInputs = (old.nativeBuildInputs or []) ++ [
+            pkgs.cargo
+            pkgs.rustc
+            pkgs.pkg-config
+          ];
+        });
       };
 
       pkgs = import nixpkgs {
