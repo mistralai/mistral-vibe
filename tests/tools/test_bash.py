@@ -2127,3 +2127,101 @@ def test_experimental_bash_standalone_denylisted_with_redirect_not_denied(comman
     assert result.permission is not ToolPermission.NEVER, (
         f"Command with redirect should not be denied: {command!r}"
     )
+
+
+def test_append_output_caps_log_size_at_maximum_limit(tmp_path, monkeypatch):
+    import vibe.core.tools.builtins.experimental_bash as exp_bash_mod
+
+    monkeypatch.setattr(exp_bash_mod, "_MAX_SESSION_LOG_BYTES", 50)
+    manager = TerminalSessionManager()
+    output_path = tmp_path / "out.log"
+    output_path.touch()
+
+    session = TerminalSession(
+        session_id="cap_test",
+        command="cmd",
+        cwd=tmp_path,
+        shell="/bin/sh",
+        terminal=_RunningTerminal(),
+        output_path=output_path,
+        manifest_path=tmp_path / "cap_test.json",
+        created_at=0.0,
+    )
+
+    manager._append_output(session, b"a" * 30)
+    assert output_path.stat().st_size == 30
+    assert not session.truncated_log
+
+    manager._append_output(session, b"b" * 30)
+    assert session.truncated_log
+    content = output_path.read_bytes()
+    assert content.startswith(b"a" * 30 + b"b" * 20)
+    assert exp_bash_mod._LOG_TRUNCATION_MARKER in content
+
+    # Further appends should be ignored
+    current_size = output_path.stat().st_size
+    manager._append_output(session, b"c" * 30)
+    assert output_path.stat().st_size == current_size
+
+
+def test_write_log_file_rejects_exceeding_max_session_log_bytes(tmp_path, monkeypatch):
+    import vibe.core.tools.builtins.experimental_bash as exp_bash_mod
+
+    monkeypatch.setattr(exp_bash_mod, "_MAX_SESSION_LOG_BYTES", 50)
+    manager = TerminalSessionManager()
+    manager.base_dir = tmp_path
+    manager.sessions_dir = tmp_path / "sessions"
+    manager.sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    log_path = manager.sessions_dir / "bash_manual.log"
+
+    with pytest.raises(ManagedShellError, match="limit"):
+        manager.write_log_file(log_path, action="write", content="x" * 60)
+
+    manager.write_log_file(log_path, action="write", content="x" * 40)
+
+    with pytest.raises(ManagedShellError, match="limit"):
+        manager.write_log_file(log_path, action="append", content="y" * 20)
+
+
+def test_prune_stale_sessions_removes_old_and_oversized_sessions(tmp_path, monkeypatch):
+    import os
+    import time
+
+    import vibe.core.tools.builtins.experimental_bash as exp_bash_mod
+
+    sessions_dir = tmp_path / "shell-tool" / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Create old session (> 7 days)
+    old_log = sessions_dir / "bash_old.log"
+    old_json = sessions_dir / "bash_old.json"
+    old_log.write_text("old output")
+    old_json.write_text('{"session_id": "bash_old", "status": "completed"}')
+    eight_days_ago = time.time() - (8 * 24 * 3600)
+    os.utime(old_log, (eight_days_ago, eight_days_ago))
+    os.utime(old_json, (eight_days_ago, eight_days_ago))
+
+    # 2. Create recent sessions
+    for i in range(5):
+        log = sessions_dir / f"bash_recent_{i}.log"
+        json_file = sessions_dir / f"bash_recent_{i}.json"
+        log.write_text(f"output {i}")
+        json_file.write_text(
+            f'{{"session_id": "bash_recent_{i}", "status": "completed"}}'
+        )
+
+    monkeypatch.setattr(exp_bash_mod, "_MAX_SAVED_SESSIONS", 3)
+    monkeypatch.setattr(
+        exp_bash_mod, "VIBE_HOME", type("VibeHome", (), {"path": tmp_path})()
+    )
+
+    manager = TerminalSessionManager()
+
+    # Old session should be pruned
+    assert not old_log.exists()
+    assert not old_json.exists()
+
+    # Saved sessions count should be capped to 3
+    remaining_logs = list(manager.sessions_dir.glob("*.log"))
+    assert len(remaining_logs) <= 3

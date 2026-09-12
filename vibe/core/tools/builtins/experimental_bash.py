@@ -78,6 +78,14 @@ FORCE_TERMINATION_TIMEOUT_SECONDS = 2.0
 READER_SELECT_SECONDS = 0.1
 FOREGROUND_STREAM_SECONDS = 0.2
 
+_MAX_SESSION_LOG_BYTES = 50 * 1024 * 1024
+_MAX_TOTAL_SESSIONS_BYTES = 500 * 1024 * 1024
+_MAX_SESSION_LOG_AGE_SECONDS = 7 * 24 * 3600
+_MAX_SAVED_SESSIONS = 100
+_LOG_TRUNCATION_MARKER = (
+    b"\n[Output truncated: session log reached maximum size limit (50MB)]\n"
+)
+
 CONTROL_SEQUENCES: dict[str, bytes] = {
     "ctrl_@": b"\x00",
     "ctrl_a": b"\x01",
@@ -453,6 +461,7 @@ class TerminalSession:
         default_factory=lambda: threading.Condition(threading.RLock())
     )
     reader_thread: threading.Thread | None = None
+    truncated_log: bool = False
 
 
 class SessionInfo(BaseModel):
@@ -572,6 +581,7 @@ class TerminalSessionManager:
         self._sessions: dict[str, TerminalSession] = {}
         self._orphaned: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
+        self._prune_stale_sessions()
         self._load_orphaned_manifests()
 
     def start(
@@ -800,14 +810,24 @@ class TerminalSessionManager:
         self._reject_other_family_session_log(resolved)
         self._reject_live_session_log_write(resolved)
         resolved.parent.mkdir(parents=True, exist_ok=True)
+        raw_bytes = content.encode("utf-8")
         if action == "write":
+            if len(raw_bytes) > _MAX_SESSION_LOG_BYTES:
+                raise ManagedShellError(
+                    f"log content exceeds {_MAX_SESSION_LOG_BYTES} bytes limit"
+                )
             resolved.write_text(content, encoding="utf-8")
         elif action == "append":
+            current_size = _safe_stat_size(resolved)
+            if current_size + len(raw_bytes) > _MAX_SESSION_LOG_BYTES:
+                raise ManagedShellError(
+                    f"appending to log would exceed {_MAX_SESSION_LOG_BYTES} bytes limit"
+                )
             with resolved.open("a", encoding="utf-8") as handle:
                 handle.write(content)
         else:
             raise ManagedShellError(f"unsupported write action: {action}")
-        return len(content.encode("utf-8"))
+        return len(raw_bytes)
 
     def _reject_live_session_log_write(self, path: Path) -> None:
         with self._lock:
@@ -893,8 +913,27 @@ class TerminalSessionManager:
 
     def _append_output(self, session: TerminalSession, data: bytes) -> None:
         with session.condition:
-            with session.output_path.open("ab") as handle:
-                handle.write(data)
+            if session.truncated_log:
+                return
+            current_size = _safe_stat_size(session.output_path)
+            if current_size >= _MAX_SESSION_LOG_BYTES:
+                session.truncated_log = True
+                with session.output_path.open("ab") as handle:
+                    handle.write(_LOG_TRUNCATION_MARKER)
+                session.updated_at = time.time()
+                session.condition.notify_all()
+                return
+
+            remaining_budget = _MAX_SESSION_LOG_BYTES - current_size
+            if len(data) > remaining_budget:
+                to_write = data[:remaining_budget]
+                session.truncated_log = True
+                with session.output_path.open("ab") as handle:
+                    handle.write(to_write)
+                    handle.write(_LOG_TRUNCATION_MARKER)
+            else:
+                with session.output_path.open("ab") as handle:
+                    handle.write(data)
             session.updated_at = time.time()
             session.condition.notify_all()
 
@@ -1095,6 +1134,71 @@ class TerminalSessionManager:
                 except OSError:
                     pass
             self._orphaned[session_id] = metadata
+
+    def _prune_stale_sessions(self) -> None:
+        if not self.sessions_dir.exists():
+            return
+        now = time.time()
+        session_files: dict[str, list[Path]] = {}
+        session_mtimes: dict[str, float] = {}
+
+        try:
+            children = list(self.sessions_dir.iterdir())
+        except OSError:
+            return
+
+        for child in children:
+            if not child.is_file():
+                continue
+            name = child.name
+            if not (name.endswith(".log") or name.endswith(".json")):
+                continue
+            session_id = child.stem
+            session_files.setdefault(session_id, []).append(child)
+            try:
+                mtime = child.stat().st_mtime
+            except OSError:
+                mtime = now
+            session_mtimes[session_id] = max(session_mtimes.get(session_id, 0.0), mtime)
+
+        with self._lock:
+            live_ids = set(self._sessions.keys())
+
+        orphaned_ids = [sid for sid in session_files if sid not in live_ids]
+
+        # 1. Prune by age
+        for session_id in list(orphaned_ids):
+            mtime = session_mtimes.get(session_id, 0.0)
+            if now - mtime > _MAX_SESSION_LOG_AGE_SECONDS:
+                for path in session_files.get(session_id, []):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                session_files.pop(session_id, None)
+                session_mtimes.pop(session_id, None)
+                orphaned_ids.remove(session_id)
+
+        # 2. Prune by count and total size
+        orphaned_ids.sort(key=lambda sid: session_mtimes.get(sid, 0.0))
+
+        def _total_size() -> int:
+            return sum(
+                _safe_stat_size(p) for paths in session_files.values() for p in paths
+            )
+
+        while orphaned_ids and (
+            len(session_files) > _MAX_SAVED_SESSIONS
+            or _total_size() > _MAX_TOTAL_SESSIONS_BYTES
+        ):
+            oldest_id = orphaned_ids.pop(0)
+            for path in session_files.get(oldest_id, []):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            session_files.pop(oldest_id, None)
+            session_mtimes.pop(oldest_id, None)
 
     def _info_from_manifest(self, metadata: dict[str, Any]) -> SessionInfo:
         return SessionInfo.model_validate(metadata)
