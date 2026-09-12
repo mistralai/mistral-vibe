@@ -1783,6 +1783,72 @@ def test_allowlisted_option_paths_outside_workspace_require_approval(
 
 
 @pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command_template",
+    [
+        "grep --file={outside} input.txt",
+        "grep --fil={outside} input.txt",
+        "grep -if{outside} input.txt",
+        "file --files-from={outside}",
+        "file --files-f={outside}",
+        "file -f{outside}",
+        "file --magic-file={outside} input.txt",
+        "file --magic-f={outside} input.txt",
+        "file -m{outside} input.txt",
+        "file -m{outside}:magic.mgc input.txt",
+        "du --files0-from={outside}",
+        "du --files0-f={outside}",
+        "wc --files0-from={outside}",
+        "wc --files0-f={outside}",
+        "date --file={outside}",
+        "date --fil={outside}",
+        "date -uf{outside}",
+        "diff --from-file={outside} input.txt",
+        "diff --to={outside} input.txt",
+    ],
+)
+def test_read_only_option_paths_outside_workspace_require_approval(
+    shell_kind, command_template, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside" / "data.txt"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+
+    permission = _resolve_default_shell_permission(
+        shell_kind, command_template.format(outside=outside)
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        str(outside.parent) in required.label
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep --file=patterns.txt input.txt",
+        "file -f names.txt",
+        "file --magic-file=magic.mgc input.txt",
+        "du --files0-from=names.txt",
+        "wc --files0-from=names.txt",
+        "date -f dates.txt",
+        "diff --from-file=base.txt input.txt",
+    ],
+)
+def test_read_only_option_paths_inside_workspace_remain_allowed(shell_kind, command):
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
 def test_legacy_bash_quoted_outside_path_requires_approval(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     outside = tmp_path.parent / "outside.txt"

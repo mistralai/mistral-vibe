@@ -7,7 +7,7 @@ from dataclasses import dataclass
 class ShellCommandPolicy:
     requires_approval: bool = False
     inspect_positional_paths: bool = False
-    embedded_path_values: tuple[str, ...] = ()
+    option_path_values: tuple[str, ...] = ()
 
 
 def _matches_long_option(token: str, option: str) -> bool:
@@ -32,18 +32,38 @@ def _contains_short_option(
     return False
 
 
-def _embedded_long_option_values(
-    args: list[str], options: frozenset[str]
-) -> tuple[str, ...]:
+def _long_option_values(args: list[str], options: frozenset[str]) -> tuple[str, ...]:
+    option_tokens = _option_tokens(args)
     values: list[str] = []
-    for token in _option_tokens(args):
-        _, separator, value = token.partition("=")
-        if (
-            separator
-            and value
-            and any(_matches_long_option(token, option) for option in options)
-        ):
-            values.append(value)
+    for index, token in enumerate(option_tokens):
+        _, separator, attached_value = token.partition("=")
+        if not any(_matches_long_option(token, option) for option in options):
+            continue
+        if separator and attached_value:
+            values.append(attached_value)
+        elif not separator and index + 1 < len(option_tokens):
+            values.append(option_tokens[index + 1])
+    return tuple(values)
+
+
+def _short_option_values(
+    args: list[str], options: frozenset[str], *, preceding_value_options: frozenset[str]
+) -> tuple[str, ...]:
+    option_tokens = _option_tokens(args)
+    values: list[str] = []
+    for token_index, token in enumerate(option_tokens):
+        if not token.startswith("-") or token.startswith("--"):
+            continue
+        for option_index, option in enumerate(token[1:]):
+            if option in options:
+                attached_value = token[option_index + 2 :]
+                if attached_value:
+                    values.append(attached_value)
+                elif token_index + 1 < len(option_tokens):
+                    values.append(option_tokens[token_index + 1])
+                break
+            if option in preceding_value_options:
+                break
     return tuple(values)
 
 
@@ -69,9 +89,64 @@ def _sort_policy(args: list[str]) -> ShellCommandPolicy:
     )
     return ShellCommandPolicy(
         requires_approval=requires_approval,
-        embedded_path_values=_embedded_long_option_values(
-            args, frozenset({"--random-source"})
+        option_path_values=_long_option_values(args, frozenset({"--random-source"})),
+    )
+
+
+def _grep_policy(args: list[str]) -> ShellCommandPolicy:
+    return ShellCommandPolicy(
+        option_path_values=(
+            *_long_option_values(args, frozenset({"--file"})),
+            *_short_option_values(
+                args,
+                frozenset({"f"}),
+                preceding_value_options=frozenset({"A", "B", "C", "D", "d", "e", "m"}),
+            ),
+        )
+    )
+
+
+def _file_policy(args: list[str]) -> ShellCommandPolicy:
+    files_from = (
+        *_long_option_values(args, frozenset({"--files-from"})),
+        *_short_option_values(
+            args, frozenset({"f"}), preceding_value_options=frozenset({"e", "F", "P"})
         ),
+    )
+    magic_files = (
+        *_long_option_values(args, frozenset({"--magic-file"})),
+        *_short_option_values(
+            args, frozenset({"m"}), preceding_value_options=frozenset({"e", "F", "P"})
+        ),
+    )
+    return ShellCommandPolicy(
+        option_path_values=files_from
+        + tuple(path for value in magic_files for path in value.split(":"))
+    )
+
+
+def _files0_from_policy(args: list[str]) -> ShellCommandPolicy:
+    return ShellCommandPolicy(
+        option_path_values=_long_option_values(args, frozenset({"--files0-from"}))
+    )
+
+
+def _date_policy(args: list[str]) -> ShellCommandPolicy:
+    return ShellCommandPolicy(
+        option_path_values=(
+            *_long_option_values(args, frozenset({"--file"})),
+            *_short_option_values(
+                args, frozenset({"f"}), preceding_value_options=frozenset({"d", "s"})
+            ),
+        )
+    )
+
+
+def _diff_policy(args: list[str]) -> ShellCommandPolicy:
+    return ShellCommandPolicy(
+        option_path_values=_long_option_values(
+            args, frozenset({"--from-file", "--to-file"})
+        )
     )
 
 
@@ -140,11 +215,17 @@ def _git_policy(args: list[str]) -> ShellCommandPolicy:
 
 
 _COMMAND_POLICIES = {
+    "date": _date_policy,
+    "diff": _diff_policy,
+    "du": _files0_from_policy,
+    "file": _file_policy,
     "find": _find_policy,
     "git": _git_policy,
+    "grep": _grep_policy,
     "less": _less_policy,
     "sort": _sort_policy,
     "tree": _tree_policy,
+    "wc": _files0_from_policy,
 }
 
 
@@ -165,7 +246,7 @@ def path_candidates(
         return ()
 
     policy = analyze_shell_command_policy(tokens)
-    candidates = list(policy.embedded_path_values)
+    candidates = list(policy.option_path_values)
     if not (inspect_positional_paths or policy.inspect_positional_paths):
         return tuple(candidates)
 
