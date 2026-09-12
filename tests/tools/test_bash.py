@@ -2077,6 +2077,19 @@ def test_new_read_only_commands_are_allowlisted():
         "for value in 1; do PATH=/tmp; git status; done",
         "FOO=bar",
         'cat "$HOME/.ssh/id_rsa"',
+        "echo ${VALUE:-harmless}",
+        "echo {harmless,safe}",
+        "echo {1..3}",
+        "echo $((1 + 2))",
+        "for value in harmless; do echo harmless; done",
+        "for ((i = 0; i < 1; i++)); do echo harmless; done",
+        "while echo harmless; do echo harmless; done",
+        "if echo harmless; then echo harmless; fi",
+        "case harmless in harmless) echo harmless;; esac",
+        "(echo harmless)",
+        "{ echo harmless; }",
+        "harmless() { echo harmless; }",
+        "echo harmless &",
     ],
     ids=[
         "ansi-c-string",
@@ -2091,10 +2104,23 @@ def test_new_read_only_commands_are_allowlisted():
         "loop-assignment",
         "assignment-only",
         "variable-expansion",
+        "parameter-default-expansion",
+        "brace-expansion",
+        "brace-range-expansion",
+        "arithmetic-expansion",
+        "for-loop",
+        "c-style-for-loop",
+        "while-loop",
+        "conditional",
+        "case-conditional",
+        "subshell",
+        "group",
+        "function-definition",
+        "background",
     ],
 )
 def test_shell_permission_analysis_fails_closed(shell_kind, command):
-    """Permission resolution must reject lossy parse results without execution."""
+    """Permission resolution must reject syntax not modeled for auto-approval."""
     if shell_kind == "legacy":
         tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
         result = tool.resolve_permission(BashArgs(command=command))

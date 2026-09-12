@@ -24,10 +24,24 @@ _REDIRECTION_NODES = {
 
 _DYNAMIC_NODES = {
     "ansi_c_string": "ANSI-C quoted arguments require approval",
+    "arithmetic_expansion": "shell arithmetic expansion requires approval",
+    "brace_expression": "shell brace expansion requires approval",
     "command_substitution": "command substitution requires approval",
+    "expansion": "shell parameter expansion requires approval",
     "process_substitution": "process substitution requires approval",
     "simple_expansion": "shell variable expansion requires approval",
     "variable_assignment": "environment assignments require approval",
+}
+
+_COMPOUND_NODES = {
+    "case_statement",
+    "compound_statement",
+    "c_style_for_statement",
+    "for_statement",
+    "function_definition",
+    "if_statement",
+    "subshell",
+    "while_statement",
 }
 
 
@@ -60,6 +74,15 @@ def analyze_shell_command(command: str) -> ShellPermissionAnalysis:
             approval_reasons.add("shell redirection requires approval")
         if reason := _DYNAMIC_NODES.get(node.type):
             approval_reasons.add(reason)
+        if node.type == "concatenation" and any(
+            child.type == "word" and child.text in {b"{", b"}"}
+            for child in node.children
+        ):
+            approval_reasons.add("shell brace expansion requires approval")
+        if node.type in _COMPOUND_NODES:
+            approval_reasons.add(f"shell {node.type} requires approval")
+        if node.type == "&":
+            approval_reasons.add("background execution requires approval")
 
         if node.type == "command":
             parts: list[str] = []
