@@ -49,24 +49,31 @@
           buildInputs = (old.buildInputs or []) ++ final.resolveBuildSystem {setuptools = [];};
         });
 
-        # cryptography 50.0.0 dropped macOS x86_64 wheels, so Nix must
-        # build from sdist on that platform. The sdist uses maturin as
-        # its PEP 517 backend and links against OpenSSL / Apple frameworks.
-        cryptography = prev.cryptography.overrideAttrs (old: {
-          buildInputs = (old.buildInputs or [])
-            ++ final.resolveBuildSystem {maturin = [];}
-            ++ lib.optionals pkgs.stdenv.isLinux [pkgs.openssl]
-            ++ lib.optionals pkgs.stdenv.isDarwin [
-              pkgs.libiconv
-              pkgs.darwin.apple_sdk.frameworks.Security
-              pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
-            ];
-          nativeBuildInputs = (old.nativeBuildInputs or []) ++ [
-            pkgs.cargo
-            pkgs.rustc
-            pkgs.pkg-config
-          ];
-        });
+        # cryptography 50.0.0 has no macOS x86_64 wheel. Source builds need
+        # the Python backend and vendored Rust crates inside the Nix sandbox.
+        cryptography = prev.cryptography.overrideAttrs (old:
+          lib.optionalAttrs (old.passthru.format == "pyproject") {
+            cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+              inherit (old) pname version src;
+              # Matches cryptography 50.0.0 in nixpkgs (a7e1a760ab81).
+              hash = "sha256-heJGLh0MgDPpksWyPLaIkZ5gVEWx8UnaJKv4GvclpmI=";
+            };
+            buildInputs = (old.buildInputs or [])
+              ++ [pkgs.openssl]
+              ++ lib.optionals pkgs.stdenv.isDarwin [pkgs.libiconv];
+            nativeBuildInputs = (old.nativeBuildInputs or [])
+              ++ final.resolveBuildSystem {
+                maturin = [];
+                cffi = [];
+                setuptools = [];
+              }
+              ++ [
+                pkgs.rustPlatform.cargoSetupHook
+                pkgs.cargo
+                pkgs.rustc
+                pkgs.pkg-config
+              ];
+          });
       };
 
       pkgs = import nixpkgs {
