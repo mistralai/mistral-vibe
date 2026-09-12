@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 from collections.abc import AsyncGenerator
 from functools import lru_cache
 from pathlib import Path
@@ -253,6 +254,107 @@ def _collect_outside_dirs(
 
 def _matches_pattern(command: str, pattern: str) -> bool:
     return command == pattern or command.startswith(pattern + " ")
+
+
+_STREAM_PREVIEW_MAX_CHARS = 200
+_STREAM_TAIL_MAX_CHARS = 500
+
+
+def _last_nonempty_line(text: str) -> str:
+    for line in reversed(text.splitlines()):
+        if line.strip():
+            return line
+    return ""
+
+
+def _truncate_preview(text: str) -> str:
+    text = text.strip()
+    if len(text) > _STREAM_PREVIEW_MAX_CHARS:
+        return text[:_STREAM_PREVIEW_MAX_CHARS]
+    return text
+
+
+async def _drain_stream_for_preview(
+    stream: asyncio.StreamReader | None,
+    buf: bytearray,
+    queue: asyncio.Queue[tuple[str, str]],
+    tag: str,
+) -> None:
+    """Read ``stream`` incrementally, buffering raw bytes and reporting a live preview.
+
+    Raw bytes are appended to ``buf`` unmodified (used later for the final,
+    exact decode via ``decode_safe``, matching prior ``communicate()``
+    behavior). Separately, a best-effort incremental UTF-8 decode is used only
+    to compute short "latest output line" previews pushed onto ``queue`` so
+    the caller can surface live progress without buffering the whole output
+    twice.
+    """
+    if stream is None:
+        await queue.put(("eof", tag))
+        return
+
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    tail = ""
+    try:
+        while True:
+            chunk = await stream.read(4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            text = decoder.decode(chunk)
+            if text:
+                tail += text
+                if len(tail) > _STREAM_TAIL_MAX_CHARS:
+                    tail = tail[-_STREAM_TAIL_MAX_CHARS:]
+                last_line = _last_nonempty_line(tail)
+                if last_line:
+                    await queue.put(("line", _truncate_preview(last_line)))
+        final_text = decoder.decode(b"", final=True)
+        if final_text:
+            tail += final_text
+            last_line = _last_nonempty_line(tail)
+            if last_line:
+                await queue.put(("line", _truncate_preview(last_line)))
+    finally:
+        await queue.put(("eof", tag))
+
+
+async def _iter_preview_updates(
+    queue: asyncio.Queue[tuple[str, str]], reader_count: int, deadline: float
+) -> AsyncGenerator[str, None]:
+    """Yield deduplicated preview lines until every reader reports EOF.
+
+    Raises ``TimeoutError`` when ``deadline`` (event-loop time) passes before
+    the readers finish.
+    """
+    loop = asyncio.get_running_loop()
+    done_readers = 0
+    last_preview: str | None = None
+    while done_readers < reader_count:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError
+        kind, payload = await asyncio.wait_for(queue.get(), timeout=remaining)
+        if kind == "eof":
+            done_readers += 1
+        elif payload and payload != last_preview:
+            last_preview = payload
+            yield payload
+
+
+async def _settle_reader_tasks(reader_tasks: list[asyncio.Task[None]]) -> None:
+    # On the success path both readers have already observed EOF, so this
+    # settles immediately. On the timeout or cancellation paths a reader may
+    # still be blocked reading a live pipe; cancel it rather than awaiting,
+    # or an external cancellation could hang here until the process exits.
+    for task in reader_tasks:
+        if not task.done():
+            task.cancel()
+    for task in reader_tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 class BashToolConfig(BaseToolConfig):
@@ -576,19 +678,54 @@ class Bash(
         try:
             proc = await spawn_shell_command(args.command, cwd=self.cwd)
 
+            stdout_buf = bytearray()
+            stderr_buf = bytearray()
+            queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+
+            reader_tasks = [
+                asyncio.create_task(
+                    _drain_stream_for_preview(proc.stdout, stdout_buf, queue, "stdout")
+                ),
+                asyncio.create_task(
+                    _drain_stream_for_preview(proc.stderr, stderr_buf, queue, "stderr")
+                ),
+            ]
+
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout
+
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
+                async for preview in _iter_preview_updates(
+                    queue, len(reader_tasks), deadline
+                ):
+                    if ctx is not None:
+                        yield ToolStreamEvent(
+                            tool_name=self.get_name(),
+                            tool_call_id=ctx.tool_call_id,
+                            message=preview,
+                        )
+
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError
+                await asyncio.wait_for(proc.wait(), timeout=remaining)
             except TimeoutError:
+                for task in reader_tasks:
+                    task.cancel()
                 await kill_async_subprocess(proc)
                 raise self._build_timeout_error(args.command, timeout)
+            finally:
+                await _settle_reader_tasks(reader_tasks)
 
             stdout = (
-                decode_console_safe(stdout_bytes)[:max_bytes] if stdout_bytes else ""
+                decode_safe(bytes(stdout_buf), from_subprocess=True).text[:max_bytes]
+                if stdout_buf
+                else ""
             )
             stderr = (
-                decode_console_safe(stderr_bytes)[:max_bytes] if stderr_bytes else ""
+                decode_safe(bytes(stderr_buf), from_subprocess=True).text[:max_bytes]
+                if stderr_buf
+                else ""
             )
 
             yield completed_shell_result(
