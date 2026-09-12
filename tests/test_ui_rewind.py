@@ -263,7 +263,7 @@ async def test_rewind_confirm_edits_message_and_prefills_input() -> None:
 
         # Input should be pre-filled with the rewound message
         chat_input = app.query_one(ChatInputContainer)
-        assert chat_input.value == "world"
+        assert chat_input.value == ">world"
 
 
 @pytest.mark.asyncio
