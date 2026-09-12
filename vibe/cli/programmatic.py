@@ -31,6 +31,7 @@ from vibe.app_server.models import (
     TeleportSummarizingContext,
 )
 from vibe.app_server.session import AppServerSession
+from vibe.cli.rich_streaming import VisualStreamingOutput
 from vibe.observability.logging import logger
 
 
@@ -38,6 +39,7 @@ class OutputFormat(StrEnum):
     TEXT = auto()
     JSON = auto()
     STREAMING = auto()
+    RICH = auto()
 
 
 class ProgrammaticLimitError(RuntimeError):
@@ -56,14 +58,25 @@ class ProgrammaticOutput:
         self._stream = stream or sys.stdout
         self._emitted: set[str] = set()
         self._teleport_url: str | None = None
+        self._rich_output: VisualStreamingOutput | None = (
+            VisualStreamingOutput(self._stream)
+            if output_format is OutputFormat.RICH
+            else None
+        )
 
     def start(self, history: list[PublicHistoryEntry]) -> None:
+        if self._format is OutputFormat.RICH and self._rich_output:
+            self._rich_output.start(history)
+            return
         if self._format is not OutputFormat.STREAMING:
             return
         for entry in history:
             self._emit_completed(entry)
 
     def consume(self, event: AppServerEvent) -> None:
+        if self._format is OutputFormat.RICH and self._rich_output:
+            self._rich_output.consume(event)
+            return
         if self._format is not OutputFormat.STREAMING:
             return
         match event:
@@ -97,6 +110,8 @@ class ProgrammaticOutput:
                 pass
 
     def finalize(self, history: list[PublicHistoryEntry]) -> str | None:
+        if self._format is OutputFormat.RICH and self._rich_output:
+            return self._rich_output.finalize(history)
         if self._format is OutputFormat.STREAMING:
             return None
         if self._format is OutputFormat.JSON:
@@ -151,6 +166,13 @@ def run_programmatic(
         try:
             await session.resources.runtime.wait_until_ready()
             await _warn_if_workspace_untrusted(session)
+            active_model = getattr(
+                session.resources.config.current, "active_model", None
+            )
+            if active_model and hasattr(output, "_rich_output") and output._rich_output:
+                output._rich_output.set_model_name(
+                    getattr(active_model, "alias", "") or str(active_model)
+                )
             output.start(session.history)
             if teleport and session.resources.config.current.vibe_code_enabled:
                 await _teleport(session, prompt, output)
