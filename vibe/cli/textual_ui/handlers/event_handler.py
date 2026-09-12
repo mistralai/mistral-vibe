@@ -214,15 +214,20 @@ class EventHandler:
                     await self.finalize_streaming()
             case PublicEffectEntry():
                 call = self.tool_calls.get(entry.id)
+                stream_status: str | None = None
                 if call is not None:
                     call.update_entry(entry)
                     if output := _appended_text(update.patch, "/state/outputText"):
                         call.set_stream_message(output)
+                        stream_status = output.strip().split("\n")[-1][:100]
                 if _effect_became_terminal(update):
                     await self.finalize_streaming()
                     await self._handle_effect_completed(entry, loading_widget)
                 elif loading_widget is not None:
-                    loading_widget.set_status(entry.detail.display.status_text)
+                    if stream_status:
+                        loading_widget.set_status(stream_status)
+                    else:
+                        loading_widget.set_status(entry.detail.display.status_text)
             case PublicCheckpointEntry(kind="compaction"):
                 if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
                     await self.finalize_streaming()
