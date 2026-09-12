@@ -1996,7 +1996,7 @@ def test_new_read_only_commands_are_allowlisted():
         "grep pattern file.txt",
         "cut -d',' -f1 file.csv",
         "sort file.txt",
-        "tr 'a' 'b' < file.txt",
+        "tr 'a' 'b' file.txt",
         "uniq file.txt",
         "basename file.txt",
         "comm file1.txt file2.txt",
@@ -2031,6 +2031,47 @@ def test_new_read_only_commands_are_allowlisted():
         assert permission.permission is ToolPermission.ALWAYS, (
             f"Command '{cmd}' should be always allowed"
         )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo harmless > /tmp/outside",
+        r"find . $'-exec' echo harmless {} \;",
+        "echo $( {/bin/bash,-c,id} ) $( (){ /bin/bash -c id } )",
+        "GIT_PAGER=cat git diff",
+    ],
+    ids=["redirect", "ansi-c-string", "parse-error", "environment-assignment"],
+)
+def test_shell_permission_analysis_fails_closed(shell_kind, command):
+    """Permission resolution must reject lossy parse results without execution."""
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_shell_permission_analysis_preserves_simple_allowlisted_commands(shell_kind):
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command="git status"))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command="git status"))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ALWAYS
 
 
 def _force_windows_bash(monkeypatch: pytest.MonkeyPatch) -> None:
