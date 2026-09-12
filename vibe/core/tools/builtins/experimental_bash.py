@@ -76,6 +76,12 @@ DEFAULT_MAX_POLL_SECONDS = 300.0
 KILL_GRACE_SECONDS = 2.0
 FORCE_TERMINATION_TIMEOUT_SECONDS = 2.0
 READER_SELECT_SECONDS = 0.1
+# A runaway command can emit output for as long as it runs, and the session log
+# was appended to unconditionally, so a single session could fill the disk. Keep
+# the most recent output: inspect_session and the tool's own tail reads are what
+# surface this file, and the newest bytes are the ones they ask for.
+DEFAULT_MAX_LOG_BYTES = 64 * 1024 * 1024
+_LOG_TRUNCATION_NOTICE = b"[vibe] earlier output dropped to bound log size\n"
 FOREGROUND_STREAM_SECONDS = 0.2
 
 CONTROL_SEQUENCES: dict[str, bytes] = {
@@ -546,6 +552,16 @@ def _skip_utf8_continuation_prefix(path: Path, cursor: int) -> int:
     return cursor + len(prefix)
 
 
+def _strip_utf8_continuation_prefix(data: bytes) -> bytes:
+    # A byte-offset cut can land inside a multi-byte character; drop the orphaned
+    # continuation bytes so the retained tail still decodes.
+    for index, byte in enumerate(data):
+        if _UTF8_CONTINUATION_MIN <= byte < _UTF8_LEAD_2:
+            continue
+        return data[index:]
+    return b""
+
+
 def _safe_stat_size(path: Path) -> int:
     try:
         return path.stat().st_size
@@ -895,8 +911,29 @@ class TerminalSessionManager:
         with session.condition:
             with session.output_path.open("ab") as handle:
                 handle.write(data)
+            self._trim_output_locked(session)
             session.updated_at = time.time()
             session.condition.notify_all()
+
+    # Readers clamp a stale cursor with min(cursor, size), so dropping the head
+    # costs a reader the bytes it had not fetched yet rather than breaking it.
+    def _trim_output_locked(self, session: TerminalSession) -> None:
+        path = session.output_path
+        size = _safe_stat_size(path)
+        if size <= DEFAULT_MAX_LOG_BYTES:
+            return
+        keep = DEFAULT_MAX_LOG_BYTES // 2
+        try:
+            with path.open("rb") as handle:
+                handle.seek(size - keep)
+                tail = handle.read()
+            path.write_bytes(
+                _LOG_TRUNCATION_NOTICE + _strip_utf8_continuation_prefix(tail)
+            )
+        except OSError:
+            # Bounding the log is best effort: a failure here must not take down
+            # the reader thread and with it the session's output.
+            return
 
     def _terminate_sessions(
         self, sessions: list[TerminalSession], *, force: bool = False
