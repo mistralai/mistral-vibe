@@ -2038,10 +2038,32 @@ def test_new_read_only_commands_are_allowlisted():
     "command",
     [
         r"find . $'-exec' echo harmless {} \;",
+        r"find . $'-ex'c echo harmless {} \;",
+        r'find . "$(basename ./-exe)c" echo harmless {} \;',
         "echo $( {/bin/bash,-c,id} ) $( (){ /bin/bash -c id } )",
         "GIT_PAGER=cat git diff",
+        "PATH=/tmp; git status",
+        "PATH=/tmp && git status",
+        "(PATH=/tmp; git status)",
+        "{ PATH=/tmp; git status; }",
+        "for value in 1; do PATH=/tmp; git status; done",
+        "FOO=bar",
+        'cat "$HOME/.ssh/id_rsa"',
     ],
-    ids=["ansi-c-string", "parse-error", "environment-assignment"],
+    ids=[
+        "ansi-c-string",
+        "nested-ansi-c-string",
+        "command-substitution",
+        "parse-error",
+        "environment-assignment",
+        "standalone-assignment",
+        "and-list-assignment",
+        "subshell-assignment",
+        "group-assignment",
+        "loop-assignment",
+        "assignment-only",
+        "variable-expansion",
+    ],
 )
 def test_shell_permission_analysis_fails_closed(shell_kind, command):
     """Permission resolution must reject lossy parse results without execution."""

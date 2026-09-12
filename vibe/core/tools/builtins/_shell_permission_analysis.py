@@ -22,6 +22,14 @@ _REDIRECTION_NODES = {
     "redirected_statement",
 }
 
+_DYNAMIC_NODES = {
+    "ansi_c_string": "ANSI-C quoted arguments require approval",
+    "command_substitution": "command substitution requires approval",
+    "process_substitution": "process substitution requires approval",
+    "simple_expansion": "shell variable expansion requires approval",
+    "variable_assignment": "environment assignments require approval",
+}
+
 
 @dataclass(frozen=True)
 class ShellPermissionAnalysis:
@@ -50,6 +58,8 @@ def analyze_shell_command(command: str) -> ShellPermissionAnalysis:
     def find_commands(node: Node) -> None:
         if node.type in _REDIRECTION_NODES:
             approval_reasons.add("shell redirection requires approval")
+        if reason := _DYNAMIC_NODES.get(node.type):
+            approval_reasons.add(reason)
 
         if node.type == "command":
             parts: list[str] = []
@@ -62,9 +72,8 @@ def analyze_shell_command(command: str) -> ShellPermissionAnalysis:
                     # decode Bash ANSI-C quoting.
                     if child.text is not None:
                         parts.append(child.text.decode("utf-8"))
-                    approval_reasons.add("ANSI-C quoted arguments require approval")
                 elif child.type == "variable_assignment":
-                    approval_reasons.add("environment assignments require approval")
+                    pass
                 else:
                     # The executor receives the original shell string. If policy
                     # extraction omits a semantic command child, the two views can
