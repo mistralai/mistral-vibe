@@ -2217,6 +2217,39 @@ def test_shell_permission_analysis_preserves_simple_allowlisted_commands(shell_k
     assert result.permission is ToolPermission.ALWAYS
 
 
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("command", "expected_reason"),
+    [
+        ("echo $(id)", "command substitution"),
+        ("echo $HOME", "variable expansion"),
+        ("cat < input.txt", "redirection"),
+        ("(PATH=/tmp; git status)", "environment assignments, subshell"),
+        ("&&", "a syntax error"),
+    ],
+    ids=["substitution", "expansion", "redirection", "multiple", "parse-error"],
+)
+def test_shell_approval_prompt_names_the_offending_syntax(
+    shell_kind, command, expected_reason
+):
+    """The prompt must say which construct blocked auto-approval, not just that one did."""
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    assert any(
+        required.label == f"shell syntax requiring approval: {expected_reason}"
+        for required in result.required_permissions
+    )
+
+
 def _force_windows_bash(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(

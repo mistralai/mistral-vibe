@@ -540,7 +540,7 @@ class Bash(
                 self._build_command_required_permission(
                     invocation_pattern=args.command,
                     session_pattern=args.command,
-                    label="shell syntax requiring approval",
+                    label=analysis.approval_label,
                 )
             )
         if not required:
