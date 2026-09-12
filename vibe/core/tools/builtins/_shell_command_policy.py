@@ -132,13 +132,25 @@ def _files0_from_policy(args: list[str]) -> ShellCommandPolicy:
 
 
 def _date_policy(args: list[str]) -> ShellCommandPolicy:
+    # --set/-s writes the system clock. -I takes an optional attached value, so it
+    # terminates a short cluster and keeps `date -Iseconds` out of the -s match.
+    requires_approval = any(
+        _matches_long_option(token, "--set")
+        or _contains_short_option(
+            token,
+            frozenset({"s"}),
+            preceding_value_options=frozenset({"d", "f", "I", "r"}),
+        )
+        for token in _option_tokens(args)
+    )
     return ShellCommandPolicy(
+        requires_approval=requires_approval,
         option_path_values=(
             *_long_option_values(args, frozenset({"--file"})),
             *_short_option_values(
                 args, frozenset({"f"}), preceding_value_options=frozenset({"d", "s"})
             ),
-        )
+        ),
     )
 
 

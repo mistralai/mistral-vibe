@@ -1750,6 +1750,10 @@ def _resolve_default_shell_permission(
         "git diff --out=diff.txt",
         "git log --output=log.txt",
         "git diff --ext-diff",
+        "date -s 2020-01-01",
+        "date -us 2020-01-01",
+        "date --set=2020-01-01",
+        "date --se=2020-01-01",
     ],
 )
 def test_side_effecting_allowlisted_options_require_approval(shell_kind, command):
@@ -1770,6 +1774,9 @@ def test_side_effecting_allowlisted_options_require_approval(shell_kind, command
         "git diff --stat",
         "git log --oneline",
         "sort -- --output=ordinary-filename",
+        "date -d yesterday",
+        "date -Iseconds",
+        "date -- -s",
     ],
 )
 def test_benign_allowlisted_options_remain_allowed(shell_kind, command):
