@@ -131,8 +131,10 @@ async def test_handles_timeout(bash):
     assert "Command timed out after 1s" in str(err.value)
 
 
-@pytest.mark.asyncio
-async def test_windows_cmd_spawn_ignores_non_cmd_comspec(monkeypatch):
+_WINDOWS_SPAWN_SENTINEL = object()
+
+
+def _arrange_windows_cmd_shell(monkeypatch) -> list[tuple[tuple, dict]]:
     monkeypatch.setattr(sys, "platform", "win32")
     _hide_standard_git_installs(monkeypatch)
     monkeypatch.setenv(
@@ -143,32 +145,52 @@ async def test_windows_cmd_spawn_ignores_non_cmd_comspec(monkeypatch):
         "vibe.utils.platform.shutil.which", lambda name, path=None: None
     )
 
-    proc = object()
-    calls = []
-
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        calls.append((args, kwargs))
-        return proc
+    calls: list[tuple[tuple, dict]] = []
 
     async def fake_create_subprocess_shell(*args, **kwargs):
-        raise AssertionError("cmd fallback must not use COMSPEC-backed shell mode")
+        calls.append((args, kwargs))
+        return _WINDOWS_SPAWN_SENTINEL
 
-    monkeypatch.setattr(
-        bash_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
-    )
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        raise AssertionError("cmd fallback must not go through list2cmdline")
+
     monkeypatch.setattr(
         bash_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
     )
+    monkeypatch.setattr(
+        bash_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_windows_cmd_spawn_ignores_non_cmd_comspec(monkeypatch):
+    calls = _arrange_windows_cmd_shell(monkeypatch)
 
     result = await bash_module.spawn_shell_command("echo hello")
 
-    assert result is proc
-    assert calls[0][0][:4] == (
+    assert result is _WINDOWS_SPAWN_SENTINEL
+    assert calls[0][0][0] == "echo hello"
+    assert calls[0][1]["executable"] == "C:\\Windows\\System32\\cmd.exe"
+
+
+@pytest.mark.asyncio
+async def test_windows_cmd_spawn_keeps_quoted_arguments_with_blanks_intact(monkeypatch):
+    calls = _arrange_windows_cmd_shell(monkeypatch)
+    command = 'git commit -m "Foo Bar Baz"'
+
+    await bash_module.spawn_shell_command(command)
+
+    assert calls[0][0][0] == command
+    # Regression guard for the argv form: list2cmdline escapes the inner quotes
+    # as \", cmd.exe strips only the outer pair, and git then sees Bar and Baz"
+    # as separate pathspecs.
+    assert '\\"' in subprocess.list2cmdline([
         "C:\\Windows\\System32\\cmd.exe",
         "/d",
         "/c",
-        "echo hello",
-    )
+        command,
+    ])
 
 
 @pytest.mark.asyncio
