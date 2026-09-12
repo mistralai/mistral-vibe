@@ -1717,6 +1717,99 @@ def test_shell_wrappers_preserve_nested_denylist(shell_kind, wrapper):
     assert "matches denylist pattern 'denied-marker'" in (result.reason or "")
 
 
+def _resolve_default_shell_permission(
+    shell_kind: str, command: str
+) -> PermissionContext | None:
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        return tool.resolve_permission(BashArgs(command=command))
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+    return tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sort -o sorted.txt input.txt",
+        "sort -rosorted.txt input.txt",
+        "sort --out=sorted.txt input.txt",
+        "sort --temporary-directory=. input.txt",
+        "sort --compress-program=gzip input.txt",
+        "find . -delete",
+        "find . -fprint matches.txt",
+        r"find . -exec echo {} \;",
+        "less -o less.log input.txt",
+        "less -Noless.log input.txt",
+        "less --LOG-FILE=less.log input.txt",
+        "tree -o tree.txt .",
+        "tree -aotree.txt .",
+        "git diff --output=diff.txt",
+        "git diff --out=diff.txt",
+        "git log --output=log.txt",
+        "git diff --ext-diff",
+    ],
+)
+def test_side_effecting_allowlisted_options_require_approval(shell_kind, command):
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sort -r input.txt",
+        "find . -name '*.py'",
+        "less -N input.txt",
+        "tree -L 2 .",
+        "git diff --stat",
+        "git log --oneline",
+        "sort -- --output=ordinary-filename",
+    ],
+)
+def test_benign_allowlisted_options_remain_allowed(shell_kind, command):
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command_template",
+    [
+        "tree {outside}",
+        "git diff --no-index {outside} other.txt",
+        "sort --random-source={outside} input.txt",
+        "sort --random={outside} input.txt",
+    ],
+)
+def test_allowlisted_option_paths_outside_workspace_require_approval(
+    shell_kind, command_template, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside" / "data.txt"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+
+    permission = _resolve_default_shell_permission(
+        shell_kind, command_template.format(outside=outside)
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        str(outside.parent) in required.label
+        for required in permission.required_permissions
+    )
+
+
 @pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
 def test_legacy_bash_quoted_outside_path_requires_approval(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
