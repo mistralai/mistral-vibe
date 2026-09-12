@@ -42,6 +42,7 @@ _COMPOUND_NODES = {
     "function_definition": "function definition",
     "if_statement": "if statement",
     "subshell": "subshell",
+    "test_command": "test expression",
     "while_statement": "while loop",
 }
 
