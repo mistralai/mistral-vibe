@@ -1689,6 +1689,34 @@ def test_find_execution_predicate_does_not_override_denylist():
     assert "matches denylist pattern 'passwd'" in (permission.reason or "")
 
 
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("wrapper", ["eval", "exec"])
+def test_shell_wrappers_preserve_nested_denylist(shell_kind, wrapper):
+    """A shell builtin must not downgrade its statically visible command to ASK."""
+    if shell_kind == "legacy":
+        tool = Bash(
+            config_getter=lambda: BashToolConfig(denylist=["denied-marker"]),
+            state=BaseToolState(),
+        )
+        result = tool.resolve_permission(
+            BashArgs(command=f"{wrapper} denied-marker harmless")
+        )
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(
+                denylist=["denied-marker"]
+            ),
+            state=BaseToolState(),
+        )
+        result = tool.resolve_permission(
+            ExperimentalBashArgs(command=f"{wrapper} denied-marker harmless")
+        )
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.NEVER
+    assert "matches denylist pattern 'denied-marker'" in (result.reason or "")
+
+
 @pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
 def test_legacy_bash_quoted_outside_path_requires_approval(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -2114,6 +2142,27 @@ def test_shell_permission_analysis_fails_closed(shell_kind, command):
 )
 def test_shell_redirections_require_approval(shell_kind, command):
     """Redirection and process substitution must never be auto-approved."""
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    ["cat <(printf harmless > marker.txt)", "cat <<EOF\n$(printf harmless)\nEOF"],
+    ids=["process-substitution-with-nested-redirect", "unquoted-heredoc-substitution"],
+)
+def test_nested_dynamic_redirections_require_approval(shell_kind, command):
+    """Nested redirects and substitutions must remain visible to permission policy."""
     if shell_kind == "legacy":
         tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
         result = tool.resolve_permission(BashArgs(command=command))

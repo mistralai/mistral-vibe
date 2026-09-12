@@ -156,6 +156,53 @@ def _split_command_tokens(command: str) -> list[str]:
         return command.split()
 
 
+def _wrapped_guardrail_commands(command: str) -> list[str]:
+    """Extract statically visible commands invoked by shell builtins."""
+    tokens = _split_command_tokens(command)
+    if not tokens:
+        return []
+
+    if tokens[0] == "eval":
+        evaluated = " ".join(tokens[1:])
+        if not evaluated:
+            return []
+        return list(analyze_shell_command(evaluated).command_parts)
+
+    if tokens[0] != "exec":
+        return []
+
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            index += 1
+            break
+        if token == "-a":
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        break
+    if index >= len(tokens):
+        return []
+    return [" ".join(tokens[index:])]
+
+
+def _expand_guardrail_commands(command_parts: list[str]) -> list[str]:
+    expanded: list[str] = []
+    pending = list(command_parts)
+    seen: set[str] = set()
+    while pending:
+        part = pending.pop(0)
+        if part in seen:
+            continue
+        seen.add(part)
+        expanded.append(part)
+        pending.extend(_wrapped_guardrail_commands(part))
+    return expanded
+
+
 def _collect_outside_dirs(
     command_parts: list[str],
     *,
@@ -377,7 +424,7 @@ class Bash(
         find_execution_required: list[RequiredPermission] = []
         seen_find_execution: set[str] = set()
 
-        for part in command_parts:
+        for part in _expand_guardrail_commands(command_parts):
             if matched := self._find_denylist_match(part):
                 return PermissionContext(
                     permission=ToolPermission.NEVER,

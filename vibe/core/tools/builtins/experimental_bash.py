@@ -39,7 +39,7 @@ from vibe.core.tools.base import (
     ToolPermission,
 )
 from vibe.core.tools.builtins._shell_permission_analysis import analyze_shell_command
-from vibe.core.tools.builtins.bash import BashToolConfig
+from vibe.core.tools.builtins.bash import BashToolConfig, _expand_guardrail_commands
 from vibe.core.tools.builtins.managed_shell import backend as managed_shell_backend
 from vibe.core.tools.builtins.managed_shell.backend import (
     UNKNOWN_EXIT_CODE,
@@ -1484,7 +1484,7 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         find_execution_required: list[RequiredPermission] = []
         seen_find_execution: set[str] = set()
 
-        for part in command_parts:
+        for part in _expand_guardrail_commands(command_parts):
             if matched := self._find_denylist_match(part):
                 return PermissionContext(
                     permission=ToolPermission.NEVER,
