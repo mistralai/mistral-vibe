@@ -26,8 +26,6 @@ from pydantic import (
     computed_field,
     model_validator,
 )
-from tree_sitter import Language, Node, Parser
-import tree_sitter_bash as tsbash
 
 from vibe.core.paths import VIBE_HOME
 from vibe.core.scratchpad import is_scratchpad_path
@@ -40,6 +38,7 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.builtins._shell_permission_analysis import analyze_shell_command
 from vibe.core.tools.builtins.bash import BashToolConfig
 from vibe.core.tools.builtins.managed_shell import backend as managed_shell_backend
 from vibe.core.tools.builtins.managed_shell.backend import (
@@ -176,42 +175,8 @@ class SessionNotFoundError(ManagedShellError):
     pass
 
 
-@functools.lru_cache(maxsize=1)
-def _get_parser() -> Parser:
-    return Parser(Language(tsbash.language()))
-
-
 def _extract_commands(command: str) -> list[str]:
-    parser = _get_parser()
-    tree = parser.parse(command.encode("utf-8"))
-
-    commands: list[str] = []
-
-    def find_commands(node: Node) -> None:
-        if node.type == "command":
-            parts = []
-            for child in node.children:
-                if (
-                    child.type
-                    in {"command_name", "word", "string", "raw_string", "concatenation"}
-                    and child.text is not None
-                ):
-                    parts.append(child.text.decode("utf-8"))
-            # When a command has a heredoc (or other redirect), tree-sitter
-            # wraps it in a redirected_statement and the redirect is a sibling
-            # of the command node, not a child.  Without this check,
-            # `python3 << 'EOF'` is extracted as bare `python3` and
-            # incorrectly blocked by the standalone denylist.
-            if parts and node.parent and node.parent.type == "redirected_statement":
-                parts.append("<redirect>")
-            if parts:
-                commands.append(" ".join(parts))
-
-        for child in node.children:
-            find_commands(child)
-
-    find_commands(tree.root_node)
-    return commands
+    return list(analyze_shell_command(command).command_parts)
 
 
 def _get_shell_executable() -> str | None:
@@ -1618,8 +1583,9 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         cwd: str | None,
         required_context_permissions: list[RequiredPermission] | None = None,
     ) -> PermissionContext | None:
-        command_parts = _extract_commands(command)
-        if not command_parts:
+        analysis = analyze_shell_command(command)
+        command_parts = list(analysis.command_parts)
+        if not command_parts and not analysis.requires_approval:
             return None
 
         guardrail_permission = self._resolve_guardrail_permission(command_parts)
@@ -1642,6 +1608,7 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
                 command_parts, outside_dirs, context_required
             )
             and not guardrail_permission
+            and not analysis.requires_approval
         ):
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
@@ -1650,6 +1617,14 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         )
         if guardrail_permission:
             required.extend(guardrail_permission.required_permissions)
+        if analysis.requires_approval:
+            required.append(
+                self._build_command_required_permission(
+                    invocation_pattern=command,
+                    session_pattern=command,
+                    label="shell syntax requiring approval",
+                )
+            )
         if not required:
             return None
 

@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
-from functools import lru_cache
 from pathlib import Path
 import shlex
 from typing import ClassVar, final
 
 from pydantic import BaseModel, Field, computed_field
-from tree_sitter import Language, Node, Parser
-import tree_sitter_bash as tsbash
 
 from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.arity import build_session_pattern
@@ -21,6 +18,7 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.builtins._shell_permission_analysis import analyze_shell_command
 from vibe.core.tools.io_port import ShellCommandRequest
 from vibe.core.tools.permissions import (
     PermissionContext,
@@ -42,42 +40,8 @@ from vibe.utils.paths import normalize_windows_path
 from vibe.utils.tool_presentation import ToolEffectKind
 
 
-@lru_cache(maxsize=1)
-def _get_parser() -> Parser:
-    return Parser(Language(tsbash.language()))
-
-
 def _extract_commands(command: str) -> list[str]:
-    parser = _get_parser()
-    tree = parser.parse(command.encode("utf-8"))
-
-    commands: list[str] = []
-
-    def find_commands(node: Node) -> None:
-        if node.type == "command":
-            parts = []
-            for child in node.children:
-                if (
-                    child.type
-                    in {"command_name", "word", "string", "raw_string", "concatenation"}
-                    and child.text is not None
-                ):
-                    parts.append(child.text.decode("utf-8"))
-            # When a command has a heredoc (or other redirect), tree-sitter
-            # wraps it in a redirected_statement and the redirect is a sibling
-            # of the command node, not a child.  Without this check,
-            # `python3 << 'EOF'` is extracted as bare `python3` and
-            # incorrectly blocked by the standalone denylist.
-            if parts and node.parent and node.parent.type == "redirected_statement":
-                parts.append("<redirect>")
-            if parts:
-                commands.append(" ".join(parts))
-
-        for child in node.children:
-            find_commands(child)
-
-    find_commands(tree.root_node)
-    return commands
+    return list(analyze_shell_command(command).command_parts)
 
 
 _READ_ONLY_COMMANDS_WINDOWS = ["dir", "findstr", "more", "type", "ver", "where"]
@@ -500,8 +464,9 @@ class Bash(
         if not uses_posix_shell():
             return None
 
-        command_parts = _extract_commands(args.command)
-        if not command_parts:
+        analysis = analyze_shell_command(args.command)
+        command_parts = list(analysis.command_parts)
+        if not command_parts and not analysis.requires_approval:
             return None
 
         guardrail_permission = self._resolve_guardrail_permission(command_parts)
@@ -516,12 +481,21 @@ class Bash(
         if (
             self._is_unconditionally_allowed(command_parts, outside_dirs)
             and not guardrail_permission
+            and not analysis.requires_approval
         ):
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
         required = self._build_required_permissions(command_parts, outside_dirs)
         if guardrail_permission:
             required.extend(guardrail_permission.required_permissions)
+        if analysis.requires_approval:
+            required.append(
+                self._build_command_required_permission(
+                    invocation_pattern=args.command,
+                    session_pattern=args.command,
+                    label="shell syntax requiring approval",
+                )
+            )
         if not required:
             return None
 
