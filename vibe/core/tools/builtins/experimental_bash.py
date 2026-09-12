@@ -40,6 +40,10 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.builtins._shell_command_policy import (
+    analyze_shell_command_policy,
+    path_candidates,
+)
 from vibe.core.tools.builtins.bash import BashToolConfig
 from vibe.core.tools.builtins.managed_shell import backend as managed_shell_backend
 from vibe.core.tools.builtins.managed_shell.backend import (
@@ -337,8 +341,6 @@ def _get_default_denylist_standalone() -> list[str]:
 _MUTATING_PATH_COMMANDS = {"cd", "chmod", "chown", "cp", "mkdir", "mv", "rm", "touch"}
 _PATH_COMMANDS = _MUTATING_PATH_COMMANDS | set(_READ_ONLY_COMMANDS_POSIX)
 
-_FIND_EXECUTION_PREDICATES = {"-exec", "-execdir", "-ok", "-okdir"}
-
 
 def _split_command_tokens(
     command: str, *, preserve_backslashes: bool = False
@@ -386,13 +388,9 @@ def _collect_outside_dirs(
         if not command:
             continue
         command_name = command if case_sensitive_commands else command.lower()
-        if command_name not in path_commands:
-            continue
-        for token in tokens[1:]:
-            if token.startswith("-"):
-                continue
-            if command_name == "chmod" and token.startswith("+"):
-                continue
+        for token in path_candidates(
+            tokens, inspect_positional_paths=command_name in path_commands
+        ):
             if not _looks_like_path(token):
                 continue
 
@@ -1454,12 +1452,6 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         scratchpad_dir: Path | None
 
     @staticmethod
-    def _has_find_execution_predicate(command: str) -> bool:
-        if not _matches_pattern(command, "find"):
-            return False
-        return any(predicate in command for predicate in _FIND_EXECUTION_PREDICATES)
-
-    @staticmethod
     def _build_command_required_permission(
         invocation_pattern: str, session_pattern: str, label: str
     ) -> RequiredPermission:
@@ -1516,8 +1508,8 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
     def _resolve_guardrail_permission(
         self, command_parts: list[str]
     ) -> PermissionContext | None:
-        find_execution_required: list[RequiredPermission] = []
-        seen_find_execution: set[str] = set()
+        option_required: list[RequiredPermission] = []
+        seen_option_required: set[str] = set()
 
         for part in command_parts:
             if matched := self._find_denylist_match(part):
@@ -1530,21 +1522,23 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
                     permission=ToolPermission.NEVER,
                     reason=f"Command denied: '{part}' is not allowed as a standalone command. Do not attempt to run this command.",
                 )
-            if not self._has_find_execution_predicate(part):
+            if not analyze_shell_command_policy(
+                _split_command_tokens(part)
+            ).requires_approval:
                 continue
-            if part in seen_find_execution:
+            if part in seen_option_required:
                 continue
-            seen_find_execution.add(part)
-            find_execution_required.append(
+            seen_option_required.add(part)
+            option_required.append(
                 self._build_command_required_permission(
                     invocation_pattern=part, session_pattern=part, label=part
                 )
             )
 
-        if not find_execution_required:
+        if not option_required:
             return None
         return PermissionContext(
-            permission=ToolPermission.ASK, required_permissions=find_execution_required
+            permission=ToolPermission.ASK, required_permissions=option_required
         )
 
     def _is_unconditionally_allowed(

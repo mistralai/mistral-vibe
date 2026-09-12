@@ -21,6 +21,10 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.builtins._shell_command_policy import (
+    analyze_shell_command_policy,
+    path_candidates,
+)
 from vibe.core.tools.io_port import ShellCommandRequest
 from vibe.core.tools.permissions import (
     PermissionContext,
@@ -173,8 +177,6 @@ _MUTATING_PATH_COMMANDS = {"cd", "chmod", "chown", "cp", "mkdir", "mv", "rm", "t
 # OUTSIDE_DIRECTORY permission.
 _PATH_COMMANDS = _MUTATING_PATH_COMMANDS | set(_READ_ONLY_COMMANDS_POSIX)
 
-_FIND_EXECUTION_PREDICATES = {"-exec", "-execdir", "-ok", "-okdir"}
-
 
 def _split_command_tokens(command: str) -> list[str]:
     try:
@@ -222,15 +224,11 @@ def _collect_outside_dirs(
     for part in command_parts:
         tokens = _split_command_tokens(part)
         command = tokens[0] if tokens else None
-        if not command or command not in _PATH_COMMANDS:
+        if not command:
             continue
-        for token in tokens[1:]:
-            # Skip CLI flags like -r, --recursive
-            if token.startswith("-"):
-                continue
-            # Skip chmod mode strings like +x, +rwx — they are not file paths
-            if command == "chmod" and token.startswith("+"):
-                continue
+        for token in path_candidates(
+            tokens, inspect_positional_paths=command in _PATH_COMMANDS
+        ):
             # Only consider tokens that look like paths
             if not (
                 token.startswith("/")
@@ -352,13 +350,6 @@ class Bash(
         return "Running command"
 
     @staticmethod
-    def _has_find_execution_predicate(command: str) -> bool:
-        """Defensive check for find -exec, -execdir, -ok, -okdir predicates."""
-        if not _matches_pattern(command, "find"):
-            return False
-        return any(predicate in command for predicate in _FIND_EXECUTION_PREDICATES)
-
-    @staticmethod
     def _build_command_required_permission(
         invocation_pattern: str, session_pattern: str, label: str
     ) -> RequiredPermission:
@@ -410,8 +401,8 @@ class Bash(
     def _resolve_guardrail_permission(
         self, command_parts: list[str]
     ) -> PermissionContext | None:
-        find_execution_required: list[RequiredPermission] = []
-        seen_find_execution: set[str] = set()
+        option_required: list[RequiredPermission] = []
+        seen_option_required: set[str] = set()
 
         for part in command_parts:
             if matched := self._find_denylist_match(part):
@@ -424,21 +415,23 @@ class Bash(
                     permission=ToolPermission.NEVER,
                     reason=f"Command denied: '{part}' is not allowed as a standalone command. Do not attempt to run this command.",
                 )
-            if not self._has_find_execution_predicate(part):
+            if not analyze_shell_command_policy(
+                _split_command_tokens(part)
+            ).requires_approval:
                 continue
-            if part in seen_find_execution:
+            if part in seen_option_required:
                 continue
-            seen_find_execution.add(part)
-            find_execution_required.append(
+            seen_option_required.add(part)
+            option_required.append(
                 self._build_command_required_permission(
                     invocation_pattern=part, session_pattern=part, label=part
                 )
             )
 
-        if not find_execution_required:
+        if not option_required:
             return None
         return PermissionContext(
-            permission=ToolPermission.ASK, required_permissions=find_execution_required
+            permission=ToolPermission.ASK, required_permissions=option_required
         )
 
     def _is_unconditionally_allowed(
