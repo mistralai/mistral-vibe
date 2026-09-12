@@ -105,14 +105,84 @@ def test_mentioned_file_content_blocks_cap_text_resources(tmp_path: Path) -> Non
     assert "truncated" in block.resource.text
 
 
-def test_mentioned_file_content_blocks_reject_outside_workspace(tmp_path: Path) -> None:
+def test_mentioned_file_content_blocks_skip_outside_workspace(tmp_path: Path) -> None:
+    """Prepare a workspace and a file that sits outside it.
+
+    Do mention both in one message.
+
+    Assert the outside file is dropped instead of failing the turn. Inlining
+    skips the read tool's permission prompt, so it stays inside the roots --
+    but the mention is user-authored, and rejecting the whole prompt over it
+    threw away everything else the user had written.
+    """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    (workspace / "notes.md").write_text("inside", encoding="utf-8")
     secret = tmp_path / "secret.txt"
     secret.write_text("nope", encoding="utf-8")
 
-    with pytest.raises(PromptPreparationError, match="outside the workspace"):
-        mentioned_file_content_blocks(f"read @{secret}", base_dir=workspace)
+    blocks = mentioned_file_content_blocks(
+        f"read @notes.md and @{secret}", base_dir=workspace
+    )
+
+    assert len(blocks) == 1
+    block = blocks[0]
+    assert isinstance(block, ResourceContentBlock)
+    assert isinstance(block.resource, UserTextResource)
+    assert block.resource.text == "inside"
+
+
+def test_mentioned_file_content_blocks_attach_from_additional_roots(
+    tmp_path: Path,
+) -> None:
+    """Prepare a file outside cwd but inside an ``--add-dir`` root.
+
+    Do mention it by absolute path.
+
+    Assert it is inlined. The file tools resolve against the same root set, so
+    refusing the mention while allowing ``read_file`` would be incoherent.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    log = downloads / "build.log"
+    log.write_text("vitest failed", encoding="utf-8")
+
+    blocks = mentioned_file_content_blocks(
+        f"read @{log}", base_dir=workspace, workspace_roots=[downloads]
+    )
+
+    assert len(blocks) == 1
+    block = blocks[0]
+    assert isinstance(block, ResourceContentBlock)
+    assert isinstance(block.resource, UserTextResource)
+    assert block.resource.uri == log.as_uri()
+    assert block.resource.text == "vitest failed"
+
+
+def test_mentioned_file_content_blocks_count_only_attachable_files(
+    tmp_path: Path,
+) -> None:
+    """Prepare more out-of-root mentions than the per-message cap allows.
+
+    Do mention them alongside one file inside the workspace.
+
+    Assert the cap counts only what is actually inlined. Dropped mentions cost
+    no context, so they must not consume the budget.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.md").write_text("inside", encoding="utf-8")
+    mentions = [f"@{workspace / 'notes.md'}"]
+    for index in range(9):
+        outside = tmp_path / f"outside-{index}.md"
+        outside.write_text(str(index), encoding="utf-8")
+        mentions.append(f"@{outside}")
+
+    blocks = mentioned_file_content_blocks(" ".join(mentions), base_dir=workspace)
+
+    assert len(blocks) == 1
 
 
 def test_mentioned_file_content_blocks_reject_too_many_files(tmp_path: Path) -> None:

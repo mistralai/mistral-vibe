@@ -7,6 +7,7 @@ import os
 import sys
 
 from vibe import __version__
+from vibe._experimental_harness import add_experimental_harness_argument
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.paths import HISTORY_FILE, LOG_FILE
@@ -23,6 +24,8 @@ sys.stdin.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAcc
 @dataclass
 class Arguments:
     setup: bool
+    experimental_harness: bool
+    legacy_harness: bool
 
 
 def parse_arguments() -> Arguments:
@@ -31,8 +34,20 @@ def parse_arguments() -> Arguments:
         "-v", "--version", action="version", version=f"%(prog)s {__version__}"
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
+    harness_group = parser.add_mutually_exclusive_group()
+    add_experimental_harness_argument(parser, group=harness_group)
+    harness_group.add_argument(
+        "--legacy-harness",
+        action="store_true",
+        default=False,
+        help="Force the legacy Python harness, overriding the GrowthBook rollout.",
+    )
     args = parser.parse_args()
-    return Arguments(setup=args.setup)
+    return Arguments(
+        setup=args.setup,
+        experimental_harness=args.experimental_harness,
+        legacy_harness=args.legacy_harness,
+    )
 
 
 def bootstrap_config_files() -> None:
@@ -94,7 +109,11 @@ def main() -> None:
         except Exception:
             pass  # error reporting disabled
 
-    run_acp_server(environ_before_dotenv_load=environ_before_dotenv_load)
+    run_acp_server(
+        environ_before_dotenv_load=environ_before_dotenv_load,
+        experimental_harness=args.experimental_harness,
+        legacy_harness=args.legacy_harness,
+    )
 
 
 if __name__ == "__main__":

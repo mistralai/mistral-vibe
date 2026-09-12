@@ -711,6 +711,7 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
                     success=display.success,
                     message=display.message,
                     warnings=display.warnings,
+                    approval_note=display.approval_note,
                 )
                 self._result_widget = widget
             return Horizontal(
@@ -720,8 +721,13 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             )
 
         # The header is inert only when there is genuinely nothing to unfold: no
-        # structured output, no fallback text, and no warnings.
-        has_body = not (output is None and not fallback_text and not display.warnings)
+        # structured output, no fallback text, and no advisories.
+        has_body = not (
+            output is None
+            and not fallback_text
+            and not display.warnings
+            and display.approval_note is None
+        )
         is_failure = not display.success
         section = HeaderCollapsibleSection(
             build_result_body,
@@ -805,6 +811,7 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             success=display.success,
             message=display.message,
             warnings=display.warnings,
+            approval_note=display.approval_note,
         )
         await self._content_container.mount(widget)
         self._result_widget = widget

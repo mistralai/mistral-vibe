@@ -391,10 +391,14 @@ class VibeAcpAgent(AcpAgent):
         credentials_persister: CredentialsPersister | None = None,
         tenant_domain_resolver: TenantDomainResolver | None = None,
         environ_before_dotenv_load: Mapping[str, str] | None = None,
+        experimental_harness: bool = False,
+        legacy_harness: bool = False,
     ) -> None:
         self.sessions: dict[str, AcpSession] = {}
         self.client_capabilities: ClientCapabilities | None = None
         self.client_info: Implementation | None = None
+        self._experimental_harness = experimental_harness
+        self._legacy_harness = legacy_harness
         self._harness_host = LocalHarnessHost()
         self._start_session = session_starter or self._harness_host.start
         self._passive_host: AppServerHost | None = None
@@ -578,6 +582,8 @@ class VibeAcpAgent(AcpAgent):
                     ),
                     session=intent,
                     client_tool_handler=client_tool_handler,
+                    experimental_harness=self._experimental_harness,
+                    legacy_harness=self._legacy_harness,
                 )
             )
         except AppServerResponseError as exc:
@@ -1352,6 +1358,8 @@ class VibeAcpAgent(AcpAgent):
                     LocalHarnessOptions(
                         client=self._client_descriptor(),
                         session_options=SessionOptions(cwd=str(Path.cwd())),
+                        experimental_harness=self._experimental_harness,
+                        legacy_harness=self._legacy_harness,
                     )
                 )
         return self._passive_host
@@ -1659,9 +1667,16 @@ async def _serve_acp_agent(agent: VibeAcpAgent) -> None:
 
 
 def run_acp_server(
-    *, environ_before_dotenv_load: Mapping[str, str] | None = None
+    *,
+    environ_before_dotenv_load: Mapping[str, str] | None = None,
+    experimental_harness: bool = False,
+    legacy_harness: bool = False,
 ) -> None:
-    agent = VibeAcpAgent(environ_before_dotenv_load=environ_before_dotenv_load)
+    agent = VibeAcpAgent(
+        environ_before_dotenv_load=environ_before_dotenv_load,
+        experimental_harness=experimental_harness,
+        legacy_harness=legacy_harness,
+    )
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
 
     def handle_sigterm(_signum: int, _frame: Any) -> None:

@@ -225,11 +225,43 @@ def test_projects_unified_shell_result_from_structured_transcript() -> None:
     assert projected.state.output_text == "outerr"
 
 
-def test_shell_projection_preserves_auto_approved_note_warning() -> None:
+def test_shell_projection_preserves_the_auto_approved_note() -> None:
     """*Prepare*: A completed bash effect whose incoming display carries a
-    smart-approve auto-approved note as a warning.
+    smart-approve auto-approved note.
     *Do*: Project it through the Vibe-owned semantic adapter.
     *Assert*: The rebuilt shell display keeps the note so the TUI can render it.
+    """
+    note = "Auto-approved: read-only command (ls)"
+    entry = _effect(
+        "bash",
+        {"command": "ls"},
+        result={
+            "structured_content": {
+                "command": "ls",
+                "stdout": "file.txt\n",
+                "stderr": "",
+                "output": "file.txt\n",
+                "returncode": 0,
+                "was_truncated": False,
+            }
+        },
+        approval_note=note,
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.approval_note == note
+    # It is not a warning: the call was authorised and succeeded.
+    assert projected.state.display.warnings == []
+
+
+def test_shell_projection_keeps_a_pre_split_note_stored_as_a_warning() -> None:
+    """*Prepare*: A completed bash effect from a session written before the
+    approval note had its own field, so the note sits in ``warnings``.
+    *Do*: Project it through the Vibe-owned semantic adapter.
+    *Assert*: The note survives replay instead of being dropped.
     """
     note = "Auto-approved: read-only command (ls)"
     entry = _effect(
@@ -837,6 +869,7 @@ def _effect(
     error: str | None = None,
     output_text: str = "",
     warnings: list[str] | None = None,
+    approval_note: str | None = None,
 ) -> PublicEffectEntry:
     completed_display: dict[str, object] = {
         "success": True,
@@ -844,6 +877,8 @@ def _effect(
     }
     if warnings is not None:
         completed_display["warnings"] = warnings
+    if approval_note is not None:
+        completed_display["approvalNote"] = approval_note
     raw = {
         "type": "effect",
         "id": "effect-action-1",

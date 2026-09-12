@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
-from functools import lru_cache
 from pathlib import Path
 import shlex
 from typing import ClassVar, final
 
 from pydantic import BaseModel, Field, computed_field
-from tree_sitter import Language, Node, Parser
-import tree_sitter_bash as tsbash
 
 from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.arity import build_session_pattern
@@ -21,6 +18,11 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.builtins._shell_command_policy import (
+    analyze_shell_command_policy,
+    path_candidates,
+)
+from vibe.core.tools.builtins._shell_permission_analysis import analyze_shell_command
 from vibe.core.tools.io_port import ShellCommandRequest
 from vibe.core.tools.permissions import (
     PermissionContext,
@@ -42,42 +44,8 @@ from vibe.utils.paths import normalize_windows_path
 from vibe.utils.tool_presentation import ToolEffectKind
 
 
-@lru_cache(maxsize=1)
-def _get_parser() -> Parser:
-    return Parser(Language(tsbash.language()))
-
-
 def _extract_commands(command: str) -> list[str]:
-    parser = _get_parser()
-    tree = parser.parse(command.encode("utf-8"))
-
-    commands: list[str] = []
-
-    def find_commands(node: Node) -> None:
-        if node.type == "command":
-            parts = []
-            for child in node.children:
-                if (
-                    child.type
-                    in {"command_name", "word", "string", "raw_string", "concatenation"}
-                    and child.text is not None
-                ):
-                    parts.append(child.text.decode("utf-8"))
-            # When a command has a heredoc (or other redirect), tree-sitter
-            # wraps it in a redirected_statement and the redirect is a sibling
-            # of the command node, not a child.  Without this check,
-            # `python3 << 'EOF'` is extracted as bare `python3` and
-            # incorrectly blocked by the standalone denylist.
-            if parts and node.parent and node.parent.type == "redirected_statement":
-                parts.append("<redirect>")
-            if parts:
-                commands.append(" ".join(parts))
-
-        for child in node.children:
-            find_commands(child)
-
-    find_commands(tree.root_node)
-    return commands
+    return list(analyze_shell_command(command).command_parts)
 
 
 _READ_ONLY_COMMANDS_WINDOWS = ["dir", "findstr", "more", "type", "ver", "where"]
@@ -173,8 +141,6 @@ _MUTATING_PATH_COMMANDS = {"cd", "chmod", "chown", "cp", "mkdir", "mv", "rm", "t
 # OUTSIDE_DIRECTORY permission.
 _PATH_COMMANDS = _MUTATING_PATH_COMMANDS | set(_READ_ONLY_COMMANDS_POSIX)
 
-_FIND_EXECUTION_PREDICATES = {"-exec", "-execdir", "-ok", "-okdir"}
-
 
 def _split_command_tokens(command: str) -> list[str]:
     try:
@@ -190,6 +156,53 @@ def _split_command_tokens(command: str) -> list[str]:
         return list(lexer)
     except ValueError:
         return command.split()
+
+
+def _wrapped_guardrail_commands(command: str) -> list[str]:
+    """Extract statically visible commands invoked by shell builtins."""
+    tokens = _split_command_tokens(command)
+    if not tokens:
+        return []
+
+    if tokens[0] == "eval":
+        evaluated = " ".join(tokens[1:])
+        if not evaluated:
+            return []
+        return list(analyze_shell_command(evaluated).command_parts)
+
+    if tokens[0] != "exec":
+        return []
+
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            index += 1
+            break
+        if token == "-a":
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        break
+    if index >= len(tokens):
+        return []
+    return [" ".join(tokens[index:])]
+
+
+def _expand_guardrail_commands(command_parts: list[str]) -> list[str]:
+    expanded: list[str] = []
+    pending = list(command_parts)
+    seen: set[str] = set()
+    while pending:
+        part = pending.pop(0)
+        if part in seen:
+            continue
+        seen.add(part)
+        expanded.append(part)
+        pending.extend(_wrapped_guardrail_commands(part))
+    return expanded
 
 
 def _collect_outside_dirs(
@@ -222,15 +235,11 @@ def _collect_outside_dirs(
     for part in command_parts:
         tokens = _split_command_tokens(part)
         command = tokens[0] if tokens else None
-        if not command or command not in _PATH_COMMANDS:
+        if not command:
             continue
-        for token in tokens[1:]:
-            # Skip CLI flags like -r, --recursive
-            if token.startswith("-"):
-                continue
-            # Skip chmod mode strings like +x, +rwx — they are not file paths
-            if command == "chmod" and token.startswith("+"):
-                continue
+        for token in path_candidates(
+            tokens, inspect_positional_paths=command in _PATH_COMMANDS
+        ):
             # Only consider tokens that look like paths
             if not (
                 token.startswith("/")
@@ -352,13 +361,6 @@ class Bash(
         return "Running command"
 
     @staticmethod
-    def _has_find_execution_predicate(command: str) -> bool:
-        """Defensive check for find -exec, -execdir, -ok, -okdir predicates."""
-        if not _matches_pattern(command, "find"):
-            return False
-        return any(predicate in command for predicate in _FIND_EXECUTION_PREDICATES)
-
-    @staticmethod
     def _build_command_required_permission(
         invocation_pattern: str, session_pattern: str, label: str
     ) -> RequiredPermission:
@@ -410,10 +412,10 @@ class Bash(
     def _resolve_guardrail_permission(
         self, command_parts: list[str]
     ) -> PermissionContext | None:
-        find_execution_required: list[RequiredPermission] = []
-        seen_find_execution: set[str] = set()
+        option_required: list[RequiredPermission] = []
+        seen_option_required: set[str] = set()
 
-        for part in command_parts:
+        for part in _expand_guardrail_commands(command_parts):
             if matched := self._find_denylist_match(part):
                 return PermissionContext(
                     permission=ToolPermission.NEVER,
@@ -424,21 +426,23 @@ class Bash(
                     permission=ToolPermission.NEVER,
                     reason=f"Command denied: '{part}' is not allowed as a standalone command. Do not attempt to run this command.",
                 )
-            if not self._has_find_execution_predicate(part):
+            if not analyze_shell_command_policy(
+                _split_command_tokens(part)
+            ).requires_approval:
                 continue
-            if part in seen_find_execution:
+            if part in seen_option_required:
                 continue
-            seen_find_execution.add(part)
-            find_execution_required.append(
+            seen_option_required.add(part)
+            option_required.append(
                 self._build_command_required_permission(
                     invocation_pattern=part, session_pattern=part, label=part
                 )
             )
 
-        if not find_execution_required:
+        if not option_required:
             return None
         return PermissionContext(
-            permission=ToolPermission.ASK, required_permissions=find_execution_required
+            permission=ToolPermission.ASK, required_permissions=option_required
         )
 
     def _is_unconditionally_allowed(
@@ -500,8 +504,9 @@ class Bash(
         if not uses_posix_shell():
             return None
 
-        command_parts = _extract_commands(args.command)
-        if not command_parts:
+        analysis = analyze_shell_command(args.command)
+        command_parts = list(analysis.command_parts)
+        if not command_parts and not analysis.requires_approval:
             return None
 
         guardrail_permission = self._resolve_guardrail_permission(command_parts)
@@ -516,12 +521,21 @@ class Bash(
         if (
             self._is_unconditionally_allowed(command_parts, outside_dirs)
             and not guardrail_permission
+            and not analysis.requires_approval
         ):
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
         required = self._build_required_permissions(command_parts, outside_dirs)
         if guardrail_permission:
             required.extend(guardrail_permission.required_permissions)
+        if analysis.requires_approval:
+            required.append(
+                self._build_command_required_permission(
+                    invocation_pattern=args.command,
+                    session_pattern=args.command,
+                    label=analysis.approval_label,
+                )
+            )
         if not required:
             return None
 

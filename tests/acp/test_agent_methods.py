@@ -168,7 +168,7 @@ async def test_config_options_delegate_to_typed_app_server_resources(
         await acp_agent_loop.set_config_option("unknown", session_id, "x")
 
 
-def _acp_agent_with_allowed_models() -> VibeAcpAgent:
+def _acp_agent_with_allowed_models(experimental_harness: bool = False) -> VibeAcpAgent:
     config = build_test_vibe_config(
         active_model="allowed",
         allowed_models=["allowed"],
@@ -179,6 +179,7 @@ def _acp_agent_with_allowed_models() -> VibeAcpAgent:
     )
 
     async def start_session(options: LocalHarnessOptions) -> AppServerSession:
+        assert options.experimental_harness is experimental_harness
         loop = build_test_agent_loop(
             config=config, backend=FakeBackend(), enable_streaming=True
         )
@@ -190,7 +191,9 @@ def _acp_agent_with_allowed_models() -> VibeAcpAgent:
         )
 
     starter: SessionStarter = start_session
-    agent = VibeAcpAgent(session_starter=starter)
+    agent = VibeAcpAgent(
+        session_starter=starter, experimental_harness=experimental_harness
+    )
     client = FakeClient()
     agent.on_connect(client)
     client.on_connect(agent)
@@ -198,8 +201,10 @@ def _acp_agent_with_allowed_models() -> VibeAcpAgent:
 
 
 @pytest.mark.asyncio
-async def test_set_config_option_rejects_model_excluded_by_allowed_models() -> None:
-    agent = _acp_agent_with_allowed_models()
+async def test_set_config_option_rejects_model_excluded_by_allowed_models(
+    experimental_harness: bool,
+) -> None:
+    agent = _acp_agent_with_allowed_models(experimental_harness=experimental_harness)
     session_id = await _new_session(agent)
 
     with pytest.raises(InvalidRequestError):

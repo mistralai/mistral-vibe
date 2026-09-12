@@ -304,7 +304,7 @@ class HostRequestHandler:
         orchestrator = await self._load_orchestrator(None)
         agents = AgentManager(
             orchestrator,
-            orchestrator.config.default_agent,
+            orchestrator.config.resolve_default_agent(),
             harness_files=self._harness_files.for_session(self._cwd(None)),
         )
         active, available = project_unified_agent_summaries(
@@ -598,7 +598,13 @@ class HostRequestHandler:
         self, cwd: str | None
     ) -> ConfigOrchestrator[VibeConfigSchema]:
         session_files = self._harness_files.for_session(self._cwd(cwd))
-        return await build_default_orchestrator(harness_files=session_files)
+        orchestrator = await build_default_orchestrator(harness_files=session_files)
+        # Match the session path so host reads (agents/list) see rollout flags
+        # like smart_approve_available. Lazy import: _runtime imports _host.
+        from vibe.app_server._runtime import _apply_cached_experiment_variants
+
+        await _apply_cached_experiment_variants(orchestrator)
+        return orchestrator
 
     @staticmethod
     def _cwd(value: str | None) -> Path:

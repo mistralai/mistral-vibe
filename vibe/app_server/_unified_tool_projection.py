@@ -919,12 +919,18 @@ def _completed_state(
     *,
     output_text: str | None = None,
 ) -> CompletedEffectState:
-    # Semantic projection rebuilds display from scratch, but cross-cutting
-    # advisories (smart approve's "Auto-approved: <reason>" note) ride in on the
-    # incoming effect's display.warnings. Carry them across so they still render.
+    # Semantic projection rebuilds display from scratch, so whatever rode in on
+    # the incoming effect has to be carried over. Sessions written before the
+    # note had its own field still keep it in `warnings`; carry those too rather
+    # than dropping the explanation when an old session is replayed.
     carried = [w for w in state.display.warnings if w not in display.warnings]
+    carry: dict[str, object] = {}
+    if state.display.approval_note is not None:
+        carry["approval_note"] = state.display.approval_note
     if carried:
-        display = display.model_copy(update={"warnings": [*display.warnings, *carried]})
+        carry["warnings"] = [*display.warnings, *carried]
+    if carry:
+        display = display.model_copy(update=carry)
     update: dict[str, object] = {
         "output": cast(
             JsonValue, output.model_dump(mode="json", by_alias=True, exclude_none=False)

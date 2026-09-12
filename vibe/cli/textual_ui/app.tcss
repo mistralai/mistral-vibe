@@ -1067,6 +1067,10 @@ StatusMessage {
     color: $warning;
 }
 
+.tool-result-approval-note {
+    color: $text-muted;
+}
+
 .diff-scroll {
     width: 1fr;
     height: auto;

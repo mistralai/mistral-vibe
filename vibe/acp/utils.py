@@ -74,6 +74,10 @@ def build_mode_state(
     agents: list[AgentSummary], active: AgentSummary
 ) -> tuple[SessionModeState, SessionConfigOptionSelect]:
     primary = [agent for agent in agents if agent.agent_type is AgentType.AGENT]
+    # The current mode must stay in the advertised list even when the rollout
+    # gate hides it, so the client can label it and switch away.
+    if all(agent.name != active.name for agent in primary):
+        primary = [*primary, active]
     modes = [
         SessionMode(
             id=agent.name, name=agent.display_name, description=agent.description

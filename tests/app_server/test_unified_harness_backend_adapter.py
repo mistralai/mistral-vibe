@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 import contextlib
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -584,6 +584,53 @@ async def test_unified_title_generation_gated_on_entrypoint(
 
     has_title_model = derivation.adapter_config.title_model is not None
     assert has_title_model is expect_title_model
+
+
+@pytest.mark.parametrize(
+    ("api_base", "expected"),
+    [
+        ("https://api.mistral.ai/v1", True),
+        ("HTTPS://API.MISTRAL.AI:443/v1", True),
+        ("https://customer.mistral.ai/v1", False),
+        ("https://api.mistral.ai.example.com/v1", False),
+        ("http://api.mistral.ai/v1", False),
+        ("https://api.mistral.ai:8443/v1", False),
+        ("https://api.mistral.ai:not-a-port/v1", False),
+    ],
+)
+def test_unified_fast_title_model_requires_public_mistral_origin(
+    api_base: str, expected: bool
+) -> None:
+    assert runtime_module._is_public_mistral_api(api_base) is expected
+
+
+@pytest.mark.asyncio
+async def test_unified_title_model_uses_active_model_on_custom_mistral_endpoint(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
+
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["providers"][0]["api_base"] = "https://customer.mistral.ai/v1"
+    config["session_logging"] = {"generate_titles": True}
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = runtime_module.HarnessProcess(experimental_harness=True)
+    try:
+        context = await process.build_unified_session_context(
+            SessionOptions(cwd=str(tmp_path)), entrypoint="desktop"
+        )
+        derivation = context.derive(UnifiedSessionSettings())
+    finally:
+        await process.close()
+
+    assert derivation.adapter_config.title_model is not None
+    assert derivation.adapter_config.title_model.model == "mistral-vibe-cli-latest"
+    assert derivation.adapter_config.title_model_is_fast is False
+    assert derivation.adapter_config.title_provider is None
 
 
 @pytest.mark.asyncio
@@ -2442,7 +2489,9 @@ async def test_unified_connector_projection_keeps_server_error_on_name_collision
     assert adapter._runtime.mcp.discovery_errors == {}
 
 
-async def _skill_adapter(tmp_path: Path, session: _RecordingSession) -> Any:
+async def _skill_adapter(
+    tmp_path: Path, session: _RecordingSession, *, workspace_roots: Sequence[Path] = ()
+) -> Any:
     """An adapter over a workspace holding one user-invocable skill."""
     from vibe.app_server._runtime import HarnessProcess
     from vibe.app_server._unified_harness_backend_adapter import (
@@ -2453,7 +2502,11 @@ async def _skill_adapter(tmp_path: Path, session: _RecordingSession) -> Any:
     _write_workspace_skill(tmp_path, "code-review", "Read the diff twice.")
     process = HarnessProcess(experimental_harness=True)
     context = await process.build_unified_session_context(
-        SessionOptions(cwd=str(tmp_path), trust_workspace=True)
+        SessionOptions(
+            cwd=str(tmp_path),
+            trust_workspace=True,
+            workspace_roots=[str(root) for root in workspace_roots],
+        )
     )
     session.cwd = str(tmp_path)
     return UnifiedHarnessBackendAdapter(
@@ -2811,6 +2864,121 @@ async def test_unified_inject_context_does_not_expand_mentions_inside_a_skill_bo
     ]
     assert [Path(uri).name for uri in resources] == ["notes.md"]
     assert "Write @secret.md to name a file." in blocks[-1].text
+
+
+@pytest.mark.asyncio
+async def test_unified_session_keeps_the_cwd_among_its_workspace_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prepare session options carrying one ``--add-dir`` root beside the cwd.
+
+    Do build the session context and derive its adapter config.
+
+    Assert the cwd leads the root set. The harness reads a non-empty set as the
+    complete one, so an added directory that replaced the cwd would leave the
+    file tools unable to read the project the session was started in.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    process = HarnessProcess(experimental_harness=True)
+
+    context = await process.build_unified_session_context(
+        SessionOptions(
+            cwd=str(workspace), trust_workspace=True, workspace_roots=[str(downloads)]
+        )
+    )
+
+    derivation = context.derive(UnifiedSessionSettings())
+    assert derivation.adapter_config.workspace_roots == (workspace, downloads)
+
+
+@pytest.mark.asyncio
+async def test_unified_start_turn_inlines_a_mention_from_an_added_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prepare a session whose workspace roots add a directory beside the cwd.
+
+    Do start a turn mentioning a file in the cwd and one in the added root.
+
+    Assert both are inlined. The file tools resolve against the same root set,
+    so a session that refuses to attach a path ``read_file`` would happily read
+    holds two contradictory definitions of its own workspace.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    (workspace / "notes.md").write_text("user file", encoding="utf-8")
+    (downloads / "build.log").write_text("vitest failed", encoding="utf-8")
+    session = _RecordingSession()
+    adapter = await _skill_adapter(workspace, session, workspace_roots=[downloads])
+
+    await adapter.start_turn(
+        TurnStartParams(
+            session_id=session.session_id,
+            message=[
+                TextContentBlock(
+                    text=f"compare @notes.md with @{downloads / 'build.log'}"
+                )
+            ],
+        )
+    )
+
+    blocks = session.sent[-1].message
+    resources = [
+        block.resource.uri
+        for block in blocks
+        if isinstance(block, ResourceContentBlock)
+    ]
+    assert sorted(Path(uri).name for uri in resources) == ["build.log", "notes.md"]
+
+
+@pytest.mark.asyncio
+async def test_unified_start_turn_keeps_an_unreachable_mention_as_plain_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prepare a file outside every workspace root of the session.
+
+    Do start a turn mentioning it alongside a file inside the workspace.
+
+    Assert the turn is sent with only the reachable file inlined. Rejecting the
+    request instead would discard a prompt the user had already composed over
+    one path they typed themselves.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.md").write_text("user file", encoding="utf-8")
+    outside = tmp_path / "build.log"
+    outside.write_text("vitest failed", encoding="utf-8")
+    session = _RecordingSession()
+    adapter = await _skill_adapter(workspace, session)
+
+    await adapter.start_turn(
+        TurnStartParams(
+            session_id=session.session_id,
+            message=[TextContentBlock(text=f"compare @notes.md with @{outside}")],
+        )
+    )
+
+    blocks = session.sent[-1].message
+    resources = [
+        block.resource.uri
+        for block in blocks
+        if isinstance(block, ResourceContentBlock)
+    ]
+    assert [Path(uri).name for uri in resources] == ["notes.md"]
+    assert str(outside) in blocks[0].text
 
 
 @pytest.mark.asyncio
@@ -3666,7 +3834,7 @@ async def test_unified_turn_start_injects_mentioned_file_context(
     calls: list[tuple[str, Path]] = []
 
     async def fake_mentioned_file_blocks(
-        text: str, *, base_dir: Path
+        text: str, *, base_dir: Path, workspace_roots: Sequence[Path] = ()
     ) -> list[ResourceContentBlock]:
         calls.append((text, base_dir))
         return [mentioned_block]

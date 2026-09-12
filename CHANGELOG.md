@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.25.4] - 2026-09-12
+
+### Fixed
+
+- Connector discovery excludes raw HTTP connectors that do not support MCP tools.
+- A single invalid connector no longer prevents the rest of your connectors from loading; an individual tool with an oversized schema is dropped on its own, and accounts over the connector cap keep a bounded catalog instead of loading none.
+- Automatic session titles use the active model on custom Mistral endpoints.
+- Smart-approve now appears in the Vibe Desktop mode picker when enabled via its rollout, and a background refresh no longer drops it.
+- ACP clients (Zed/JetBrains) always list the active mode, so a session can never get stuck on a mode missing from its own list.
+- Smart-approve now escalates to a confirmation prompt when a risky action is requested again, instead of only blocking it, and shows the reason it is asking.
+- Auto-approved calls no longer read as warnings: the reason smart-approve let a call run is shown as a note rather than a warning.
+- `@` file mentions now resolve against every workspace root, including `--add-dir` ones.
+- A `@` mention outside the workspace no longer rejects the whole message; it stays plain text and the read tool can still ask for it.
+- `--add-dir` no longer drops the working directory from the file tools' workspace roots.
+- Shell permission checks now require approval for risky syntax and command options that could bypass workspace and denylist controls (CVE-2026-87984, CVE-2026-87985, CVE-2026-87986, CVE-2026-87987, and residual CVE-2026-87988 variants).
+
 ## [2.25.3] - 2026-09-11
 
 ### Added

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -117,6 +118,11 @@ class ConnectorCatalogUnavailableError(ConnectorCatalogError):
 class ConnectorCatalogValidationError(ConnectorCatalogError):
     """The connector bootstrap payload violates the bounded catalog contract."""
 
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        # Low-cardinality drop code; keeps ids/tool names (the message) out of logs.
+        super().__init__(message)
+        self.reason = reason
+
 
 @runtime_checkable
 class SessionConnectorCatalogBinding(Protocol):
@@ -155,15 +161,11 @@ class _BootstrapConnector(BaseModel):
     name: str | None = None
     protocol: str | None = None
     status: _BootstrapStatus = Field(default_factory=_BootstrapStatus)
-    tools: list[_BootstrapTool] = Field(default_factory=list)
+    # Tools stay raw so a single malformed tool never fails the whole connector;
+    # each one is parsed (and isolated) individually in _resolve_connector_tools.
+    tools: list[JsonValue] = Field(default_factory=list)
     auth_action: _BootstrapAuthAction | None = None
     bootstrap_errors: JsonValue = None
-
-
-class _BootstrapPayload(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
-    connectors: list[_BootstrapConnector] = Field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1497,50 +1499,35 @@ def _resolve_provider(config: VibeConfigSchema) -> _ConnectorProvider | None:
 def _resolve_catalog(
     payload: object, provider_fingerprint: str
 ) -> ResolvedConnectorCatalog:
-    try:
-        parsed = _BootstrapPayload.model_validate(payload)
-    except ValidationError as exc:
-        raise ConnectorCatalogValidationError(
-            "Connector bootstrap payload is malformed"
-        ) from exc
-    if len(parsed.connectors) > _MAX_CONNECTORS:
-        raise ConnectorCatalogValidationError(
-            f"Connector bootstrap exceeds {_MAX_CONNECTORS} connectors"
-        )
-
-    raw_ids: set[str] = set()
-    prepared_connectors: list[tuple[str, str, _BootstrapConnector]] = []
-    for raw_connector in parsed.connectors:
-        raw_id = (raw_connector.id or "").strip()
-        if not raw_id:
-            continue
-        if raw_id in raw_ids:
-            raise ConnectorCatalogValidationError(
-                "Connector bootstrap contains a duplicate connector ID"
-            )
-        raw_ids.add(raw_id)
-        if len(raw_connector.tools) > _MAX_TOOLS_PER_CONNECTOR:
-            raise ConnectorCatalogValidationError(
-                f"Connector {raw_id!r} exceeds {_MAX_TOOLS_PER_CONNECTOR} tools"
-            )
-        display_name = (raw_connector.name or raw_id).strip() or raw_id
-        prepared_connectors.append((raw_id, display_name, raw_connector))
+    # Structurally valid, id-sorted connectors. Only a broken envelope is fatal;
+    # malformed items and duplicate ids are isolated so healthy siblings survive.
+    ordered_connectors = _prepare_bootstrap_connectors(payload)
 
     aliases: set[str] = set()
     connectors: list[ResolvedConnector] = []
-    for raw_id, display_name, raw_connector in sorted(
-        prepared_connectors, key=lambda item: item[0]
-    ):
+    truncated = False
+    for raw_id, display_name, raw_connector in ordered_connectors:
+        # Reserve the alias for every structurally valid connector in id order so
+        # dropping one below (bad tools, over cap) never shifts a sibling's alias.
         alias = _unique_alias(normalize_connector_alias(display_name), aliases)
-        tools = tuple(
-            _resolve_tool(tool, raw_id=raw_id) for tool in raw_connector.tools
-        )
-        tool_names = [tool.raw_name for tool in tools]
-        if len(tool_names) != len(set(tool_names)):
-            raise ConnectorCatalogValidationError(
-                f"Connector {raw_id!r} contains duplicate tool names"
+        # Count only kept connectors against the cap so invalid rows never crowd
+        # out a healthy tail; excess healthy connectors are truncated, not the
+        # ones that happen to sort first.
+        if len(connectors) >= _MAX_CONNECTORS:
+            truncated = True
+            continue
+        try:
+            tools = _resolve_connector_tools(raw_connector, raw_id=raw_id)
+        except ConnectorCatalogValidationError as exc:
+            logger.warning(
+                "Dropping connector that violates the bounded catalog contract",
+                extra={
+                    "connector_operation": "bootstrap",
+                    "connector_outcome": "invalid",
+                    "connector_drop_reason": exc.reason or "invalid",
+                },
             )
-        tools = tuple(sorted(tools, key=lambda tool: tool.raw_name))
+            continue
         connectors.append(
             ResolvedConnector(
                 raw_id=raw_id,
@@ -1551,6 +1538,17 @@ def _resolve_catalog(
                 tools=tools,
                 diagnostics=_bounded_diagnostics(raw_connector.bootstrap_errors),
             )
+        )
+
+    if truncated:
+        logger.warning(
+            "Truncating connector catalog to the bounded maximum",
+            extra={
+                "connector_operation": "bootstrap",
+                "connector_drop_reason": "catalog_truncated",
+                "connector_total": len(ordered_connectors),
+                "connector_limit": _MAX_CONNECTORS,
+            },
         )
 
     revision_payload = [_connector_revision_payload(item) for item in connectors]
@@ -1567,15 +1565,121 @@ def _resolve_catalog(
     return catalog
 
 
+def _prepare_bootstrap_connectors(
+    payload: object,
+) -> list[tuple[str, str, _BootstrapConnector]]:
+    """Parse each connector individually and drop the ones we cannot trust.
+
+    Only a structurally broken envelope (not a mapping, or ``connectors`` not a
+    list) is fatal. Malformed connector items are dropped, and every copy of a
+    duplicated id is dropped since its identity is ambiguous. Returns id-sorted
+    ``(raw_id, display_name, connector)`` triples for the structurally valid rows.
+    """
+    if not isinstance(payload, Mapping):
+        raise ConnectorCatalogValidationError(
+            "Connector bootstrap payload is malformed"
+        )
+    raw_items = payload.get("connectors")
+    if raw_items is None:
+        return []
+    if not isinstance(raw_items, list):
+        raise ConnectorCatalogValidationError(
+            "Connector bootstrap payload is malformed"
+        )
+
+    parsed: list[_BootstrapConnector] = []
+    malformed = 0
+    for raw_item in raw_items:
+        try:
+            parsed.append(_BootstrapConnector.model_validate(raw_item))
+        except ValidationError:
+            malformed += 1
+    if malformed:
+        logger.warning(
+            "Dropping connectors with a malformed bootstrap payload",
+            extra={
+                "connector_operation": "bootstrap",
+                "connector_drop_reason": "malformed_connector",
+                "connector_dropped": malformed,
+            },
+        )
+
+    id_counts = Counter(raw_id for c in parsed if (raw_id := (c.id or "").strip()))
+    duplicate_ids = {raw_id for raw_id, count in id_counts.items() if count > 1}
+    if duplicate_ids:
+        logger.warning(
+            "Dropping connectors that share a duplicate id",
+            extra={
+                "connector_operation": "bootstrap",
+                "connector_drop_reason": "duplicate_connector_id",
+                "connector_dropped": len(duplicate_ids),
+            },
+        )
+
+    prepared: list[tuple[str, str, _BootstrapConnector]] = []
+    for connector in parsed:
+        raw_id = (connector.id or "").strip()
+        if not raw_id or raw_id in duplicate_ids:
+            continue
+        display_name = (connector.name or raw_id).strip() or raw_id
+        prepared.append((raw_id, display_name, connector))
+    prepared.sort(key=lambda item: item[0])
+    return prepared
+
+
+def _resolve_connector_tools(
+    raw_connector: _BootstrapConnector, *, raw_id: str
+) -> tuple[ResolvedConnectorTool, ...]:
+    """Resolve one connector's tools, raising on per-connector contract breaches."""
+    if len(raw_connector.tools) > _MAX_TOOLS_PER_CONNECTOR:
+        raise ConnectorCatalogValidationError(
+            f"Connector {raw_id!r} exceeds {_MAX_TOOLS_PER_CONNECTOR} tools",
+            reason="too_many_tools",
+        )
+    # Drop a single unusable tool (malformed wire, oversized schema, missing name)
+    # on its own so the connector keeps its remaining tools.
+    resolved: list[ResolvedConnectorTool] = []
+    drop_counts: Counter[str] = Counter()
+    for raw_tool in raw_connector.tools:
+        try:
+            resolved.append(
+                _resolve_tool(_BootstrapTool.model_validate(raw_tool), raw_id=raw_id)
+            )
+        except ValidationError:
+            drop_counts["malformed_tool"] += 1
+        except ConnectorCatalogValidationError as exc:
+            drop_counts[exc.reason or "invalid"] += 1
+    if drop_counts:
+        # One summary per connector instead of one line per tool, so a connector
+        # shipping many unusable tools cannot flood the logs.
+        logger.warning(
+            "Dropping connector tools that violate the bounded contract",
+            extra={
+                "connector_operation": "bootstrap",
+                "connector_drop_reason": "tools_dropped",
+                "connector_tool_drop_counts": dict(drop_counts),
+            },
+        )
+    tool_names = [tool.raw_name for tool in resolved]
+    if len(tool_names) != len(set(tool_names)):
+        raise ConnectorCatalogValidationError(
+            f"Connector {raw_id!r} contains duplicate tool names",
+            reason="duplicate_tool_names",
+        )
+    return tuple(sorted(resolved, key=lambda tool: tool.raw_name))
+
+
 def _resolve_tool(tool: _BootstrapTool, *, raw_id: str) -> ResolvedConnectorTool:
     name = tool.name.strip()
     if not name:
         raise ConnectorCatalogValidationError(
-            f"Connector {raw_id!r} contains a tool without a name"
+            f"Connector {raw_id!r} contains a tool without a name",
+            reason="unnamed_tool",
         )
     if _json_size(tool.input_schema) > _MAX_INPUT_SCHEMA_BYTES:
         raise ConnectorCatalogValidationError(
-            f"Connector tool {name!r} input schema exceeds 64 KiB"
+            f"Connector tool {name!r} input schema exceeds 64 KiB",
+            reason="oversized_tool_schema",
         )
     return ResolvedConnectorTool(
         raw_name=name,

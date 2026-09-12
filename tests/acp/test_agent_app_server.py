@@ -48,8 +48,11 @@ from vibe.core.config import SessionLoggingConfig
 from vibe.core.types import FunctionCall, ScheduledLoop, ToolCall
 
 
-def _agent(backend: FakeBackend) -> tuple[VibeAcpAgent, FakeClient]:
+def _agent(
+    backend: FakeBackend, *, experimental_harness: bool = False
+) -> tuple[VibeAcpAgent, FakeClient]:
     async def start_session(options: LocalHarnessOptions) -> AppServerSession:
+        assert options.experimental_harness is experimental_harness
         loop = build_test_agent_loop(backend=backend, enable_streaming=True)
         return await AppServerSession.start(
             start_test_app_server(loop),
@@ -59,7 +62,9 @@ def _agent(backend: FakeBackend) -> tuple[VibeAcpAgent, FakeClient]:
             client_tool_handler=options.client_tool_handler,
         )
 
-    agent = VibeAcpAgent(session_starter=start_session)
+    agent = VibeAcpAgent(
+        session_starter=start_session, experimental_harness=experimental_harness
+    )
     client = FakeClient()
     agent.on_connect(client)
     client.on_connect(agent)
@@ -67,8 +72,13 @@ def _agent(backend: FakeBackend) -> tuple[VibeAcpAgent, FakeClient]:
 
 
 @pytest.mark.asyncio
-async def test_prompt_is_a_thin_translation_of_public_app_server_events() -> None:
-    agent, client = _agent(FakeBackend([mock_llm_chunk(content="Public response")]))
+async def test_prompt_is_a_thin_translation_of_public_app_server_events(
+    experimental_harness: bool,
+) -> None:
+    agent, client = _agent(
+        FakeBackend([mock_llm_chunk(content="Public response")]),
+        experimental_harness=experimental_harness,
+    )
     try:
         created = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
         response = await agent.prompt(
@@ -93,7 +103,9 @@ async def test_prompt_is_a_thin_translation_of_public_app_server_events() -> Non
 
 
 @pytest.mark.asyncio
-async def test_cancelled_prompt_uses_interrupted_app_server_turn_status() -> None:
+async def test_cancelled_prompt_uses_interrupted_app_server_turn_status(
+    experimental_harness: bool,
+) -> None:
     backend_started = asyncio.Event()
     release_backend = asyncio.Event()
 
@@ -104,7 +116,10 @@ async def test_cancelled_prompt_uses_interrupted_app_server_turn_status() -> Non
             async for chunk in super().complete_streaming(**kwargs):
                 yield chunk
 
-    agent, _ = _agent(GatedBackend([mock_llm_chunk(content="unused")]))
+    agent, _ = _agent(
+        GatedBackend([mock_llm_chunk(content="unused")]),
+        experimental_harness=experimental_harness,
+    )
     try:
         created = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
         prompt_task = asyncio.create_task(
@@ -173,9 +188,12 @@ async def test_new_session_without_a_key_is_unauthenticated(
 
 
 @pytest.mark.asyncio
-async def test_reasoning_is_projected_from_public_app_server_events() -> None:
+async def test_reasoning_is_projected_from_public_app_server_events(
+    experimental_harness: bool,
+) -> None:
     agent, client = _agent(
-        FakeBackend([mock_llm_chunk(content="Answer", reasoning_content="Thinking")])
+        FakeBackend([mock_llm_chunk(content="Answer", reasoning_content="Thinking")]),
+        experimental_harness=experimental_harness,
     )
     try:
         created = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
@@ -198,11 +216,12 @@ async def test_reasoning_is_projected_from_public_app_server_events() -> None:
 
 @pytest.mark.asyncio
 async def test_acp_session_workspace_and_mcp_inputs_cross_the_app_server_boundary(
-    tmp_path: Path,
+    tmp_path: Path, experimental_harness: bool
 ) -> None:
     captured: list[LocalHarnessOptions] = []
 
     async def start_session(options: LocalHarnessOptions) -> AppServerSession:
+        assert options.experimental_harness is experimental_harness
         captured.append(options)
         loop = build_test_agent_loop(enable_streaming=True)
         return await AppServerSession.start(
@@ -213,7 +232,9 @@ async def test_acp_session_workspace_and_mcp_inputs_cross_the_app_server_boundar
             client_tool_handler=options.client_tool_handler,
         )
 
-    agent = VibeAcpAgent(session_starter=start_session)
+    agent = VibeAcpAgent(
+        session_starter=start_session, experimental_harness=experimental_harness
+    )
     client = FakeClient()
     agent.on_connect(client)
     client.on_connect(agent)
@@ -249,12 +270,15 @@ async def test_acp_session_workspace_and_mcp_inputs_cross_the_app_server_boundar
 
 
 @pytest.mark.asyncio
-async def test_unsolicited_scheduled_turn_is_forwarded_to_acp(tmp_path: Path) -> None:
+async def test_unsolicited_scheduled_turn_is_forwarded_to_acp(
+    tmp_path: Path, experimental_harness: bool
+) -> None:
     config = build_test_vibe_config(
         session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
     )
 
     async def start_session(options: LocalHarnessOptions) -> AppServerSession:
+        assert options.experimental_harness is experimental_harness
         loop = build_test_agent_loop(
             config=config,
             backend=FakeBackend([mock_llm_chunk(content="Scheduled response")]),
@@ -280,7 +304,9 @@ async def test_unsolicited_scheduled_turn_is_forwarded_to_acp(tmp_path: Path) ->
             client_tool_handler=options.client_tool_handler,
         )
 
-    agent = VibeAcpAgent(session_starter=start_session)
+    agent = VibeAcpAgent(
+        session_starter=start_session, experimental_harness=experimental_harness
+    )
     client = FakeClient()
     agent.on_connect(client)
     client.on_connect(agent)
@@ -304,9 +330,9 @@ async def test_unsolicited_scheduled_turn_is_forwarded_to_acp(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_retries_are_forwarded_as_an_ext_notification_not_a_session_update() -> (
-    None
-):
+async def test_retries_are_forwarded_as_an_ext_notification_not_a_session_update(
+    experimental_harness: bool,
+) -> None:
     """Retrying is transient, so it must not enter the session update stream.
 
     Every SessionUpdate variant renders as chat content and lands in history; a
@@ -317,6 +343,7 @@ async def test_retries_are_forwarded_as_an_ext_notification_not_a_session_update
     )
 
     async def start_session(options: LocalHarnessOptions) -> AppServerSession:
+        assert options.experimental_harness is experimental_harness
         loop = build_test_agent_loop(backend=backend, enable_streaming=True)
         backend.on_retry = loop.notice_retry
         return await AppServerSession.start(
@@ -327,7 +354,9 @@ async def test_retries_are_forwarded_as_an_ext_notification_not_a_session_update
             client_tool_handler=options.client_tool_handler,
         )
 
-    agent = VibeAcpAgent(session_starter=start_session)
+    agent = VibeAcpAgent(
+        session_starter=start_session, experimental_harness=experimental_harness
+    )
     client = FakeClient()
     agent.on_connect(client)
     client.on_connect(agent)
@@ -392,7 +421,9 @@ async def test_retry_notification_reaches_the_wire_underscore_prefixed() -> None
 
 
 @pytest.mark.asyncio
-async def test_autonomous_profile_change_re_pushes_config_options() -> None:
+async def test_autonomous_profile_change_re_pushes_config_options(
+    experimental_harness: bool,
+) -> None:
     """An autonomous profile switch (e.g. exit_plan_mode) patches the
     session's `agent` and arrives as a SessionUpdated AppServerEvent. The mode
     is otherwise only carried on the load/new session response, so external
@@ -404,7 +435,10 @@ async def test_autonomous_profile_change_re_pushes_config_options() -> None:
     forwarded (see AppServerSession._handle_notification), so the re-pushed
     config must read the *new* mode, not the stale one.
     """
-    agent, client = _agent(FakeBackend([mock_llm_chunk(content="ok")]))
+    agent, client = _agent(
+        FakeBackend([mock_llm_chunk(content="ok")]),
+        experimental_harness=experimental_harness,
+    )
     try:
         created = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
         session = agent.sessions[created.session_id]
@@ -449,12 +483,17 @@ async def test_autonomous_profile_change_re_pushes_config_options() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unchanged_agent_does_not_re_push_config_options() -> None:
+async def test_unchanged_agent_does_not_re_push_config_options(
+    experimental_harness: bool,
+) -> None:
     """A SessionUpdated that did not change the agent (e.g. a title patch) must
     not re-push config options — that would spam the client on every session
     mutation.
     """
-    agent, client = _agent(FakeBackend([mock_llm_chunk(content="ok")]))
+    agent, client = _agent(
+        FakeBackend([mock_llm_chunk(content="ok")]),
+        experimental_harness=experimental_harness,
+    )
     try:
         created = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
         session = agent.sessions[created.session_id]
@@ -491,9 +530,9 @@ def test_acp_runtime_adapter_has_no_direct_core_dependency() -> None:
 
 @pytest.mark.asyncio
 async def test_response_too_long_returns_max_tokens_stop_reason(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, experimental_harness: bool
 ) -> None:
-    agent, _ = _agent(FakeBackend())
+    agent, _ = _agent(FakeBackend(), experimental_harness=experimental_harness)
     try:
         created = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
         session = agent.sessions[created.session_id]
@@ -522,8 +561,10 @@ async def test_response_too_long_returns_max_tokens_stop_reason(
 
 
 @pytest.mark.asyncio
-async def test_conversation_limit_returns_max_turn_requests_stop_reason() -> None:
-    agent, _ = _agent(FakeBackend())
+async def test_conversation_limit_returns_max_turn_requests_stop_reason(
+    experimental_harness: bool,
+) -> None:
+    agent, _ = _agent(FakeBackend(), experimental_harness=experimental_harness)
     try:
         created = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
         await agent.set_config_option("max_turns", created.session_id, "0")
@@ -540,7 +581,7 @@ async def test_conversation_limit_returns_max_turn_requests_stop_reason() -> Non
 
 @pytest.mark.asyncio
 async def test_acp_host_filesystem_flows_through_the_app_server(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, experimental_harness: bool
 ) -> None:
     file_path = Path.cwd() / "host.txt"
     file_path.touch()
@@ -555,7 +596,8 @@ async def test_acp_host_filesystem_flows_through_the_app_server(
         FakeBackend([
             [mock_llm_chunk(content="", tool_calls=[tool_call])],
             [mock_llm_chunk(content="done")],
-        ])
+        ]),
+        experimental_harness=experimental_harness,
     )
     read_text_file = AsyncMock(
         return_value=ReadTextFileResponse(content="from the ACP host")
@@ -586,7 +628,7 @@ async def test_acp_host_filesystem_flows_through_the_app_server(
 
 @pytest.mark.asyncio
 async def test_acp_host_write_only_filesystem_flows_through_the_app_server(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, experimental_harness: bool
 ) -> None:
     file_path = Path.cwd() / "host-write.txt"
     tool_call = ToolCall(
@@ -601,7 +643,8 @@ async def test_acp_host_write_only_filesystem_flows_through_the_app_server(
         FakeBackend([
             [mock_llm_chunk(content="", tool_calls=[tool_call])],
             [mock_llm_chunk(content="done")],
-        ])
+        ]),
+        experimental_harness=experimental_harness,
     )
     write_text_file = AsyncMock()
     monkeypatch.setattr(client, "write_text_file", write_text_file)
@@ -638,7 +681,7 @@ async def test_acp_host_write_only_filesystem_flows_through_the_app_server(
 
 @pytest.mark.asyncio
 async def test_acp_terminal_timeout_can_kill_while_wait_request_is_open(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, experimental_harness: bool
 ) -> None:
     tool_call = ToolCall(
         id="shell-1",
@@ -651,7 +694,8 @@ async def test_acp_terminal_timeout_can_kill_while_wait_request_is_open(
         FakeBackend([
             [mock_llm_chunk(content="", tool_calls=[tool_call])],
             [mock_llm_chunk(content="done")],
-        ])
+        ]),
+        experimental_harness=experimental_harness,
     )
     wait_started = asyncio.Event()
 

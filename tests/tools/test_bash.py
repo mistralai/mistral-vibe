@@ -1689,6 +1689,200 @@ def test_find_execution_predicate_does_not_override_denylist():
     assert "matches denylist pattern 'passwd'" in (permission.reason or "")
 
 
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("wrapper", ["eval", "exec"])
+def test_shell_wrappers_preserve_nested_denylist(shell_kind, wrapper):
+    """A shell builtin must not downgrade its statically visible command to ASK."""
+    if shell_kind == "legacy":
+        tool = Bash(
+            config_getter=lambda: BashToolConfig(denylist=["denied-marker"]),
+            state=BaseToolState(),
+        )
+        result = tool.resolve_permission(
+            BashArgs(command=f"{wrapper} denied-marker harmless")
+        )
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(
+                denylist=["denied-marker"]
+            ),
+            state=BaseToolState(),
+        )
+        result = tool.resolve_permission(
+            ExperimentalBashArgs(command=f"{wrapper} denied-marker harmless")
+        )
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.NEVER
+    assert "matches denylist pattern 'denied-marker'" in (result.reason or "")
+
+
+def _resolve_default_shell_permission(
+    shell_kind: str, command: str
+) -> PermissionContext | None:
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        return tool.resolve_permission(BashArgs(command=command))
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+    return tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sort -o sorted.txt input.txt",
+        "sort -rosorted.txt input.txt",
+        "sort --out=sorted.txt input.txt",
+        "sort --temporary-directory=. input.txt",
+        "sort --compress-program=gzip input.txt",
+        "find . -delete",
+        "find . -fprint matches.txt",
+        r"find . -exec echo {} \;",
+        "less -o less.log input.txt",
+        "less -Noless.log input.txt",
+        "less --LOG-FILE=less.log input.txt",
+        "tree -o tree.txt .",
+        "tree -aotree.txt .",
+        "git diff --output=diff.txt",
+        "git diff --out=diff.txt",
+        "git log --output=log.txt",
+        "git diff --ext-diff",
+        "date -s 2020-01-01",
+        "date -us 2020-01-01",
+        "date --set=2020-01-01",
+        "date --se=2020-01-01",
+    ],
+)
+def test_side_effecting_allowlisted_options_require_approval(shell_kind, command):
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sort -r input.txt",
+        "find . -name '*.py'",
+        "less -N input.txt",
+        "tree -L 2 .",
+        "git diff --stat",
+        "git log --oneline",
+        "sort -- --output=ordinary-filename",
+        "date -d yesterday",
+        "date -Iseconds",
+        "date -- -s",
+    ],
+)
+def test_benign_allowlisted_options_remain_allowed(shell_kind, command):
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command_template",
+    [
+        "tree {outside}",
+        "git diff --no-index {outside} other.txt",
+        "sort --random-source={outside} input.txt",
+        "sort --random={outside} input.txt",
+    ],
+)
+def test_allowlisted_option_paths_outside_workspace_require_approval(
+    shell_kind, command_template, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside" / "data.txt"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+
+    permission = _resolve_default_shell_permission(
+        shell_kind, command_template.format(outside=outside)
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        str(outside.parent) in required.label
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command_template",
+    [
+        "grep --file={outside} input.txt",
+        "grep --fil={outside} input.txt",
+        "grep -if{outside} input.txt",
+        "file --files-from={outside}",
+        "file --files-f={outside}",
+        "file -f{outside}",
+        "file --magic-file={outside} input.txt",
+        "file --magic-f={outside} input.txt",
+        "file -m{outside} input.txt",
+        "file -m{outside}:magic.mgc input.txt",
+        "du --files0-from={outside}",
+        "du --files0-f={outside}",
+        "wc --files0-from={outside}",
+        "wc --files0-f={outside}",
+        "date --file={outside}",
+        "date --fil={outside}",
+        "date -uf{outside}",
+        "diff --from-file={outside} input.txt",
+        "diff --to={outside} input.txt",
+    ],
+)
+def test_read_only_option_paths_outside_workspace_require_approval(
+    shell_kind, command_template, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside" / "data.txt"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+
+    permission = _resolve_default_shell_permission(
+        shell_kind, command_template.format(outside=outside)
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        str(outside.parent) in required.label
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep --file=patterns.txt input.txt",
+        "file -f names.txt",
+        "file --magic-file=magic.mgc input.txt",
+        "du --files0-from=names.txt",
+        "wc --files0-from=names.txt",
+        "date -f dates.txt",
+        "diff --from-file=base.txt input.txt",
+    ],
+)
+def test_read_only_option_paths_inside_workspace_remain_allowed(shell_kind, command):
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ALWAYS
+
+
 @pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
 def test_legacy_bash_quoted_outside_path_requires_approval(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -1996,7 +2190,7 @@ def test_new_read_only_commands_are_allowlisted():
         "grep pattern file.txt",
         "cut -d',' -f1 file.csv",
         "sort file.txt",
-        "tr 'a' 'b' < file.txt",
+        "tr 'a' 'b'",
         "uniq file.txt",
         "basename file.txt",
         "comm file1.txt file2.txt",
@@ -2031,6 +2225,217 @@ def test_new_read_only_commands_are_allowlisted():
         assert permission.permission is ToolPermission.ALWAYS, (
             f"Command '{cmd}' should be always allowed"
         )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"find . $'-exec' echo harmless {} \;",
+        r"find . $'-ex'c echo harmless {} \;",
+        r'find . "$(basename ./-exe)c" echo harmless {} \;',
+        "echo $( {/bin/bash,-c,id} ) $( (){ /bin/bash -c id } )",
+        "GIT_PAGER=cat git diff",
+        "PATH=/tmp; git status",
+        "PATH=/tmp && git status",
+        "(PATH=/tmp; git status)",
+        "{ PATH=/tmp; git status; }",
+        "for value in 1; do PATH=/tmp; git status; done",
+        "FOO=bar",
+        'cat "$HOME/.ssh/id_rsa"',
+        "echo ${VALUE:-harmless}",
+        "echo {harmless,safe}",
+        "echo {1..3}",
+        "echo $((1 + 2))",
+        "cat =sh",
+        "grep --file==sh pattern README.md",
+        "cat ~-/secret",
+        "cat ~+2/secret",
+        "cat ~vault/secret",
+        "cat ***/*",
+        "cat =(printf harmless)",
+        "echo ${(e)payload}",
+        "echo *(e:'true':)",
+        "[[ -r /etc/passwd ]] && echo readable",
+        "[ -r /etc/passwd ] && echo readable",
+        "for value in harmless; do echo harmless; done",
+        "for ((i = 0; i < 1; i++)); do echo harmless; done",
+        "while echo harmless; do echo harmless; done",
+        "if echo harmless; then echo harmless; fi",
+        "case harmless in harmless) echo harmless;; esac",
+        "(echo harmless)",
+        "{ echo harmless; }",
+        "harmless() { echo harmless; }",
+        "echo harmless &",
+    ],
+    ids=[
+        "ansi-c-string",
+        "nested-ansi-c-string",
+        "command-substitution",
+        "parse-error",
+        "environment-assignment",
+        "standalone-assignment",
+        "and-list-assignment",
+        "subshell-assignment",
+        "group-assignment",
+        "loop-assignment",
+        "assignment-only",
+        "variable-expansion",
+        "parameter-default-expansion",
+        "brace-expansion",
+        "brace-range-expansion",
+        "arithmetic-expansion",
+        "zsh-equals-expansion",
+        "zsh-magic-equals-expansion",
+        "zsh-directory-stack-expansion",
+        "zsh-directory-stack-index-expansion",
+        "zsh-named-directory-expansion",
+        "zsh-symlink-following-glob",
+        "zsh-temp-file-substitution",
+        "zsh-parameter-evaluation",
+        "zsh-executable-glob-qualifier",
+        "double-bracket-test-command",
+        "single-bracket-test-command",
+        "for-loop",
+        "c-style-for-loop",
+        "while-loop",
+        "conditional",
+        "case-conditional",
+        "subshell",
+        "group",
+        "function-definition",
+        "background",
+    ],
+)
+def test_shell_permission_analysis_fails_closed(shell_kind, command):
+    """Permission resolution must reject syntax not modeled for auto-approval."""
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo harmless > output.txt",
+        "echo harmless >> output.txt",
+        "cat < input.txt",
+        "echo harmless 2>&1",
+        "echo harmless &> output.txt",
+        "cat <<'EOF'\nharmless\nEOF",
+        "cat <<< harmless",
+        "> output.txt",
+        "{ echo harmless; } > output.txt",
+        'echo "$(echo harmless > output.txt)"',
+        "cat <(echo harmless)",
+        "echo harmless > >(cat)",
+    ],
+    ids=[
+        "output",
+        "append",
+        "input",
+        "fd-duplication",
+        "combined-output",
+        "heredoc",
+        "here-string",
+        "redirect-only",
+        "compound",
+        "nested",
+        "process-substitution-input",
+        "process-substitution-output",
+    ],
+)
+def test_shell_redirections_require_approval(shell_kind, command):
+    """Redirection and process substitution must never be auto-approved."""
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    ["cat <(printf harmless > marker.txt)", "cat <<EOF\n$(printf harmless)\nEOF"],
+    ids=["process-substitution-with-nested-redirect", "unquoted-heredoc-substitution"],
+)
+def test_nested_dynamic_redirections_require_approval(shell_kind, command):
+    """Nested redirects and substitutions must remain visible to permission policy."""
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_shell_permission_analysis_preserves_simple_allowlisted_commands(shell_kind):
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command="git status"))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command="git status"))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("command", "expected_reason"),
+    [
+        ("echo $(id)", "command substitution"),
+        ("echo $HOME", "variable expansion"),
+        ("cat < input.txt", "redirection"),
+        ("(PATH=/tmp; git status)", "environment assignments, subshell"),
+        ("&&", "a syntax error"),
+    ],
+    ids=["substitution", "expansion", "redirection", "multiple", "parse-error"],
+)
+def test_shell_approval_prompt_names_the_offending_syntax(
+    shell_kind, command, expected_reason
+):
+    """The prompt must say which construct blocked auto-approval, not just that one did."""
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    assert any(
+        required.label == f"shell syntax requiring approval: {expected_reason}"
+        for required in result.required_permissions
+    )
 
 
 def _force_windows_bash(monkeypatch: pytest.MonkeyPatch) -> None:

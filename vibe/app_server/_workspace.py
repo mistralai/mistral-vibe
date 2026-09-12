@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
@@ -161,10 +162,12 @@ def prepare_prompt_from_context(
 
 
 def mentioned_file_content_blocks(
-    message: str, *, base_dir: Path
+    message: str, *, base_dir: Path, workspace_roots: Sequence[Path] = ()
 ) -> list[ContentBlock]:
     blocks: list[ContentBlock] = []
-    for resource in _mentioned_file_resources(message, base_dir=base_dir):
+    for resource in _mentioned_file_resources(
+        message, base_dir=base_dir, workspace_roots=workspace_roots
+    ):
         try:
             result = read_lines_safe(
                 resource.path,
@@ -180,10 +183,12 @@ def mentioned_file_content_blocks(
 
 
 async def mentioned_file_content_blocks_async(
-    message: str, *, base_dir: Path
+    message: str, *, base_dir: Path, workspace_roots: Sequence[Path] = ()
 ) -> list[ContentBlock]:
     blocks: list[ContentBlock] = []
-    for resource in _mentioned_file_resources(message, base_dir=base_dir):
+    for resource in _mentioned_file_resources(
+        message, base_dir=base_dir, workspace_roots=workspace_roots
+    ):
         try:
             result = await read_lines_safe_async(
                 resource.path,
@@ -198,20 +203,40 @@ async def mentioned_file_content_blocks_async(
     return blocks
 
 
-def _mentioned_file_resources(message: str, *, base_dir: Path) -> list[PathResource]:
+def _mentioned_file_resources(
+    message: str, *, base_dir: Path, workspace_roots: Sequence[Path] = ()
+) -> list[PathResource]:
+    """The mentioned files inside the workspace roots, in mention order.
+
+    Inlining skips the read tool's prompt, so it keeps to those roots. A
+    mention outside them stays plain text for the read tool to ask about,
+    rather than failing the whole message.
+    """
     root = base_dir.expanduser().resolve()
+    roots = _attachable_roots(root, workspace_roots)
     payload = build_path_prompt_payload(message, base_dir=root)
-    resources = [resource for resource in payload.resources if resource.kind == "file"]
+    resources = [
+        resource
+        for resource in payload.resources
+        if resource.kind == "file" and _is_within_roots(resource.path, roots)
+    ]
     if len(resources) > _MENTIONED_FILE_MAX_FILES:
         raise PromptPreparationError(
             f"Too many file mentions: {_MENTIONED_FILE_MAX_FILES} maximum"
         )
-    for resource in resources:
-        if not resource.path.resolve().is_relative_to(root):
-            raise PromptPreparationError(
-                f"Cannot attach file outside the workspace: {resource.alias}"
-            )
     return resources
+
+
+def _attachable_roots(cwd: Path, workspace_roots: Sequence[Path]) -> tuple[Path, ...]:
+    roots = [root.expanduser().resolve() for root in workspace_roots]
+    if cwd not in roots:
+        roots.insert(0, cwd)
+    return tuple(roots)
+
+
+def _is_within_roots(path: Path, roots: Sequence[Path]) -> bool:
+    resolved = path.expanduser().resolve()
+    return any(resolved.is_relative_to(root) for root in roots)
 
 
 def _mentioned_file_content_block(

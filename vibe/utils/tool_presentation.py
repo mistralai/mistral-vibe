@@ -48,6 +48,9 @@ class EffectResultDisplay(PresentationModel):
     verb: str = ""
     message: str
     warnings: list[str] = Field(default_factory=list)
+    # Why the call ran without asking (smart approve). Not a warning: the
+    # call succeeded and was authorised, so it must not read as a problem.
+    approval_note: str | None = None
     suffix: str = ""
 
     @property
