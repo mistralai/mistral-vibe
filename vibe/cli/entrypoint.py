@@ -113,11 +113,16 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=str,
-        choices=["text", "json", "streaming"],
+        choices=["text", "json", "streaming", "rich"],
         default="text",
         help="Output format for programmatic mode (-p): 'text' "
         "for human-readable (default), 'json' for all messages at end, "
-        "'streaming' for newline-delimited JSON per message.",
+        "'streaming' for newline-delimited JSON per message, 'rich' for live styled streaming with progress.",
+    )
+    parser.add_argument(
+        "--auto-exit",
+        action="store_true",
+        help="In interactive TUI mode, automatically exit after completing the initial prompt.",
     )
     parser.add_argument(
         "--agent",
