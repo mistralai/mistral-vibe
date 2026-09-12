@@ -18,11 +18,11 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
-from vibe.core.tools.builtins._shell_permission_analysis import analyze_shell_command
 from vibe.core.tools.builtins._shell_command_policy import (
     analyze_shell_command_policy,
     path_candidates,
 )
+from vibe.core.tools.builtins._shell_permission_analysis import analyze_shell_command
 from vibe.core.tools.io_port import ShellCommandRequest
 from vibe.core.tools.permissions import (
     PermissionContext,
