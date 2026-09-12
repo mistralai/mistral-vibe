@@ -1996,7 +1996,7 @@ def test_new_read_only_commands_are_allowlisted():
         "grep pattern file.txt",
         "cut -d',' -f1 file.csv",
         "sort file.txt",
-        "tr 'a' 'b' file.txt",
+        "tr 'a' 'b'",
         "uniq file.txt",
         "basename file.txt",
         "comm file1.txt file2.txt",
