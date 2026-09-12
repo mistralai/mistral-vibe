@@ -15,6 +15,13 @@ _SUPPORTED_COMMAND_PARTS = {
     "concatenation",
 }
 
+_REDIRECTION_NODES = {
+    "file_redirect",
+    "heredoc_redirect",
+    "herestring_redirect",
+    "redirected_statement",
+}
+
 
 @dataclass(frozen=True)
 class ShellPermissionAnalysis:
@@ -41,7 +48,7 @@ def analyze_shell_command(command: str) -> ShellPermissionAnalysis:
         approval_reasons.add("shell syntax contains a parse error")
 
     def find_commands(node: Node) -> None:
-        if node.type == "redirected_statement":
+        if node.type in _REDIRECTION_NODES:
             approval_reasons.add("shell redirection requires approval")
 
         if node.type == "command":

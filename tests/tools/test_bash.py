@@ -2037,15 +2037,61 @@ def test_new_read_only_commands_are_allowlisted():
 @pytest.mark.parametrize(
     "command",
     [
-        "echo harmless > /tmp/outside",
         r"find . $'-exec' echo harmless {} \;",
         "echo $( {/bin/bash,-c,id} ) $( (){ /bin/bash -c id } )",
         "GIT_PAGER=cat git diff",
     ],
-    ids=["redirect", "ansi-c-string", "parse-error", "environment-assignment"],
+    ids=["ansi-c-string", "parse-error", "environment-assignment"],
 )
 def test_shell_permission_analysis_fails_closed(shell_kind, command):
     """Permission resolution must reject lossy parse results without execution."""
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo harmless > output.txt",
+        "echo harmless >> output.txt",
+        "cat < input.txt",
+        "echo harmless 2>&1",
+        "echo harmless &> output.txt",
+        "cat <<'EOF'\nharmless\nEOF",
+        "cat <<< harmless",
+        "> output.txt",
+        "{ echo harmless; } > output.txt",
+        'echo "$(echo harmless > output.txt)"',
+        "cat <(echo harmless)",
+        "echo harmless > >(cat)",
+    ],
+    ids=[
+        "output",
+        "append",
+        "input",
+        "fd-duplication",
+        "combined-output",
+        "heredoc",
+        "here-string",
+        "redirect-only",
+        "compound",
+        "nested",
+        "process-substitution-input",
+        "process-substitution-output",
+    ],
+)
+def test_shell_redirections_require_approval(shell_kind, command):
+    """Redirection and process substitution must never be auto-approved."""
     if shell_kind == "legacy":
         tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
         result = tool.resolve_permission(BashArgs(command=command))
