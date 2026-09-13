@@ -476,6 +476,61 @@ def test_tool_is_one_public_lifecycle_entry() -> None:
     assert reduced.state.output["content"] == "hello"
 
 
+def test_reused_tool_call_id_projects_a_distinct_effect_entry() -> None:
+    projector = EventProjector("session-1", "turn-1")
+    first_call = projector.project(_read_call())
+    first_result = projector.project(_read_result())
+    # Providers outside the official API restart tool call numbering on every
+    # completion, so the settled id comes back for an unrelated call.
+    second_call = projector.project(_read_call())
+    second_result = projector.project(_read_result())
+
+    assert second_call[-1].method == "history/entryAdded"
+    assert len(projector.history) == 2
+    first, second = projector.history
+    assert first.id == "tool-1"
+    assert second.id != first.id
+    assert isinstance(second, PublicEffectEntry)
+    assert isinstance(second.state, CompletedEffectState)
+    assert second.generation_status == "completed"
+    assert projector.effect_entry_id("tool-1") == second.id
+
+    projection = _projection()
+    updates = [*first_call, *first_result, *second_call, *second_result]
+    for sequence, update in enumerate(updates, start=1):
+        assert projection.consume(_notification(sequence, update)) is not None
+    assert [entry.id for entry in projection.history] == [first.id, second.id]
+
+
+def test_reused_tool_call_id_across_turns_projects_a_distinct_entry() -> None:
+    projector = EventProjector("session-1", "turn-1")
+    projector.project(_read_call())
+    projector.project(_read_result())
+
+    resumed = EventProjector(
+        "session-1",
+        "turn-2",
+        reserved_entry_ids=[entry.id for entry in projector.history],
+    )
+    added = resumed.project(_read_call())
+
+    assert added[-1].method == "history/entryAdded"
+    assert resumed.history[0].id != "tool-1"
+
+
+def test_reused_tool_call_id_without_a_call_event_projects_a_result_entry() -> None:
+    projector = EventProjector("session-1", "turn-1")
+    projector.project(_read_result())
+    updates = projector.project(_read_result())
+
+    assert [update.method for update in updates] == [
+        "history/entryAdded",
+        "history/entryUpdated",
+    ]
+    assert len(projector.history) == 2
+    assert projector.history[1].id != projector.history[0].id
+
+
 def test_callback_entry_is_emitted_before_related_effect_is_blocked() -> None:
     projector = EventProjector("session-1", "turn-1")
     projector.project(_read_call())
