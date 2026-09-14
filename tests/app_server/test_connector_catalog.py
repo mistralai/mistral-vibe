@@ -793,7 +793,7 @@ def test_resolve_drops_connector_with_duplicate_trimmed_tool_names(
     assert [connector.alias for connector in catalog.connectors] == ["wiki"]
 
 
-def test_resolve_drops_connector_exceeding_tool_limit() -> None:
+def test_resolve_marks_connector_exceeding_tool_limit_as_unavailable() -> None:
     over_limit = _connector(connector_id="c-many", name="many")
     over_limit["tools"] = [
         {"name": f"tool_{index}", "description": "x", "inputSchema": {}}
@@ -804,7 +804,14 @@ def test_resolve_drops_connector_exceeding_tool_limit() -> None:
         {"connectors": [over_limit, _connector(name="wiki")]}, "fingerprint"
     )
 
-    assert [connector.alias for connector in catalog.connectors] == ["wiki"]
+    by_alias = {connector.alias: connector for connector in catalog.connectors}
+    assert set(by_alias.keys()) == {"many", "wiki"}
+    assert not by_alias["many"].ready
+    assert by_alias["many"].tools == ()
+    assert by_alias["many"].diagnostics == (
+        "Connector bootstrap issue: tool_limit_exceeded",
+    )
+    assert by_alias["wiki"].ready
 
 
 def test_resolve_drops_oversized_tool_but_keeps_connector() -> None:
@@ -993,6 +1000,102 @@ def test_resolve_aggregates_dropped_tool_warnings(
     assert getattr(tool_drop_logs[0], "connector_tool_drop_counts", None) == {
         "unnamed_tool": 5
     }
+
+
+@pytest.mark.asyncio
+async def test_connector_catalog_accepts_more_than_128_tools(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    connector = _connector()
+    connector["tools"] = [
+        {"name": f"tool_{i}", "description": f"Tool {i}", "inputSchema": {}}
+        for i in range(200)
+    ]
+
+    async def fetch(_base_url: str, _api_key: str) -> object:
+        return {"connectors": [connector]}
+
+    service = ConnectorCatalogService(
+        implicit_source_enabled=False,
+        cache_path=tmp_path / "connectors.json",
+        fetch_bootstrap=fetch,
+    )
+
+    catalog = await service.resolve_catalog(_orchestrator())
+    assert catalog is not None
+    assert len(catalog.connectors) == 1
+    assert len(catalog.connectors[0].tools) == 200
+
+
+@pytest.mark.asyncio
+async def test_connector_catalog_marks_oversized_connector_as_unavailable_with_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    connector = _connector()
+    connector["tools"] = [
+        {"name": f"tool_{i}", "description": f"Tool {i}", "inputSchema": {}}
+        for i in range(1001)
+    ]
+
+    async def fetch(_base_url: str, _api_key: str) -> object:
+        return {"connectors": [connector]}
+
+    service = ConnectorCatalogService(
+        implicit_source_enabled=False,
+        cache_path=tmp_path / "connectors.json",
+        fetch_bootstrap=fetch,
+    )
+
+    catalog = await service.resolve_catalog(_orchestrator())
+    assert catalog is not None
+    assert len(catalog.connectors) == 1
+    resolved = catalog.connectors[0]
+    assert not resolved.ready
+    assert resolved.tools == ()
+    assert resolved.diagnostics == ("Connector bootstrap issue: tool_limit_exceeded",)
+
+
+@pytest.mark.asyncio
+async def test_connector_catalog_isolates_oversized_connector_and_preserves_valid_connectors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    good = _connector(connector_id="good", name="Good")
+    good["tools"] = [
+        {"name": f"good_tool_{i}", "description": f"Good Tool {i}", "inputSchema": {}}
+        for i in range(3)
+    ]
+    huge = _connector(connector_id="huge", name="Huge")
+    huge["tools"] = [
+        {"name": f"huge_tool_{i}", "description": f"Huge Tool {i}", "inputSchema": {}}
+        for i in range(1001)
+    ]
+
+    async def fetch(_base_url: str, _api_key: str) -> object:
+        return {"connectors": [good, huge]}
+
+    service = ConnectorCatalogService(
+        implicit_source_enabled=False,
+        cache_path=tmp_path / "connectors.json",
+        fetch_bootstrap=fetch,
+    )
+
+    catalog = await service.resolve_catalog(_orchestrator())
+    assert catalog is not None
+    assert len(catalog.connectors) == 2
+
+    by_id = {c.raw_id: c for c in catalog.connectors}
+    assert by_id["good"].ready
+    assert len(by_id["good"].tools) == 3
+    assert by_id["good"].diagnostics == ()
+
+    assert not by_id["huge"].ready
+    assert by_id["huge"].tools == ()
+    assert by_id["huge"].diagnostics == (
+        "Connector bootstrap issue: tool_limit_exceeded",
+    )
 
 
 def test_connector_selection_preserves_explicit_policy_precedence() -> None:
