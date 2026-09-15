@@ -83,7 +83,6 @@ def _git_bash_managed_shell_enabled(config: VibeConfigSchema | None) -> bool:
 
 def _get_git_bash_env_overrides(overrides: dict[str, str] | None) -> dict[str, str]:
     env = {
-        "CI": "true",
         "NONINTERACTIVE": "1",
         "NO_TTY": "1",
         "TERM": "dumb",

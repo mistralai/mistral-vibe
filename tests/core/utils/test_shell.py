@@ -3,6 +3,15 @@ from __future__ import annotations
 import vibe.core.utils.shell as shell
 
 
+def test_shell_environment_does_not_set_ci(monkeypatch) -> None:
+    monkeypatch.setattr(shell, "is_windows", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+
+    environment = shell._shell_environment()
+
+    assert "CI" not in environment
+
+
 def test_shell_environment_does_not_invent_locale(monkeypatch) -> None:
     monkeypatch.setattr(shell, "is_windows", lambda: False)
     monkeypatch.delenv("LC_ALL", raising=False)

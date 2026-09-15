@@ -1331,7 +1331,6 @@ async def test_git_bash_fallback_projects_native_shell_to_client_terminal(
             command=shell,
             args=["-c", "printf hello"],
             env={
-                "CI": "true",
                 "NONINTERACTIVE": "1",
                 "NO_TTY": "1",
                 "TERM": "dumb",
@@ -1386,7 +1385,6 @@ async def test_powershell_fallback_projects_native_shell_to_client_terminal(
             command=shell,
             args=["-NoLogo", "-NoProfile", "-Command", "Write-Output hello"],
             env={
-                "CI": "true",
                 "NONINTERACTIVE": "1",
                 "NO_TTY": "1",
                 "GIT_PAGER": "more",

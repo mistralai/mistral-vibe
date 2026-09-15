@@ -661,13 +661,7 @@ def _analyze_windows_paths(
 
 
 def _get_windows_env_overrides(overrides: dict[str, str] | None) -> dict[str, str]:
-    env = {
-        "CI": "true",
-        "NONINTERACTIVE": "1",
-        "NO_TTY": "1",
-        "GIT_PAGER": "more",
-        "PAGER": "more",
-    }
+    env = {"NONINTERACTIVE": "1", "NO_TTY": "1", "GIT_PAGER": "more", "PAGER": "more"}
     if overrides:
         env.update(overrides)
     return env

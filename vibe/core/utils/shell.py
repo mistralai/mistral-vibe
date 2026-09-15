@@ -56,7 +56,7 @@ async def spawn_shell_command(
 
 
 def _shell_environment() -> dict[str, str]:
-    env = {**os.environ, "CI": "true", "NONINTERACTIVE": "1", "NO_TTY": "1"}
+    env = {**os.environ, "NONINTERACTIVE": "1", "NO_TTY": "1"}
     if is_windows():
         return {**env, "GIT_PAGER": "more", "PAGER": "more"}
     # LC_ALL overrides every LC_* category, so a user-set LC_ALL=C (common in
