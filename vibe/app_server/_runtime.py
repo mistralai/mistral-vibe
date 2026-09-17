@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import threading
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlsplit
 
 from pydantic import JsonValue, ValidationError
 
@@ -87,7 +86,7 @@ from vibe.core.experiments.manager import (
 from vibe.core.experiments.models import EvalResponse
 from vibe.core.hooks.config import load_hooks_file, load_hooks_from_fs
 from vibe.core.hooks.models import HookConfigResult
-from vibe.core.paths import VIBE_HOME, WORKTREES_DIR, dedup_paths
+from vibe.core.paths import VIBE_HOME, WORKTREES_DIR
 from vibe.core.session import last_session_pointer
 from vibe.core.session.session_id import extract_suffix, generate_session_id
 from vibe.core.session.session_index import warm_session_index
@@ -117,7 +116,6 @@ from vibe.utils.cache_store import FileSystemCacheStore
 from vibe.utils.http import get_server_url_from_api_base
 
 _SHORT_SESSION_ID_LENGTH = 8
-_PUBLIC_MISTRAL_API_ORIGIN = ("https", "api.mistral.ai", 443)
 type _CommandEnvironmentMode = Literal["unix", "git_bash", "powershell"]
 
 
@@ -127,17 +125,6 @@ def _command_environment_mode() -> _CommandEnvironmentMode:
     if get_windows_bash_path() is not None:
         return "git_bash"
     return "powershell"
-
-
-def _is_public_mistral_api(api_base: str) -> bool:
-    parsed = urlsplit(api_base)
-    try:
-        port = parsed.port
-    except ValueError:
-        return False
-    effective_port = 443 if port is None and parsed.scheme.lower() == "https" else port
-    origin = (parsed.scheme.lower(), (parsed.hostname or "").lower(), effective_port)
-    return origin == _PUBLIC_MISTRAL_API_ORIGIN
 
 
 def _build_unified_system_instructions(
@@ -181,7 +168,7 @@ def _build_launch_context_from_services(
 def _utility_credential_provider(config: VibeConfigSchema) -> ProviderConfig:
     """The provider a background title's credential resolves against.
 
-    Bound to the Mistral provider (the destination the fast title route targets)
+    Bound to the Mistral provider (the destination the title route targets)
     rather than re-running utility selection, so a vanished Mistral key surfaces
     as auth-required instead of resolving the active provider's key — which the
     route would then send to the Mistral endpoint. Raising here is turned into an
@@ -202,10 +189,12 @@ def _utility_provider_route(
 ) -> LocalProviderRoute | None:
     """A utility completion's provider destination, or None to reuse the session's.
 
-    Used by background title generation and the smart-approve classifier. The route
-    is set only when the caller enables it and the selected provider differs from
-    the session's active provider. Same-provider callers reuse the session adapter
-    and its credentials, so the route stays None.
+    Used by background title generation and the smart-approve classifier: both run
+    the fast Mistral model regardless of the session's active provider. The route
+    is set only when the caller enables it and the utility provider differs from
+    the session's active provider — so the utility call runs on the fast Mistral
+    model while the session runs elsewhere. Same-provider callers reuse the session
+    adapter and its credentials, so the route stays None.
     """
     if not enabled or provider_cfg.name == session_provider_name:
         return None
@@ -243,6 +232,9 @@ if TYPE_CHECKING:
     from vibe.core.config import ProviderConfig
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
     from vibe.core.tools.mcp.registry import MCPRegistry
+
+# Env var pointing at a file to append every JSON-RPC message to (diagnostic).
+TRACE_ENV_VAR = "VIBE_APPSERVER_TRACE"
 
 
 def merge_plugin_mcp_into_catalog(
@@ -604,10 +596,16 @@ class HarnessServer:
         if not self._reconnectable:
             raise RuntimeError("This app-server transport cannot reconnect")
         client_transport, server_transport = memory_transport_pair()
+        traced: JsonRpcTransport = server_transport
+        trace = os.environ.get(TRACE_ENV_VAR)
+        if trace:
+            from vibe.app_server.transport import TracingTransport
+
+            traced = TracingTransport(server_transport, trace)
         return AppServerClient(
             client_transport,
             run_peer=lambda: self._server.serve_connection(
-                server_transport, close_on_disconnect=False
+                traced, close_on_disconnect=False
             ),
         )
 
@@ -1173,14 +1171,9 @@ class HarnessProcess:
         harness_files = session_config.harness_files
         config = config_orchestrator.config
         cwd = Path(options.cwd or Path.cwd()).expanduser().resolve()
-        # The harness reads a non-empty root set as the complete one, so the cwd
-        # has to stay in it: ``--add-dir`` widens the workspace, never replaces it.
         workspace_roots = tuple(
-            dedup_paths([
-                cwd,
-                *(Path(root).expanduser() for root in options.workspace_roots),
-            ])
-        )
+            Path(root).expanduser().resolve() for root in options.workspace_roots
+        ) or (cwd,)
         plugins, plugin_provider, plugin_mcp = await self._build_plugins(
             session_config, cwd
         )
@@ -1200,12 +1193,12 @@ class HarnessProcess:
 
         # A second credential port for background title generation that may run on
         # the fast Mistral model even when the session's active provider differs.
-        # Bound to the Mistral provider — the one the fast title route targets —
-        # rather than re-running utility selection: if the Mistral key later
-        # disappears, this must surface as auth-required, not fall back to the active
-        # provider and send its key to the Mistral endpoint the route still points
-        # at. Same per-session lifetime as ``credentials`` so rejection memory
-        # survives derivations.
+        # Bound to the Mistral provider — the one the title route targets — rather
+        # than re-running utility selection: if the Mistral key later disappears,
+        # this must surface as auth-required, not fall back to the active provider
+        # and send its key to the Mistral endpoint the route still points at. Same
+        # per-session lifetime as ``credentials`` so rejection memory survives
+        # derivations.
         title_credentials = ProviderCredentialService(
             config_orchestrator, select_provider=_utility_credential_provider
         )
@@ -1311,20 +1304,12 @@ class HarnessProcess:
             config: VibeConfigSchema, settings: UnifiedSessionSettings
         ) -> UnifiedRuntimeDerivation:
             active_model = config.get_active_model()
-            provider = config.get_provider_for_model(active_model)
             compaction_model = config.get_compaction_model()
-            title_model_config, utility_provider_cfg = select_utility_model(config)
-            title_provider_cfg = utility_provider_cfg
-            title_model_is_fast = is_fast_utility_model(config)
-            if title_model_is_fast and not _is_public_mistral_api(
-                utility_provider_cfg.api_base
-            ):
-                title_model_config = active_model
-                title_provider_cfg = provider
-                title_model_is_fast = False
+            title_model_config, title_provider_cfg = select_utility_model(config)
             title_model = LocalModelRoute(
                 model=title_model_config.name, temperature=0.0, thinking="off"
             )
+            title_model_is_fast = is_fast_utility_model(config)
             # Match the legacy policy: only interactive terminal/desktop clients
             # get background titles; other clients keep the message preview.
             auto_title_enabled = (
@@ -1338,6 +1323,7 @@ class HarnessProcess:
                 if active_model.auto_compact_threshold > 0
                 else RustDisabledCompactionPolicy()
             )
+            provider = config.get_provider_for_model(active_model)
             derived_tools = ToolManager(
                 lambda: config, defer_mcp=True, cwd=cwd, harness_files=harness_files
             )
@@ -1456,7 +1442,7 @@ class HarnessProcess:
                     # route + credentials rather than the active model's. Set only
                     # under smart approve, when the classify gate actually runs.
                     classifier_provider=_utility_provider_route(
-                        utility_provider_cfg,
+                        title_provider_cfg,
                         session_provider_name=provider.name,
                         credentials=title_credentials,
                         enabled=smart_approve,
@@ -1930,6 +1916,12 @@ async def create_harness_server(
     without a network.
     """
     from vibe.app_server.server import AppServer
+
+    trace = os.environ.get(TRACE_ENV_VAR)
+    if trace:
+        from vibe.app_server.transport import TracingTransport
+
+        transport = TracingTransport(transport, trace)
 
     if process is not None and experimental_harness:
         raise ValueError(

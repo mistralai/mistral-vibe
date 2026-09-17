@@ -51,6 +51,11 @@ def create_backend(
     enable_otel: bool = False,
     on_retry: RetryObserver | None = None,
 ) -> BackendLike:
+    from vibe.core.llm.backend.fake import FakeBackend, fake_backend_enabled
+
+    if fake_backend_enabled():
+        return FakeBackend()
+
     backend = Backend(provider.backend)
     factory = BACKEND_FACTORY[backend]
     transport_timeouts: dict[str, float] = (

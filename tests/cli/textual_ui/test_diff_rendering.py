@@ -21,7 +21,6 @@ from vibe.cli.textual_ui.widgets.diff_rendering import (
     edit_diff_inputs,
     language_for_path,
     render_edit_diff,
-    render_edit_diff_async,
 )
 
 
@@ -145,27 +144,21 @@ class TestBuildDiffLine:
 
 
 class TestRenderEditDiff:
-    @pytest.mark.asyncio
-    async def test_async_render_runs_in_another_thread(self) -> None:
-        loop_thread = threading.get_ident()
-        render_thread: int | None = None
-
-        def capture_thread(*args, **kwargs):
-            nonlocal render_thread
-            render_thread = threading.get_ident()
-            return render_edit_diff(*args, **kwargs)
-
+    def test_rows_are_not_highlighted_until_content_is_read(self) -> None:
         with patch(
-            "vibe.cli.textual_ui.widgets.diff_rendering.render_edit_diff",
-            side_effect=capture_thread,
-        ):
-            lines = await render_edit_diff_async(
-                [DiffOccurrence(1, "x = 1", "x = 2")], "py", ansi=False, dark=True
-            )
+            "vibe.cli.textual_ui.widgets.diff_rendering._build_diff_body",
+            return_value=Content("body"),
+        ) as build_body:
+            lines = _render("x = 100", "x = 200", "py", 1, ansi=False)
+            assert all(line.plain for line in lines)
+            build_body.assert_not_called()
 
-        assert lines
-        assert render_thread is not None
-        assert render_thread != loop_thread
+            assert lines[0].content is lines[0].content
+            assert build_body.call_count == 1
+
+    def test_plain_matches_the_highlighted_content(self) -> None:
+        lines = _render("x = 100", "x = 200", "py", 1, ansi=False)
+        assert all(line.plain == line.content.plain for line in lines)
 
     def test_simple_replacement(self) -> None:
         lines = _render("x = 100", "x = 200", "py", 1, ansi=False)

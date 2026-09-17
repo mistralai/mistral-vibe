@@ -66,7 +66,13 @@ def _install_fresh_wheel(tmp_path: Path, wheel_path: Path) -> Path:
     return _venv_executable(venv_path, "vibe")
 
 
-@pytest.mark.timeout(90)
+# This test builds the wheel, which compiles a release vibe-rs (thin LTO +
+# debuginfo) inside the timed body. A cold CI compile of the crate and its
+# ~400 locked dependencies far exceeds a tight budget, so the timeout must
+# cover it while staying under the Buildkite step cap. It is only a hang
+# backstop: every interactive step below has its own short pexpect timeout
+# (10-30s).
+@pytest.mark.timeout(900)
 def test_fresh_wheel_install_can_spawn_cli_and_complete_happy_path(
     streaming_mock_server: StreamingMockServer,
     setup_e2e_env: None,

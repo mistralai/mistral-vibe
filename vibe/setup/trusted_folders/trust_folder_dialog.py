@@ -18,6 +18,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from vibe.app_server.models import WorkspaceTrustDecision, WorkspaceTrustDetails
+from vibe.cli.textual_ui.replay_harness import ReplayDialogIdleMarker
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
@@ -263,9 +264,23 @@ class TrustFolderApp(App[TrustDecision | None]):
         self.settings_path = settings_path
         self._result: TrustDecision | None = None
         self._quit_without_saving = False
+        self._replay_idle_marker = ReplayDialogIdleMarker(self)
 
     def on_mount(self) -> None:
         self.theme = "ansi-dark"
+
+    async def on_event(self, event: events.Event) -> None:
+        # Drop the harness hold/release keys before any widget can see them.
+        if isinstance(event, events.Key) and self._replay_idle_marker.consume_batch_key(
+            event.key
+        ):
+            return
+        if isinstance(event, events.InputEvent) and not event.is_forwarded:
+            self._replay_idle_marker.rearm()
+        await super().on_event(event)
+
+    def on_idle(self) -> None:
+        self._replay_idle_marker.maybe_emit()
 
     def compose(self) -> ComposeResult:
         yield TrustFolderDialog(
@@ -280,12 +295,14 @@ class TrustFolderApp(App[TrustDecision | None]):
 
     def action_quit_without_saving(self) -> None:
         self._quit_without_saving = True
+        self._replay_idle_marker.stop()
         self.exit(result=None)
 
     def on_trust_folder_dialog_decided(
         self, message: TrustFolderDialog.Decided
     ) -> None:
         self._result = cast(TrustDecision, message.decision)
+        self._replay_idle_marker.stop()
         self.exit(result=self._result)
 
     def run_trust_dialog(self) -> TrustDecision | None:

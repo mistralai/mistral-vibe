@@ -16,8 +16,8 @@ from vibe.app_server.models import (
 )
 from vibe.cli.textual_ui.widgets.diff_rendering import (
     DiffOccurrence,
+    DiffView,
     edit_diff_batch_inputs,
-    render_edit_diff,
 )
 from vibe.cli.textual_ui.widgets.tool_widgets import (
     EditApprovalWidget,
@@ -96,7 +96,7 @@ def test_batch_approval_and_occurrence_only_result_build_diff_widgets() -> None:
 
 
 @pytest.mark.asyncio
-async def test_restyle_keeps_existing_diff_until_background_render_finishes() -> None:
+async def test_restyle_rebuilds_the_diff_in_the_requested_mode() -> None:
     widget = _result_widget()
 
     class _App(App[None]):
@@ -105,36 +105,42 @@ async def test_restyle_keeps_existing_diff_until_background_render_finishes() ->
 
     async with _App().run_test() as pilot:
         await pilot.pause()
-        await pilot.app.workers.wait_for_complete()
         original_lines = widget._diff_view._lines
         assert not widget._diff_view._ansi
-        replacement_lines = render_edit_diff(
-            [DiffOccurrence(1, "value = 2", "value = 3")], "py", ansi=True, dark=True
-        )
-        render_started = asyncio.Event()
-        allow_render = asyncio.Event()
 
-        async def delayed_render(*args, **kwargs):
-            render_started.set()
-            await allow_render.wait()
-            return replacement_lines
+        widget.request_diff_render(ansi=True, dark=True)
 
-        with patch(
-            "vibe.cli.textual_ui.widgets.tool_widgets.render_edit_diff_async",
-            side_effect=delayed_render,
-        ):
-            worker = widget.request_diff_render(ansi=True, dark=True)
-            assert worker is not None
-            await render_started.wait()
+        assert widget._diff_view._lines is not original_lines
+        assert widget._diff_view._ansi
+        assert widget._diff_view._dark
+        assert widget.border_row_colors
 
-            assert widget._diff_view._lines is original_lines
-            assert widget._diff_view._ansi
-            assert widget._diff_view._dark
 
-            allow_render.set()
-            await worker.wait()
+@pytest.mark.asyncio
+async def test_restyle_only_highlights_visible_rows() -> None:
+    # A tall diff mounted in a short viewport: restyling must not pay for the
+    # rows the compositor never asks for.
+    result = FileEditEffectOutput(
+        file="example.py",
+        old_string="\n".join(f"value = {i}" for i in range(200)),
+        new_string="\n".join(f"changed = {i}" for i in range(200)),
+    )
+    widget = EditResultWidget(result, success=True, message="updated")
 
-        assert widget._diff_view._lines is replacement_lines
+    class _App(App[None]):
+        def compose(self) -> ComposeResult:
+            yield widget
+
+    async with _App().run_test(size=(80, 10)) as pilot:
+        await pilot.pause()
+        widget.request_diff_render(ansi=True, dark=True)
+        await pilot.pause()
+
+        lines = widget._diff_view._lines
+        built = sum(line._content is not None for line in lines)
+
+    assert len(lines) > 100
+    assert 0 < built < len(lines)
 
 
 @pytest.mark.asyncio
@@ -142,7 +148,6 @@ async def test_approval_uses_latest_theme_requested_while_loading_inputs() -> No
     widget = _approval_widget()
     inputs_started = asyncio.Event()
     release_inputs = asyncio.Event()
-    rendered_theme: tuple[bool, bool] | None = None
 
     class _App(App[None]):
         def compose(self) -> ComposeResult:
@@ -153,41 +158,27 @@ async def test_approval_uses_latest_theme_requested_while_loading_inputs() -> No
         await release_inputs.wait()
         return [DiffOccurrence(1, "value = 1", "value = 2")]
 
-    async def capture_render(*args, ansi: bool, dark: bool, **kwargs):
-        nonlocal rendered_theme
-        rendered_theme = (ansi, dark)
-        return render_edit_diff(
-            [DiffOccurrence(1, "value = 1", "value = 2")], "py", ansi=ansi, dark=dark
-        )
-
     async with _App().run_test() as pilot:
         await pilot.pause()
-        await pilot.app.workers.wait_for_complete()
         widget._occurrences = None
 
-        with (
-            patch(
-                "vibe.cli.textual_ui.widgets.tool_widgets.edit_diff_inputs",
-                side_effect=delayed_inputs,
-            ),
-            patch(
-                "vibe.cli.textual_ui.widgets.tool_widgets.render_edit_diff_async",
-                side_effect=capture_render,
-            ),
+        with patch(
+            "vibe.cli.textual_ui.widgets.tool_widgets.edit_diff_inputs",
+            side_effect=delayed_inputs,
         ):
             reload_inputs = asyncio.create_task(widget.on_mount())
             await inputs_started.wait()
-            assert widget.request_diff_render(ansi=True, dark=True) is None
+            widget.request_diff_render(ansi=True, dark=True)
             release_inputs.set()
             await reload_inputs
-            assert widget._render_worker is not None
-            await widget._render_worker.wait()
 
-    assert rendered_theme == (True, True)
+    assert widget._diff_view._ansi
+    assert widget._diff_view._dark
+    assert widget._diff_view._lines
 
 
 @pytest.mark.asyncio
-async def test_latest_diff_render_wins_while_an_older_render_is_running() -> None:
+async def test_diff_view_reuses_the_visual_it_built_for_a_row() -> None:
     widget = _result_widget()
 
     class _App(App[None]):
@@ -196,44 +187,9 @@ async def test_latest_diff_render_wins_while_an_older_render_is_running() -> Non
 
     async with _App().run_test() as pilot:
         await pilot.pause()
-        await pilot.app.workers.wait_for_complete()
-        first_lines = render_edit_diff(
-            [DiffOccurrence(1, "first = 1", "first = 2")], "py", ansi=True, dark=True
-        )
-        latest_lines = render_edit_diff(
-            [DiffOccurrence(1, "latest = 1", "latest = 2")],
-            "py",
-            ansi=False,
-            dark=False,
-        )
-        first_started = asyncio.Event()
-        latest_started = asyncio.Event()
-        release_first = asyncio.Event()
-        release_latest = asyncio.Event()
+        view = widget.query_one(DiffView)
+        first = view._visual(0)
+        assert view._visual(0) is first
 
-        async def delayed_render(*args, ansi: bool, **kwargs):
-            if ansi:
-                first_started.set()
-                await release_first.wait()
-                return first_lines
-            latest_started.set()
-            await release_latest.wait()
-            return latest_lines
-
-        with patch(
-            "vibe.cli.textual_ui.widgets.tool_widgets.render_edit_diff_async",
-            side_effect=delayed_render,
-        ):
-            worker = widget.request_diff_render(ansi=True, dark=True)
-            assert worker is not None
-            await first_started.wait()
-
-            assert widget.request_diff_render(ansi=False, dark=False) is worker
-            release_first.set()
-            await latest_started.wait()
-            release_latest.set()
-            await worker.wait()
-
-        assert widget._diff_view._lines is latest_lines
-        assert not widget._diff_view._ansi
-        assert not widget._diff_view._dark
+        widget.request_diff_render(ansi=True, dark=True)
+        assert view._visuals == [None] * len(view._lines)

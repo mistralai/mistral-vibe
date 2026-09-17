@@ -212,16 +212,15 @@ async def test_connector_catalog_default_selection_matches_production_compositio
 
 
 @pytest.mark.asyncio
-async def test_faulty_connector_is_dropped_without_hiding_healthy_siblings(
+async def test_invalid_initial_connector_bootstrap_keeps_session_usable(
     backend_contract_connection: BackendContractConnection,
     backend_contract_mistral_api,
     respx_mock: respx.MockRouter,
 ) -> None:
-    """One invalid connector is dropped so the rest of the catalog still loads."""
-    faulty = _connector("github/raw", "github", tools=("search", " search "))
-    healthy = _connector("wiki/raw", "wiki")
+    """An invalid initial catalog is unavailable instead of aborting session startup."""
+    duplicate_tools = _connector("github/raw", "github", tools=("search", " search "))
     session, _ = await _open_connector_session(
-        backend_contract_connection, respx_mock, _payload(faulty, healthy)
+        backend_contract_connection, respx_mock, _payload(duplicate_tools)
     )
     try:
         response = ConnectorCatalogReadResponse.model_validate(
@@ -231,11 +230,11 @@ async def test_faulty_connector_is_dropped_without_hiding_healthy_siblings(
             )
         )
 
-        assert response.catalog.disposition == "memory"
-        assert response.catalog.catalog_revision is not None
-        assert [entry.alias for entry in response.catalog.connectors] == ["wiki"]
+        assert response.catalog.disposition == "not_loaded"
+        assert response.catalog.catalog_revision is None
         assert response.session is not None
-        assert [source.alias for source in response.session.sources] == ["wiki"]
+        assert response.session.sources == []
+        assert session.resources.runtime.connectors.total == 0
     finally:
         await session.close()
 

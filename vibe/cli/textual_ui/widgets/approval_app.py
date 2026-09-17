@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from typing import ClassVar
 
@@ -20,6 +21,17 @@ from vibe.cli.textual_ui.widgets.tool_widgets import get_approval_widget
 from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
 
 _INPUT_GRACE_PERIOD_S = 0.5
+_INPUT_GRACE_PERIOD_ENV_VAR = "VIBE_INPUT_GRACE_PERIOD_MS"
+
+
+def _input_grace_period_s() -> float:
+    raw = os.getenv(_INPUT_GRACE_PERIOD_ENV_VAR)
+    if raw is None:
+        return _INPUT_GRACE_PERIOD_S
+    try:
+        return max(0, int(raw)) / 1000
+    except ValueError:
+        return _INPUT_GRACE_PERIOD_S
 
 
 class ApprovalApp(VimNavigationMixin, Container):
@@ -167,7 +179,7 @@ class ApprovalApp(VimNavigationMixin, Container):
         self.styles.height = natural_height
 
     def is_within_grace_period(self) -> bool:
-        return (time.monotonic() - self._mount_time) < _INPUT_GRACE_PERIOD_S
+        return (time.monotonic() - self._mount_time) < _input_grace_period_s()
 
     async def _update_tool_info(self) -> None:
         if not self.tool_info_container:

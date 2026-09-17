@@ -30,6 +30,7 @@ class CompletionPopup(VerticalScroll):
         self.styles.padding = (0, COMPLETION_POPUP_PADDING_X)
         self.can_focus = False
         self._suggestions: list[CompletionEntry] = []
+        self._rows: list[_CompletionRow] = []
 
     def update_suggestions(
         self, suggestions: list[CompletionEntry], selected: int
@@ -38,11 +39,12 @@ class CompletionPopup(VerticalScroll):
             self.hide()
             return
 
+        # Querying the DOM instead would also return rows a previous rebuild has
+        # removed: the prune is a queued message, so back-to-back updates would
+        # highlight a row that is about to vanish and leave the popup unmarked.
         if suggestions != self._suggestions:
-            rows = self._rebuild(suggestions)
-        else:
-            rows = list(self.query(_CompletionRow))
-        self._select(rows, selected)
+            self._rows = self._rebuild(suggestions)
+        self._select(self._rows, selected)
         self.styles.display = "block"
 
     def _rebuild(self, suggestions: list[CompletionEntry]) -> list[_CompletionRow]:
@@ -77,6 +79,7 @@ class CompletionPopup(VerticalScroll):
     def hide(self) -> None:
         self.remove_children()
         self._suggestions = []
+        self._rows = []
         self.styles.display = "none"
 
     @property

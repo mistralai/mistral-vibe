@@ -16,13 +16,10 @@ from vibe.core.checkpoints import FileSnapshot, FileState
 
 
 @pytest.mark.asyncio
-async def test_review_extensions_delegate_to_app_server(
-    tmp_path: Path, experimental_harness: bool
-) -> None:
+async def test_review_extensions_delegate_to_app_server(tmp_path: Path) -> None:
     loops: list[AgentLoop] = []
 
     async def start_session(options: LocalHarnessOptions) -> AppServerSession:
-        assert options.experimental_harness is experimental_harness
         loop = build_test_agent_loop()
         loops.append(loop)
         return await AppServerSession.start(
@@ -32,9 +29,7 @@ async def test_review_extensions_delegate_to_app_server(
             session_options=options.session_options,
         )
 
-    agent = VibeAcpAgent(
-        session_starter=start_session, experimental_harness=experimental_harness
-    )
+    agent = VibeAcpAgent(session_starter=start_session)
     client = FakeClient()
     agent.on_connect(client)
     client.on_connect(agent)
@@ -97,12 +92,11 @@ async def test_review_extensions_delegate_to_app_server(
 )
 @pytest.mark.asyncio
 async def test_review_mutation_extensions_delegate_to_app_server(
-    tmp_path: Path, method: str, expected_content: str, experimental_harness: bool
+    tmp_path: Path, method: str, expected_content: str
 ) -> None:
     loops: list[AgentLoop] = []
 
     async def start_session(options: LocalHarnessOptions) -> AppServerSession:
-        assert options.experimental_harness is experimental_harness
         loop = build_test_agent_loop()
         loops.append(loop)
         return await AppServerSession.start(
@@ -112,9 +106,7 @@ async def test_review_mutation_extensions_delegate_to_app_server(
             session_options=options.session_options,
         )
 
-    agent = VibeAcpAgent(
-        session_starter=start_session, experimental_harness=experimental_harness
-    )
+    agent = VibeAcpAgent(session_starter=start_session)
     client = FakeClient()
     agent.on_connect(client)
     client.on_connect(agent)
@@ -141,10 +133,8 @@ async def test_review_mutation_extensions_delegate_to_app_server(
 
 
 @pytest.mark.asyncio
-async def test_review_mutation_rejects_invalid_target(
-    tmp_path: Path, experimental_harness: bool
-) -> None:
-    agent = VibeAcpAgent(experimental_harness=experimental_harness)
+async def test_review_mutation_rejects_invalid_target(tmp_path: Path) -> None:
+    agent = VibeAcpAgent()
     client = FakeClient()
     agent.on_connect(client)
     client.on_connect(agent)

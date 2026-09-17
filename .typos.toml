@@ -2,6 +2,8 @@
 extend-ignore-re = ["(?m)^.*(#|//)\\s*typos:disable-line$", "datas"]
 
 [default.extend-words]
+# Rust TUI crate (vibe/cli-rust/); not the dish "ratatouille".
+ratatui = "ratatui"
 iterm = "iterm"
 ITERM = "ITERM"
 asend = "asend"
@@ -9,6 +11,8 @@ certifi = "certifi"
 # Additive Increase / Multiplicative Decrease — congestion-control acronym,
 # not the word "aimed".
 AIMD = "AIMD"
+# E2E fixture string: "abcd" with 'c' deleted, not the word "and".
+abd = "abd"
 
 [default.extend-identifiers]
 # macOS pasteboard four-char-code for the PNG flavor — required verbatim

@@ -24,7 +24,19 @@ from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalGroup, VerticalScroll
 from textual.dom import NoScreen
 from textual.driver import Driver
-from textual.events import AppBlur, AppFocus, MouseScrollDown, MouseScrollUp, MouseUp
+from textual.events import (
+    AppBlur,
+    AppFocus,
+    Event,
+    Idle,
+    InputEvent,
+    Key,
+    MouseScrollDown,
+    MouseScrollUp,
+    MouseUp,
+    Paste,
+    Resize,
+)
 from textual.screen import Screen
 from textual.widget import Widget
 from textual.widgets import Static
@@ -123,7 +135,9 @@ from vibe.cli.narrator_manager.narrator_manager_port import (
 from vibe.cli.plan_offer.presentation import plan_offer_cta, plan_title
 from vibe.cli.process_start import PROCESS_START_MONOTONIC, PROCESS_START_WALLCLOCK
 from vibe.cli.terminal_detect import Terminal, detect_terminal
+from vibe.cli.textual_ui import demo, stress
 from vibe.cli.textual_ui._resume_errors import resume_failure_message
+from vibe.cli.textual_ui.e2e_actions import record_open_url
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.mcp_commands import (
     MCP_ADD_HELP,
@@ -143,6 +157,11 @@ from vibe.cli.textual_ui.notifications import (
     TextualNotificationAdapter,
 )
 from vibe.cli.textual_ui.quit_manager import QuitManager
+from vibe.cli.textual_ui.replay_harness import (
+    ReplayIdleMarker,
+    footer_cwd,
+    footer_pid_label,
+)
 from vibe.cli.textual_ui.scheduled_loop_runner import ScheduledLoopCommands
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
@@ -259,7 +278,7 @@ from vibe.cli.vscode_extension_promo import (
     VscodeExtensionPromoState,
     should_show_promo,
 )
-from vibe.config_values import FALLBACK_THEME
+from vibe.config_values import AUTO_THEME, FALLBACK_THEME
 from vibe.observability.logging import (
     get_log_level_chain,
     logger,
@@ -537,6 +556,7 @@ class _PickerState:
 
     previewing: bool = False
     preview_session_id: str | None = None
+    fetches_in_flight: int = 0
 
     def preview_is_current(self, session_id: str) -> bool:
         return self.preview_session_id == session_id
@@ -684,6 +704,8 @@ class VibeApp(App):  # noqa: PLR0904
         backslash from model output) can't break the platform opener. Both link
         paths — tool-output links and clicked markdown links — funnel here.
         """
+        if record_open_url(url):
+            return
         super().open_url(normalize_url(url), new_tab=new_tab)
 
     def __init__(
@@ -748,9 +770,8 @@ class VibeApp(App):  # noqa: PLR0904
         # counter routes later submits through the same lock until they drain.
         self._deferred_submit_lock = asyncio.Lock()
         self._deferred_submits = 0
-        self._agent_task: asyncio.Task | None = None
-        self._bash_task: asyncio.Task | None = None
-        self._app_server_events_worker: Worker[None] | None = None
+        self._replay_idle_marker = ReplayIdleMarker(self)
+        self._init_tasks()
         self._app_server_event_handler_lock = asyncio.Lock()
         self._init_controllers()
 
@@ -773,6 +794,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._history_widget_indices: WeakKeyDictionary[Widget, int] = (
             WeakKeyDictionary()
         )
+        self._demo_history_index = 1_000_000
         self._update_notifier = update_notifier
         self._update_cache_repository = update_cache_repository
         self._current_version = current_version
@@ -887,6 +909,7 @@ class VibeApp(App):  # noqa: PLR0904
         # Guards against double-display of MCP/startup notices across the
         # readiness-watch and finish-resume-notices race; unrelated to picker preview.
         self._post_init_notices_shown: bool = False
+        self._init_completion_worker: Worker[None] | None = None
         self._custom_tools_deprecation_message: CustomToolsDeprecationMessage | None = (
             None
         )
@@ -915,6 +938,12 @@ class VibeApp(App):  # noqa: PLR0904
             send_mention_telemetry=self._send_mention_telemetry,
             send_skill_telemetry=self._send_skill_telemetry,
         )
+
+    def _init_tasks(self) -> None:
+        self._agent_task: asyncio.Task | None = None
+        self._bash_task: asyncio.Task | None = None
+        self.stress_task: asyncio.Task | None = None
+        self._app_server_events_worker: Worker[None] | None = None
 
     def _init_controllers(self) -> None:
         self._queue = QueueController(self._build_queue_ports())
@@ -1139,8 +1168,12 @@ class VibeApp(App):  # noqa: PLR0904
             )
 
         with Horizontal(id="bottom-bar"):
-            yield PathDisplay(self.app_server.cwd if has_session else str(Path.cwd()))
-            yield NoMarkupStatic(process_id_label(), id="process-title")
+            yield PathDisplay(
+                footer_cwd(self.app_server.cwd if has_session else str(Path.cwd()))
+            )
+            yield NoMarkupStatic(
+                footer_pid_label(process_id_label()), id="process-title"
+            )
             yield NoMarkupStatic(id="spacer")
             self._context_progress = ContextProgress()
             if has_session:
@@ -1282,7 +1315,9 @@ class VibeApp(App):  # noqa: PLR0904
         self.call_after_refresh(self._record_tui_displayed)
         self._show_config_issues()
 
-        self.run_worker(self._watch_init_completion(), exclusive=False)
+        self._init_completion_worker = self.run_worker(
+            self._watch_init_completion(), exclusive=False
+        )
 
         if self._show_resume_picker:
             self.run_worker(self._show_session_picker(), exclusive=False)
@@ -1326,6 +1361,8 @@ class VibeApp(App):  # noqa: PLR0904
         await self._show_greeting_message()
         self._schedule_update_notification()
         self._refresh_banner()
+        # Startup UI has converged; arm the replay idle marker (no-op in normal use).
+        self._replay_idle_marker.startup_settled()
         if self._show_resume_picker:
             return
         if self._resume_session_id is not None or self._continue_latest:
@@ -1506,6 +1543,19 @@ class VibeApp(App):  # noqa: PLR0904
             timeout=12,
         )
 
+    def startup_notices_pending(self) -> bool:
+        """Whether the worker that mounts the post-init MCP notices is still running."""
+        worker = self._init_completion_worker
+        return worker is not None and worker.is_running
+
+    def resume_preview_pending(self) -> bool:
+        """Whether a session-picker preview still owes a debounce or history fetch."""
+        if self._picker.fetches_in_flight > 0:
+            return True
+        return any(
+            picker.has_pending_preview for picker in self.query(SessionPickerApp)
+        )
+
     def _show_mcp_discovery_failures(self) -> None:
         for server_name, error in sorted(
             self.app_server.resources.runtime.mcp.discovery_errors.items()
@@ -1555,9 +1605,25 @@ class VibeApp(App):  # noqa: PLR0904
         if self._fatal_init_error:
             self.exit()
 
+    async def on_event(self, event: Event) -> None:
+        # The harness brackets a batched input step with hold/release keys; they
+        # must never reach a widget, so drop them before anything else runs.
+        if isinstance(event, Key) and self._replay_idle_marker.consume_batch_key(
+            event.key
+        ):
+            return
+        # Re-arm before the widget consumes the key: char keys are stopped by the
+        # composer and never reach `on_key`, so hook every input event here.
+        if isinstance(event, (Paste, Resize)) or (
+            isinstance(event, InputEvent) and not event.is_forwarded
+        ):
+            self._replay_idle_marker.rearm()
+        await super().on_event(event)
+
     async def on_chat_input_container_submitted(
         self, event: ChatInputContainer.Submitted
     ) -> None:
+        self._replay_idle_marker.rearm()
         await self._submit_or_defer(event.value)
 
     async def _submit_or_defer(self, raw_value: str) -> None:
@@ -1844,6 +1910,9 @@ class VibeApp(App):  # noqa: PLR0904
         if self._bash_task is not None and not self._bash_task.done():
             return True
         return False
+
+    async def on_idle(self, event: Idle) -> None:
+        self._replay_idle_marker.maybe_emit()
 
     def _is_queue_edit_active(self) -> bool:
         if not self._queue:
@@ -2853,6 +2922,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         async for event in events:
             await self._handle_turn_event(event)
+            self._replay_idle_marker.rearm_after_busy_event()
 
     async def _handle_turn_event(self, event: AppServerEvent) -> None:
         if isinstance(event, SessionSnapshot):
@@ -2931,9 +3001,50 @@ class VibeApp(App):  # noqa: PLR0904
                         await self._queue.turn_started(event.turn.queue_item_id)
                         await self._begin_unsolicited_turn()
                     await self._handle_turn_event(event)
+                    self._replay_idle_marker.rearm_after_busy_event()
                     if isinstance(event, TurnCompleted):
                         await self._complete_unsolicited_turn(event)
                     self._maybe_settle_interrupt()
+
+    async def _demo_command(self, **_kwargs: Any) -> None:
+        await self._render_demo_entries(demo.entries())
+
+    async def _stress_command(
+        self, *, cmd_args: str = "", command_message: SlashCommandMessage | None = None
+    ) -> None:
+        if self.stress_task is not None and not self.stress_task.done():
+            self.stress_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.stress_task
+            self.stress_task = None
+            return
+        self.stress_task = asyncio.create_task(self._run_stress(stress.count(cmd_args)))
+
+    async def _run_stress(self, count: int) -> None:
+        try:
+            for entry in demo.stress_entries(count):
+                await self.render_demo_entry(entry)
+                await asyncio.sleep(1.0 / stress.RATE)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("stress firehose crashed")
+        finally:
+            self.stress_task = None
+
+    async def render_demo_entry(self, entry: PublicHistoryEntry) -> None:
+        await self._render_demo_entries((entry,))
+
+    async def _render_demo_entries(
+        self, entries: tuple[PublicHistoryEntry, ...]
+    ) -> None:
+        if not entries:
+            return
+        await self._mount_history_batch(
+            list(entries), self._messages_area, start_index=self._demo_history_index
+        )
+        self._demo_history_index += len(entries)
+        self.call_after_refresh(self._chat_widget.anchor)
 
     def _turn_ui_lock(self) -> asyncio.Lock:
         if self._turn_ui_mutex is None:
@@ -4102,16 +4213,18 @@ class VibeApp(App):  # noqa: PLR0904
         # Record the intended preview target so a slower earlier request can't
         # overwrite the screen after the highlight moved on or resume started.
         self._picker.preview_session_id = session_id
+        self._picker.fetches_in_flight += 1
         try:
             history = await self.app_server.resources.sessions.get_session_history(
                 session_id
             )
+            if not self._picker.preview_is_current(session_id):
+                return
+            await self._apply_picker_preview(session_id, history)
         except Exception:
             logger.exception("get_session_history failed for %s", session_id)
-            return
-        if not self._picker.preview_is_current(session_id):
-            return
-        await self._apply_picker_preview(session_id, history)
+        finally:
+            self._picker.fetches_in_flight -= 1
 
     async def _apply_picker_preview(
         self, session_id: str, history: list[PublicHistoryEntry]
@@ -4609,6 +4722,9 @@ class VibeApp(App):  # noqa: PLR0904
             self._agent_task = None
             if self.event_handler:
                 self.event_handler.current_compact = None
+            # The compaction answer drives no app-pump traffic, so the busy
+            # window can end with the replay settle chain dead; re-check it.
+            self._replay_idle_marker.maybe_emit()
 
     def _get_session_exit_summary(self) -> SessionExitSummary:
         if self._mount_first and self._app_server is None:
@@ -5668,11 +5784,11 @@ class VibeApp(App):  # noqa: PLR0904
     async def shutdown_cleanup(self) -> None:
         with suppress(Exception):
             await self._begin_shutdown()
-        for task in (self._agent_task, self._bash_task):
+        for task in (self._agent_task, self._bash_task, self.stress_task):
             if task is None or task.done():
                 continue
             task.cancel()
-        for task in (self._agent_task, self._bash_task):
+        for task in (self._agent_task, self._bash_task, self.stress_task):
             if task is None or task.done():
                 continue
             with suppress(asyncio.CancelledError, Exception):
@@ -6090,8 +6206,14 @@ def run_textual_ui(
     history_file: Path,
     update_cache_repository: UpdateCacheRepository,
     startup: StartupOptions | None = None,
+    theme: str = AUTO_THEME,
 ) -> SessionExitSummary | None:
-    resolve_auto_theme()
+    # Warm the auto-theme cache before Textual takes the terminal, since the
+    # probe does blocking tty I/O. Only "auto" ever probes; an explicit theme
+    # would just discard the result, so skip it (a non-responding terminal makes
+    # the probe block the full detection timeout).
+    if resolve_theme_name(theme) == AUTO_THEME:
+        resolve_auto_theme()
 
     async def run() -> SessionExitSummary | None:
         app_server = await start_app_server()

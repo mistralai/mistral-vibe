@@ -176,6 +176,7 @@ class AppServerSession:  # noqa: PLR0904
         self._unsolicited_events: asyncio.Queue[_QueuedEvent] = asyncio.Queue(
             maxsize=_EVENT_QUEUE_MAX_SIZE
         )
+        self._delivering_event = False
         self._message_task: asyncio.Task[None] | None = None
         self._closing = False
         self._client_tool_handler = client_tool_handler
@@ -378,27 +379,34 @@ class AppServerSession:  # noqa: PLR0904
             if self._consumed_turn_id == turn.id:
                 self._consumed_turn_id = None
 
+    @property
+    def events_in_transit(self) -> bool:
+        """True while an event has been projected but not yet handed to a consumer."""
+        return not self._unsolicited_events.empty() or self._delivering_event
+
     async def events(self) -> AsyncGenerator[AppServerEvent, None]:
         await self._ensure_attached()
         while True:
             item = await self._unsolicited_events.get()
-            if isinstance(item, _StreamClosed):
-                if self._closing:
-                    # Intentional shutdown: end the stream cleanly instead of
-                    # raising. A connection dropped during teardown is expected,
-                    # and the failed reconnect/resume it may trigger must not be
-                    # surfaced to consumers as an error.
-                    return
-                raise item.error or RuntimeError(
-                    "App-server event stream closed unexpectedly"
-                )
-            if item.generation != self._event_generation:
-                continue
-            event = item.event
-            if isinstance(event, TurnCompleted):
-                await self.resources.runtime.refresh()
+            # Held until the yield so callers can tell state changes from UI catch-up.
+            self._delivering_event = True
+            try:
+                if isinstance(item, _StreamClosed):
+                    if self._closing:
+                        # Intentional shutdown ends the stream without reconnecting.
+                        return
+                    raise item.error or RuntimeError(
+                        "App-server event stream closed unexpectedly"
+                    )
                 if item.generation != self._event_generation:
                     continue
+                event = item.event
+                if isinstance(event, TurnCompleted):
+                    await self.resources.runtime.refresh()
+                    if item.generation != self._event_generation:
+                        continue
+            finally:
+                self._delivering_event = False
             yield event
 
     async def enqueue(

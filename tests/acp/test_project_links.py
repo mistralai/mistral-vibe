@@ -30,8 +30,8 @@ ROOT = "/tmp/widgets"
 
 
 @pytest.fixture
-def acp_agent(experimental_harness: bool) -> VibeAcpAgent:
-    return _create_acp_agent(experimental_harness=experimental_harness)
+def acp_agent() -> VibeAcpAgent:
+    return _create_acp_agent()
 
 
 class _FakeController:

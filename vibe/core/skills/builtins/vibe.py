@@ -792,6 +792,9 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
   config.toml; `/log-level unset` clears the session override. LEVEL is one of
   DEBUG, INFO, WARNING, ERROR, CRITICAL.
 - `/debug` - Toggle debug console
+- `/demo` - Display every renderable history entry for Python/Rust TUI comparison.
+- `/stress [count]` - Repeat the `/demo` history entries in order to load-test
+  rendering. Defaults to 100 entries; run it again while active to stop.
 - `/compact` - Compact model context by summarizing. The session ID and visible
   conversation stay intact; the auto title is refreshed to reflect the
   compacted conversation (unless renamed manually).
@@ -894,9 +897,9 @@ Image attachments:
   spaces. This applies to text files, folders, and images; pasted prose,
   relative paths, and missing paths are left unchanged.
 - **Image copy/paste from the clipboard** (**macOS only** for now):
-  writes the image to `<session_dir>/attachments/clipboard-<ts>.png`
-  (or the system temp dir when no session is active) and inserts an
-  `@<path>` token at the cursor. Two entry points:
+  writes the image to a persistent temporary PNG, inserts an `@<path>` token
+  at the cursor, then snapshots it under the session attachments on submit.
+  Two entry points:
   1. `Ctrl+V` keybinding inside the prompt.
   2. `/paste-image` slash command.
 

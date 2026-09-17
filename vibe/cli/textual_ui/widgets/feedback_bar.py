@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from humanize import naturaldelta
-from rich.text import Text
 from textual.app import ComposeResult
+from textual.content import Content
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
@@ -28,15 +28,12 @@ class FeedbackBar(Widget):
         pass
 
     @staticmethod
-    def _prompt_text() -> Text:
-        text = Text()
-        text.append("How's your session with Vibe?  ")
+    def _prompt_text() -> Content:
+        parts: list[str | tuple[str, str]] = ["How's your session with Vibe?  "]
         for key, label in FEEDBACK_RATING_KEYS.items():
-            text.append(key, style="blue")
-            text.append(f": {label}  ")
-        text.append(FEEDBACK_SNOOZE_KEY, style="blue")
-        text.append(f": {FEEDBACK_SNOOZE_LABEL}")
-        return text
+            parts.extend(((key, "$primary"), f": {label}  "))
+        parts.extend(((FEEDBACK_SNOOZE_KEY, "$primary"), f": {FEEDBACK_SNOOZE_LABEL}"))
+        return Content.assemble(*parts)
 
     def compose(self) -> ComposeResult:
         yield Static(self._prompt_text(), id="feedback-text")
@@ -58,7 +55,7 @@ class FeedbackBar(Widget):
         except Exception:
             pass
         self.query_one("#feedback-text", Static).update(
-            Text("Thank you for your feedback!")
+            Content("Thank you for your feedback!")
         )
         self.post_message(self.FeedbackGiven(rating))
         self.set_timer(THANK_YOU_DURATION, lambda: self._set_active(False))
@@ -70,7 +67,7 @@ class FeedbackBar(Widget):
             pass
         snooze_duration = naturaldelta(FEEDBACK_SNOOZED_COOLDOWN_SECONDS)
         self.query_one("#feedback-text", Static).update(
-            Text(f"Snoozed for {snooze_duration}. See you later!")
+            Content(f"Snoozed for {snooze_duration}. See you later!")
         )
         self.post_message(self.SnoozeKeyPressed())
         self.set_timer(THANK_YOU_DURATION, lambda: self._set_active(False))

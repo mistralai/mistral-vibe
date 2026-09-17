@@ -4158,10 +4158,6 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
     def _cwd_path(self) -> Path:
         return Path(self.cwd or Path.cwd()).expanduser().resolve()
 
-    def _mention_roots(self) -> tuple[Path, ...]:
-        """The roots a mention may be inlined from, as the file tools see them."""
-        return tuple(self._adapter_config.workspace_roots)
-
     def _session_dir(self) -> Path:
         return Path(self._storage_root) / "unified" / self.session_id
 
@@ -4191,7 +4187,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         return prepare_prompt_from_context(
             params.message,
             cwd=self._cwd_path(),
-            session_dir=Path(summary.path) if summary.path is not None else None,
+            session_dir=self._session_dir(),
             model_alias=self._runtime.config.active_model.alias,
             model_supports_images=self._runtime.config.active_model.supports_images,
             needs_initial_auto_title=summary.needs_initial_auto_title,
@@ -4318,7 +4314,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
     ) -> ParamsT:
         text = _text_from_blocks(params.message)
         blocks = await mentioned_file_content_blocks_async(
-            text, base_dir=self._cwd_path(), workspace_roots=self._mention_roots()
+            text, base_dir=self._cwd_path()
         )
         if not blocks:
             return params
@@ -4340,7 +4336,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         user_entry = params.entries[user_index]
         text = _text_from_session_blocks(user_entry.content)
         blocks = await mentioned_file_content_blocks_async(
-            text, base_dir=self._cwd_path(), workspace_roots=self._mention_roots()
+            text, base_dir=self._cwd_path()
         )
         if not blocks:
             return params
@@ -4360,7 +4356,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
     ) -> ContextInjectParams:
         text = _text_from_blocks(params.input)
         blocks = await mentioned_file_content_blocks_async(
-            text, base_dir=self._cwd_path(), workspace_roots=self._mention_roots()
+            text, base_dir=self._cwd_path()
         )
         if not blocks:
             return params

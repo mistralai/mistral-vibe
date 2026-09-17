@@ -1,0 +1,427 @@
+[
+  {
+    "id": "user-with-image",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 0,
+    "updatedAt": 0,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "user",
+    "content": [
+      { "type": "text", "text": "Show every chat history entry." },
+      {
+        "type": "image",
+        "attachment": {
+          "source": { "kind": "inline", "data": "iVBORw0KGgo=" },
+          "alias": "demo.png",
+          "mimeType": "image/png"
+        }
+      }
+    ],
+    "source": "turn_start",
+    "userDisplayContent": null
+  },
+  {
+    "id": "assistant-markdown",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 1,
+    "updatedAt": 1,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "# Markdown demo\n\nSome **bold** text, some *italic* text, and `inline code`.\n\n```rust\nfn greet(name: &str) {\n    println!(\"Hello, {name}\");\n}\n```\n\n```python\ndef greet(name: str) -> str:\n    \"\"\"Say hello.\"\"\"\n    return f\"Hello, {name}\"  # 1 + 1\n```\n\n- first bullet\n- second bullet\n\n1. first step\n2. second step\n\n> a short blockquote\n\nA [link](https://mistral.ai) to finish, and an editor link to [README](vscode://file/tmp/README.md:1).\n\nA link-heavy paragraph, so `/stress` exercises hit testing: [agent loop](vscode://file/tmp/loop.py:1), [tool registry](vscode://file/tmp/tools.py:2), [config layers](vscode://file/tmp/config.py:3), [session store](vscode://file/tmp/store.py:4), [rewind](vscode://file/tmp/rewind.py:5), [skills loader](vscode://file/tmp/skills.py:6), [hooks runner](vscode://file/tmp/hooks.py:7), [MCP client](vscode://file/tmp/mcp.py:8), [connectors](vscode://file/tmp/connectors.py:9), [retry helper](vscode://file/tmp/retry.py:10), [ratatui docs](https://ratatui.rs), [pulldown-cmark](https://crates.io/crates/pulldown-cmark), [tokio](https://tokio.rs), [serde](https://serde.rs), [Mistral](https://mistral.ai), [Le Chat](https://chat.mistral.ai), [the API docs](https://docs.mistral.ai), [Textual](https://textual.textualize.io), [the Rust book](https://doc.rust-lang.org/book), and [crates.io](https://crates.io).\n\n| left | right |\n| --- | --- |\n| one | two |"
+      }
+    ],
+    "source": null,
+    "userDisplayContent": null
+  },
+  {
+    "id": "reasoning-completed",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 2,
+    "updatedAt": 2,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "reasoning",
+    "text": "A completed thought can be expanded to inspect its reasoning.",
+    "summary": ["Completed reasoning summary."]
+  },
+  {
+    "id": "reasoning-live",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 3,
+    "updatedAt": 3,
+    "generationStatus": "in_progress",
+    "relatedEntryId": null,
+    "type": "reasoning",
+    "text": "This thought is still streaming.",
+    "summary": []
+  },
+  {
+    "id": "effect-pending",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 4,
+    "updatedAt": 4,
+    "generationStatus": "in_progress",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo pending effect",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_pending",
+      "input": null,
+      "display": {
+        "summary": "Preparing a tool call",
+        "content": null,
+        "suffix": "",
+        "verb": "Preparing",
+        "message": "a tool call",
+        "settledVerb": "Prepared",
+        "settledMessage": "a tool call",
+        "statusText": "Preparing tool"
+      }
+    },
+    "state": { "status": "pending" }
+  },
+  {
+    "id": "effect-running",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 5,
+    "updatedAt": 5,
+    "generationStatus": "in_progress",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo running effect",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_running",
+      "input": null,
+      "display": {
+        "summary": "Running a tool",
+        "content": null,
+        "suffix": "",
+        "verb": "Running",
+        "message": "a tool",
+        "settledVerb": "Ran",
+        "settledMessage": "a tool",
+        "statusText": "Running tool"
+      }
+    },
+    "state": { "status": "running", "outputText": "partial output" }
+  },
+  {
+    "id": "effect-blocked",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 6,
+    "updatedAt": 6,
+    "generationStatus": "in_progress",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo blocked effect",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_blocked",
+      "input": null,
+      "display": {
+        "summary": "Waiting for approval",
+        "content": null,
+        "suffix": "",
+        "verb": "Waiting",
+        "message": "for approval",
+        "settledVerb": "Approved",
+        "settledMessage": "the request",
+        "statusText": "Waiting for approval"
+      }
+    },
+    "state": {
+      "status": "blocked",
+      "callbackId": "demo-approval",
+      "outputText": ""
+    }
+  },
+  {
+    "id": "effect-completed",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 7,
+    "updatedAt": 7,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "read_file demo.rs",
+    "detail": {
+      "kind": "file_read",
+      "toolName": "read_file",
+      "input": {
+        "filePath": "demo.rs",
+        "offset": null,
+        "limit": 2000
+      },
+      "display": {
+        "summary": "Reading demo.rs",
+        "content": null,
+        "suffix": "",
+        "verb": "Reading",
+        "message": "demo.rs",
+        "settledVerb": "Read",
+        "settledMessage": "demo.rs",
+        "statusText": "Reading file"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": {
+        "filePath": "demo.rs",
+        "content": "fn main() {\n    println!(\"demo\");\n}",
+        "numLines": 3,
+        "startLine": 1,
+        "requestedOffset": null,
+        "requestedLimit": 2000,
+        "totalLines": 3,
+        "wasTruncated": false
+      },
+      "outputText": "",
+      "durationMs": 12.5,
+      "display": {
+        "success": true,
+        "verb": "Read",
+        "message": "3 lines from demo.rs",
+        "warnings": [],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "effect-edit",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 8,
+    "updatedAt": 8,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "edit demo.txt",
+    "detail": {
+      "kind": "file_edit",
+      "toolName": "edit",
+      "input": {
+        "filePath": "demo.txt",
+        "oldString": "second line\n",
+        "newString": "second line, edited\n",
+        "replaceAll": true
+      },
+      "display": {
+        "summary": "Editing demo.txt",
+        "content": null,
+        "suffix": "",
+        "verb": "Editing",
+        "message": "demo.txt",
+        "settledVerb": "Edited",
+        "settledMessage": "demo.txt",
+        "statusText": "Editing files"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": {
+        "file": "demo.txt",
+        "oldString": "second line\n",
+        "newString": "second line, edited\n",
+        "occurrences": [
+          {
+            "startLine": 12,
+            "oldText": "first line\nsecond line\nthird line\nfourth line\nfifth line\nsixth line\nseventh line\ntrailing line\n",
+            "newText": "first line\nsecond line, edited\nthird line\nfourth line\nfifth line\nsixth line\nseventh line\nappended line\ntrailing line\n"
+          },
+          {
+            "startLine": 48,
+            "oldText": "second line\n",
+            "newText": "second line, edited\n"
+          }
+        ]
+      },
+      "outputText": "",
+      "durationMs": 8.25,
+      "display": {
+        "success": true,
+        "verb": "Edited",
+        "message": "demo.txt",
+        "warnings": [],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "effect-completed-error",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 8,
+    "updatedAt": 8,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo unsuccessful result",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_unsuccessful",
+      "input": null,
+      "display": {
+        "summary": "Running a command",
+        "content": null,
+        "suffix": "",
+        "verb": "Running",
+        "message": "a command",
+        "settledVerb": "Ran",
+        "settledMessage": "a command",
+        "statusText": "Running command"
+      }
+    },
+    "state": {
+      "status": "completed",
+      "output": { "content": "command returned a non-zero result" },
+      "outputText": "",
+      "durationMs": 8.0,
+      "display": {
+        "success": false,
+        "verb": "Ran",
+        "message": "command returned a non-zero result",
+        "warnings": ["This is a visual demo warning."],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "effect-failed",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 9,
+    "updatedAt": 9,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo failed effect",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_failed",
+      "input": null,
+      "display": {
+        "summary": "Running a command that fails",
+        "content": null,
+        "suffix": "",
+        "verb": "Running",
+        "message": "a command that fails",
+        "settledVerb": "Ran",
+        "settledMessage": "a command that fails",
+        "statusText": "Running command"
+      }
+    },
+    "state": {
+      "status": "failed",
+      "error": { "message": "exit code 1", "code": null, "details": null },
+      "outputText": "exit code 1",
+      "durationMs": 4.0,
+      "display": {
+        "success": false,
+        "verb": "Ran",
+        "message": "command failed",
+        "warnings": [],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "effect-cancelled",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 10,
+    "updatedAt": 10,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo cancelled effect",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_cancelled",
+      "input": null,
+      "display": {
+        "summary": "Running a cancellable command",
+        "content": null,
+        "suffix": "",
+        "verb": "Running",
+        "message": "a cancellable command",
+        "settledVerb": "Ran",
+        "settledMessage": "a cancellable command",
+        "statusText": "Running command"
+      }
+    },
+    "state": {
+      "status": "cancelled",
+      "reason": "Cancelled by the user",
+      "outputText": "",
+      "durationMs": 2.0,
+      "display": null
+    }
+  },
+  {
+    "id": "effect-skipped",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 11,
+    "updatedAt": 11,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "effect",
+    "title": "demo skipped effect",
+    "detail": {
+      "kind": "tool",
+      "toolName": "demo_skipped",
+      "input": null,
+      "display": {
+        "summary": "Preparing an optional command",
+        "content": null,
+        "suffix": "",
+        "verb": "Preparing",
+        "message": "an optional command",
+        "settledVerb": "Prepared",
+        "settledMessage": "an optional command",
+        "statusText": "Preparing command"
+      }
+    },
+    "state": {
+      "status": "skipped",
+      "reason": "The prerequisite was not met",
+      "display": {
+        "success": true,
+        "verb": "Skipped",
+        "message": "optional command",
+        "warnings": [],
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "id": "checkpoint-compaction",
+    "sessionId": "demo-session",
+    "turnId": "demo-turn",
+    "createdAt": 12,
+    "updatedAt": 12,
+    "generationStatus": "completed",
+    "relatedEntryId": null,
+    "type": "checkpoint",
+    "kind": "compaction",
+    "message": "Compaction completed.",
+    "details": null
+  }
+]

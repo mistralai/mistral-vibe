@@ -115,6 +115,7 @@ def project_config_view(
         # the "Default (currently X)" hint, which must stay stable while a pin
         # is in effect.
         default_model_alias=config.resolve_default_model_alias(),
+        default_agent=config.default_agent,
         theme=config.theme,
         log_level=config.log_level,
         disable_welcome_banner_animation=config.disable_welcome_banner_animation,
@@ -129,6 +130,7 @@ def project_config_view(
         enable_update_checks=config.enable_update_checks,
         enable_notifications=config.enable_notifications,
         experimental_enable_tab_status=config.experimental_enable_tab_status,
+        enable_telemetry=config.enable_telemetry,
         vibe_code_enabled=config.vibe_code_enabled,
         experimental_enable_registry_skills=config.experimental_enable_registry_skills,
         models=[

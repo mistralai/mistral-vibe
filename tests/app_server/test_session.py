@@ -39,6 +39,7 @@ from vibe.app_server._turns import TurnController
 from vibe.app_server.client import AppServerClient, AppServerConnectionClosed
 from vibe.app_server.connector_catalog import ConnectorRuntimeAuthorization
 from vibe.app_server.events import (
+    AppServerEvent,
     CallbackRequested,
     ConnectorAuthorizationRequiredEvent,
     HistoryEntryAdded,
@@ -67,6 +68,7 @@ from vibe.app_server.models import (
     PublicNoticeEntry,
     PublicQueuedTurn,
     PublicRetryCategory,
+    PublicTurn,
     PublicTurnQueue,
     PublicTurnStatus,
     ResourceContentBlock,
@@ -689,6 +691,57 @@ async def test_in_place_resume_discards_events_from_previous_session(
         await session.close()
 
     assert observed is new_event
+
+
+@pytest.mark.asyncio
+async def test_turn_completed_stays_in_transit_across_the_runtime_refresh() -> None:
+    session = await create_test_app_server_session(build_test_agent_loop())
+    refreshing = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_refresh() -> None:
+        refreshing.set()
+        await release.wait()
+
+    session.resources.runtime.refresh = blocked_refresh  # type: ignore[method-assign]
+    completed = TurnCompleted(
+        PublicTurn(
+            id="turn-1",
+            session_id=session.session_id,
+            status=PublicTurnStatus.COMPLETED,
+            started_at=1,
+            completed_at=2,
+        )
+    )
+    events = session.events()
+
+    async def deliver() -> AppServerEvent:
+        return await anext(events)
+
+    consumer: asyncio.Task[AppServerEvent] | None = None
+    try:
+        assert not session.events_in_transit
+        await session._publish_event(completed)
+        assert session.events_in_transit
+
+        consumer = asyncio.create_task(deliver())
+        await asyncio.wait_for(refreshing.wait(), timeout=1)
+        # The queue is already drained here, so only the delivery flag sees this.
+        assert session._unsolicited_events.empty()
+        assert session.events_in_transit
+
+        release.set()
+        assert await asyncio.wait_for(consumer, timeout=1) is completed
+        assert not session.events_in_transit
+        await events.aclose()
+    finally:
+        # Unblock and settle the consumer first: aclose() cannot run under it.
+        release.set()
+        if consumer is not None:
+            consumer.cancel()
+            with suppress(asyncio.CancelledError):
+                await consumer
+        await session.close()
 
 
 @pytest.mark.asyncio

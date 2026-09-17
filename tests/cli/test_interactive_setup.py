@@ -11,6 +11,7 @@ from tests.update_notifier.adapters.fake_update_cache_repository import (
 from vibe.app_server import local as local_harness_mod
 from vibe.cli import cli as cli_mod
 from vibe.cli.textual_ui import app as textual_app_mod
+from vibe.core.config import DEFAULT_THEME
 
 
 def _make_args(**overrides: object) -> argparse.Namespace:
@@ -59,6 +60,7 @@ def _run(args: argparse.Namespace) -> None:
         args=args,
         stdin_prompt=None,
         update_cache_repository=FakeUpdateCacheRepository(),
+        theme=DEFAULT_THEME,
     )
 
 

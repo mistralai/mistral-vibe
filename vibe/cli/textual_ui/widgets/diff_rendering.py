@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 import difflib
+from functools import partial
 from pathlib import Path
 import re
+from threading import Lock
 from typing import NamedTuple
 
 from textual.color import Color
@@ -24,6 +26,27 @@ from textual.visual import Visual, visualize
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.utils.io import read_safe
 from vibe.utils.text import line_contexts
+
+_pending_lock = Lock()
+_pending_count = 0
+
+
+def has_pending_diff_renders() -> bool:
+    """True while a diff is still being computed off the UI thread."""
+    with _pending_lock:
+        return _pending_count > 0
+
+
+async def _off_thread[T](call: Callable[[], T]) -> T:
+    global _pending_count
+    with _pending_lock:
+        _pending_count += 1
+    try:
+        return await asyncio.to_thread(call)
+    finally:
+        with _pending_lock:
+            _pending_count -= 1
+
 
 _HUNK_HEADER_RE = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
@@ -67,8 +90,10 @@ def language_for_path(file_path: str) -> str:
 async def edit_diff_inputs(
     file_path: str, old_string: str, new_string: str, *, replace_all: bool
 ) -> list[DiffOccurrence]:
-    return await asyncio.to_thread(
-        _edit_diff_inputs, file_path, old_string, new_string, replace_all=replace_all
+    return await _off_thread(
+        lambda: _edit_diff_inputs(
+            file_path, old_string, new_string, replace_all=replace_all
+        )
     )
 
 
@@ -152,12 +177,33 @@ def _gutter_styles(prefix_char: str, *, ansi: bool) -> tuple[str, str]:
     return _MUTED_STYLE, _DIM_MUTED_STYLE
 
 
+def _gutter_text(prefix_char: str, lineno: int | None) -> str:
+    """Return the unstyled gutter text; ASCII only, so width equals its length."""
+    lineno_str = f"{lineno:>4} " if lineno is not None else ""
+    return f"{lineno_str}{prefix_char} "
+
+
 def _build_diff_gutter(prefix_char: str, lineno: int | None, *, ansi: bool) -> Content:
     """Build the styled gutter (line number plus +/-/space sign) for a row."""
     sign_style, lineno_style = _gutter_styles(prefix_char, ansi=ansi)
     lineno_str = f"{lineno:>4} " if lineno is not None else ""
     prefix = f"{prefix_char} "
     return Content.styled(lineno_str, lineno_style) + Content.styled(prefix, sign_style)
+
+
+def _build_diff_row(
+    code: str,
+    prefix_char: str,
+    lineno: int | None,
+    language: str,
+    *,
+    ansi: bool,
+    theme: type[HighlightTheme],
+) -> Content:
+    """Build a full row: styled gutter followed by the highlighted body."""
+    return _build_diff_gutter(prefix_char, lineno, ansi=ansi) + _build_diff_body(
+        code, prefix_char, language, ansi=ansi, theme=theme
+    )
 
 
 def _build_diff_body(
@@ -175,21 +221,36 @@ def _build_diff_body(
     return body
 
 
-class _DiffLine(NamedTuple):
-    content: Content  # gutter + body, highlighted; no background (that's the band)
-    body_plain: str  # body only, for selection/copy
-    css_class: str
-    gutter_width: int
+class _DiffLine:
+    """One diff row, highlighted on first access."""
+
+    def __init__(
+        self,
+        build: Callable[[], Content],
+        plain: str,
+        body_plain: str,
+        css_class: str,
+        gutter_width: int,
+    ) -> None:
+        self._build = build
+        self._content: Content | None = None
+        self.plain = plain  # gutter + body, unstyled; drives widget sizing
+        self.body_plain = body_plain  # body only, for selection/copy
+        self.css_class = css_class
+        self.gutter_width = gutter_width
+
+    @property
+    def content(self) -> Content:
+        """Gutter + body, highlighted; no background (that's the band)."""
+        if self._content is None:
+            self._content = self._build()
+        return self._content
 
 
 def _gap_line(*, ansi: bool) -> _DiffLine:
     """Build the ellipsis separator row shown between hunks or occurrences."""
-    return _DiffLine(
-        Content.styled("⋯", _DIM_MUTED_STYLE if ansi else _MUTED_STYLE),
-        "",
-        "diff-gap",
-        0,
-    )
+    style = _DIM_MUTED_STYLE if ansi else _MUTED_STYLE
+    return _DiffLine(partial(Content.styled, "⋯", style), "⋯", "", "diff-gap", 0)
 
 
 class DiffView(NoMarkupStatic):
@@ -211,7 +272,7 @@ class DiffView(NoMarkupStatic):
         self._ansi = ansi
         self._dark = dark
         self._gutter_width = 0
-        self._visuals: list[Visual] = []
+        self._visuals: list[Visual | None] = []
         super().__init__(classes="diff-view")
         self.set_render_data(lines, ansi=ansi, dark=dark)
 
@@ -224,17 +285,18 @@ class DiffView(NoMarkupStatic):
         # Uniform within a single render (all rows numbered, or none); gap rows
         # carry width 0 and empty bodies, so max() yields the real gutter width.
         self._gutter_width = max((line.gutter_width for line in lines), default=0)
-        # One visual per line so each row can be rendered over its own background;
-        # the joined Content on the base Static still drives auto width/height.
-        self._visuals = [visualize(self, line.content, markup=False) for line in lines]
-        self.update(Content("\n").join(line.content for line in lines))
+        # One visual per line so each row can be rendered over its own background,
+        # built on demand in `_visual`. The unstyled text on the base Static drives
+        # auto width/height; highlighting never changes cell widths.
+        self._visuals = [None] * len(lines)
+        self.update(Content("\n".join(line.plain for line in lines)))
 
-    def set_render_mode(self, *, ansi: bool, dark: bool) -> None:
-        if (self._ansi, self._dark) == (ansi, dark):
-            return
-        self._ansi = ansi
-        self._dark = dark
-        self.refresh()
+    def _visual(self, y: int) -> Visual:
+        visual = self._visuals[y]
+        if visual is None:
+            visual = visualize(self, self._lines[y].content, markup=False)
+            self._visuals[y] = visual
+        return visual
 
     def _band_color(self, y: int) -> Color | None:
         """Blend the added/removed tint over the backdrop, or None for plain rows."""
@@ -267,13 +329,13 @@ class DiffView(NoMarkupStatic):
         selection = self.text_selection
         span = selection.get_span(y) if selection is not None else None
         if span is None:
-            return self._visuals[y]
+            return self._visual(y)
         # The gutter (line numbers + sign) is not part of the copied text, so it
         # must not read as selected either: clamp the highlight to the body.
         start = max(span[0], self._gutter_width)
         end = span[1]
         if end != -1 and end <= start:
-            return self._visuals[y]
+            return self._visual(y)
         style = Style.from_styles(self.screen.get_component_styles("screen--selection"))
         content = self._lines[y].content.stylize(
             style, start, None if end == -1 else end
@@ -299,18 +361,15 @@ class DiffView(NoMarkupStatic):
         return diff_border_colors(self._lines)
 
 
-async def render_edit_diff_async(
-    occurrences: Sequence[DiffOccurrence], language: str, *, ansi: bool, dark: bool
-) -> list[_DiffLine]:
-    return await asyncio.to_thread(
-        render_edit_diff, occurrences, language, ansi=ansi, dark=dark
-    )
-
-
 def render_edit_diff(
     occurrences: Sequence[DiffOccurrence], language: str, *, ansi: bool, dark: bool
 ) -> list[_DiffLine]:
-    """Render all occurrences into diff rows, each anchored at its line number."""
+    """Lay all occurrences out as diff rows, each anchored at its line number.
+
+    Only the row structure is computed here; highlighting is deferred to the
+    first paint of each row, so this stays cheap enough to call on every theme
+    change for every mounted diff.
+    """
     theme = _pick_theme(ansi=ansi, dark=dark)
     # Each occurrence carries its own whole-line old/new content, so the diff is
     # computed per occurrence and anchored at its line number, with a gap between.
@@ -377,15 +436,23 @@ def _render_occurrence(
             new_lineno += 1
 
         lineno_val = lineno if start_line else None
-        gutter = _build_diff_gutter(prefix_char, lineno_val, ansi=ansi)
-        body = _build_diff_body(code, prefix_char, language, ansi=ansi, theme=theme)
-
+        gutter = _gutter_text(prefix_char, lineno_val)
+        build = partial(
+            _build_diff_row,
+            code,
+            prefix_char,
+            lineno_val,
+            language,
+            ansi=ansi,
+            theme=theme,
+        )
         lines.append(
             _DiffLine(
-                gutter + body,
-                body.plain,
+                build,
+                gutter + code,
+                code,
                 _DIFF_CSS_CLASS_BY_PREFIX[prefix_char],
-                gutter.cell_length,
+                len(gutter),
             )
         )
 

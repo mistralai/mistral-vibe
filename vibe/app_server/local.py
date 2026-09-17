@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from vibe.app_server._replay import make_replay_client, replay_launch_command
 from vibe.app_server._runtime import (
     ClientDescriptor,
     ContinueSessionIntent,
@@ -62,14 +63,19 @@ class LocalHarnessHost:
             raise
 
     async def connect(self, options: LocalHarnessOptions) -> AppServerHost:
-        process = self._process_for(
-            options.experimental_harness, options.legacy_harness
-        )
-        client_transport, server_transport = memory_transport_pair()
-        harness = await create_harness_server(
-            server_transport, transport_kind="in_process", process=process
-        )
-        client = AppServerClient(client_transport, run_peer=harness.serve)
+        if replay_launch_command() is not None:
+            client = make_replay_client()
+            client_factory = make_replay_client
+        else:
+            process = self._process_for(
+                options.experimental_harness, options.legacy_harness
+            )
+            client_transport, server_transport = memory_transport_pair()
+            harness = await create_harness_server(
+                server_transport, transport_kind="in_process", process=process
+            )
+            client = AppServerClient(client_transport, run_peer=harness.serve)
+            client_factory = harness.connect_client
         resume_session_id: str | None = None
         continue_session = False
         match options.session:
@@ -85,7 +91,7 @@ class LocalHarnessHost:
             resume_session_id=resume_session_id,
             continue_session=continue_session,
             client_tool_handler=options.client_tool_handler,
-            client_factory=harness.connect_client,
+            client_factory=client_factory,
         )
 
     async def close(self) -> None:

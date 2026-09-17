@@ -175,9 +175,11 @@ async def test_exit_picker_to_input_clears_preview_and_startup_state(
     rebuild.assert_awaited_once_with()
 
 
-@pytest.mark.parametrize("theme", [AUTO_THEME, "dracula"])
-def test_run_textual_ui_warms_auto_theme_before_app_server_start(
-    theme: str, tmp_path
+@pytest.mark.parametrize(
+    ("theme", "expect_probe"), [(AUTO_THEME, True), ("dracula", False)]
+)
+def test_run_textual_ui_warms_auto_theme_only_when_auto(
+    theme: str, expect_probe: bool, tmp_path
 ) -> None:
     app_server = object.__new__(AppServerSession)
     app_server.resources = MagicMock()
@@ -200,7 +202,9 @@ def test_run_textual_ui_warms_auto_theme_before_app_server_start(
     ):
 
         async def start_app_server_after_theme_detection() -> AppServerSession:
-            resolve_auto_theme.assert_called_once_with()
+            # The warmup (or its absence) must be decided before the app server
+            # starts, so the blocking tty probe never overlaps Textual.
+            assert resolve_auto_theme.called is expect_probe
             return app_server
 
         start_app_server.side_effect = start_app_server_after_theme_detection
@@ -208,7 +212,11 @@ def test_run_textual_ui_warms_auto_theme_before_app_server_start(
             start_app_server=start_app_server,
             history_file=tmp_path / "history",
             update_cache_repository=MagicMock(),
+            theme=theme,
         )
 
-    resolve_auto_theme.assert_called_once_with()
+    if expect_probe:
+        resolve_auto_theme.assert_called_once_with()
+    else:
+        resolve_auto_theme.assert_not_called()
     vibe_app.assert_called_once()

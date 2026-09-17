@@ -27,6 +27,7 @@ from vibe.app_server.protocol import (
     CallbackResultError,
     CallbackResultResponse,
     EventWatermarkResponse,
+    FeedbackShouldShowResponse,
     InitializeParams,
     InvalidParamsData,
     InvalidParamsIssue,
@@ -105,6 +106,21 @@ def test_wire_models_serialize_camel_case_and_reject_snake_case_wire_keys() -> N
 
     with pytest.raises(ValidationError):
         validate_wire(SessionHistoryListParams, {"session_id": "session-1"})
+
+
+def test_feedback_response_serializes_cooldown_and_accepts_legacy_shape() -> None:
+    response = FeedbackShouldShowResponse(show=True, snooze_duration_seconds=604_800)
+
+    assert response.model_dump(mode="json") == {
+        "show": True,
+        "snoozeDurationSeconds": 604_800,
+    }
+    assert (
+        validate_wire(
+            FeedbackShouldShowResponse, {"show": True}
+        ).snooze_duration_seconds
+        is None
+    )
 
 
 def test_public_session_state_carries_optional_retry_state() -> None:

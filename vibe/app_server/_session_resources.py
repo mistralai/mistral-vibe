@@ -95,7 +95,7 @@ class ShellResource:
         self._events: dict[str, asyncio.Queue[ShellTimelineEvent]] = {}
 
     async def run(
-        self, command: str, *, timeout_seconds: float = 30.0
+        self, command: str, *, timeout_seconds: float | None = None
     ) -> AsyncGenerator[ShellTimelineEvent, None]:
         client = await self._connection.connect()
         operation_id = str(uuid4())

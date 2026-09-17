@@ -12,6 +12,7 @@ from textual.containers import Horizontal
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.constants import MistralColors
+from vibe.cli.textual_ui.replay_harness import replaying, settle_busy
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
@@ -104,6 +105,8 @@ class LoadingWidget(SpinnerMixin, Static):
         self._interrupting = False
 
     def _get_easter_egg(self) -> str | None:
+        if replaying():
+            return None
         EASTER_EGG_PROBABILITY = 0.10
         if random.random() < EASTER_EGG_PROBABILITY:
             available_eggs = list(self.EASTER_EGGS)
@@ -256,7 +259,8 @@ class LoadingWidget(SpinnerMixin, Static):
     def on_mount(self) -> None:
         self.start_time = time()
         self._update_animation()
-        self.start_spinner_timer()
+        if not settle_busy():
+            self.start_spinner_timer()
 
     def on_resize(self) -> None:
         self.refresh_spinner()

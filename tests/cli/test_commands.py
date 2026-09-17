@@ -53,6 +53,24 @@ class TestCommandRegistry:
         assert isinstance(cmd, Command)
         assert cmd_args == ""
 
+    def test_demo_and_stress_commands_share_the_comparison_contract(self) -> None:
+        registry = CommandRegistry()
+
+        demo = registry.parse_command("/demo")
+        stress = registry.parse_command("/stress 14")
+
+        assert demo == ("demo", registry.commands["demo"], "")
+        assert stress == ("stress", registry.commands["stress"], "14")
+        assert (
+            registry.commands["demo"].description
+            == "Display every renderable history entry for Python/Rust TUI comparison."
+        )
+        assert (
+            registry.commands["stress"].description
+            == "Repeat the /demo history entries to load-test rendering. "
+            "Optional arg: entries (default 100)."
+        )
+
     def test_parse_command_returns_none_when_no_match(self) -> None:
         registry = CommandRegistry()
         assert registry.parse_command("/nonexistent") is None

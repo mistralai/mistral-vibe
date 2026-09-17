@@ -13,6 +13,25 @@ from vibe.cli.autocompletion.base import (
 )
 from vibe.cli.autocompletion.completers import PathCompleter
 
+_pending_lock = Lock()
+_pending_count = 0
+
+
+def _track_pending(delta: int) -> None:
+    global _pending_count
+    with _pending_lock:
+        _pending_count += delta
+
+
+def _noop() -> None:
+    return None
+
+
+def has_pending_completions() -> bool:
+    """True while a path completion is still being computed off the UI thread."""
+    with _pending_lock:
+        return _pending_count > 0
+
 
 class PathCompletionController:
     _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="path-completion")
@@ -84,6 +103,7 @@ class PathCompletionController:
         app = getattr(self._view, "app", None)
         if app:
             with self._query_lock:
+                _track_pending(1)
                 self._pending_future = self._executor.submit(
                     self._compute_completions, text, cursor_index, generation
                 )
@@ -106,6 +126,21 @@ class PathCompletionController:
             return generation != self._generation
 
     def _handle_completion_result(
+        self, future: Future, query: tuple[str, int], generation: int
+    ) -> None:
+        # Clear the pending flag only once the refresh is queued, so an idle
+        # observer never sees "no work left" before the popup is scheduled.
+        try:
+            self._apply_completion_result(future, query, generation)
+        finally:
+            _track_pending(-1)
+            # A superseded result queues no render, so wake the pump anyway to let
+            # idle observers re-check now that the async work is done.
+            app = getattr(self._view, "app", None)
+            if app:
+                app.call_later(_noop)
+
+    def _apply_completion_result(
         self, future: Future, query: tuple[str, int], generation: int
     ) -> None:
         if future.cancelled():

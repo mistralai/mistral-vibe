@@ -149,9 +149,13 @@ url = "https://pypi.org/simple"
 
 [tool.hatch.build.targets.wheel]
 include = ["vibe/"]
+exclude = ["vibe/cli-rust"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
 
 [project.scripts]
-vibe = "vibe.cli.entrypoint:main"
+vibe = "vibe.cli.launcher:main"
 vibe-acp = "vibe.acp.entrypoint:main"
 vibe-app-server = "vibe.app_server.stdio:main"
 
@@ -180,6 +184,7 @@ dev = [
     "pytest-textual-snapshot>=1.1.0",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
+    "pyte>=0.8.2",
     "respx>=0.22.0",
     "ruff>=0.15.18",
     "tomlkit>=0.13.0",
@@ -269,7 +274,8 @@ max-nested-blocks = 5
 ignore_decorators = ["@*"]
 
 [tool.pytest.ini_options]
-addopts = "-p pytest_vibe -vvvv -q -n auto --dist=loadgroup --durations=10 --import-mode=importlib --maxschedchunk=1"
+# client-e2e is a standalone harness with its own pytest.ini; the main suite must not collect it.
+addopts = "-p pytest_vibe -vvvv -q -n auto --dist=loadgroup --durations=10 --import-mode=importlib --maxschedchunk=1 --ignore=client-e2e"
 timeout = 10
 markers = [
     "unified_supported: backend contract behavior implemented by the Unified Harness",
