@@ -73,6 +73,11 @@ class RetryReason:
 
     category: RetryCategory
     detail: str
+    #: How long the server asked us to wait, in seconds, when it said so. The
+    #: retry itself already honors this; it is carried here so that anything
+    #: pacing *subsequent* calls can use the one authoritative number about how
+    #: long the limit lasts instead of guessing.
+    retry_after_seconds: float | None = None
 
     @classmethod
     def from_http_status(cls, status_code: int) -> RetryReason:
@@ -82,7 +87,11 @@ class RetryReason:
     def from_error(cls, error: Exception) -> RetryReason:
         status = _http_error_status(error)
         if status is not None:
-            return cls.from_http_status(status)
+            return cls(
+                RetryCategory.for_http_status(status),
+                f"HTTP {status}",
+                _parse_retry_after(error),
+            )
         return cls(RetryCategory.for_transport_error(error), type(error).__name__)
 
 

@@ -88,6 +88,61 @@ async def test_repeated_rate_limits_back_off_multiplicatively() -> None:
     assert pacer.min_interval == 4.0
 
 
+@pytest.mark.asyncio
+async def test_server_directed_wait_is_the_floor_not_the_guess() -> None:
+    """A `Retry-After` is the limit describing itself; the AIMD schedule is a
+    guess about a limit nobody described. Starting the next call a second later
+    because the guess says so walks straight back into the same 429."""
+    clock = _FakeClock()
+    sleeps: list[float] = []
+    pacer = _make_pacer(clock=clock, sleeps=sleeps, base_interval_seconds=1.0)
+
+    await pacer.acquire()
+    pacer.on_rate_limited(retry_after_seconds=17.0)
+    assert pacer.min_interval == 17.0
+
+    clock.advance(0.0)
+    await pacer.acquire()
+    assert sleeps == [pytest.approx(17.0)]
+
+
+def test_server_directed_wait_never_lowers_an_interval_already_higher() -> None:
+    # Repeated limits have already backed off past what this one response asked
+    # for; taking the smaller number would undo that.
+    clock = _FakeClock()
+    pacer = _make_pacer(clock=clock, sleeps=[], base_interval_seconds=1.0)
+
+    pacer.on_rate_limited()
+    pacer.on_rate_limited()
+    pacer.on_rate_limited()
+    assert pacer.min_interval == 4.0
+
+    pacer.on_rate_limited(retry_after_seconds=2.0)
+    assert pacer.min_interval == 8.0
+
+
+def test_server_directed_wait_is_still_capped() -> None:
+    # A server asking for an hour must not park the agent for an hour.
+    clock = _FakeClock()
+    pacer = _make_pacer(
+        clock=clock, sleeps=[], base_interval_seconds=1.0, max_interval_seconds=3.0
+    )
+
+    pacer.on_rate_limited(retry_after_seconds=3600.0)
+    assert pacer.min_interval == 3.0
+
+
+def test_absent_or_zero_retry_after_leaves_the_schedule_alone() -> None:
+    clock = _FakeClock()
+    pacer = _make_pacer(clock=clock, sleeps=[], base_interval_seconds=1.0)
+
+    pacer.on_rate_limited(retry_after_seconds=None)
+    assert pacer.min_interval == 1.0
+    # A server that says "retry immediately" is not asking for a slower pace.
+    pacer.on_rate_limited(retry_after_seconds=0.0)
+    assert pacer.min_interval == 2.0
+
+
 def test_interval_capped_at_max() -> None:
     clock = _FakeClock()
     sleeps: list[float] = []
