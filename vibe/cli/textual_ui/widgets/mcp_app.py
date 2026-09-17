@@ -21,6 +21,7 @@ from vibe.app_server.models import (
     MCPState,
 )
 from vibe.cli.autocompletion.fuzzy import fuzzy_match
+from vibe.cli.textual_ui.replay_harness import replaying
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
@@ -157,7 +158,10 @@ class MCPApp(Container):
     def on_mount(self) -> None:
         self._refresh_view(self._viewing_name)
         self.query_one(OptionList).focus()
-        if self._refresh_callback is not None:
+        # Replay skips the catalogue poll: it rewrites the browser from the
+        # server at a moment no scenario controls, so whether a frame shows a
+        # just-toggled row would come down to which landed first.
+        if self._refresh_callback is not None and not replaying():
             self.set_interval(_BACKGROUND_REFRESH_INTERVAL_SECONDS, self._start_refresh)
 
     def refresh_index(self) -> None:

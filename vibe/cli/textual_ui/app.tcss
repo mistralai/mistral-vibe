@@ -747,6 +747,14 @@ Markdown {
     }
 }
 
+.collapsible-toggle.header .selected-text {
+    text-opacity: 100%;
+
+    &:ansi {
+        text-style: none;
+    }
+}
+
 .collapsible-triangle {
     width: auto;
     height: auto;
@@ -1065,10 +1073,6 @@ StatusMessage {
 
 .tool-result-warning {
     color: $warning;
-}
-
-.tool-result-approval-note {
-    color: $text-muted;
 }
 
 .diff-scroll {

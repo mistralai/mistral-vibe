@@ -33,3 +33,18 @@ inject_dsn() {
 
 inject_dsn "_CLI_SENTRY_DSN" "${CLI_SENTRY_DSN:-}" "${require_sentry_dsn}"
 inject_dsn "_ACP_SENTRY_DSN" "${ACP_SENTRY_DSN:-}" "${require_sentry_dsn}"
+
+if [ -n "${CLI_SENTRY_DSN:-}" ]; then
+  rust_target_file="vibe/cli-rust/src/observability/sentry.rs"
+  placeholder='const CLI_SENTRY_DSN: Option<&str> = None;'
+  if ! grep -Fxq "${placeholder}" "${rust_target_file}"; then
+    echo "Expected CLI_SENTRY_DSN placeholder not found in ${rust_target_file}" >&2
+    exit 1
+  fi
+
+  replacement="const CLI_SENTRY_DSN: Option<&str> = Some(\"${CLI_SENTRY_DSN}\");"
+  escaped_replacement="$(printf '%s' "${replacement}" | sed 's/[&|]/\\&/g')"
+  sed -i.bak "s|^${placeholder}$|${escaped_replacement}|" "${rust_target_file}"
+  rm -f "${rust_target_file}.bak"
+  grep -Fxq "${replacement}" "${rust_target_file}"
+fi

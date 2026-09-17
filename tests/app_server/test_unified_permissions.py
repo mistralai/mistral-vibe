@@ -252,13 +252,14 @@ async def test_a_command_no_shell_can_read_is_scoped_to_itself(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_a_permanent_grant_cannot_auto_allow_unreadable_shell_syntax(
+async def test_a_permanent_grant_for_an_unreadable_command_outlives_the_session(
     tmp_path: Path,
 ) -> None:
-    """*Prepare*: Persist an unreadable command in the shell allowlist.
+    """*Prepare*: A resolver, and the same unreadable command approved for good.
     *Do*: Resolve it again against a fresh store, as the next session would.
-    *Assert*: It still asks. Invalid syntax must fail closed before allowlist
-    matching because a real shell may execute behavior the parser omitted.
+    *Assert*: It runs. The shells match their allowlists against a *parsed*
+    command, and this one parses to nothing, so only the resolver can read back
+    the entry it wrote -- without that, "always" would prompt every session.
     """
     # Prepare
     resolver, orchestrator = _resolver(tmp_path)
@@ -271,7 +272,7 @@ async def test_a_permanent_grant_cannot_auto_allow_unreadable_shell_syntax(
     again = await next_session.resolve("file_system.bash", {"command": "&&"})
 
     # Assert
-    assert again.decision == "ask"
+    assert again.decision == "allow"
 
 
 @pytest.mark.parametrize("command", ["", "   "])

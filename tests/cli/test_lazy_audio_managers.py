@@ -134,6 +134,19 @@ def test_lazy_voice_manager_materializes_when_used() -> None:
     assert manager.transcribe_state == TranscribeState.RECORDING
 
 
+def test_lazy_voice_manager_stays_lazy_when_enabled_at_startup() -> None:
+    config = build_test_app_config(voice_mode_enabled=True)
+    factory = MagicMock(return_value=FakeVoiceManager(is_voice_ready=True))
+
+    manager = LazyVoiceManager(lambda: config, factory)
+
+    factory.assert_not_called()
+    assert manager.is_enabled is True
+
+    manager.start_recording()
+    factory.assert_called_once()
+
+
 def test_lazy_narrator_manager_materializes_when_enabled_at_startup() -> None:
     config = build_test_app_config(narrator_enabled=True)
     narrator = FakeNarratorManager()

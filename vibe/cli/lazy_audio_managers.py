@@ -39,8 +39,6 @@ class LazyVoiceManager:
         self._factory = factory
         self._manager: VoiceManagerPort | None = None
         self._listeners: list[VoiceManagerListener] = []
-        if self._config_getter().voice_mode_enabled:
-            self._materialize()
 
     @property
     def is_enabled(self) -> bool:

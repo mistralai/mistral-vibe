@@ -238,6 +238,7 @@ def _run_interactive_mode(
     args: argparse.Namespace,
     stdin_prompt: str | None,
     update_cache_repository: UpdateCacheRepository,
+    theme: str,
 ) -> None:
     from vibe.app_server.local import (
         ClientDescriptor,
@@ -294,6 +295,7 @@ def _run_interactive_mode(
             start_app_server=harness.connect,
             history_file=HISTORY_FILE.path,
             update_cache_repository=update_cache_repository,
+            theme=theme,
             startup=StartupOptions(
                 initial_prompt=args.initial_prompt or stdin_prompt,
                 teleport_on_start=args.teleport,
@@ -466,6 +468,7 @@ def run_cli(args: argparse.Namespace) -> None:
                 args=args,
                 stdin_prompt=stdin_prompt,
                 update_cache_repository=update_cache_repository,
+                theme=config.theme,
             )
         else:
             _run_programmatic_mode(args=args, stdin_prompt=stdin_prompt)

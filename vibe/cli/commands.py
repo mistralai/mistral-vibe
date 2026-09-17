@@ -114,6 +114,24 @@ class CommandRegistry:
                 handler="action_toggle_debug_console",
                 side_channel=True,
             ),
+            "demo": Command(
+                aliases=frozenset(["/demo"]),
+                description=(
+                    "Display every renderable history entry for Python/Rust TUI "
+                    "comparison."
+                ),
+                handler="_demo_command",
+                side_channel=True,
+            ),
+            "stress": Command(
+                aliases=frozenset(["/stress"]),
+                description=(
+                    "Repeat the /demo history entries to load-test rendering. "
+                    "Optional arg: entries (default 100)."
+                ),
+                handler="_stress_command",
+                side_channel=True,
+            ),
             "compact": Command(
                 aliases=frozenset(["/compact"]),
                 description="Compact conversation history by summarizing. Optionally pass instructions to guide the summary",

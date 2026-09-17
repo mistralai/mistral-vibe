@@ -14,8 +14,8 @@ if TYPE_CHECKING:
     from vibe.cli.textual_ui.app import ChatScroll
 
 from vibe.cli.textual_ui.widgets.no_markup_static import (
-    NoMarkupStatic,
     NonSelectableStatic,
+    SelectableStatic,
 )
 
 # Control chars (incl. ESC) that must never reach the terminal via a header.
@@ -228,11 +228,11 @@ class HeaderCollapsibleSection(CollapsibleSection):
             self._triangle.add_class("success" if header_success else "error")
 
         verb_widget = (
-            NoMarkupStatic(header_verb, classes="collapsible-header-verb")
+            SelectableStatic(header_verb, classes="collapsible-header-verb")
             if header_verb
             else None
         )
-        self._text_widget = NoMarkupStatic(
+        self._text_widget = SelectableStatic(
             self._header_text, classes="status-indicator-text"
         )
         children: list[Widget] = [self._triangle]
@@ -241,7 +241,7 @@ class HeaderCollapsibleSection(CollapsibleSection):
         children.append(self._text_widget)
         if header_suffix:
             children.append(
-                NoMarkupStatic(header_suffix, classes="status-indicator-suffix")
+                SelectableStatic(header_suffix, classes="status-indicator-suffix")
             )
         toggle_classes = "collapsible-toggle header"
         if header_suffix:
@@ -289,7 +289,7 @@ class OverflowCollapsibleSection(CollapsibleSection):
         super().__init__(body)
         self._collapsed_label = collapsed_label
         self._expanded_label = expanded_label
-        self._label = NoMarkupStatic(
+        self._label = SelectableStatic(
             collapsed_label, classes="collapsible-toggle-label"
         )
         self._toggle_row = Horizontal(

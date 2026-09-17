@@ -22,3 +22,9 @@ class NonSelectableStatic(NoMarkupStatic):
 
     def get_selection(self, selection: Any) -> None:
         return None
+
+
+class SelectableStatic(NoMarkupStatic):
+    def selection_updated(self, selection: Any) -> None:
+        self.set_class(selection is not None, "selected-text")
+        super().selection_updated(selection)

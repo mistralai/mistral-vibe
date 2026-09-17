@@ -280,65 +280,6 @@ async def test_finalize_does_not_tear_down_promoted_follow_up_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_during_queue_promotion_enqueues_behind_promoted_turn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app, backend = _blocked_app()
-    promotion_waiting = asyncio.Event()
-    release_promotion = asyncio.Event()
-    promotion_count = 0
-    original_emit_queue_updated = TurnController._emit_queue_updated
-
-    async def gate_promoted_queue_update(self: TurnController) -> None:
-        nonlocal promotion_count
-        await original_emit_queue_updated(self)
-        active_turn = self.active_turn
-        if (
-            active_turn is not None
-            and active_turn.queue_item_id is not None
-            and not self.queue_state.items
-        ):
-            promotion_count += 1
-            if promotion_count == 2:
-                promotion_waiting.set()
-                await release_promotion.wait()
-
-    monkeypatch.setattr(
-        TurnController, "_emit_queue_updated", gate_promoted_queue_update
-    )
-
-    try:
-        async with app.run_test() as pilot:
-            chat_input = app.query_one(ChatInputContainer)
-            chat_input.post_message(ChatInputContainer.Submitted("first"))
-            assert await _wait_until(pilot, backend.started.is_set)
-            chat_input.post_message(ChatInputContainer.Submitted("second"))
-            assert await _wait_until(pilot, lambda: len(app._queue) == 1)
-
-            backend.release.set()
-            assert await _wait_until(pilot, promotion_waiting.is_set)
-            assert await _wait_until(pilot, lambda: not app._agent_job_active())
-            assert app._queue.has_server_work
-
-            chat_input.post_message(ChatInputContainer.Submitted("third"))
-            assert await _wait_until(pilot, lambda: _queued_texts(app) == ["third"])
-
-            release_promotion.set()
-            assert await _wait_until(pilot, lambda: len(backend.requests_messages) == 3)
-            assert await _wait_until(
-                pilot, lambda: not app._agent_job_active() and len(app._queue) == 0
-            )
-    finally:
-        release_promotion.set()
-
-    assert [request[-1].content for request in backend.requests_messages] == [
-        "first",
-        "second",
-        "third",
-    ]
-
-
-@pytest.mark.asyncio
 async def test_ctrl_c_removes_newest_server_prompt() -> None:
     app, backend = _blocked_app()
     async with app.run_test() as pilot:

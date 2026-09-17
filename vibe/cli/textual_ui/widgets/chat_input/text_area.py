@@ -7,7 +7,6 @@ from typing import Any, ClassVar
 
 from rich.style import Style
 from textual import events
-from textual._context import NoActiveAppError
 from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import TextArea
@@ -17,7 +16,9 @@ from vibe.cli.autocompletion.base import CompletionResult
 from vibe.cli.commands import CommandRegistry
 from vibe.cli.constants import CLIPBOARD_IMAGE_PASTE_SUPPORTED_SYSTEM
 from vibe.cli.input_modes import DEFAULT_MODE, InputMode
+from vibe.cli.textual_ui import click_chain
 from vibe.cli.textual_ui.external_editor import ExternalEditor
+from vibe.cli.textual_ui.replay_harness import replaying
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
@@ -36,7 +37,6 @@ _WORD = re.compile(r"\w+")
 _TRAILING_WORD = re.compile(r"\w+$")
 _DOUBLE_CLICK = 2
 _TRIPLE_CLICK = 3
-_DEFAULT_CLICK_CHAIN_TIME_THRESHOLD = 0.5
 
 FEEDBACK_RATING_KEYS: dict[str, str] = {"1": "good", "2": "fine", "3": "bad"}
 FEEDBACK_SNOOZE_KEY = "0"
@@ -197,6 +197,13 @@ class ChatTextArea(TextArea):
         if self._app_has_focus:
             self.call_after_refresh(self.focus)
 
+    def _toggle_cursor_blink_visible(self) -> None:
+        # Replay keeps the caret lit: a blink landing between the last key and
+        # the idle marker would repaint one cell of the frame the harness reads.
+        if replaying():
+            return
+        super()._toggle_cursor_blink_visible()
+
     def set_app_focus(self, has_focus: bool) -> None:
         self._app_has_focus = has_focus
         self.cursor_blink = has_focus
@@ -271,10 +278,7 @@ class ChatTextArea(TextArea):
         self._dragged = False
 
     def _update_click_chain(self, target: Location, now: float) -> None:
-        try:
-            threshold = self.app.CLICK_CHAIN_TIME_THRESHOLD
-        except NoActiveAppError:
-            threshold = _DEFAULT_CLICK_CHAIN_TIME_THRESHOLD
+        threshold = click_chain.threshold(self)
         within = (
             self._last_down_location == target
             and self._last_down_time is not None

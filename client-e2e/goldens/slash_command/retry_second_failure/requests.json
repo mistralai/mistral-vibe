@@ -1,0 +1,65 @@
+[
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "hi",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "turn/start",
+  "params": {
+   "autoTitle": null,
+   "clientUserMessageId": "<client-message-id>",
+   "idempotencyKey": "<client-message-id>",
+   "injected": true,
+   "mentionStats": null,
+   "message": [
+    {
+     "text": "<vibe_warning>The previous model stream ended before reaching its end. Continue the response exactly where it stopped without repeating text already produced. If no response text was produced, answer the pending user request normally.</vibe_warning>",
+     "type": "text"
+    }
+   ],
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "userDisplayContent": null
+  }
+ },
+ {
+  "method": "turn/start",
+  "params": {
+   "autoTitle": null,
+   "clientUserMessageId": "<client-message-id>",
+   "idempotencyKey": "<client-message-id>",
+   "injected": true,
+   "mentionStats": null,
+   "message": [
+    {
+     "text": "<vibe_warning>The previous model stream ended before reaching its end. Continue the response exactly where it stopped without repeating text already produced. If no response text was produced, answer the pending user request normally.</vibe_warning>",
+     "type": "text"
+    }
+   ],
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "userDisplayContent": null
+  }
+ }
+]

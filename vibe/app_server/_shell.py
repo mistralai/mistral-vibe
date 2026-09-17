@@ -26,6 +26,7 @@ from vibe.core.utils import kill_async_subprocess
 from vibe.core.utils.shell import spawn_shell_command
 
 type ShellOutputObserver = Callable[[str], Awaitable[None]]
+type ShellStartObserver = Callable[[], Awaitable[None]]
 
 DEFAULT_MAX_OUTPUT_BYTES = 16_000
 
@@ -198,7 +199,10 @@ class ShellController:
         self._interrupted: set[str] = set()
 
     async def run(
-        self, params: ShellRunParams, observe_output: ShellOutputObserver | None = None
+        self,
+        params: ShellRunParams,
+        observe_output: ShellOutputObserver | None = None,
+        observe_start: ShellStartObserver | None = None,
     ) -> ShellRunResponse:
         if params.operation_id in self._operations:
             raise ShellConflictError(
@@ -214,6 +218,8 @@ class ShellController:
         timed_out = False
         interrupted = False
         try:
+            if observe_start is not None:
+                await observe_start()
             process = await spawn_shell_command(params.command, cwd=cwd)
             self._processes[params.operation_id] = process
             readers = [

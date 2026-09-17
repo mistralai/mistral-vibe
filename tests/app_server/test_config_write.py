@@ -19,6 +19,7 @@ from vibe.app_server.transport import memory_transport_pair
 from vibe.core.config import ModelConfig, build_default_orchestrator
 from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.trusted_folders import trusted_folders_manager
+from vibe.observability.logging import get_log_level_chain, set_config_log_level
 
 
 async def _write_model_ops(
@@ -135,6 +136,41 @@ async def test_config_write_model_field_sparse_when_model_in_durable_layer() -> 
     # Identity fields (name, provider) are NOT materialized — they come from
     # DefaultConfigLayer at merge time.
     assert persisted == {"thinking": "low", "alias": "local"}
+
+
+@pytest.mark.asyncio
+async def test_config_write_log_level_applies_to_the_running_process() -> None:
+    client_transport, server_transport = memory_transport_pair()
+    agent_loop = build_test_agent_loop(config=build_test_vibe_config())
+    server = build_test_app_server(agent_loop, server_transport)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+
+    try:
+        await client.initialize(ClientInfo(name="log-level-test", version="1"))
+        await client.notify("initialized")
+        await client.request("session/start", SessionStartParams())
+        await client.request(
+            "config/write",
+            ConfigWriteParams(
+                session_id=agent_loop.session_id,
+                ops=[ConfigWriteOpWire(op="set", path="/log_level", value="DEBUG")],
+            ),
+        )
+        assert get_log_level_chain().config == "DEBUG"
+
+        await client.request(
+            "config/write",
+            ConfigWriteParams(
+                session_id=agent_loop.session_id,
+                ops=[ConfigWriteOpWire(op="remove", path="/log_level")],
+            ),
+        )
+        assert get_log_level_chain().config is None
+    finally:
+        set_config_log_level(None)
+        await client_transport.close()
+        await server_transport.close()
+        await agent_loop.aclose()
 
 
 @pytest.mark.asyncio

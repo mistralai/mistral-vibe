@@ -84,3 +84,16 @@ class LinkStatic(Static):
         # Hover highlight only refreshes on mouse move, so re-render to keep the
         # link styled after a click.
         self.refresh()
+
+
+class NonSelectableLinkStatic(LinkStatic):
+    @property
+    def text_selection(self) -> None:
+        return None
+
+    @text_selection.setter
+    def text_selection(self, value: Any) -> None:
+        pass
+
+    def get_selection(self, selection: Any) -> None:
+        return None

@@ -120,11 +120,18 @@ class StdioJsonRpcTransport:
 
     async def _write_messages(self) -> None:
         while (line := await self._outbox.get()) is not None:
-            await asyncio.to_thread(self._write_line, line)
+            if not await asyncio.to_thread(self._write_line, line):
+                return
 
-    def _write_line(self, line: bytes) -> None:
-        self._writer.write(line)
-        self._writer.flush()
+    def _write_line(self, line: bytes) -> bool:
+        try:
+            self._writer.write(line)
+            self._writer.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            # The peer went away (e.g. client hit Ctrl-C). Stop the writer
+            # cleanly so shutdown can complete instead of surfacing the error.
+            return False
+        return True
 
 
 class MemoryJsonRpcTransport:
@@ -149,6 +156,38 @@ class MemoryJsonRpcTransport:
             return
         self._closed = True
         await self._outgoing.put(None)
+
+
+class TracingTransport:
+    """Wraps a transport, appending every message (both directions) to a file."""
+
+    _connections = 0
+
+    def __init__(self, inner: JsonRpcTransport, path: str) -> None:
+        self._inner = inner
+        self._path = path
+        self._conn = TracingTransport._connections
+        TracingTransport._connections += 1
+
+    def _log(self, direction: str, message: dict[str, Any]) -> None:
+        line = json.dumps(
+            {"conn": self._conn, "dir": direction, "msg": message},
+            separators=(",", ":"),
+        )
+        with open(self._path, "a") as f:
+            f.write(line + "\n")
+
+    async def send(self, message: dict[str, Any]) -> None:
+        self._log("send", message)
+        await self._inner.send(message)
+
+    async def messages(self) -> AsyncIterator[dict[str, Any]]:
+        async for message in self._inner.messages():
+            self._log("recv", message)
+            yield message
+
+    async def close(self) -> None:
+        await self._inner.close()
 
 
 def memory_transport_pair() -> tuple[MemoryJsonRpcTransport, MemoryJsonRpcTransport]:

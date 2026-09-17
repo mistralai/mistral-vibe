@@ -5,21 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.25.4] - 2026-09-12
+## [2.25.4] - 2026-09-17
 
 ### Fixed
 
 - Connector discovery excludes raw HTTP connectors that do not support MCP tools.
-- A single invalid connector no longer prevents the rest of your connectors from loading; an individual tool with an oversized schema is dropped on its own, and accounts over the connector cap keep a bounded catalog instead of loading none.
-- Automatic session titles use the active model on custom Mistral endpoints.
-- Smart-approve now appears in the Vibe Desktop mode picker when enabled via its rollout, and a background refresh no longer drops it.
-- ACP clients (Zed/JetBrains) always list the active mode, so a session can never get stuck on a mode missing from its own list.
-- Smart-approve now escalates to a confirmation prompt when a risky action is requested again, instead of only blocking it, and shows the reason it is asking.
-- Auto-approved calls no longer read as warnings: the reason smart-approve let a call run is shown as a note rather than a warning.
-- `@` file mentions now resolve against every workspace root, including `--add-dir` ones.
-- A `@` mention outside the workspace no longer rejects the whole message; it stays plain text and the read tool can still ask for it.
-- `--add-dir` no longer drops the working directory from the file tools' workspace roots.
-- Shell permission checks now require approval for risky syntax and command options that could bypass workspace and denylist controls (CVE-2026-87984, CVE-2026-87985, CVE-2026-87986, CVE-2026-87987, and residual CVE-2026-87988 variants).
+- Rust CLI: Ctrl-C during headless startup no longer skips app-server teardown
+- Rust CLI: `echo hi | vibe-rs` no longer leaves the terminal black and stuck
+- Upgrade commands work when the Rust CLI is selected.
+- Released Rust CLI builds report crashes when telemetry is enabled.
+- Gemfury builds report the same commit version in Python and Rust.
+- Rust CLI input now moves mouse and arrow navigation by visual row and exits history after restoring the live draft.
+- The Rust CLI again reaches the app-server prompt queue (stale pre-fork RPC and notification names restored).
+- A paused prompt queue now shows its release hint, and hidden thinking no longer adds "thought" to a folded tool group's label.
+- Unfolded failed or skipped tool calls show the error or skip reason instead of an empty section.
+- Completed tool calls without structured output (e.g. hook replacements) show their text on expand.
+- Tool result bodies are sanitized, so ANSI control sequences in command output no longer corrupt the transcript.
+- Streamed shell results no longer repeat their output when unfolded.
+- Generic and MCP tool result bodies are sanitized before display.
+- Edit results with warnings but no diff rows now close their border.
+- Rust CLI (experimental): fix stalled assistant streaming when the server grows a message via JSON-Patch `add` array operations.
+- Installing from sdist no longer requires a Rust toolchain
+- `CARGO_BUILD_FLAGS` is applied when auto-building the Rust CLI
+- Rust CLI: startup from a deleted directory now exits with a clear message, and `--workdir` still recovers from it
+- Rust CLI: `--workdir` now validates the target directory at startup and runs from it; unsupported paths are rejected
+- Rust TUI: slash commands typed before startup completes now wait for the session to be ready instead of running against an unready backend (e.g. `/whoami` no longer returns "No identity information").
+- Rust TUI: a completion popup dismissed during startup stays closed when the session becomes ready, instead of reopening and forgetting the selection.
+- Rust TUI: failed shell commands now show their error, and captured shell output strips terminal control sequences and collapses carriage-return redraws.
+- Rust TUI: pasting a slash-prefixed command now opens slash completion, and manual shell timeout defaults remain server-owned.
 
 ## [2.25.3] - 2026-09-11
 

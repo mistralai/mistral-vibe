@@ -16,7 +16,7 @@ from vibe.cli.history_manager import HistoryManager
 from vibe.cli.input_modes import InputMode
 from vibe.cli.textual_ui.recording.recording_indicator import RecordingIndicator
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.no_markup_static import NonSelectableStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 from vibe.cli.voice_manager.voice_manager_port import (
     TranscribeState,
@@ -24,6 +24,12 @@ from vibe.cli.voice_manager.voice_manager_port import (
     VoiceManagerPort,
 )
 from vibe.observability.logging import logger
+
+_QUEUE_SELECTION_HINT = (
+    "Up/Down: select  ·  Enter: edit  ·  Backspace/Delete: remove  ·  Esc: exit"
+)
+_QUEUE_SELECTION_HINT_TIMEOUT = 3.0
+_QUEUE_EDIT_HINT = "Enter to save · Esc to discard"
 
 
 class _PromptSpinner(SpinnerMixin, Static):
@@ -92,7 +98,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
     ) -> None:
         super().__init__(**kwargs)
         self.input_widget: ChatTextArea | None = None
-        self.prompt_widget: NoMarkupStatic | None = None
+        self.prompt_widget: NonSelectableStatic | None = None
         self._command_registry = command_registry
         self._switching_mode = False
         self._voice_manager = voice_manager
@@ -114,7 +120,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
 
     def compose(self) -> ComposeResult:
         with Horizontal():
-            self.prompt_widget = NoMarkupStatic(">", id="prompt")
+            self.prompt_widget = NonSelectableStatic(">", id="prompt")
             yield self.prompt_widget
 
             self.input_widget = ChatTextArea(
@@ -224,8 +230,12 @@ class ChatInputBody(VoiceManagerListener, Widget):
             return
 
         next_entry = self.history.get_next()
-        if next_entry is not None:
-            self._load_history_entry(next_entry)
+        if next_entry is None:
+            return
+
+        self._load_history_entry(next_entry)
+        if not self.history.is_navigating():
+            self.input_widget.reset_history_state()
 
     def on_chat_text_area_history_reset(
         self, _event: ChatTextArea.HistoryReset
@@ -344,12 +354,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
         self.input_widget._queue_selection_active = True
         self._lock_input_for_selection()
         self._post_scroll()
-        self.post_message(
-            self.InlineNoticeRequested(
-                "Up/Down: select  ·  Enter: edit  ·  Backspace/Delete: remove  ·  Esc: exit",
-                timeout=3.0,
-            )
-        )
+        self._show_queue_selection_hint()
         return True
 
     def on_chat_text_area_queue_selection_previous(
@@ -389,9 +394,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
         self.input_widget._queue_edit_active = True
         self._unlock_input_for_edit()
         self._load_history_entry(content)
-        self.post_message(
-            self.InlineNoticeRequested("Enter to save · Esc to discard", timeout=None)
-        )
+        self.post_message(self.InlineNoticeRequested(_QUEUE_EDIT_HINT, timeout=None))
 
     def on_chat_text_area_queue_selection_remove(
         self, _event: ChatTextArea.QueueSelectionRemove
@@ -435,7 +438,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
             self._update_prompt()
         self._lock_input_for_selection()
         self._post_scroll()
-        self.post_message(self.InlineNoticeCleared())
+        self._show_queue_selection_hint()
 
     def _exit_queue_mode(self) -> None:
         was_in_edit = self._queue_in_edit_mode
@@ -458,6 +461,13 @@ class ChatInputBody(VoiceManagerListener, Widget):
             self._unlock_input_for_edit()
         self.post_message(self.QueueModeExited())
 
+    def _show_queue_selection_hint(self) -> None:
+        self.post_message(
+            self.InlineNoticeRequested(
+                _QUEUE_SELECTION_HINT, timeout=_QUEUE_SELECTION_HINT_TIMEOUT
+            )
+        )
+
     def _post_scroll(self) -> None:
         if self._queue_cursor < 0 or not self._queue_items:
             return
@@ -478,7 +488,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
         self._lock_input_for_selection()
         if scroll_to_selection:
             self._post_scroll()
-        self.post_message(self.InlineNoticeCleared())
+        self._show_queue_selection_hint()
 
     def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         event.stop()

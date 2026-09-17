@@ -343,6 +343,10 @@ Use `/mcp` or `/connectors` to browse configured MCP servers and workspace
 connectors. The browser starts on the first item; press Up or Left to focus its
 fuzzy search bar, then Up again to wrap to the last item.
 
+`/demo` displays the complete set of renderable chat-history entries for comparing
+the Python and Rust CLIs. `/stress [count]` repeats that same fixture in order
+(100 entries by default) to load-test rendering.
+
 ### Custom Slash Commands via Skills
 
 You can define your own slash commands through the skills system. Skills are reusable components that extend Vibe's functionality.

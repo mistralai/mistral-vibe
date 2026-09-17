@@ -28,6 +28,9 @@ class _BlockingBackend(FakeBackend):
 
 
 _BACKENDS: WeakKeyDictionary[VibeApp, _BlockingBackend] = WeakKeyDictionary()
+_SELECTION_HINT = (
+    "Up/Down: select  ·  Enter: edit  ·  Backspace/Delete: remove  ·  Esc: exit"
+)
 
 
 @pytest.fixture
@@ -215,6 +218,8 @@ async def test_enter_in_edit_mode_updates_queued_item(vibe_app: VibeApp) -> None
 
         assert not body._queue_in_edit_mode
         assert body._queue_cursor >= 0
+        assert vibe_app._inline_notice.display
+        assert vibe_app._inline_notice.content == _SELECTION_HINT
 
         items = vibe_app._queue.queue_item_texts()
         assert any("edited text" == content for _, content in items)
@@ -565,7 +570,7 @@ async def test_edit_mode_hint_shown_on_enter(vibe_app: VibeApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_edit_mode_hint_persists_until_exit(vibe_app: VibeApp) -> None:
+async def test_cancelled_edit_restores_selection_hint(vibe_app: VibeApp) -> None:
     async with vibe_app.run_test() as pilot:
         await _start_bash_and_wait_busy(pilot, vibe_app)
         await _enqueue_prompt(pilot, vibe_app, "edit me")
@@ -582,10 +587,10 @@ async def test_edit_mode_hint_persists_until_exit(vibe_app: VibeApp) -> None:
         assert vibe_app._inline_notice.display
         assert vibe_app._inline_notice.content == "Enter to save · Esc to discard"
 
-        # Leaving edit mode (Escape) clears the hint.
         await pilot.press("escape")
         await pilot.pause(0.15)
-        assert not vibe_app._inline_notice.display
+        assert vibe_app._inline_notice.display
+        assert vibe_app._inline_notice.content == _SELECTION_HINT
 
 
 @pytest.mark.asyncio

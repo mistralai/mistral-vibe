@@ -90,15 +90,19 @@ class ShellRequestHandler:
             output.append(chunk)
             await self._turns.append_effect_output(operation_id, chunk)
 
-        try:
+        async def observe_start() -> None:
             await self._turns.start_effect(
                 session_id=params.session_id,
                 entry_id=operation_id,
                 title="shell",
                 detail=shell_effect_detail(command),
             )
+
+        try:
             try:
-                response = await self._shell.run(run_params, observe_output)
+                response = await self._shell.run(
+                    run_params, observe_output, observe_start
+                )
             except asyncio.CancelledError:
                 await self._turns.complete_effect(
                     operation_id,

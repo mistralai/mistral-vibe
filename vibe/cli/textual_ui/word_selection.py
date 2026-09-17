@@ -10,6 +10,7 @@ from textual.screen import Screen
 from textual.selection import Selection, SelectState
 from textual.widget import Widget
 
+from vibe.cli.textual_ui import click_chain
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
 from vibe.cli.textual_ui.widgets.collapsible import ClickWithoutDragMixin
 
@@ -17,7 +18,6 @@ _WORD = re.compile(r"\w+")
 _TRAILING_WORD = re.compile(r"\w+$")
 _DOUBLE_CLICK = 2
 _TRIPLE_CLICK = 3
-_DEFAULT_CLICK_CHAIN_TIME_THRESHOLD = 0.5
 
 
 class SelectGranularity(StrEnum):
@@ -379,10 +379,7 @@ class WordSelectScreen(Screen[None]):
         )
 
     def _click_chain_threshold(self) -> float:
-        try:
-            return self.app.CLICK_CHAIN_TIME_THRESHOLD
-        except NoActiveAppError:
-            return _DEFAULT_CLICK_CHAIN_TIME_THRESHOLD
+        return click_chain.threshold(self)
 
     @staticmethod
     def _boundary_around(

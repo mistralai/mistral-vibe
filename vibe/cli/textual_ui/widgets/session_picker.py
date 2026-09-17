@@ -187,6 +187,11 @@ class SessionPickerApp(Container):
     def has_sessions(self) -> bool:
         return bool(self._sessions)
 
+    @property
+    def has_pending_preview(self) -> bool:
+        """True while the debounce timer still owes a preview render."""
+        return self._preview_timer is not None
+
     def _option_list(self) -> OptionList:
         return self.query_one(OptionList)
 

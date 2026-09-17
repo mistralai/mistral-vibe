@@ -132,6 +132,13 @@ def test_config_view_redacts_persistence_paths() -> None:
     assert "sessionLogging" not in config.model_dump(mode="json", by_alias=True)
 
 
+def test_config_view_reports_the_configured_default_agent() -> None:
+    config = project_config_view(build_test_vibe_config(default_agent="plan"))
+
+    assert config.default_agent == "plan"
+    assert config.model_dump(mode="json", by_alias=True)["defaultAgent"] == "plan"
+
+
 def test_stats_projection_includes_cached_token_counts() -> None:
     agent_loop = build_test_agent_loop()
     agent_loop.stats.session_cached_tokens = 42
