@@ -252,7 +252,7 @@ class MistralMapper:
         ]
 
 
-ReasoningEffortValue = Literal["none", "high"]
+ReasoningEffortValue = Literal["none", "low", "high"]
 
 _THINKING_TO_REASONING_EFFORT: dict[str, ReasoningEffortValue] = {
     "low": "none",
@@ -260,6 +260,23 @@ _THINKING_TO_REASONING_EFFORT: dict[str, ReasoningEffortValue] = {
     "high": "high",
     "max": "high",
 }
+
+
+def _resolve_reasoning_effort(model: ModelConfig) -> ReasoningEffortValue | None:
+    """Map the model's thinking level to a wire value the model accepts.
+
+    A model can declare ``supported_reasoning_efforts``. When the mapped value
+    is not in that list (glm-5-3 rejects "none", for example), drop the
+    parameter instead of sending a value the provider refuses, and let the
+    provider apply its default effort.
+    """
+    effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
+    if effort is None:
+        return None
+    supported = model.supported_reasoning_efforts
+    if supported is not None and effort not in supported:
+        return None
+    return effort
 
 
 class MistralBackend:
@@ -466,7 +483,7 @@ class MistralBackend:
             api_key_origin=self._api_key_origin,
         )
         try:
-            reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
+            reasoning_effort = _resolve_reasoning_effort(model)
             response = await self._get_client().chat.complete_async(
                 model=model.name,
                 messages=[
@@ -547,7 +564,7 @@ class MistralBackend:
             api_key_origin=self._api_key_origin,
         )
         try:
-            reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
+            reasoning_effort = _resolve_reasoning_effort(model)
 
             stream = await self._get_client().chat.stream_async(
                 model=model.name,

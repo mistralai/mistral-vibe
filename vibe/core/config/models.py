@@ -69,7 +69,8 @@ class SessionLoggingConfig(BaseSettings):
     # terminal tab). Off falls back to the first-message preview. Default off:
     # the utility model (mistral-vibe-cli-fast) is not served by every Mistral
     # deployment (dedicated/on-prem), where these calls return 400s, so titling
-    # is opt-in.
+    #
+ is opt-in.
     generate_titles: bool = False
 
     @field_validator("save_dir", mode="before")
@@ -119,7 +120,8 @@ class ProviderConfig(BaseModel):
     def _uses_mistral_browser_sign_in_defaults(self) -> bool:
         return self.name == "mistral" and (
             self.backend == Backend.MISTRAL
-            or self._is_legacy_mistral_provider_without_backend()
+            or self
+._is_legacy_mistral_provider_without_backend()
         )
 
     @model_validator(mode="after")
@@ -179,7 +181,8 @@ class _MCPBase(BaseModel):
     )
     disabled: bool = Field(
         default=False,
-        description="Disable all tools from this MCP server. Tools are still discovered but hidden.",
+        description="Disable a
+ll tools from this MCP server. Tools are still discovered but hidden.",
     )
     disabled_tools: list[str] = Field(
         default_factory=list,
@@ -240,7 +243,8 @@ class MCPStaticAuth(BaseModel):
     def _validate_headers(cls, headers: dict[str, str]) -> dict[str, str]:
         normalized_names: set[str] = set()
         for name in headers:
-            if not _HEADER_NAME_PATTERN.fullmatch(name):
+            if not _HEADER_NAME_PATTERN.fu
+llmatch(name):
                 raise ValueError(f"Invalid HTTP header name {name!r}")
             normalized_name = name.lower()
             if normalized_name in normalized_names:
@@ -285,7 +289,8 @@ class MCPStaticAuth(BaseModel):
         if not self.api_key_env and (
             self.api_key_header != "Authorization"
             or self.api_key_format != "Bearer {token}"
-        ):
+  
+      ):
             logger.warning(
                 "MCP static auth sets api_key_header/api_key_format without "
                 "api_key_env; these fields are ignored.",
@@ -344,7 +349,8 @@ MCPAuth = Annotated[MCPStaticAuth | MCPOAuth, Field(discriminator="type")]
 
 
 def _promote_legacy_auth(data: Any) -> Any:
-    if not isinstance(data, dict):
+    if not isinstance(dat
+a, dict):
         return data
     legacy_present = [k for k in _LEGACY_STATIC_AUTH_KEYS if k in data]
     if not legacy_present:
@@ -408,7 +414,8 @@ MCPServer = Annotated[
 
 
 class ConnectorConfig(BaseModel):
-    name: str = Field(description="Normalized connector alias to match against.")
+    name: str = Field(description="Normalized connector alias to match aga
+inst.")
     disabled: bool = Field(
         default=False,
         description="Disable all tools from this connector. Tools are still discovered but hidden.",
@@ -441,6 +448,11 @@ class ModelConfig(BaseModel):
         None  # Price per million cached input tokens; None bills them at input_price
     )
     thinking: ThinkingLevel = "off"
+    # Wire values accepted as reasoning_effort. None keeps the default mapping.
+    # Models that reject a mapped value (glm-5-3 rejects "none") list their
+    # supported values so the backend drops the parameter instead of sending
+    # a value the provider refuses.
+    supported_reasoning_efforts: tuple[str, ...] | None = None
     supports_images: bool = False
     auto_compact_threshold: int = DEFAULT_AUTO_COMPACT_THRESHOLD
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
@@ -467,7 +479,8 @@ def normalize_model_configs(value: Any) -> Any:
 def serialize_model_configs(value: Any) -> Any:
     """Write the internal model map back as legacy [[models]] TOML entries.
 
-    None-valued fields are dropped: TOML has no null and tomli_w rejects it.
+    None-value
+d fields are dropped: TOML has no null and tomli_w rejects it.
     """
     normalized = normalize_model_configs(value)
     if not isinstance(normalized, Mapping):
@@ -525,7 +538,8 @@ def _model_payload_with_alias(alias: Any, payload: Any) -> Any:
     if isinstance(payload, ModelConfig):
         if payload.alias != alias:
             raise ValueError(
-                f"Model key '{alias}' does not match model alias '{payload.alias}'."
+                f"Model key '{ali
+as}' does not match model alias '{payload.alias}'."
             )
         return payload
 
@@ -589,7 +603,8 @@ class TranscribeModelConfig(BaseModel):
     language: str = "en"
     target_streaming_delay_ms: int = 500
 
-    _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
+    _default_
+alias_to_name = model_validator(mode="before")(_default_alias_to_name)
 
 
 class TTSClient(StrEnum):
