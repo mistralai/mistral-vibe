@@ -98,7 +98,8 @@ _BOOTSTRAP_CACHE_FORMAT = 2
 _BOOTSTRAP_CACHE_TTL_SECONDS = 10 * 60
 _BOOTSTRAP_TIMEOUT_SECONDS = 30.0
 _MAX_CONNECTORS = 256
-_MAX_TOOLS_PER_CONNECTOR = 128
+# Headroom limit per connector; oversized connectors degrade gracefully to unavailable with a diagnostic.
+_MAX_TOOLS_PER_CONNECTOR = 1_000
 _MAX_INPUT_SCHEMA_BYTES = 64 * 1024
 _MAX_DIAGNOSTICS_PER_CONNECTOR = 3
 _MAX_DIAGNOSTIC_CHARACTERS = 512
@@ -1561,6 +1562,28 @@ def _resolve_catalog(
         if len(connectors) >= _MAX_CONNECTORS:
             truncated = True
             continue
+
+        diagnostics = list(_bounded_diagnostics(raw_connector.bootstrap_errors))
+        if len(raw_connector.tools) > _MAX_TOOLS_PER_CONNECTOR:
+            tool_limit_diagnostic = "Connector bootstrap issue: tool_limit_exceeded"
+            if (
+                tool_limit_diagnostic not in diagnostics
+                and len(diagnostics) < _MAX_DIAGNOSTICS_PER_CONNECTOR
+            ):
+                diagnostics.append(tool_limit_diagnostic)
+            connectors.append(
+                ResolvedConnector(
+                    raw_id=raw_id,
+                    alias=alias,
+                    display_name=display_name,
+                    ready=False,
+                    auth_action=_auth_action(raw_connector.auth_action),
+                    tools=(),
+                    diagnostics=tuple(diagnostics),
+                )
+            )
+            continue
+
         try:
             tools = _resolve_connector_tools(raw_connector, raw_id=raw_id)
         except ConnectorCatalogValidationError as exc:
@@ -1581,7 +1604,7 @@ def _resolve_catalog(
                 ready=raw_connector.status.is_ready,
                 auth_action=_auth_action(raw_connector.auth_action),
                 tools=tools,
-                diagnostics=_bounded_diagnostics(raw_connector.bootstrap_errors),
+                diagnostics=tuple(diagnostics),
             )
         )
 
@@ -1683,11 +1706,6 @@ def _resolve_connector_tools(
     raw_connector: _BootstrapConnector, *, raw_id: str
 ) -> tuple[ResolvedConnectorTool, ...]:
     """Resolve one connector's tools, raising on per-connector contract breaches."""
-    if len(raw_connector.tools) > _MAX_TOOLS_PER_CONNECTOR:
-        raise ConnectorCatalogValidationError(
-            f"Connector {raw_id!r} exceeds {_MAX_TOOLS_PER_CONNECTOR} tools",
-            reason="too_many_tools",
-        )
     # Drop a single unusable tool (malformed wire, oversized schema, missing name)
     # on its own so the connector keeps its remaining tools.
     resolved: list[ResolvedConnectorTool] = []
