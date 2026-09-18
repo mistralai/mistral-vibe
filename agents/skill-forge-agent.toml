@@ -1,0 +1,46 @@
+name = "skill-forge"
+system_prompt = "skill-forge-system"
+model = "devstral-2"
+temperature = 0.1
+max_tokens = 4096
+thinking = "off"
+
+[tools]
+allowed = [
+    "AskUserQuestion",
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Skill",
+    "Agent",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "TaskCreate",
+    "TaskUpdate",
+    "TaskList",
+    "TaskGet",
+    "TaskStop",
+    "WebFetch",
+    "WebSearch",
+    "PushNotification",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "ScheduleWakeup",
+    "NotebookEdit",
+    "RemoteTrigger",
+    "EnterWorktree",
+    "ExitWorktree",
+    "Monitor"
+]
+
+[behavior]
+auto_continue = false
+max_iterations = 50
+require_user_confirmation = true
+
+[middleware]
+custom_middleware = "skills/skill-forge/middleware.py:SkillForgeMiddleware"
+load_on_invoke = true
+stash_existing = true
