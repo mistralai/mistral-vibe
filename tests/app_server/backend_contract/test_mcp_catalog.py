@@ -665,7 +665,8 @@ async def _connect_recording_client(
     experimental_harness: bool, *, process: HarnessProcess | None = None
 ) -> _RecordingConnection:
     effective_process = process or HarnessProcess(
-        experimental_harness=experimental_harness
+        experimental_harness=experimental_harness,
+        legacy_harness=not experimental_harness,
     )
     client_transport, server_transport = memory_transport_pair()
     recording = _RecordingTransport(cast(JsonRpcTransport, client_transport))

@@ -11,7 +11,6 @@ import httpx
 import zstandard
 
 from vibe.core.config import VibeConfigSchema
-from vibe.core.session.session_logger import SessionLogger
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.git import GitRepoInfo, GitRepository
 from vibe.core.teleport.nuage import (
@@ -41,7 +40,6 @@ from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 class TeleportService:
     def __init__(
         self,
-        session_logger: SessionLogger,
         vibe_code_sessions_base_url: str,
         vibe_code_api_key: str,
         workdir: Path | None = None,
@@ -51,7 +49,6 @@ class TeleportService:
         project_store: VibeProjectsStore | None = None,
         timeout: float = 60.0,
     ) -> None:
-        self._session_logger = session_logger
         self._vibe_code_sessions_base_url = vibe_code_sessions_base_url
         self._vibe_code_api_key = vibe_code_api_key
         self._vibe_config = vibe_config

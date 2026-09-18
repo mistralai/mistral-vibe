@@ -77,7 +77,12 @@ def _option_tokens(args: list[str]) -> tuple[str, ...]:
 
 def _sort_policy(args: list[str]) -> ShellCommandPolicy:
     options = _option_tokens(args)
-    side_effecting_long = {"--compress-program", "--output", "--temporary-directory"}
+    side_effecting_long = {
+        "--compress-program",
+        "--files0-from",
+        "--output",
+        "--temporary-directory",
+    }
     requires_approval = any(
         any(_matches_long_option(token, option) for option in side_effecting_long)
         or _contains_short_option(
@@ -248,6 +253,16 @@ def analyze_shell_command_policy(tokens: list[str]) -> ShellCommandPolicy:
     command = tokens[0].rsplit("/", 1)[-1]
     policy = _COMMAND_POLICIES.get(command)
     return policy(tokens[1:]) if policy else ShellCommandPolicy()
+
+
+# Policies that can set ``requires_approval``. The rest only nominate path
+# candidates, which become OUTSIDE_DIRECTORY permissions of their own -- a scope
+# no command pattern is ever matched against, so widening one costs them nothing.
+_OPTION_GATED_COMMANDS = frozenset({"date", "find", "git", "less", "sort", "tree"})
+
+
+def has_option_guardrails(tokens: list[str]) -> bool:
+    return bool(tokens) and tokens[0].rsplit("/", 1)[-1] in _OPTION_GATED_COMMANDS
 
 
 def path_candidates(

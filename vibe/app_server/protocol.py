@@ -10,6 +10,7 @@ from pydantic import (
     StrictInt,
     StrictStr,
     TypeAdapter,
+    field_validator,
     model_validator,
 )
 
@@ -57,6 +58,7 @@ from vibe.app_server.models import (
     PluginInfo,
     PreparedPrompt,
     PublicCallbackEntry,
+    PublicChildSession,
     PublicError,
     PublicHistoryEntry,
     PublicRetryCategory,
@@ -109,6 +111,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "config/fields/read",
     "config/proxy/read",
     "config/proxy/write",
+    "config/model/write",
     "config/read",
     "config/reload",
     "config/schema",
@@ -175,6 +178,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/history/list",
     "session/list",
     "session/log/read",
+    "session/pin",
     "session/read",
     "session/ready/read",
     "session/ready/wait",
@@ -199,6 +203,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "skills/list",
     "skills/remove",
     "skills/setAlias",
+    "skills/setEnabled",
     "skills/setLatest",
     "skills/setVersion",
     "skills/updates",
@@ -354,6 +359,16 @@ class AgentConfig(ProtocolModel):
     trust_workspace: bool = False
     mcp_servers: list[SessionMCPServer] = Field(default_factory=list)
 
+    @field_validator("cwd", "workdir")
+    @classmethod
+    def _reject_empty_cwd(cls, value: str | None) -> str | None:
+        # An empty cwd would silently resolve to the server process cwd,
+        # making a directory the caller never named trustable. A client
+        # that wants the default omits the field instead.
+        if value == "":
+            raise ValueError("Session cwd must not be empty")
+        return value
+
 
 SessionOptions = AgentConfig
 
@@ -471,6 +486,11 @@ class SessionListParams(ProtocolModel):
     root_session_id: str | None = None
     parent_session_id: str | None = None
     cwd: str | None = None
+    # Union of `cwd` matching over several checkouts.
+    cwds: list[str] | None = None
+    # ``True`` keeps only pinned sessions, ``False`` only unpinned ones, and
+    # ``None`` asks for both.
+    pinned: bool | None = None
 
 
 class SessionListResponse(ProtocolModel):
@@ -500,6 +520,18 @@ class SessionTitleUpdateResponse(ProtocolModel):
     title: str
     updated_at: str | None = None
     last_event_id: int | None = None
+
+
+class SessionPinParams(ProtocolModel):
+    session_id: str
+    pinned: bool
+
+
+class SessionPinResponse(ProtocolModel):
+    # Absent while the session is unpinned, so the response says both whether
+    # the session is pinned and, when it is, how it should sort against the
+    # rest of the shelf.
+    pinned_at: int | None = None
 
 
 class SessionHistoryListParams(ProtocolModel):
@@ -814,8 +846,26 @@ class RuntimeReadResponse(ProtocolModel):
     ready: bool
 
 
+class RuntimeMutationStatus(StrEnum):
+    APPLIED = auto()
+    PENDING = auto()
+
+
 class RuntimeMutationResponse(ProtocolModel):
+    """What the mutation produced, and whether the session is running it yet.
+
+    ``runtime`` is always the configuration the mutation produced, so a client
+    can render what the user asked for. ``PENDING`` says the session is still
+    running the previous one until the turn it is in ends: the Core reads its
+    settings when a turn starts, so what it holds cannot be replaced under it.
+    """
+
     runtime: RuntimeSnapshot
+    status: RuntimeMutationStatus = RuntimeMutationStatus.APPLIED
+
+    @property
+    def applied(self) -> bool:
+        return self.status is RuntimeMutationStatus.APPLIED
 
 
 class RuntimeUpdatedParams(ProtocolModel):
@@ -888,6 +938,14 @@ class ConfigWriteOpWire(ProtocolModel):
     target_layer: str | None = None
 
 
+class ModelConfigWriteParams(ProtocolModel):
+    """A model pick: which model answers, and how hard it thinks."""
+
+    session_id: str
+    model_alias: str | None = None
+    reasoning_effort: str | None = None
+
+
 class ConfigWriteParams(ProtocolModel):
     session_id: str
     ops: list[ConfigWriteOpWire]
@@ -898,6 +956,10 @@ class ConfigWriteParams(ProtocolModel):
 class ConfigWriteResponse(ConfigMutationResponse):
     rejected: bool = False
     failures: list[str] = Field(default_factory=list)
+
+    @property
+    def applied(self) -> bool:
+        return super().applied and not self.rejected and not self.failures
 
 
 class ConfigReadParams(ProtocolModel):
@@ -1012,6 +1074,12 @@ class SkillsRemoveParams(ProtocolModel):
     session_id: str
     name: str
     scope: SkillScopeArg = "global"
+
+
+class SkillsSetEnabledParams(ProtocolModel):
+    session_id: str
+    name: str
+    enabled: bool
 
 
 class SkillsConvertLocalParams(ProtocolModel):
@@ -1216,6 +1284,7 @@ class ConnectorCatalogReadResponse(ProtocolModel):
     catalog: ConnectorCatalogView
     selections: list[ConnectorSelectionView] = Field(default_factory=list)
     session: SessionConnectorStateView | None = None
+    manage_url: str | None = None
 
 
 class ConnectorCatalogRefreshParams(ProtocolModel):
@@ -1321,6 +1390,7 @@ class MCPAddParams(ProtocolModel):
     name: str | None = None
     scopes: list[str] = Field(default_factory=list)
     transport: MCPAddTransport = "streamable-http"
+    allow_insecure_http: bool = False
 
 
 class MCPAddResponse(ProtocolModel):
@@ -2026,6 +2096,10 @@ class TurnCompletedParams(EventNotificationParams):
 class StatsUpdatedParams(EventNotificationParams):
     stats: AgentStatsSnapshot
     context_window: int
+
+
+class ChildSessionUpdatedParams(EventNotificationParams):
+    child_session: PublicChildSession
 
 
 class Notification(ProtocolModel):

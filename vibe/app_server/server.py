@@ -28,6 +28,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendHost,
     SessionBackendHostBackgroundTasks,
     SessionBackendHostDelete,
+    SessionBackendHostPin,
     SessionBackendNotificationSink,
     SessionBackendOpenCallbacks,
     SessionBackendQueuedTurnSteering,
@@ -67,6 +68,7 @@ from vibe.app_server.protocol import (
     JsonRpcErrorResponse,
     JsonRpcProtocolError,
     JsonRpcSuccessResponse,
+    ModelConfigWriteParams,
     Notification,
     PageRequest,
     ProtocolError,
@@ -82,6 +84,7 @@ from vibe.app_server.protocol import (
     SessionHistoryClearParams,
     SessionHistoryClearResponse,
     SessionListParams,
+    SessionPinParams,
     SessionReadParams,
     SessionReadResponse,
     SessionResumeParams,
@@ -152,6 +155,7 @@ _SESSION_OPTIONAL_METHODS = frozenset({
 _SESSION_BACKEND_METHODS = frozenset({
     "callback/result",
     "config/reload",
+    "config/model/write",
     "config/write",
     "session/agent/update",
     "session/compact",
@@ -861,22 +865,25 @@ class AppServer:
     async def _dispatch_backend_host_operation(
         self, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult | None:
-        if method == "session/list":
-            response = await self._session_backend_host.list(
-                validate_wire(SessionListParams, raw_params)
-            )
-            return DispatchResult(response)
-        if method == "session/read":
-            response = await self._session_backend_host.read(
-                validate_wire(SessionReadParams, raw_params)
-            )
-            return DispatchResult(response)
+        if method in {"session/list", "session/read"}:
+            return await self._dispatch_backend_host_read(method, raw_params)
         if method == "session/rename":
             params = validate_wire(SessionTitleUpdateParams, raw_params)
             response = await self._session_backend_host.rename(params)
             if self._root is not None and self._root.session_id == params.session_id:
                 await self._flush_backend_events(self._root)
             return DispatchResult(response)
+        if method == "session/pin":
+            if not isinstance(self._session_backend_host, SessionBackendHostPin):
+                raise method_not_found(method)
+            pin_params = validate_wire(SessionPinParams, raw_params)
+            pin_response = await self._session_backend_host.pin(pin_params)
+            if (
+                self._root is not None
+                and self._root.session_id == pin_params.session_id
+            ):
+                await self._flush_backend_events(self._root)
+            return DispatchResult(pin_response)
         if method == "session/fork":
             params = validate_wire(SessionForkParams, raw_params)
             result = await self._session_backend_host.fork(params)
@@ -899,6 +906,19 @@ class AppServer:
         if handoff := await self._dispatch_backend_host_handoff(method, raw_params):
             return handoff
         return await self._dispatch_backend_host_lifecycle(method, raw_params)
+
+    async def _dispatch_backend_host_read(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult:
+        if method == "session/list":
+            response = await self._session_backend_host.list(
+                validate_wire(SessionListParams, raw_params)
+            )
+            return DispatchResult(response)
+        response = await self._session_backend_host.read(
+            validate_wire(SessionReadParams, raw_params)
+        )
+        return DispatchResult(response)
 
     async def _dispatch_backend_host_handoff(
         self, method: str, raw_params: dict[str, Any]
@@ -1052,7 +1072,7 @@ class AppServer:
             return DispatchResult(
                 result.response,
                 after_response=result.after_response,
-                runtime_updated=True,
+                runtime_updated=result.response.applied,
             )
         if method == "session/settings/update":
             result = await root.update_settings(
@@ -1119,6 +1139,7 @@ class AppServer:
         return DispatchResult(
             result.response,
             after_response=result.after_response,
+            on_response_abandoned=result.on_response_abandoned,
             runtime_updated=result.runtime_updated,
         )
 
@@ -1129,9 +1150,12 @@ class AppServer:
             result = await root.write_config(
                 validate_wire(ConfigWriteParams, raw_params)
             )
-            runtime_updated = (
-                not result.response.rejected and not result.response.failures
+            runtime_updated = result.response.applied
+        elif method == "config/model/write":
+            result = await root.write_model_config(
+                validate_wire(ModelConfigWriteParams, raw_params)
             )
+            runtime_updated = result.response.applied
         elif method == "config/reload":
             plan = (
                 await self._mcp_catalog_service.prepare_config_reload(root)

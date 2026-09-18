@@ -10,21 +10,23 @@ from typing import IO, Any
 
 from pydantic_core import to_jsonable_python
 
-from vibe.core.config.types import ConcurrencyConflictError
-
 
 @contextmanager
-def capture_stable_file(path: Path) -> Iterator[tuple[IO[bytes], str]]:
-    """Yield a file and fingerprint, raising if the path changes before exit."""
-    with path.open("rb") as file:
-        before = create_file_fingerprint(file)
-        yield file, before
+def open_fingerprinted_file(path: Path) -> Iterator[tuple[IO[bytes], str]]:
+    """Yield a file open for reading and the fingerprint of what it holds.
 
-    with path.open("rb") as file:
-        after = create_file_fingerprint(file)
+    The fingerprint comes from ``fstat`` on this very descriptor, so it names
+    the bytes the caller is about to read and nothing else. A writer replacing
+    the path mid-read cannot invalidate that pairing: a save lands as an atomic
+    rename, so the open descriptor keeps pointing at the version it opened.
 
-    if after != before:
-        raise ConcurrencyConflictError(expected_fp=before, actual_fp=after)
+    Whether the *path* has since moved on is a separate question, and not one
+    the reader has to answer -- a patch built on this fingerprint is checked
+    against the freshly loaded one at write time, which is where a stale read
+    is caught.
+    """
+    with path.open("rb") as file:
+        yield file, create_file_fingerprint(file)
 
 
 def create_file_fingerprint(file: IO) -> str:

@@ -143,12 +143,45 @@ class ConfigBuilder[S: ConfigSchema]:
                     continue
 
                 value = self._apply_model_before_validators(key, field_info, value)
-                accumulated[key] = meta.merge_strategy.apply(
-                    accumulated.get(key), value, key_fn=self._make_key_fn(meta)
+                accumulated[key] = self._merge_value(
+                    key, meta, accumulated, value, layer_name=ld.name
                 )
                 origins[key] = ld.name
 
         return accumulated, origins
+
+    def _merge_value(
+        self,
+        key: str,
+        meta: MergeFieldMetadata,
+        accumulated: dict[str, Any],
+        value: Any,
+        *,
+        layer_name: str,
+    ) -> Any:
+        """Combine one field across layers, reporting a shape clash as user error.
+
+        A strategy raises ``TypeError`` when the layers disagree on shape, which
+        in practice means a setting was typed as a scalar where a table or list
+        belongs. That is the user's config, not a bug, so it is re-raised as a
+        ``ValueError`` naming the field and the layer -- the startup path prints
+        that and exits, instead of showing a traceback.
+
+        Neither swallowing it nor keeping one side is safe: the schema coerces
+        several of these fields rather than rejecting them, so a mistyped
+        ``tools`` would validate as ``{}`` and silently drop the permissions a
+        lower layer had set.
+        """
+        try:
+            return meta.merge_strategy.apply(
+                accumulated.get(key), value, key_fn=self._make_key_fn(meta)
+            )
+        except TypeError as error:
+            raise ValueError(
+                f"Invalid configuration for '{key}' in the {layer_name} layer: "
+                f"it is a {type(value).__name__}, which cannot be combined with "
+                f"the value another layer provides. Fix or remove that setting."
+            ) from error
 
     def _apply_model_before_validators(
         self, field_name: str, field_info: FieldInfo, value: Any

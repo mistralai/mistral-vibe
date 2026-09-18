@@ -192,6 +192,22 @@ class TestKeyringTokenStorage:
         assert storage.token_expiry_time == -1
 
     @pytest.mark.asyncio
+    async def test_missing_tokens_do_not_probe_legacy_services(
+        self, memory_keyring: _MemoryKeyring, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reads: list[tuple[str, str]] = []
+        original = memory_keyring.get_password
+
+        def _record(service: str, username: str) -> str | None:
+            reads.append((service, username))
+            return original(service, username)
+
+        monkeypatch.setattr(memory_keyring, "get_password", _record)
+
+        assert await KeyringTokenStorage(alias="linear").get_tokens() is None
+        assert reads == [(_KEYRING_SERVICE, "mcp-oauth:linear:tokens")]
+
+    @pytest.mark.asyncio
     async def test_round_trip_client_info(self, memory_keyring: _MemoryKeyring) -> None:
         storage = KeyringTokenStorage(alias="linear")
         assert await storage.get_client_info() is None
@@ -959,6 +975,66 @@ class TestPerformOAuthLogin:
                 await perform_oauth_login(srv, on_url=on_url)
 
         assert errors == []
+
+    @pytest.mark.asyncio
+    async def test_transient_refresh_discards_stuck_creds_and_retries_fresh(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        # Seed creds, fail the first refresh transiently (5xx), and assert the
+        # retry runs against an emptied keyring instead of re-refreshing.
+        srv = _oauth_server(name="demo")
+        storage = KeyringTokenStorage(alias="demo")
+        await storage.set_tokens(
+            OAuthToken(access_token="stale", refresh_token="stale-rt", expires_in=1)
+        )
+        await storage.set_client_info(
+            OAuthClientInformationFull(
+                client_id="pruned-dcr-client",
+                redirect_uris=["http://127.0.0.1:47823/callback"],  # type: ignore[list-item]
+                token_endpoint_auth_method="none",
+            )
+        )
+        await Fingerprint.compute(srv).save("demo")
+
+        errors: list[Exception] = [
+            MCPOAuthTransientRefreshError(server_alias="demo", reason="HTTP 500"),
+            OAuthFlowError("fresh authorization reached"),
+        ]
+        creds_at_each_attempt: list[bool] = []
+
+        class TransientThenFreshClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            async def __aenter__(self) -> TransientThenFreshClient:
+                return self
+
+            async def __aexit__(self, *_exc: object) -> None:
+                pass
+
+            def stream(self, *_args: object, **_kwargs: object) -> _RaisingStream:
+                creds_at_each_attempt.append(
+                    (_KEYRING_SERVICE, "mcp-oauth:demo:tokens") in memory_keyring.store
+                )
+                return _RaisingStream(errors.pop(0))
+
+        async def on_url(_url: str) -> None:
+            pass
+
+        with patch(
+            "vibe.core.auth.mcp_oauth.VibeAsyncHTTPClient", new=TransientThenFreshClient
+        ):
+            with pytest.raises(
+                MCPOAuthLoginFailed, match="fresh authorization reached"
+            ):
+                await perform_oauth_login(srv, on_url=on_url)
+
+        assert errors == []  # both attempts ran: a retry happened
+        # First attempt saw the stored tokens; the retry saw an emptied keyring.
+        assert creds_at_each_attempt == [True, False]
+        assert await storage.get_tokens() is None
+        assert await storage.get_client_info() is None
+        assert await Fingerprint.load("demo") is None
 
     @pytest.mark.asyncio
     async def test_full_flow_persists_tokens_and_fingerprint(

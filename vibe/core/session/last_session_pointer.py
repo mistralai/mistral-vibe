@@ -75,7 +75,10 @@ def record(config: SessionLoggingConfig, session_id: str | None) -> None:
         return
     path = _pointer_path(config, tty_key)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # Pointer files hold session IDs, so the directory and file are created
+        # owner-only; existing paths keep their current mode.
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path.touch(mode=0o600, exist_ok=True)
         path.write_text(f"{session_id}\n", encoding="utf-8")
     except OSError as e:
         logger.debug("Failed to record last session pointer path=%s err=%s", path, e)

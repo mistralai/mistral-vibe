@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from types import UnionType
+from typing import Union, get_args, get_origin
+from unittest.mock import patch
 
 import keyring
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
+from pydantic.fields import FieldInfo
 import pytest
+import tomli_w
 
 from vibe.core.config import MissingAPIKeyError, ModelConfig, ProviderConfig
+from vibe.core.config.layers.environment import EnvironmentLayer
+from vibe.core.config.layers.user import UserConfigLayer
+from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.schema import MergeFieldMetadata
 from vibe.core.config.vibe_schema import VibeConfigSchema
+from vibe.core.utils.merge import MergeStrategy
 
 _ROUTED_TEST_ALIAS = "target-testing-model-alias"
 _ROUTED_TEST_MODEL = ModelConfig(
@@ -113,6 +124,10 @@ def test_default_agent_is_accept_edits() -> None:
 
 def test_file_watcher_for_autocomplete_is_enabled_by_default() -> None:
     assert VibeConfigSchema().file_watcher_for_autocomplete is True
+
+
+def test_subagent_status_list_is_enabled_by_default() -> None:
+    assert VibeConfigSchema().show_subagent_status_list is True
 
 
 def test_smart_approve_is_not_offered_by_default() -> None:
@@ -632,3 +647,226 @@ def test_log_level_rejects_invalid() -> None:
 @pytest.mark.parametrize("level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
 def test_log_level_accepts_canonical_levels(level: str) -> None:
     assert VibeConfigSchema(log_level=level).log_level == level
+
+
+@pytest.mark.asyncio
+async def test_a_layer_setting_one_nested_field_keeps_the_others(
+    tmp_path: Path,
+) -> None:
+    """A layer contributes only the keys it names, so the rest must survive it.
+
+    A nested config group is a bag of independent settings. Every layer above
+    the first contributes a partial table -- one `VIBE_SESSION_LOGGING__*`
+    variable, or a project file overriding a single key -- and taking the whole
+    group from the topmost layer silently resets the keys it never mentioned to
+    their class defaults.
+    """
+    toml_path = tmp_path / "config.toml"
+    save_dir = tmp_path / "sessions"
+    # Serialized rather than formatted: a Windows path interpolated into a
+    # double-quoted TOML string turns its separators into escapes, and the
+    # layer would fail to parse instead of exercising the merge.
+    toml_path.write_text(
+        tomli_w.dumps({
+            "session_logging": {
+                "enabled": False,
+                "save_dir": str(save_dir),
+                "session_prefix": "mine",
+            }
+        })
+    )
+
+    with patch.dict(
+        os.environ, {"VIBE_SESSION_LOGGING__GENERATE_TITLES": "true"}, clear=True
+    ):
+        user = UserConfigLayer(path=toml_path)
+        orchestrator = await ConfigOrchestrator.create(
+            schema=VibeConfigSchema,
+            layers=[user, EnvironmentLayer(schema=VibeConfigSchema)],
+            default_layer_resolver=lambda: user,
+        )
+
+    session_logging = orchestrator.config.session_logging
+    assert session_logging.generate_titles is True
+    assert session_logging.enabled is False
+    assert session_logging.session_prefix == "mine"
+    assert session_logging.save_dir == str(save_dir)
+
+
+# Nested models the winning layer is meant to supply whole. GrowthBook hands
+# ``routed_model_config`` over atomically as one experiment-chosen model, so
+# merging it per field would splice leftover user keys into a definition the
+# experiment never described.
+ATOMIC_NESTED_FIELDS = frozenset({"routed_model_config"})
+
+
+def _nested_model_fields() -> dict[str, FieldInfo]:
+    """Schema fields whose value is a nested model, optional ones included.
+
+    ``X | None`` is not a ``type``, so an isinstance check alone silently skips
+    every optional nested field -- which is most of them.
+    """
+    nested: dict[str, FieldInfo] = {}
+    for name, info in VibeConfigSchema.model_fields.items():
+        annotation = info.annotation
+        # Only unions are unwrapped. A container of models -- ``list[ModelConfig]``
+        # -- is not a settings group: it has its own merge semantics (union by
+        # key, replace for a runtime-supplied payload) and per-field merging
+        # would be meaningless for it.
+        candidates = (
+            get_args(annotation)
+            if get_origin(annotation) in {Union, UnionType}
+            else (annotation,)
+        )
+        if any(
+            isinstance(candidate, type) and issubclass(candidate, BaseModel)
+            for candidate in candidates
+        ):
+            nested[name] = info
+    return nested
+
+
+def test_nested_model_fields_merge_per_field_unless_atomic_by_design() -> None:
+    """A nested model is a bag of settings, so one layer must not supply all of it.
+
+    Structural rather than behavioural, so a field added later cannot
+    reintroduce the loss without this failing. Anything genuinely atomic goes
+    in ``ATOMIC_NESTED_FIELDS`` with a reason, rather than being annotated
+    wrongly to keep this assertion green.
+    """
+    replaced = sorted(
+        name
+        for name, info in _nested_model_fields().items()
+        if name not in ATOMIC_NESTED_FIELDS
+        and (metadata := MergeFieldMetadata.from_field(info)) is not None
+        and metadata.merge_strategy is MergeStrategy.REPLACE
+    )
+    assert replaced == []
+
+
+def test_the_guard_inspects_the_optional_nested_fields_too() -> None:
+    """The guard is worthless if its generator cannot see the risky fields.
+
+    ``compaction_model`` is the one that motivated widening it: a user-level
+    full table plus a project-level single key used to replace the whole table
+    with that key, then fail validation on the required fields it dropped.
+    """
+    inspected = _nested_model_fields()
+    assert "compaction_model" in inspected
+    assert "routed_model_config" in inspected
+    assert {"session_logging", "project_context", "experiments"} <= set(inspected)
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_key_in_a_lower_layer_does_not_break_config_load(
+    tmp_path: Path,
+) -> None:
+    """Per-field merging puts every layer's keys in front of the validator.
+
+    Under wholesale replacement an unrecognised key was discarded along with
+    the rest of the losing group. Now it survives to validation, so a group
+    that forbids extras would turn a project file naming a setting from a newer
+    Vibe into a startup failure for whoever is running an older one.
+    """
+    toml_path = tmp_path / "config.toml"
+    save_dir = tmp_path / "sessions"
+    toml_path.write_text(
+        tomli_w.dumps({
+            "session_logging": {
+                "save_dir": str(save_dir),
+                "a_setting_from_a_newer_vibe": True,
+            }
+        })
+    )
+
+    with patch.dict(
+        os.environ, {"VIBE_SESSION_LOGGING__GENERATE_TITLES": "true"}, clear=True
+    ):
+        user = UserConfigLayer(path=toml_path)
+        orchestrator = await ConfigOrchestrator.create(
+            schema=VibeConfigSchema,
+            layers=[user, EnvironmentLayer(schema=VibeConfigSchema)],
+            default_layer_resolver=lambda: user,
+        )
+
+    session_logging = orchestrator.config.session_logging
+    assert session_logging.save_dir == str(save_dir)
+    assert session_logging.generate_titles is True
+
+
+@pytest.mark.asyncio
+async def test_a_mistyped_group_is_reported_not_silently_dropped(
+    tmp_path: Path,
+) -> None:
+    """A scalar where a table belongs is user error, reported as such.
+
+    The merge strategies raise ``TypeError`` when layers disagree on shape, and
+    nothing on the CLI startup path catches that -- one mistyped line ended in
+    a traceback. It is re-raised as a ``ValueError`` naming the field and the
+    layer, which that path prints before exiting.
+
+    Keeping one side instead would be worse than the traceback: several fields
+    coerce rather than reject, so the mistyped layer would win silently. See
+    the test below.
+    """
+    toml_path = tmp_path / "config.toml"
+    toml_path.write_text('session_logging = "oops"\n')
+
+    with patch.dict(
+        os.environ, {"VIBE_SESSION_LOGGING__GENERATE_TITLES": "true"}, clear=True
+    ):
+        user = UserConfigLayer(path=toml_path)
+        with pytest.raises(ValueError, match="session_logging") as exc_info:
+            _ = await ConfigOrchestrator.create(
+                schema=VibeConfigSchema,
+                layers=[user, EnvironmentLayer(schema=VibeConfigSchema)],
+                default_layer_resolver=lambda: user,
+            )
+
+    assert not isinstance(exc_info.value, ValidationError)
+
+
+@pytest.mark.asyncio
+async def test_a_mistyped_higher_layer_never_silently_discards_a_lower_one(
+    tmp_path: Path,
+) -> None:
+    """The reason a shape clash must raise rather than pick a side.
+
+    ``tools`` coerces a bad value to ``{}`` instead of rejecting it, so letting
+    the mistyped layer win would drop the tool permissions the layer below had
+    set -- no error, no warning, and the permission quietly gone.
+    """
+    user_toml = tmp_path / "user.toml"
+    project_toml = tmp_path / "project.toml"
+    user_toml.write_text('tools = { shell = { permission = "always" } }\n')
+    project_toml.write_text('tools = "oops"\n')
+
+    with patch.dict(os.environ, {}, clear=True):
+        user = UserConfigLayer(path=user_toml)
+        project = UserConfigLayer(path=project_toml, name="project-toml")
+        with pytest.raises(ValueError, match="tools"):
+            _ = await ConfigOrchestrator.create(
+                schema=VibeConfigSchema,
+                layers=[user, project],
+                default_layer_resolver=lambda: user,
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_mistyped_group_alone_is_reported_as_a_validation_error(
+    tmp_path: Path,
+) -> None:
+    """With nothing to merge against, the schema reports it as it always did."""
+    toml_path = tmp_path / "config.toml"
+    toml_path.write_text('session_logging = "oops"\n')
+
+    with patch.dict(os.environ, {}, clear=True):
+        user = UserConfigLayer(path=toml_path)
+        with pytest.raises(ValidationError) as exc_info:
+            _ = await ConfigOrchestrator.create(
+                schema=VibeConfigSchema,
+                layers=[user],
+                default_layer_resolver=lambda: user,
+            )
+
+    assert "session_logging" in str(exc_info.value)

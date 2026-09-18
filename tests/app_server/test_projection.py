@@ -480,13 +480,13 @@ def test_persisted_compaction_boundary_projects_completed_checkpoint() -> None:
 def test_project_mcp_surfaces_connector_bootstrap_error() -> None:
     agent_loop = build_test_agent_loop()
     registry = FakeConnectorRegistry(
-        bootstrap_error="Failed to load workspace connectors (HTTP 502)."
+        bootstrap_error="Failed to load connectors (HTTP 502)."
     )
     agent_loop.connector_registry = registry
 
     state = project_mcp(agent_loop)
 
-    assert state.connector_error == "Failed to load workspace connectors (HTTP 502)."
+    assert state.connector_error == "Failed to load connectors (HTTP 502)."
 
 
 def test_project_mcp_no_connector_error_when_healthy() -> None:

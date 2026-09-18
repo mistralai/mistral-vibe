@@ -73,6 +73,10 @@ class _RecordingSession:
         self.capabilities: list[object] = []
         self.shut_down = False
 
+    def configure_turn_settlement(self, settle: object) -> None:
+        """Held, not called: this double admits no turns."""
+        self.settle_configuration = settle
+
     async def apply_runtime_configuration(
         self,
         settings: object,
@@ -80,8 +84,9 @@ class _RecordingSession:
         capabilities: object,
         *,
         plugins: object = None,
+        allow_reserved_turn: bool = False,
     ) -> None:
-        del plugins
+        del plugins, allow_reserved_turn
         self.settings.append(settings)
         self.applied.append(adapter_config)
         self.capabilities.append(capabilities)
@@ -243,7 +248,7 @@ async def test_unified_variants_resolved_mid_turn_wait_for_the_next_turn(
     mid_turn_pushes = len(session.applied)
     mid_turn_aliases = _model_aliases(adapter)
     session.active_turn_id = None
-    await adapter._flush_pending_derivation()
+    await adapter._settle_configuration()
 
     # The Core reads its settings at turn start, so a mid-turn push would swap
     # the model underneath the running turn.

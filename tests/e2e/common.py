@@ -60,16 +60,11 @@ def poll_until(predicate: Callable[[], bool], timeout: float, message: str) -> N
     raise AssertionError(message)
 
 
-def wait_for_request_count(
-    request_count_getter: Callable[[], int], expected_count: int, timeout: float
-) -> None:
-    poll_until(
-        lambda: request_count_getter() >= expected_count,
-        timeout,
-        f"Timed out waiting for {expected_count} backend request(s).",
-    )
-
-
+# Waiting on the backend must always drain the child, never just sleep on the
+# predicate. Textual's writer thread has a 30-slot queue and blocks on a full one, so
+# a pty nobody reads eventually stalls the app's event loop: it stops handling input,
+# never dispatches the turn, and the request the caller is waiting for never arrives.
+# The startup burst alone is ~26KB against a 64KB Linux pty buffer.
 def wait_for_request_count_while_draining_child_output(
     child: pexpect.spawn,
     captured: io.StringIO,

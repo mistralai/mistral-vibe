@@ -116,11 +116,11 @@ class TestCommandRegistry:
         assert registry.get_command_name("/teleport") == "teleport"
         assert registry.has_command("teleport")
 
-    def test_teleport_command_hidden_for_unified_harness(self) -> None:
+    def test_teleport_command_available_for_unified_harness(self) -> None:
         registry = CommandRegistry(
             context=CommandContext(vibe_code_enabled=True, experimental_harness=True)
         )
-        assert registry.get_command_name("/teleport") is None
+        assert registry.get_command_name("/teleport") == "teleport"
 
     def test_teleport_command_registration_uses_latest_context(self) -> None:
         registry = CommandRegistry(context=CommandContext(vibe_code_enabled=True))

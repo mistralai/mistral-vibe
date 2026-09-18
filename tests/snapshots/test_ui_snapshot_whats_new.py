@@ -21,7 +21,7 @@ from vibe.cli.update_notifier import UpdateCache
 
 
 async def _wait_for_whats_new(pilot: Pilot) -> None:
-    for _ in range(200):
+    for _ in range(500):
         if pilot.app.query(WhatsNewMessage):
             await pilot.pause()
             return

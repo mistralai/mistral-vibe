@@ -8,6 +8,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from vibe.cli.autocompletion.file_indexer.ignore_rules import IgnoreRules
+from vibe.utils.platform import resolve_git_executable
 
 if TYPE_CHECKING:
     from watchfiles import Change
@@ -178,10 +179,13 @@ class FileIndexStore:
     def _list_git_entries(
         self, root: Path, should_cancel: Callable[[], bool] | None
     ) -> list[IndexEntry] | None:
+        git = resolve_git_executable(cwd=root)
+        if git is None:
+            return None
         try:
             process = subprocess.Popen(
                 [
-                    "git",
+                    git,
                     "-C",
                     os.fspath(root),
                     "ls-files",

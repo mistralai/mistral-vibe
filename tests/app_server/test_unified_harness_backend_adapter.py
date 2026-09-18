@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import AsyncIterator, Callable, Sequence
 import contextlib
 from dataclasses import replace
@@ -17,6 +18,13 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, Mock
 
 import mistralai_vibe_local_harness.session_protocol as harness_session_protocol
+from mistralai_vibe_local_harness.vibe import (
+    DeferredTurnPreparationContext as HarnessDeferredTurnPreparationContext,
+    DeferredTurnPreparationError as HarnessDeferredTurnPreparationError,
+    DeferredTurnStartCapability,
+    DeferredTurnStartParams as HarnessDeferredTurnStartParams,
+    DeferredTurnStartResult as HarnessDeferredTurnStartResult,
+)
 import pytest
 import tomli_w
 
@@ -26,6 +34,8 @@ from tests.stubs.app_server import build_test_app_server
 from tests.stubs.fake_account_gateway import FakeAccountGateway
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
+from tests.stubs.fake_connector_catalog import FakeConnectorCatalogService
+from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from vibe.app_server import _runtime as runtime_module
 from vibe.app_server._account import WhoAmIResult
 from vibe.app_server._dispatch import RequestFailure
@@ -41,20 +51,32 @@ from vibe.app_server._session_backend_port import (
     ResolvedMCPCatalog,
     SessionBackendError,
     SessionBackendHost,
+    SessionBackendHostPin,
     SessionBackendRuntimeView,
     SessionConnectorSourceState,
     SessionConnectorState,
 )
 from vibe.app_server._unified_scheduled_loops import ScheduledLoopStoreError
+from vibe.app_server._unified_scratchpad import SCRATCHPAD_TOOL_NAME, scratchpad_dir
+from vibe.app_server._worktree_effects import WorktreeProgress
+from vibe.app_server._worktree_session import WorktreeResolution
 from vibe.app_server.client import AppServerClient
-from vibe.app_server.events import HistoryEntryAdded
+from vibe.app_server.events import (
+    ChildSessionUpdated,
+    HistoryEntryAdded,
+    SessionSnapshot,
+    TurnQueueUpdated,
+    TurnRetrying,
+)
 from vibe.app_server.models import (
     AccountPlanKind,
     CompletedEffectState,
     ConnectorCounts,
     FailedEffectState,
+    FileImageSource,
     GenericEffectDetail,
     IdleSessionStatus,
+    InlineImageSource,
     MCPSourceKind,
     MCPSourceStatus,
     MCPSourceSummary,
@@ -64,11 +86,16 @@ from vibe.app_server.models import (
     PublicEffectEntry,
     PublicEntryGenerationStatus,
     PublicMessageEntry,
+    PublicQueuedTurn,
+    PublicRetryCategory,
+    PublicRetryState,
     PublicSession,
     PublicSessionState,
     PublicTurn,
+    PublicTurnQueue,
     PublicTurnStatus,
     ResourceContentBlock,
+    RunningEffectState,
     ShellEffectDetail,
     ShellEffectOutput,
     TextContentBlock,
@@ -107,11 +134,14 @@ from vibe.app_server.protocol import (
     SessionListParams,
     SessionListResponse,
     SessionOptions,
+    SessionPinParams,
+    SessionPinResponse,
     SessionReadParams,
     SessionReadResponse,
     SessionResumeParams,
     SessionStartParams,
     SessionTextContentBlock,
+    SessionTitleUpdateParams,
     SkillsInstalledParams,
     SkillsInstalledResponse,
     SkillsListParams,
@@ -123,6 +153,7 @@ from vibe.app_server.protocol import (
     TurnQueueReadParams,
     TurnQueueReplaceParams,
     TurnQueueReplaceResponse,
+    TurnQueueResumeParams,
     TurnQueueSteerParams,
     TurnQueueSteerResponse,
     TurnStartParams,
@@ -140,6 +171,7 @@ from vibe.core.config import MCPStdio, SessionLoggingConfig, VibeConfigSchema
 from vibe.core.config.admin_config import AdminConfigApplyResult, AdminConfigOutcome
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.experiments.active import ExperimentSurface
+from vibe.core.git.worktree import PreparedWorktree
 from vibe.core.git.worktree.record import WorktreeClaim, WorktreeRecoveryRecord
 from vibe.core.paths import WORKTREES_DIR
 from vibe.core.session.session_interop import (
@@ -152,8 +184,10 @@ from vibe.core.skills.manager import SkillManager
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import LaunchContext
 from vibe.core.tools.builtins.skill import already_loaded_message
+from vibe.core.tools.connectors.connector_registry import RemoteTool
 from vibe.core.tools.mcp.registry import MCPRegistry
 from vibe.core.tools.models import ToolPermission
+from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.types import LLMMessage, Role, ScheduledLoop
 from vibe.user_content import UserDisplayContent, UserTextResource
 
@@ -176,15 +210,37 @@ class _RecordingSession:
     session_id = "session-1"
     cwd: str | None = None
     parent_session_id: str | None = None
-    active_turn_id: str | None = None
+    ephemeral = True
+    deferred_turn_params: HarnessDeferredTurnStartParams
 
     def __init__(self) -> None:
         self._pins: dict[SessionPin, str | None] = {}
+        self._active_turn_id: str | None = None
+        self.reserved_turn_id: str | None = None
+        self.allow_reserved_flags: list[bool] = []
         self.applied: list[object] = []
         self.settings: list[object] = []
+        self.system_instructions: list[str | None] = []
         self.capabilities: list[object] = []
         self.plugins: list[tuple[object, ...] | None] = []
         self.sent: list[Any] = []
+        self.settle_configuration: Any | None = None
+
+    def configure_turn_settlement(self, settle: Any) -> None:
+        self.settle_configuration = settle
+
+    async def _settle_configuration(self) -> None:
+        """Ask the Host to land parked configuration, as the real Session does."""
+        if self.settle_configuration is not None:
+            await self.settle_configuration()
+
+    @property
+    def active_turn_id(self) -> str | None:
+        return self._active_turn_id or self.reserved_turn_id
+
+    @active_turn_id.setter
+    def active_turn_id(self, value: str | None) -> None:
+        self._active_turn_id = value
 
     def pin(self, pin: SessionPin) -> str | None:
         return self._pins.get(pin)
@@ -204,7 +260,9 @@ class _RecordingSession:
         adapter_config: object,
         capabilities: object,
         *,
+        system_instructions: str | None = None,
         plugins: tuple[object, ...] | None = None,
+        allow_reserved_turn: bool = False,
     ) -> None:
         # The real Harness rejects this mid-turn: Core reads its settings when
         # the turn starts and reconfigures them through its own command queue.
@@ -212,12 +270,19 @@ class _RecordingSession:
         # off this path mid-turn pass here and fail in front of a user.
         from mistralai_vibe_local_harness.vibe import HarnessTurnConflictError
 
-        if self.active_turn_id is not None:
-            raise HarnessTurnConflictError(self.active_turn_id)
+        self.allow_reserved_flags.append(allow_reserved_turn)
+        if self._active_turn_id is not None:
+            raise HarnessTurnConflictError(self._active_turn_id)
+        if self.reserved_turn_id is not None and not allow_reserved_turn:
+            raise HarnessTurnConflictError(self.reserved_turn_id)
         self.settings.append(settings)
+        self.system_instructions.append(system_instructions)
         self.applied.append(adapter_config)
         self.capabilities.append(capabilities)
         self.plugins.append(plugins)
+
+    async def reconfigure_subagents(self, adapter_config: object) -> None:
+        self.applied.append(adapter_config)
 
     async def apply_capabilities(
         self, capabilities: object, *, plugins: tuple[object, ...] | None = None
@@ -226,9 +291,24 @@ class _RecordingSession:
         self.plugins.append(plugins)
 
     async def start_turn(self, params: Any) -> Any:
+        await self._settle_configuration()
         self.sent.append(params)
         turn = SimpleNamespace(id="turn-1", session_id=self.session_id, started_at=0)
         return SimpleNamespace(response=SimpleNamespace(turn=turn), after_response=None)
+
+    async def start_deferred_turn(
+        self, params: HarnessDeferredTurnStartParams
+    ) -> HarnessDeferredTurnStartResult:
+        self.sent.append(params)
+        self.deferred_turn_params = params
+        return HarnessDeferredTurnStartResult(
+            turn_id="turn-1",
+            session_id=self.session_id,
+            started_at=0,
+            last_event_id=0,
+            after_response=lambda: None,
+            on_response_abandoned=lambda: None,
+        )
 
     async def enqueue_turn(self, params: Any) -> Any:
         from mistralai_vibe_local_harness.session_protocol import (
@@ -351,7 +431,7 @@ def _stub_core_config() -> Any:
 def _stub_adapter_config() -> Any:
     """A real adapter config for a stub derivation.
 
-    The adapter reads ``adapter_config.skills`` to resolve ``/skill-name``, so
+    The Harness reads ``adapter_config.skills`` for model-issued skill calls, so
     a placeholder here fails on attribute access rather than on anything the
     test is about.
     """
@@ -380,6 +460,15 @@ def _empty_plugin_mcp() -> PluginMCPCatalog:
     return PluginMCPCatalog(MCPRegistry(), MCPAuthenticationService())
 
 
+def _session_stub(**attributes: Any) -> Any:
+    """A Session double carrying what the adapter reaches for as it is built.
+
+    A class-based double states its own methods, so a port the adapter starts
+    requiring fails there loudly. This is only for the namespace doubles.
+    """
+    return SimpleNamespace(configure_turn_settlement=lambda _settle: None, **attributes)
+
+
 def _inert_adapter(
     session: object,
     cwd: str | None,
@@ -387,6 +476,8 @@ def _inert_adapter(
     *,
     runtime: object | None = None,
     host: object | None = None,
+    services: object | None = None,
+    deferred_turns: DeferredTurnStartCapability | None = None,
     telemetry_client: TelemetryClient | None = None,
     permissions: object | None = None,
 ) -> Any:
@@ -418,13 +509,16 @@ def _inert_adapter(
         runtime=cast(Any, runtime if runtime is not None else object()),
         core_config=_stub_core_config(),
         adapter_config=_stub_adapter_config(),
+        skill_payloads={},
     )
     cast(Any, session).cwd = cwd
     return UnifiedHarnessBackendAdapter(
         cast(Any, session),
         context,
         derivation,
+        deferred_turns=deferred_turns,
         host=cast(Any, host),
+        services=cast(Any, services),
         telemetry_client=telemetry_client,
     )
 
@@ -447,6 +541,102 @@ def test_unified_command_environment_follows_platform_shell_support(
     monkeypatch.setattr(runtime_module, "get_windows_bash_path", lambda: git_bash_path)
 
     assert runtime_module._command_environment_mode() == expected
+
+
+def test_published_mcp_names_invert_the_routes_the_runtime_normalized() -> None:
+    """A route is built from normalized halves; the config key keeps the raw ones.
+
+    Kebab case, a leading digit and a post-normalization collision all move the
+    route away from the name Vibe published, so nothing but the snapshot pairs
+    the two -- and a wrong pairing reads an unwritten key, which asks rather
+    than honouring a configured ``never``.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.vibe._mcp_models import (
+        MCPAuthorizationRef,
+        MCPRemoteToolDescriptor,
+        ResolvedMCPServerConfig,
+    )
+    from mistralai_vibe_local_harness.vibe._mcp_naming import build_route_snapshot
+
+    from vibe.app_server._unified_harness_backend_adapter import _published_mcp_names
+
+    server = ResolvedMCPServerConfig(
+        name="data-api",
+        transport="stdio",
+        command="server",
+        authorization=MCPAuthorizationRef("data-api", "fingerprint", "none", "rev-1"),
+    )
+    remote_names = ("create-issue", "1st-query", "search-issues", "search_issues")
+    snapshot = build_route_snapshot(
+        catalog_revision="catalog-1",
+        resolved=[
+            (
+                server,
+                tuple(MCPRemoteToolDescriptor(remote_name=n) for n in remote_names),
+            )
+        ],
+        sources=(),
+    )
+
+    names = _published_mcp_names(snapshot)
+
+    assert set(names) == {f"mcp_data_api.{route[1]}" for route in snapshot.routes}
+    assert sorted(names.values()) == [
+        "data-api_1st-query",
+        "data-api_create-issue",
+        "data-api_search-issues",
+        "data-api_search_issues",
+    ]
+
+
+def test_published_connector_names_invert_the_routes_the_runtime_normalized() -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.vibe._connector_models import (
+        ResolvedConnector,
+        ResolvedConnectorCatalog,
+        ResolvedConnectorSelection,
+        ResolvedConnectorTool,
+    )
+    from mistralai_vibe_local_harness.vibe._connector_naming import (
+        build_connector_snapshot,
+    )
+
+    from vibe.app_server._unified_harness_backend_adapter import (
+        _published_connector_names,
+    )
+
+    snapshot = build_connector_snapshot(
+        catalog=ResolvedConnectorCatalog(
+            revision="catalog-1",
+            connectors=(
+                ResolvedConnector(
+                    raw_id="raw-github",
+                    alias="git-hub",
+                    display_name="GitHub",
+                    ready=True,
+                    auth_action="none",
+                    tools=(
+                        ResolvedConnectorTool("create-issue", None, {}),
+                        ResolvedConnectorTool("1st-query", None, {}),
+                    ),
+                ),
+            ),
+        ),
+        selection=ResolvedConnectorSelection(
+            selection_revision="sel-1",
+            enable_connectors=True,
+            implicit_source_enabled=True,
+            connector_settings=(),
+            enabled_tools=(),
+            disabled_tools=(),
+        ),
+    )
+
+    assert _published_connector_names(snapshot) == {
+        "connector_git_hub.create_issue": "connector_git-hub_create-issue",
+        "connector_git_hub._1st_query": "connector_git-hub_1st-query",
+    }
 
 
 def test_unified_connector_state_flattens_remote_tool_descriptions() -> None:
@@ -666,11 +856,57 @@ async def test_unified_runtime_enables_large_output_offloading(
     )
 
 
+@pytest.mark.asyncio
+async def test_unified_runtime_declares_the_vibe_tool_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A Unified Harness session context for a local CLI workspace.
+    *Do*: Derive the Core configuration used to start the session.
+    *Assert*: The `vibe` group carries the tools the Harness does not ship.
+
+    Also pins the scratchpad hook binding to the *template*, which is what reaches
+    subagents: a child inherits this capability set wholesale, and it inherits the
+    scratchpad tool with it, so notes a child writes have to survive its compactions
+    too. Passing the binding per session as well would fail session creation on a
+    duplicate hook `order`.
+    """
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = runtime_module.HarnessProcess(experimental_harness=True)
+    try:
+        context = await process.build_unified_session_context(
+            SessionOptions(cwd=str(tmp_path))
+        )
+
+        # Do
+        derivation = context.derive(UnifiedSessionSettings())
+    finally:
+        await process.close()
+
+    # Assert
+    groups = {
+        group.name: [tool.name for tool in group.tools]
+        for group in derivation.core_config.capabilities.tool_groups
+    }
+    assert groups["vibe"] == ["todo", SCRATCHPAD_TOOL_NAME]
+    # Declaring a second group must not displace the one that was already there.
+    assert groups["ui"] == ["ask_user_question"]
+    # Vibe binds no builtin hook: a non-empty binding list defers `commit_turn` for
+    # every session that derives from this config, subagents included.
+    assert derivation.core_config.capabilities.hook_bindings == []
+
+
 def test_unified_mcp_projection_update_preserves_connector_sources() -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
 
     class FakeSession:
         session_id = "session-1"
+
+        def configure_turn_settlement(self, settle: object) -> None:
+            """Unused: no queued turn is promoted here."""
 
     runtime = build_runtime_snapshot(
         SessionOptions(),
@@ -718,6 +954,37 @@ def test_unified_mcp_projection_update_preserves_connector_sources() -> None:
         "github": "connector error",
     }
     assert projected.connector_error == "bootstrap warning"
+
+
+def test_mcp_catalog_carries_the_global_tool_globs() -> None:
+    """*Prepare*: A config with global enabled/disabled tool globs.
+    *Do*: Resolve them for the harness MCP catalog.
+    *Assert*: The filter rides the catalog; an unconstrained config sends none.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import (
+        _harness_mcp_catalog,
+        _mcp_tool_filter,
+    )
+
+    enabled = _mcp_tool_filter(build_test_vibe_config(enabled_tools=["linear_*"]))
+    assert enabled is not None
+    assert enabled.allows("linear_get_issue")
+    assert not enabled.allows("github_create_pr")
+
+    denied = _mcp_tool_filter(
+        build_test_vibe_config(disabled_tools=["github_create_*"])
+    )
+    assert denied is not None
+    assert denied.allows("github_get_issue")
+    assert not denied.allows("github_create_pr")
+
+    catalog = _harness_mcp_catalog(
+        ResolvedMCPCatalog(revision="test", servers=()), enabled
+    )
+    assert catalog.tool_filter is enabled
+
+    assert _mcp_tool_filter(build_test_vibe_config()) is None
 
 
 @pytest.mark.asyncio
@@ -774,6 +1041,9 @@ async def test_unified_adapter_tracks_open_callbacks_for_delivery_lifecycle(
     class FakeSession:
         session_id = "session-1"
         rejected: object | None = None
+
+        def configure_turn_settlement(self, settle: object) -> None:
+            """Unused: no queued turn is promoted here."""
 
         async def respond_to_callback(self, params: object) -> object:
             self.rejected = params
@@ -837,6 +1107,9 @@ async def test_unified_adapter_routes_child_callback_through_the_local_host(
     class FakeSession:
         session_id = "session-root"
 
+        def configure_turn_settlement(self, settle: object) -> None:
+            """Unused: no queued turn is promoted here."""
+
         async def respond_to_callback(self, _params: object) -> object:
             raise AssertionError("child callback must not be sent to the root Session")
 
@@ -876,6 +1149,74 @@ async def test_unified_adapter_routes_child_callback_through_the_local_host(
     root_session_id, routed = host.routed
     assert root_session_id == "session-root"
     assert cast(Any, routed).session_id == "session-child"
+
+
+@pytest.mark.asyncio
+async def test_unified_adapter_reads_and_pages_child_history_through_the_host(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    class FakeSession(_RecordingSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.read_session_ids: list[str] = []
+
+        async def read(self, params: Any) -> object:
+            self.read_session_ids.append(params.session_id)
+            return await super().read(params)
+
+    class FakeHost:
+        def __init__(self) -> None:
+            self.read_session_ids: list[str] = []
+
+        def references_child(self, root_session_id: str, child_session_id: str) -> bool:
+            return (
+                root_session_id == "session-1" and child_session_id == "session-child"
+            )
+
+        async def read(self, params: Any) -> object:
+            self.read_session_ids.append(params.session_id)
+            result = await child.read(params)
+            return SimpleNamespace(snapshot=result.snapshot, cwd=str(tmp_path))
+
+    session = FakeSession()
+    session.sent.append(SimpleNamespace(message=[TextContentBlock(text="root")]))
+    child = _RecordingSession()
+    child.session_id = "session-child"
+    child.sent.append(SimpleNamespace(message=[TextContentBlock(text="child")]))
+    host = FakeHost()
+    adapter = _inert_adapter(session, None, str(tmp_path), host=host)
+
+    read = await adapter.read(
+        SessionReadParams(
+            session_id="session-child", history=PageRequest(limit=20), turns=None
+        )
+    )
+
+    result = await adapter.dispatch_extension(
+        "session/history/list",
+        {"sessionId": "session-child", "page": {"limit": 20, "direction": "backward"}},
+    )
+
+    assert read.state.session.id == "session-child"
+    assert [entry.session_id for entry in read.state.history or []] == ["session-child"]
+    assert [entry.session_id for entry in result.response.items] == ["session-child"]
+    assert session.read_session_ids == []
+    assert host.read_session_ids == ["session-child", "session-child"]
+
+    with pytest.raises(SessionBackendError) as exc_info:
+        await adapter.dispatch_extension(
+            "session/history/list",
+            {
+                "sessionId": "session-unrelated",
+                "page": {"limit": 20, "direction": "backward"},
+            },
+        )
+
+    assert exc_info.value.code is ProtocolErrorCode.NOT_FOUND
+    assert session.read_session_ids == []
+    assert host.read_session_ids == ["session-child", "session-child"]
 
 
 @pytest.mark.asyncio
@@ -944,8 +1285,13 @@ async def test_unified_adapter_records_only_an_approval_that_outlives_the_call(
     class FakeSession:
         session_id = "session-1"
 
+        def configure_turn_settlement(self, settle: object) -> None:
+            """Unused: no queued turn is promoted here."""
+
         async def respond_to_callback(self, _params: object) -> object:
-            return SimpleNamespace(response={"last_event_id": 1}, after_response=None)
+            return SimpleNamespace(
+                response={"accepted": True, "last_event_id": 1}, after_response=None
+            )
 
     permissions = _RecordingPermissions()
     adapter = _inert_adapter(
@@ -1372,14 +1718,20 @@ def _approval_action(turn_id: str) -> Any:
 @pytest.mark.parametrize(
     ("harness_code", "expected"),
     [
+        ("images_not_supported", TurnErrorCode.IMAGES_NOT_SUPPORTED),
         ("model_stream_failed", TurnErrorCode.BACKEND_ERROR),
         # Not BACKEND_ERROR: that code is retryable, and a refused key is not.
         ("model_unauthorized", TurnErrorCode.INVALID_API_KEY),
     ],
 )
-def test_unified_turn_error_maps_internal_provider_code_to_public_backend_error(
+def test_unified_turn_error_maps_internal_harness_code_to_public_error(
     harness_code: str, expected: TurnErrorCode
 ):
+    """*Prepare*: A failed Harness turn using an internal error code.
+    *Do*: Project the turn through the Unified backend adapter.
+    *Assert*: The client receives the matching public Turn error code.
+    """
+    # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.session_protocol import (
         FailedPublicTurn as HarnessFailedPublicTurn,
@@ -1388,6 +1740,7 @@ def test_unified_turn_error_maps_internal_provider_code_to_public_backend_error(
 
     from vibe.app_server._unified_harness_backend_adapter import _public_turn
 
+    # Do
     turn = _public_turn(
         HarnessFailedPublicTurn(
             id="turn-1",
@@ -1402,6 +1755,7 @@ def test_unified_turn_error_maps_internal_provider_code_to_public_backend_error(
         )
     )
 
+    # Assert
     assert turn.error is not None
     assert turn.error.code == expected
     assert turn.error.message == "provider rejected the request"
@@ -1435,8 +1789,8 @@ async def test_unified_stale_turn_errors_match_legacy_protocol_codes(
 
 
 @pytest.mark.parametrize(
-    ("auto_approve", "edit_mode", "shell_mode"),
-    [(False, "ask", "ask"), (True, "allow", "allow")],
+    ("auto_approve", "edit_mode", "shell_mode", "provided_mode"),
+    [(False, "ask", "ask", "ask"), (True, "allow", "allow", "allow")],
 )
 @pytest.mark.asyncio
 async def test_unified_runtime_config_gates_editing_tools(
@@ -1445,6 +1799,7 @@ async def test_unified_runtime_config_gates_editing_tools(
     auto_approve: bool,
     edit_mode: str,
     shell_mode: str,
+    provided_mode: str,
 ) -> None:
     """The default agent is ``accept-edits``, and only the bypass lifts a mode.
 
@@ -1489,8 +1844,8 @@ async def test_unified_runtime_config_gates_editing_tools(
         runtime_module._command_environment_mode()
     )
     assert derivation.runtime.bypass_tool_permissions is auto_approve
-    # Provided/MCP tools keep their pre-smart-approve behaviour outside classify mode.
-    assert derivation.adapter_config.provided_tool_mode == "allow"
+    # Provided/MCP tools follow the same gate; only the bypass runs them unconditionally.
+    assert derivation.adapter_config.provided_tool_mode == provided_mode
 
 
 @pytest.mark.asyncio
@@ -1522,6 +1877,9 @@ async def test_smart_approve_mode_sets_gated_tools_to_classify(
     assert tool_modes["process.start"] == "ask"
     # Provided/MCP tools are gated by the classifier under smart approve too.
     assert adapter_config.provided_tool_mode == "classify"
+    # The mode contributes no binding of its own, and `hooks.bindings` carries only
+    # the user's: Vibe's builtin scratchpad hook rides in the capability set instead,
+    # which is the channel a subagent inherits.
     assert context.hooks.bindings == ()
 
 
@@ -1669,7 +2027,7 @@ async def test_mid_turn_switch_into_smart_approve_gates_provided_tools(
         [AddOperationPatch(path="/smart_approve_available", value=True)], reason="test"
     )
     derivation = context.derive(UnifiedSessionSettings())
-    assert derivation.adapter_config.provided_tool_mode == "allow"
+    assert derivation.adapter_config.provided_tool_mode == "ask"
 
     session = _RecordingSession()
     adapter = UnifiedHarnessBackendAdapter(cast(Any, session), context, derivation)
@@ -1810,7 +2168,6 @@ async def test_classification_event_is_forwarded_to_telemetry_not_the_ui(
         "outcome": "escalated_denied",
         "escalated": True,
         "latency_ms": 12.0,
-        "cache_hit": False,
         "classifier_model": "mistral-small-latest",
         "risk_level": None,
         "user_authorization": None,
@@ -1828,6 +2185,49 @@ async def test_classification_event_is_forwarded_to_telemetry_not_the_ui(
     assert properties["escalated"] is True
     # None-valued fields are dropped rather than sent as null.
     assert "risk_level" not in properties
+    assert "approval_grant" not in properties
+
+
+@pytest.mark.asyncio
+async def test_classification_forwards_the_humans_approval_grant(
+    tmp_path: Path,
+) -> None:
+    """The human's answer rides the classification event through to analytics.
+
+    ``outcome`` collapses every approval into ``escalated_approved``, so without this
+    field a one-shot approval and a "remember for the session" are indistinguishable
+    and the rate at which users silence the gate cannot be measured.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession()
+    adapter = _inert_adapter(session, str(tmp_path), str(tmp_path))
+    sent: list[tuple[str, dict[str, object]]] = []
+
+    class _FakeTelemetry:
+        def send_telemetry_event(
+            self, name: str, properties: dict[str, object], **_: object
+        ) -> None:
+            sent.append((name, properties))
+
+    adapter._telemetry = _FakeTelemetry()
+
+    consumed = await adapter._consumed_classification_event({
+        "type": "tool_classification",
+        "eventId": 8,
+        "tool_name": "file_system.bash",
+        "verdict": "prompt",
+        "tier": "fast",
+        "reason": "risky",
+        "outcome": "escalated_approved",
+        "escalated": True,
+        "approval_grant": "approve_for_session",
+        "turn_id": "t1",
+        "call_id": "c1",
+    })
+
+    assert consumed is True
+    _, properties = sent[0]
+    assert properties["approval_grant"] == "approve_for_session"
 
 
 @pytest.mark.asyncio
@@ -1860,11 +2260,7 @@ async def test_non_classification_event_is_not_consumed_as_telemetry(
 async def test_subagent_classification_is_forwarded_not_applied_as_child_state(
     tmp_path: Path,
 ) -> None:
-    """A subagent's classification arrives wrapped in ``child_session_event``. It must
-    be forwarded to telemetry and yield no UI events, not fall through to the child
-    state update -- which (before this fix) rejected on the unregistered child and
-    dropped the subagent's real events from the parent stream.
-    """
+    """A wrapped subagent classification reaches telemetry, not root projection."""
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     session = _RecordingSession()
     adapter = _inert_adapter(session, str(tmp_path), str(tmp_path))
@@ -1878,7 +2274,13 @@ async def test_subagent_classification_is_forwarded_not_applied_as_child_state(
 
     adapter._telemetry = _FakeTelemetry()
 
-    translated, watermark = await adapter._translate_child_event(
+    root_state = PublicSessionState(
+        event_id=0,
+        session=PublicSession(
+            id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
+        ),
+    )
+    translated, returned_state, watermark = await adapter._translate_child_event(
         {
             "type": "child_session_event",
             "sessionId": "child-1",
@@ -1893,16 +2295,17 @@ async def test_subagent_classification_is_forwarded_not_applied_as_child_state(
                 "outcome": "auto_approved",
                 "escalated": False,
                 "latency_ms": 5.0,
-                "cache_hit": False,
                 "classifier_model": "mistral-small-latest",
                 "turn_id": "t1",
                 "call_id": "c1",
             },
         },
         50,
+        root_state,
     )
 
     assert translated == []
+    assert returned_state is root_state
     assert watermark == 9
     assert len(sent) == 1
     assert sent[0][0] == "vibe.tool_classification"
@@ -1987,6 +2390,11 @@ async def test_unified_runtime_derives_complete_compaction_configuration(
     failures = await context.config_orchestrator.apply_patch(
         [
             AddOperationPatch(
+                path="/models/devstral-latest/supports_images",
+                value=False,
+                target_layer_name=OverridesLayer.NAME,
+            ),
+            AddOperationPatch(
                 path="/auto_compact_threshold",
                 value=32_000,
                 target_layer_name=OverridesLayer.NAME,
@@ -1999,6 +2407,7 @@ async def test_unified_runtime_derives_complete_compaction_configuration(
                     "alias": "compact",
                     "temperature": 0.7,
                     "thinking": "medium",
+                    "supports_images": True,
                 },
                 target_layer_name=OverridesLayer.NAME,
             ),
@@ -2014,14 +2423,31 @@ async def test_unified_runtime_derives_complete_compaction_configuration(
     assert failures == []
     assert derivation.core_config.settings.context.compaction.mode == "automatic"
     assert derivation.core_config.settings.context.compaction.token_threshold == 32_000
+    image_delivery = getattr(
+        derivation.core_config.settings.context, "image_delivery", None
+    )
+    if image_delivery is not None:
+        assert image_delivery.agent == "resource_link"
+        assert image_delivery.compaction == "native"
     assert derivation.adapter_config.active_model.model == active_model.name
     assert (
         derivation.adapter_config.active_model.temperature == active_model.temperature
     )
     assert derivation.adapter_config.active_model.thinking == active_model.thinking
+    missing = object()
+    active_supports_images = getattr(
+        derivation.adapter_config.active_model, "supports_images", missing
+    )
+    if active_supports_images is not missing:
+        assert active_supports_images is False
     assert derivation.adapter_config.compaction_model.model == "compact-model"
     assert derivation.adapter_config.compaction_model.temperature == 0.7
     assert derivation.adapter_config.compaction_model.thinking == "medium"
+    compaction_supports_images = getattr(
+        derivation.adapter_config.compaction_model, "supports_images", missing
+    )
+    if compaction_supports_images is not missing:
+        assert compaction_supports_images is True
 
 
 @pytest.mark.asyncio
@@ -2130,6 +2556,562 @@ async def test_unified_config_write_updates_live_compaction_configuration(
 
 
 @pytest.mark.asyncio
+async def test_unified_config_write_mid_turn_defers_until_the_next_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A live Unified adapter with a turn in flight.
+    *Do*: Pick a different active model.
+    *Assert*: The write is accepted and persisted immediately, but its derivation
+    is held back until the turn drains and ``_settle_configuration`` lands it.
+    A running turn never refuses the pick: the Core reads its settings at turn
+    start, so deferring is the only way a mid-turn pick can take effect at all.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    active_model = context.config_orchestrator.config.get_active_model()
+    picked = next(
+        alias
+        for alias in context.config_orchestrator.config.models
+        if alias != active_model.alias
+    )
+    session = _RecordingSession()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
+    )
+    session.active_turn_id = "turn-1"
+    pushes_before = len(session.settings)
+
+    # Do
+    result = await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id, model_alias=picked
+        )
+    )
+
+    # Assert: accepted and persisted now, but not yet pushed into the live session.
+    assert result.response.rejected is False
+    assert result.response.failures == []
+    assert context.config_orchestrator.config.get_active_model().alias == picked
+    assert len(session.settings) == pushes_before
+
+    # The turn drains; the next turn's start flushes the pending derivation.
+    session.active_turn_id = None
+    await adapter._settle_configuration()  # pyright: ignore[reportPrivateUsage]
+
+    assert len(session.settings) == pushes_before + 1
+    assert cast(Any, session.applied[-1]).active_model.model == (
+        context.config_orchestrator.config.models[picked].name
+    )
+
+
+@pytest.mark.asyncio
+async def test_unified_model_pick_says_whether_the_session_is_running_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A live Unified adapter with a turn in flight.
+    *Do*: Pick a model during the turn, then pick another once it has drained.
+    *Assert*: The first answers ``pending`` and the second ``applied``. Both
+    carry the runtime the pick produced, so the picker can render it either way;
+    the status is what tells the client whether the session is running it yet.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ModelConfigWriteParams, RuntimeMutationStatus
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    config = context.config_orchestrator.config
+    opened_on = config.get_active_model().alias
+    other = [alias for alias in config.models if alias != opened_on]
+    aliases = [other[0], opened_on]
+    session = _RecordingSession()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
+    )
+    session.active_turn_id = "turn-1"
+
+    # Do
+    parked = await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id, model_alias=aliases[0]
+        )
+    )
+    session.active_turn_id = None
+    await adapter._settle_configuration()  # pyright: ignore[reportPrivateUsage]
+    landed = await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id, model_alias=aliases[1]
+        )
+    )
+
+    # Assert
+    assert parked.response.status is RuntimeMutationStatus.PENDING
+    assert parked.response.applied is False
+    assert parked.response.runtime.config.active_model.alias == aliases[0]
+    assert landed.response.status is RuntimeMutationStatus.APPLIED
+    assert landed.response.applied is True
+
+
+@pytest.mark.asyncio
+async def test_unified_picking_the_default_leaves_the_session_unpinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A live Unified adapter whose session is pinned to a model.
+    *Do*: Pick the default, which the picker sends as an empty alias.
+    *Assert*: The session records the empty pick rather than the model the
+    default resolves to today. Recording the resolved one would pin the session
+    to it, and the user asked for the opposite: follow the default.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
+
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    config = context.config_orchestrator.config
+    default = config.resolve_default_model_alias()
+    pinned = next(alias for alias in config.models if alias != default)
+    session = _RecordingSession()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
+    )
+    await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id, model_alias=pinned
+        )
+    )
+
+    assert session.pin(SessionPin.ACTIVE_MODEL) == pinned
+
+    # Do
+    await adapter.write_model_config(
+        ModelConfigWriteParams(session_id=_RecordingSession.session_id, model_alias="")
+    )
+
+    # Assert
+    assert session.pin(SessionPin.ACTIVE_MODEL) == ""
+    active = context.config_orchestrator.config.get_active_model().alias
+    assert active == default
+
+
+@pytest.mark.asyncio
+async def test_unified_queueing_a_turn_leaves_the_running_one_on_its_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A running turn, and the default picked during it -- which the
+    session records as the empty alias the user chose.
+    *Do*: Queue a follow-up turn.
+    *Assert*: The adapter still serves the model the running turn started on.
+    Enqueue records the model a queued turn will run, and resolving the empty
+    pin reads as a change; adopting it there would swap the model under the
+    turn already running, which is the whole reason a pick is parked.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
+
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    config = context.config_orchestrator.config
+    default = config.resolve_default_model_alias()
+    pinned = next(alias for alias in config.models if alias != default)
+    session = _RecordingSession()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
+    )
+    await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id, model_alias=pinned
+        )
+    )
+    session.active_turn_id = "turn-1"
+    running_model = adapter._model
+    await adapter.write_model_config(
+        ModelConfigWriteParams(session_id=_RecordingSession.session_id, model_alias="")
+    )
+
+    # Do
+    await adapter.enqueue_turn(
+        TurnEnqueueParams(
+            session_id=_RecordingSession.session_id,
+            idempotency_key="enqueue",
+            entries=[
+                TurnUserInputEntry(content=[SessionTextContentBlock(text="queued")])
+            ],
+        )
+    )
+
+    # Assert
+    assert adapter._model == running_model
+    assert adapter._deferred.parked is True
+    assert session.pin(SessionPin.ACTIVE_MODEL) == ""
+    assert context.config_orchestrator.config.get_active_model().alias == default
+
+
+@pytest.mark.asyncio
+async def test_unified_a_model_pick_waits_for_a_teleport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A session mid-teleport.
+    *Do*: Pick a model.
+    *Assert*: Refused. A teleport copies the session as it stands, so a
+    configuration moving underneath it is the one thing a pick cannot do --
+    unlike a running turn, which parks the pick instead.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._session_backend_port import SessionBackendError
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    config = context.config_orchestrator.config
+    picked = next(
+        alias for alias in config.models if alias != config.get_active_model().alias
+    )
+    session = _RecordingSession()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
+    )
+    adapter._teleport_active = "teleport-1"
+
+    # Do / Assert
+    with pytest.raises(SessionBackendError) as refused:
+        await adapter.write_model_config(
+            ModelConfigWriteParams(
+                session_id=_RecordingSession.session_id, model_alias=picked
+            )
+        )
+
+    assert refused.value.code is ProtocolErrorCode.CONFLICT
+    assert context.config_orchestrator.config.get_active_model().alias != picked
+
+
+@pytest.mark.asyncio
+async def test_unified_settled_pick_announces_the_runtime_it_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A live Unified adapter holding a pick parked by a running turn.
+    *Do*: Drain the turn and settle, then settle again with nothing parked.
+    *Assert*: Settling emits ``runtime/updated`` carrying the picked model, once.
+    The write answered ``pending``, so dispatch emitted nothing for it: without
+    this notice, subscribers keep the outgoing model after the session has
+    already moved off it.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ModelConfigWriteParams, RuntimeUpdatedParams
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    config = context.config_orchestrator.config
+    picked = next(
+        alias for alias in config.models if alias != config.get_active_model().alias
+    )
+    services = Mock()
+    services.notify = AsyncMock()
+    session = _RecordingSession()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session),
+        context,
+        context.derive(UnifiedSessionSettings()),
+        services=cast(Any, services),
+    )
+    session.active_turn_id = "turn-1"
+    await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id, model_alias=picked
+        )
+    )
+
+    assert services.notify.await_count == 0
+
+    # Do
+    session.active_turn_id = None
+    await adapter._settle_configuration()  # pyright: ignore[reportPrivateUsage]
+    await adapter._settle_configuration()  # pyright: ignore[reportPrivateUsage]
+
+    # Assert
+    services.notify.assert_awaited_once()
+    method, params = services.notify.await_args.args
+    assert method == "runtime/updated"
+    assert isinstance(params, RuntimeUpdatedParams)
+    assert params.session_id == _RecordingSession.session_id
+    assert params.runtime.config.active_model.alias == picked
+
+
+@pytest.mark.asyncio
+async def test_unified_a_failed_announcement_still_lets_the_turn_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A parked pick and a transport that refuses notifications.
+    *Do*: Drain the turn and settle.
+    *Assert*: Settling still lands the pick and does not raise. A turn opens on
+    this path, so an announcement nobody can receive must not be what keeps the
+    session from starting it.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    config = context.config_orchestrator.config
+    picked = next(
+        alias for alias in config.models if alias != config.get_active_model().alias
+    )
+
+    services = Mock()
+    services.notify = AsyncMock(side_effect=ConnectionResetError("the client is gone"))
+    session = _RecordingSession()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session),
+        context,
+        context.derive(UnifiedSessionSettings()),
+        services=cast(Any, services),
+    )
+    session.active_turn_id = "turn-1"
+    await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id, model_alias=picked
+        )
+    )
+
+    # Do
+    session.active_turn_id = None
+    await adapter._settle_configuration()  # pyright: ignore[reportPrivateUsage]
+
+    # Assert
+    assert cast(Any, session.applied[-1]).active_model.model == (
+        context.config_orchestrator.config.models[picked].name
+    )
+
+
+@pytest.mark.asyncio
+async def test_unified_model_pick_pins_the_session_before_the_next_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A live Unified adapter with a turn in flight.
+    *Do*: Pick a different model, and never start another turn.
+    *Assert*: The session's own pin already names the pick. The pin is what a
+    reopened session restores from, so leaving it to the next turn would reopen
+    on the model the running turn started with, contradicting the transcript
+    marker this same pick wrote.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
+
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    config = context.config_orchestrator.config
+    picked = next(
+        alias for alias in config.models if alias != config.get_active_model().alias
+    )
+    session = _RecordingSession()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
+    )
+    session.active_turn_id = "turn-1"
+
+    # Do
+    await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id, model_alias=picked
+        )
+    )
+
+    # Assert
+    assert session.pin(SessionPin.ACTIVE_MODEL) == picked
+
+
+@pytest.mark.asyncio
+async def test_unified_parked_pick_survives_a_turn_that_wins_the_flush_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A parked pick, and a turn that starts while it is being applied.
+    *Do*: Flush the pending derivation.
+    *Assert*: No exception, and the pick stays parked. A raise would end the
+    session's live stream, and clearing the flag would drop the pick.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ConfigWriteOpWire, ConfigWriteParams
+
+    class _TurnStartsMidFlush(_RecordingSession):
+        """Idle when the flush looks, running by the time the push lands."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._turn_reads = 0
+
+        @property
+        def active_turn_id(self) -> str | None:
+            self._turn_reads += 1
+            return None if self._turn_reads <= 1 else "turn-1"
+
+        @active_turn_id.setter
+        def active_turn_id(self, value: str | None) -> None:
+            self._active_turn_id = value
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    config = context.config_orchestrator.config
+    picked = next(
+        alias for alias in config.models if alias != config.get_active_model().alias
+    )
+    session = _TurnStartsMidFlush()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
+    )
+    await adapter.write_config(
+        ConfigWriteParams(
+            session_id=_RecordingSession.session_id,
+            ops=[ConfigWriteOpWire(op="set", path="/active_model", value=picked)],
+            reason="mid-turn pick",
+        )
+    )
+    pushes_before = len(session.settings)
+
+    # Do
+    await adapter._settle_configuration()  # pyright: ignore[reportPrivateUsage]
+
+    # Assert
+    assert adapter._deferred.parked is True  # pyright: ignore[reportPrivateUsage]
+    assert len(session.settings) == pushes_before
+
+
+@pytest.mark.asyncio
+async def test_unified_config_write_mid_turn_conflicts_beyond_the_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A live Unified adapter with a turn in flight.
+    *Do*: Write a setting that is not the model or its thinking level.
+    *Assert*: ``CONFLICT``. Only the settings a running turn cannot read defer.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ConfigWriteOpWire, ConfigWriteParams
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    active_model = context.config_orchestrator.config.get_active_model()
+    session = _RecordingSession()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
+    )
+    session.active_turn_id = "turn-1"
+
+    # Do / Assert
+    with pytest.raises(SessionBackendError) as exc_info:
+        await adapter.write_config(
+            ConfigWriteParams(
+                session_id=_RecordingSession.session_id,
+                ops=[
+                    ConfigWriteOpWire(
+                        op="set",
+                        path=f"/models/{active_model.alias}/auto_compact_threshold",
+                        value=48_000,
+                    )
+                ],
+                reason="mid-turn write",
+            )
+        )
+
+    assert exc_info.value.code is ProtocolErrorCode.CONFLICT
+
+
+@pytest.mark.asyncio
 async def test_unified_config_write_rejects_invalid_core_settings_before_persistence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2214,11 +3196,17 @@ async def test_unified_runtime_denies_a_tool_disabled_by_a_live_config_patch(
     assert after["file_system.read_file"] == "allow"
 
 
-def _write_workspace_skill(root: Path, name: str, body: str) -> Path:
+def _write_workspace_skill(
+    root: Path, name: str, body: str, *, disable_model_invocation: bool = False
+) -> Path:
     path = root / ".vibe" / "skills" / name / "SKILL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
+    invocation_policy = (
+        "disable-model-invocation: true\n" if disable_model_invocation else ""
+    )
     path.write_text(
-        f"---\nname: {name}\ndescription: Reviews a diff.\n---\n\n{body}\n",
+        f"---\nname: {name}\ndescription: Reviews a diff.\n"
+        f"{invocation_policy}---\n\n{body}\n",
         encoding="utf-8",
     )
     return path
@@ -2258,6 +3246,50 @@ async def test_unified_runtime_config_carries_a_workspace_skill_to_both_sides_of
     # Nothing Core can name may be missing a body: the enum on the `skill` tool
     # is built from the catalogue, so a gap is a call that can only fail.
     assert set(definitions) <= set(derivation.adapter_config.skills)
+
+
+@pytest.mark.asyncio
+async def test_unified_explicit_only_skill_stays_available_to_slash_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    _write_workspace_skill(
+        tmp_path,
+        "manual-review",
+        "Review only when asked.",
+        disable_model_invocation=True,
+    )
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path), trust_workspace=True)
+    )
+    derivation = context.derive(UnifiedSessionSettings())
+
+    assert "manual-review" not in {
+        skill.name for skill in derivation.core_config.capabilities.skills
+    }
+    assert "manual-review" not in derivation.adapter_config.skills
+    assert "manual-review" in derivation.skill_payloads
+    assert "manual-review" in {skill.name for skill in derivation.runtime.skills}
+
+    session = _RecordingSession()
+    session.cwd = str(tmp_path)
+    adapter = UnifiedHarnessBackendAdapter(cast(Any, session), context, derivation)
+    await adapter.start_turn(
+        TurnStartParams(
+            session_id=session.session_id,
+            message=[TextContentBlock(text="/manual-review")],
+        )
+    )
+
+    assert "Review only when asked." in session.sent[-1].message[-1].text
 
 
 @pytest.mark.asyncio
@@ -2399,11 +3431,215 @@ async def test_unified_reload_keeps_what_the_session_is_connected_to(
         )
     ).response.runtime
 
-    assert [(source.name, source.kind) for source in runtime.mcp.sources] == [
-        ("local", MCPSourceKind.SERVER),
-        ("github", MCPSourceKind.CONNECTOR),
+    assert [
+        (source.name, source.display_name, source.kind)
+        for source in runtime.mcp.sources
+    ] == [
+        ("local", "local", MCPSourceKind.SERVER),
+        ("github", "GitHub", MCPSourceKind.CONNECTOR),
     ]
     assert runtime.connectors == ConnectorCounts(connected=1, total=1)
+
+
+async def _unified_trust_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, Any, Any]:
+    """A live unified adapter over an untrusted cwd containing an AGENTS.md."""
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+
+    (tmp_path / "AGENTS.md").write_text("Trusted instructions", encoding="utf-8")
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    session = _RecordingSession()
+    session.cwd = str(tmp_path)
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
+    )
+    return adapter, context, session
+
+
+@pytest.mark.asyncio
+async def test_unified_trust_decision_grants_the_session_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, context, session = await _unified_trust_adapter(tmp_path, monkeypatch)
+    reload_config = AsyncMock(wraps=context.config_orchestrator.reload)
+    monkeypatch.setattr(context.config_orchestrator, "reload", reload_config)
+
+    def project_instructions() -> str:
+        return runtime_module._build_unified_system_instructions(
+            context.config_orchestrator.config, context.harness_files, cwd=tmp_path
+        )
+
+    assert "Trusted instructions" not in project_instructions()
+
+    result = await adapter.dispatch_extension(
+        "workspace/trust/decision",
+        {"sessionId": _RecordingSession.session_id, "decision": "trust_cwd"},
+    )
+
+    assert result.runtime_updated is True
+    assert result.response.status == "trusted"
+    assert trusted_folders_manager.is_trusted(tmp_path) is True
+    reload_config.assert_awaited_once()
+    # runtime_updated is only the dispatch flag; the re-derived runtime must
+    # also reach the session, and the trusted project doc must land in it.
+    assert session.applied
+    assert "Trusted instructions" in project_instructions()
+
+
+@pytest.mark.asyncio
+async def test_unified_trust_decision_rejects_an_unknown_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, _, _ = await _unified_trust_adapter(tmp_path, monkeypatch)
+
+    with pytest.raises(SessionBackendError) as excinfo:
+        await adapter.dispatch_extension(
+            "workspace/trust/decision",
+            {"sessionId": "missing", "decision": "trust_cwd"},
+        )
+
+    assert excinfo.value.code is ProtocolErrorCode.NOT_FOUND
+    assert trusted_folders_manager.is_trusted(tmp_path) is not True
+
+
+@pytest.mark.asyncio
+async def test_unified_trust_decision_accepts_a_symlink_to_the_session_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, context, _ = await _unified_trust_adapter(tmp_path, monkeypatch)
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+
+    result = await adapter.dispatch_extension(
+        "workspace/trust/decision",
+        {
+            "sessionId": _RecordingSession.session_id,
+            "decision": "trust_cwd",
+            "cwd": str(alias),
+        },
+    )
+
+    assert result.response.status == "trusted"
+    assert trusted_folders_manager.is_trusted(tmp_path) is True
+    assert trusted_folders_manager.is_trusted(alias) is True
+
+
+@pytest.mark.asyncio
+async def test_unified_trust_decision_rejects_a_foreign_cwd_while_a_turn_is_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, _, session = await _unified_trust_adapter(tmp_path, monkeypatch)
+    session.active_turn_id = "turn-1"
+    other = tmp_path / "attacker-dir"
+    other.mkdir()
+
+    # The cwd pin outranks the idle requirement: a foreign cwd is an
+    # invalid request no matter the turn state.
+    with pytest.raises(SessionBackendError) as excinfo:
+        await adapter.dispatch_extension(
+            "workspace/trust/decision",
+            {
+                "sessionId": _RecordingSession.session_id,
+                "decision": "trust_cwd",
+                "cwd": str(other),
+            },
+        )
+
+    assert excinfo.value.code is ProtocolErrorCode.INVALID_PARAMS
+    assert trusted_folders_manager.is_trusted(tmp_path) is not True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cwd", [None, ""])
+async def test_unified_trust_decision_rejects_a_session_without_a_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cwd: str | None
+) -> None:
+    adapter, _, session = await _unified_trust_adapter(tmp_path, monkeypatch)
+    # The harness's legacy-migration fallback can persist an empty cwd; neither
+    # it nor a missing cwd may resolve to the server process cwd.
+    session.cwd = cwd
+
+    with pytest.raises(SessionBackendError) as excinfo:
+        await adapter.dispatch_extension(
+            "workspace/trust/decision",
+            {"sessionId": _RecordingSession.session_id, "decision": "trust_cwd"},
+        )
+
+    assert excinfo.value.code is ProtocolErrorCode.INVALID_PARAMS
+    assert trusted_folders_manager.is_trusted(tmp_path) is not True
+
+
+@pytest.mark.asyncio
+async def test_unified_trust_decision_rejects_a_foreign_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, context, _ = await _unified_trust_adapter(tmp_path, monkeypatch)
+    reload_config = AsyncMock(wraps=context.config_orchestrator.reload)
+    monkeypatch.setattr(context.config_orchestrator, "reload", reload_config)
+    other = tmp_path / "attacker-dir"
+    other.mkdir()
+    (other / "AGENTS.md").write_text("Hostile instructions", encoding="utf-8")
+
+    with pytest.raises(SessionBackendError) as excinfo:
+        await adapter.dispatch_extension(
+            "workspace/trust/decision",
+            {
+                "sessionId": _RecordingSession.session_id,
+                "decision": "trust_cwd",
+                "cwd": str(other),
+            },
+        )
+
+    assert excinfo.value.code is ProtocolErrorCode.INVALID_PARAMS
+    assert trusted_folders_manager.is_trusted(other) is not True
+    assert trusted_folders_manager.is_trusted(tmp_path) is not True
+    reload_config.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unified_trust_decision_decline_writes_no_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, context, _ = await _unified_trust_adapter(tmp_path, monkeypatch)
+    reload_config = AsyncMock(wraps=context.config_orchestrator.reload)
+    monkeypatch.setattr(context.config_orchestrator, "reload", reload_config)
+
+    result = await adapter.dispatch_extension(
+        "workspace/trust/decision",
+        {"sessionId": _RecordingSession.session_id, "decision": "decline"},
+    )
+
+    assert result.runtime_updated is False
+    assert result.response.status == "untrusted"
+    assert trusted_folders_manager.is_explicitly_untrusted(tmp_path) is True
+    reload_config.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unified_trust_decision_grant_requires_idle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, _, session = await _unified_trust_adapter(tmp_path, monkeypatch)
+    session.active_turn_id = "turn-1"
+
+    with pytest.raises(SessionBackendError) as excinfo:
+        await adapter.dispatch_extension(
+            "workspace/trust/decision",
+            {"sessionId": _RecordingSession.session_id, "decision": "trust_cwd"},
+        )
+
+    assert excinfo.value.code is ProtocolErrorCode.CONFLICT
+    assert trusted_folders_manager.is_trusted(tmp_path) is not True
 
 
 @pytest.mark.asyncio
@@ -2490,7 +3726,11 @@ async def test_unified_connector_projection_keeps_server_error_on_name_collision
 
 
 async def _skill_adapter(
-    tmp_path: Path, session: _RecordingSession, *, workspace_roots: Sequence[Path] = ()
+    tmp_path: Path,
+    session: _RecordingSession,
+    *,
+    workspace_roots: Sequence[Path] = (),
+    storage_root: Path | None = None,
 ) -> Any:
     """An adapter over a workspace holding one user-invocable skill."""
     from vibe.app_server._runtime import HarnessProcess
@@ -2508,6 +3748,8 @@ async def _skill_adapter(
             workspace_roots=[str(root) for root in workspace_roots],
         )
     )
+    if storage_root is not None:
+        context = replace(context, storage_root=str(storage_root))
     session.cwd = str(tmp_path)
     return UnifiedHarnessBackendAdapter(
         cast(Any, session), context, context.derive(UnifiedSessionSettings())
@@ -2724,6 +3966,48 @@ async def test_unified_start_turn_points_at_a_skill_the_conversation_already_hol
 
     assert "Read the diff twice." in session.sent[0].message[-1].text
     assert session.sent[1].message[-1].text == already_loaded_message("code-review")
+
+
+@pytest.mark.asyncio
+async def test_unified_turns_carry_the_scratchpad_until_the_model_holds_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prepare a session whose scratchpad already holds a note.
+
+    Do start two turns and then steer a third.
+
+    Assert the first carries the note and the rest do not. This is the whole
+    durability half's wiring: the restatement rides a turn's own user content,
+    so nothing else catches the adapter silently not asking for it.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    session = _RecordingSession()
+    storage_root = tmp_path / "sessions"
+    adapter = await _skill_adapter(tmp_path, session, storage_root=storage_root)
+    notes = scratchpad_dir(storage_root, session.session_id)
+    notes.mkdir(parents=True)
+    (notes / "plan.md").write_text("ship the seam first", encoding="utf-8")
+
+    for text in ("hello", "and then?"):
+        await adapter.start_turn(
+            TurnStartParams(
+                session_id=session.session_id, message=[TextContentBlock(text=text)]
+            )
+        )
+    await adapter.steer_turn(
+        TurnSteerParams(
+            session_id=session.session_id,
+            expected_turn_id="turn-1",
+            message=[TextContentBlock(text="actually")],
+        )
+    )
+
+    first = session.sent[0].message
+    assert [block.text for block in first[:-1]] == ["hello"]
+    assert "ship the seam first" in first[-1].text
+    assert [block.text for block in session.sent[1].message] == ["and then?"]
+    assert [block.text for block in session.sent[2].message] == ["actually"]
 
 
 @pytest.mark.asyncio
@@ -3022,8 +4306,8 @@ async def test_unified_runtime_config_withholds_skills_when_the_skill_tool_is_of
 
     Do derive.
 
-    Assert the catalogue is empty. Core would otherwise put the skill in the
-    prompt and the model would have no tool to load it with.
+    Assert the model-visible catalogue and payloads are empty while the client
+    catalogue and slash-invocation payloads retain the skill.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from vibe.app_server._runtime import HarnessProcess
@@ -3048,7 +4332,8 @@ async def test_unified_runtime_config_withholds_skills_when_the_skill_tool_is_of
     # A disabled tool is not a deleted skill: the client still lists it and
     # ``/skill-name`` still has a body to inject, exactly as on the legacy loop.
     assert "code-review" in {skill.name for skill in derivation.runtime.skills}
-    assert "code-review" in derivation.adapter_config.skills
+    assert "code-review" in derivation.skill_payloads
+    assert "code-review" not in derivation.adapter_config.skills
 
 
 @pytest.mark.asyncio
@@ -3118,7 +4403,12 @@ async def test_unified_harness_skills_installed() -> None:
 
 
 async def _unified_adapter_with_real_context(
-    tmp_path: Path, session: object, *, auto_approve: bool = False
+    tmp_path: Path,
+    session: object,
+    *,
+    auto_approve: bool = False,
+    deferred_turns: DeferredTurnStartCapability | None = None,
+    services: object | None = None,
 ) -> tuple[Any, Any]:
     from vibe.app_server._runtime import HarnessProcess
     from vibe.app_server._unified_harness_backend_adapter import (
@@ -3131,7 +4421,13 @@ async def _unified_adapter_with_real_context(
         SessionOptions(cwd=str(tmp_path), agent="ask", auto_approve=auto_approve)
     )
     derivation = context.derive(UnifiedSessionSettings())
-    adapter = UnifiedHarnessBackendAdapter(cast(Any, session), context, derivation)
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session),
+        context,
+        derivation,
+        deferred_turns=deferred_turns,
+        services=cast(Any, services),
+    )
     return adapter, derivation
 
 
@@ -3240,12 +4536,15 @@ async def test_unified_agent_switch_mid_turn_defers_only_the_core_half(
     session.active_turn_id = "turn-1"
     adapter, _ = await _unified_adapter_with_real_context(tmp_path, session)
 
-    await adapter.switch_agent(
+    switched = await adapter.switch_agent(
         AgentSwitchParams(
             session_id=_RecordingSession.session_id, agent_name="auto-approve"
         )
     )
 
+    # The approval policy landed, but the agent has not taken over, and the
+    # response says so rather than reading as a completed switch.
+    assert switched.response.applied is False
     assert cast(Any, session.applied[-1]).bypass_approval is True
     assert session.settings == []
 
@@ -3258,6 +4557,12 @@ async def test_unified_agent_switch_mid_turn_defers_only_the_core_half(
 
     assert len(session.settings) == 1
     assert cast(Any, session.applied[-1]).bypass_approval is True
+
+    landed = await adapter.switch_agent(
+        AgentSwitchParams(session_id=_RecordingSession.session_id, agent_name="ask")
+    )
+
+    assert landed.response.applied is True
 
 
 @pytest.mark.asyncio
@@ -3584,8 +4889,11 @@ def test_agent_ceiling_narrows_the_catalogue_with_the_profile_globs() -> None:
         {"enabled_tools": ["read_*", "bash"]},
     )
 
-    assert ceiling["file_system.read_file"] == "ask"
-    assert ceiling["file_system.bash"] == "ask"
+    # The ceiling encodes what the profile *permits*; the Runtime takes the stricter
+    # of this and the parent's mode, so "allow" here lets an auto-approve parent bypass
+    # while an ask parent still resolves.
+    assert ceiling["file_system.read_file"] == "allow"
+    assert ceiling["file_system.bash"] == "allow"
     assert ceiling["file_system.write_file"] == "deny"
     assert ceiling["file_system.search_replace"] == "deny"
 
@@ -3600,13 +4908,14 @@ def test_agent_ceiling_disabled_tools_win_over_enabled_tools() -> None:
         {"enabled_tools": ["*_file"], "disabled_tools": ["write_file"]},
     )
 
-    assert ceiling["file_system.read_file"] == "ask"
+    assert ceiling["file_system.read_file"] == "allow"
     assert ceiling["file_system.write_file"] == "deny"
 
 
-def test_agent_ceiling_stops_a_declared_always_at_ask() -> None:
-    # ``allow`` would retire Vibe's resolver, and installing a plugin is not a way to
-    # retire it.
+def test_agent_ceiling_permits_a_declared_always_as_allow() -> None:
+    # The ceiling encodes what the profile permits; "allow" does not retire the
+    # resolver on its own — the Runtime takes the stricter of this and the parent's
+    # mode, so an ask-mode parent still resolves and a bypass parent lets it through.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from vibe.app_server._runtime import rust_agent_tool_ceiling
 
@@ -3616,7 +4925,7 @@ def test_agent_ceiling_stops_a_declared_always_at_ask() -> None:
         {"tools": {"read_file": {"permission": "always"}}},
     )
 
-    assert ceiling["file_system.read_file"] == "ask"
+    assert ceiling["file_system.read_file"] == "allow"
 
 
 def test_agent_ceiling_declared_never_denies_a_tool_the_session_allows() -> None:
@@ -3629,7 +4938,7 @@ def test_agent_ceiling_declared_never_denies_a_tool_the_session_allows() -> None
         {"tools": {"write_file": {"permission": "never"}}},
     )
 
-    assert ceiling["file_system.read_file"] == "ask"
+    assert ceiling["file_system.read_file"] == "allow"
     assert ceiling["file_system.write_file"] == "deny"
 
 
@@ -3649,7 +4958,7 @@ def test_agent_ceiling_ignores_malformed_profile_entries() -> None:
         },
     )
 
-    assert ceiling["file_system.read_file"] == "ask"
+    assert ceiling["file_system.read_file"] == "allow"
 
 
 def test_agent_ceiling_denies_a_builtin_no_vibe_tool_stands_behind() -> None:
@@ -3664,10 +4973,14 @@ def test_agent_ceiling_denies_a_builtin_no_vibe_tool_stands_behind() -> None:
 
     assert ceiling["file_system.bash"] == "deny"
     assert ceiling["process.start"] == "deny"
-    assert ceiling["file_system.read_file"] == "ask"
+    assert ceiling["file_system.read_file"] == "allow"
 
 
-def test_agent_ceiling_without_overrides_matches_the_session_catalogue() -> None:
+def test_agent_ceiling_without_overrides_matches_a_bypass_catalogue() -> None:
+    # With no profile overrides, the ceiling grants exactly what the catalogue
+    # permits. This matches a BYPASS-gate derivation (no allow→ask lowering), not
+    # a PROMPT one, because the ceiling encodes what the profile permits and the
+    # parent's mode is the other input to the stricter-of-two comparison.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from vibe.app_server._runtime import (
         ToolGate,
@@ -3678,8 +4991,50 @@ def test_agent_ceiling_without_overrides_matches_the_session_catalogue() -> None
     available = {"read_file", "write_file", "bash"}
 
     assert rust_agent_tool_ceiling(available, _always, {}) == _rust_tool_modes(
-        available, _always, gate=ToolGate.PROMPT
+        available, _always, gate=ToolGate.BYPASS
     )
+
+
+def test_agent_ceiling_allows_always_tools_so_a_bypass_parent_can_skip_prompts() -> (
+    None
+):
+    # Regression: the ceiling used to be computed with gate=PROMPT, which lowered
+    # every ALWAYS tool to "ask". The Runtime takes the stricter of the ceiling and
+    # the parent's mode, so even an auto-approve parent (all builtins "allow") was
+    # beaten by the ceiling's "ask" and the subagent prompted. The ceiling now maps
+    # ALWAYS directly to "allow"; the parent's mode is what lowers it to "ask".
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import (
+        ToolGate,
+        _rust_tool_modes,
+        rust_agent_tool_ceiling,
+    )
+
+    available = {"read_file", "bash"}
+
+    ceiling = rust_agent_tool_ceiling(available, _always, {})
+    bypass_modes = _rust_tool_modes(available, _always, gate=ToolGate.BYPASS)
+
+    # The ceiling and a bypass-mode parent agree: everything the profile permits
+    # is "allow", so the subagent runs without prompting.
+    assert ceiling["file_system.read_file"] == "allow"
+    assert ceiling["file_system.bash"] == "allow"
+    assert ceiling == {k: v for k, v in bypass_modes.items() if v != "classify"}
+
+
+def test_agent_ceiling_ask_permission_stays_ask_under_bypass_parent() -> None:
+    # A tool with ASK permission in the profile still gets "ask" in the ceiling.
+    # Under a bypass-mode parent ("allow"), the Runtime's stricter-of-two keeps
+    # "ask", so the resolver still runs. The ceiling only turns ALWAYS into "allow";
+    # it never upgrades ASK.
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import rust_agent_tool_ceiling
+
+    ceiling = rust_agent_tool_ceiling(
+        {"read_file"}, lambda _name: ToolPermission.ASK, {}
+    )
+
+    assert ceiling["file_system.read_file"] == "ask"
 
 
 @pytest.mark.parametrize(
@@ -3710,7 +5065,7 @@ def test_unified_system_instructions_use_the_selected_prompt_variant(
 
     # Do
     instructions = runtime_module._build_unified_system_instructions(
-        config, harness_files
+        config, harness_files, cwd=tmp_path
     )
 
     # Assert
@@ -3742,7 +5097,7 @@ def test_unified_system_instructions_include_agents_md_docs(
 
     # Do
     instructions = runtime_module._build_unified_system_instructions(
-        config, harness_files
+        config, harness_files, cwd=tmp_path
     )
 
     # Assert
@@ -3778,13 +5133,55 @@ def test_unified_system_instructions_skip_agents_md_docs_when_context_is_disable
 
     # Do
     instructions = runtime_module._build_unified_system_instructions(
-        config, harness_files
+        config, harness_files, cwd=tmp_path
     )
 
     # Assert
     assert "You are Mistral Vibe" in instructions
     assert "## User instructions" not in instructions
     assert "## Project instructions" not in instructions
+
+
+def test_unified_system_instructions_include_git_context(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """*Prepare*: The cwd is a git repository with a branch and commits.
+    *Do*: Resolve Unified system instructions with include_project_context=True.
+    *Assert*: The instructions include the current branch, main branch, and
+    recent commits — matching the legacy backend's project-context block.
+    """
+    import subprocess
+
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.core.config.harness_files import HarnessFilesManager
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "initial commit"],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    harness_files = HarnessFilesManager(sources=("user", "project")).for_session(
+        tmp_path
+    )
+    harness_files.trust_store.trust_for_session(tmp_path)
+    config = build_test_vibe_config(
+        include_project_context=True, system_prompt_id="cli"
+    )
+
+    instructions = runtime_module._build_unified_system_instructions(
+        config, harness_files, cwd=tmp_path
+    )
+
+    assert "Current branch: main" in instructions
+    assert "Main branch (you will usually use this for PRs): main" in instructions
+    assert "initial commit" in instructions
+    assert f"Absolute path: {tmp_path}" in instructions
 
 
 # Adapter tests that install a plugin from the vibe_sdk fixtures live in
@@ -3822,6 +5219,63 @@ async def test_unified_harness_prepares_a_text_prompt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unified_harness_snapshots_mentioned_images_for_an_unpersisted_session(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: An unpersisted Unified session and an image mention.
+    *Do*: Prepare the prompt through the public app-server client.
+    *Assert*: The image is copied into session attachments and removed on shutdown.
+    """
+    # Prepare
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    (tmp_path / "shot.png").write_bytes(image_bytes)
+    config = build_test_vibe_config(
+        active_model="local",
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        ),
+    )
+    assert config.get_active_model().supports_images is False
+    client, server = _connect_harness_host(config)
+    await client.initialize(ClientInfo(name="test", version="0"))
+    await client.notify("initialized")
+    started = SessionReadResponse.model_validate(
+        await client.request(
+            "session/start",
+            SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path))),
+        )
+    )
+    session_dir = (
+        Path(config.session_logging.save_dir) / "unified" / started.state.session.id
+    )
+
+    try:
+        # Do
+        response = WorkspacePromptPrepareResponse.model_validate(
+            await client.request(
+                "workspace/prompt/prepare",
+                WorkspacePromptPrepareParams(
+                    session_id=started.state.session.id, message="look at @shot.png"
+                ),
+            )
+        )
+
+        # Assert
+        assert len(response.prompt.images) == 1
+        image = response.prompt.images[0]
+        assert image.alias == "shot.png"
+        assert image.mime_type == "image/png"
+        assert isinstance(image.source, FileImageSource)
+        snapshot = Path(image.source.path)
+        assert snapshot.parent == session_dir / "attachments"
+        assert snapshot.read_bytes() == image_bytes
+    finally:
+        await server.close()
+
+    assert not session_dir.exists()
+
+
+@pytest.mark.asyncio
 async def test_unified_turn_start_injects_mentioned_file_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3845,7 +5299,7 @@ async def test_unified_turn_start_injects_mentioned_file_context(
         fake_mentioned_file_blocks,
     )
     adapter = _inert_adapter(
-        SimpleNamespace(session_id="session-1", ephemeral=True, cwd=None),
+        _session_stub(session_id="session-1", ephemeral=True, cwd=None),
         str(tmp_path),
         str(tmp_path),
     )
@@ -3984,6 +5438,9 @@ async def test_unified_flush_events_does_not_wait_before_event_stream_starts(
         session_id = "session-1"
         cwd: str | None = None
 
+        def configure_turn_settlement(self, settle: object) -> None:
+            """Unused: no queued turn is promoted here."""
+
         async def read(self, _params: object) -> object:
             return type("ReadResult", (), {"snapshot": self._snapshot(1)})()
 
@@ -4042,6 +5499,9 @@ async def test_unified_flush_events_tracks_queue_event_watermarks(
     class FakeHarnessSession:
         session_id = "session-1"
         cwd: str | None = None
+
+        def configure_turn_settlement(self, settle: object) -> None:
+            """Unused: no queued turn is promoted here."""
 
         def __init__(self) -> None:
             self.events_started = asyncio.Event()
@@ -4143,6 +5603,9 @@ async def test_unified_adapter_preserves_canonical_queue_entries(
             self.received: object | None = None
             self.replaced: Any | None = None
             self.turn_queue = HarnessTurnQueue(items=[], paused=False, max_items=32)
+
+        def configure_turn_settlement(self, settle: object) -> None:
+            """Unused: no queued turn is promoted here."""
 
         def pin(self, pin: SessionPin) -> str | None:
             return self._pins.get(pin)
@@ -4323,7 +5786,7 @@ def test_unified_state_updates_preserve_the_subscription_history_window(
 
     entries = [message(index) for index in range(3)]
     adapter = _inert_adapter(
-        SimpleNamespace(session_id="session-root", cwd=None),
+        _session_stub(session_id="session-root", cwd=None),
         str(tmp_path),
         str(tmp_path),
         runtime=_priced_runtime(),
@@ -4372,13 +5835,68 @@ def test_unified_state_updates_preserve_the_subscription_history_window(
     assert [entry.id for entry in current.history or []] == ["entry-2", "entry-3"]
 
 
+def test_unified_read_projects_provider_retry_and_accepts_older_harness_state(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: New and pre-retry-field Harness session snapshots.
+    *Do*: Translate both snapshots through the Vibe backend adapter.
+    *Assert*: Retry state is projected when present and absent state remains compatible.
+    """
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.session_protocol import (
+        IdleSessionStatus,
+        LatestPublicHistoryPage,
+        PublicSession as HarnessPublicSession,
+        TurnQueue as HarnessTurnQueue,
+    )
+
+    from vibe.app_server._unified_harness_backend_adapter import _read_response
+
+    state = {
+        "session": HarnessPublicSession(
+            id="session-root", status=IdleSessionStatus(), created_at=1, updated_at=1
+        ),
+        "history": LatestPublicHistoryPage(entries=[]),
+        "latest_turn": None,
+        "turn_queue": HarnessTurnQueue(items=[], paused=False, max_items=32),
+    }
+
+    # Do
+    retrying = _read_response(
+        cast(
+            Any,
+            SimpleNamespace(
+                state=SimpleNamespace(
+                    **state,
+                    retrying=SimpleNamespace(
+                        turn_id="turn-1", category="rate_limited", detail="HTTP 429"
+                    ),
+                ),
+                watermark=1,
+            ),
+        ),
+        str(tmp_path),
+    )
+    older_harness = _read_response(
+        cast(Any, SimpleNamespace(state=SimpleNamespace(**state), watermark=2)),
+        str(tmp_path),
+    )
+
+    # Assert
+    assert retrying.state.retrying == PublicRetryState(
+        turn_id="turn-1", category=PublicRetryCategory.RATE_LIMITED, detail="HTTP 429"
+    )
+    assert older_harness.state.retrying is None
+
+
 @pytest.mark.asyncio
 async def test_unified_root_subscription_translates_child_session_events(
     tmp_path: Path,
 ) -> None:
     """*Prepare*: A root Harness subscription registers a child before its first update.
     *Do*: Consume the child update through the root adapter event stream.
-    *Assert*: The emitted App Server notification retains the child Session identity.
+    *Assert*: Root-owned summary events retain child identity and lifecycle state.
     """
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
@@ -4428,6 +5946,10 @@ async def test_unified_root_subscription_translates_child_session_events(
 
     class FakeHarnessSession:
         session_id = root_id
+        parent_session_id = None
+
+        def configure_turn_settlement(self, settle: object) -> None:
+            """Unused: no queued turn is promoted here."""
 
         async def subscribe(self, _params: object) -> HarnessSessionSubscription:
             async def events():
@@ -4464,13 +5986,146 @@ async def test_unified_root_subscription_translates_child_session_events(
     subscription = await adapter.subscribe(
         SessionReadParams(session_id=root_id, history=PageRequest(limit=20))
     )
+    registration = await anext(subscription.events)
     event = await anext(subscription.events)
 
     # Assert
-    assert event.session_id == child_id
+    assert isinstance(registration.event, ChildSessionUpdated)
+    assert registration.event.child_session.id == child_id
+    assert registration.session_id == root_id
+    assert registration.event_id == 1
+    assert isinstance(event.event, ChildSessionUpdated)
+    assert event.event.child_session.id == child_id
+    assert event.event.child_session.status.type == "running"
+    assert event.session_id == root_id
+    assert event.event_id == 2
     assert event.params is not None
-    assert event.params.model_dump(by_alias=True)["sessionId"] == child_id
+    assert event.params.model_dump(by_alias=True)["sessionId"] == root_id
+    assert subscription.snapshot.state.child_sessions == []
     await cast(Any, subscription.events).aclose()
+
+    resumed = await adapter.subscribe(
+        SessionReadParams(session_id=root_id, history=PageRequest(limit=20))
+    )
+    assert len(resumed.snapshot.state.child_sessions) == 1
+    assert resumed.snapshot.state.child_sessions[0].id == child_id
+    assert resumed.snapshot.state.child_sessions[0].status.type == "running"
+    await cast(Any, resumed.events).aclose()
+
+
+def test_child_summaries_derive_identity_and_stop_without_name_reuse_races(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server.models import (
+        ArchivedSessionStatus,
+        SubagentEffectDetail,
+        SubagentEffectInput,
+    )
+    from vibe.utils.tool_presentation import EffectCallDisplay, EffectResultDisplay
+
+    def effect(
+        effect_id: str,
+        created_at: int,
+        detail: GenericEffectDetail | SubagentEffectDetail,
+    ) -> PublicEffectEntry:
+        return PublicEffectEntry(
+            id=effect_id,
+            session_id="session-1",
+            turn_id="turn-1",
+            created_at=created_at,
+            updated_at=created_at,
+            generation_status=PublicEntryGenerationStatus.COMPLETED,
+            title=detail.tool_name,
+            detail=detail,
+            state=CompletedEffectState(
+                display=EffectResultDisplay(success=True, message="done")
+            ),
+        )
+
+    def spawn(effect_id: str, child_id: str, created_at: int) -> PublicEffectEntry:
+        return effect(
+            effect_id,
+            created_at,
+            SubagentEffectDetail(
+                tool_name="subagent.spawn",
+                input=SubagentEffectInput(task="Audit tests", agent="explore"),
+                child_session_id=child_id,
+                display=EffectCallDisplay(
+                    summary="Starting test-audit",
+                    message="test-audit",
+                    status_text="Starting test-audit",
+                ),
+            ),
+        )
+
+    adapter = _inert_adapter(_RecordingSession(), str(tmp_path), str(tmp_path))
+    root_session = PublicSession(
+        id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
+    )
+    first_child = PublicSession(
+        id="child-1",
+        status=IdleSessionStatus(),
+        created_at=1,
+        updated_at=2,
+        context_usage=TokenUsage(
+            input_tokens=1200, output_tokens=34, total_tokens=1234
+        ),
+    )
+    second_child = PublicSession(
+        id="child-2", status=IdleSessionStatus(), created_at=3, updated_at=3
+    )
+    adapter._child_states = {
+        first_child.id: PublicSessionState(event_id=0, session=first_child),
+        second_child.id: PublicSessionState(event_id=0, session=second_child),
+    }
+    stop = effect(
+        "effect-stop",
+        3,
+        GenericEffectDetail(
+            tool_name="subagent.stop",
+            input={"agentName": "test-audit"},
+            display=EffectCallDisplay(
+                summary="Stopping test-audit", status_text="Stopping test-audit"
+            ),
+        ),
+    )
+    root_state = PublicSessionState(
+        event_id=0,
+        session=root_session,
+        history=[
+            spawn("effect-spawn-1", first_child.id, 1),
+            stop,
+            spawn("effect-spawn-2", second_child.id, 3),
+        ],
+    )
+    in_progress_stop = stop.model_copy(
+        update={
+            "generation_status": PublicEntryGenerationStatus.IN_PROGRESS,
+            "state": RunningEffectState(),
+        }
+    )
+    adapter._state_with_child_summaries(
+        root_state.model_copy(
+            update={
+                "history": [
+                    spawn("effect-spawn-1", first_child.id, 1),
+                    in_progress_stop,
+                    spawn("effect-spawn-2", second_child.id, 3),
+                ]
+            }
+        )
+    )
+
+    summaries = adapter._state_with_child_summaries(root_state).child_sessions
+
+    assert [(child.name, child.agent_type) for child in summaries] == [
+        ("test-audit", "explore"),
+        ("test-audit", "explore"),
+    ]
+    assert isinstance(summaries[0].status, ArchivedSessionStatus)
+    assert isinstance(summaries[1].status, IdleSessionStatus)
+    assert summaries[0].context_usage == first_child.context_usage
 
 
 def test_unified_subagent_analytics_emits_one_content_free_terminal_event(
@@ -4553,7 +6208,7 @@ def test_unified_subagent_analytics_emits_one_content_free_terminal_event(
         harness_backend=ExperimentSurface.UNIFIED,
     )
     adapter = _inert_adapter(
-        SimpleNamespace(session_id="session-root", cwd=None),
+        _session_stub(session_id="session-root", cwd=None),
         str(tmp_path),
         str(tmp_path),
         runtime=_priced_runtime(),
@@ -4604,7 +6259,7 @@ def test_request_sent_forwarding_maps_call_type_and_drains(
         harness_backend=ExperimentSurface.UNIFIED,
     )
     adapter = _inert_adapter(
-        SimpleNamespace(session_id="session-root", cwd=None),
+        _session_stub(session_id="session-root", cwd=None),
         str(tmp_path),
         str(tmp_path),
         runtime=_priced_runtime(),
@@ -4666,12 +6321,113 @@ def test_request_sent_forwarding_maps_call_type_and_drains(
     )
 
 
+def test_request_sent_carries_client_message_id(
+    tmp_path: Path, telemetry_events: list[dict[str, Any]]
+) -> None:
+    """*Prepare*: A user entry and a buffered request-sent payload.
+    *Do*: Reconcile the state (learns the message id), then drain the queue.
+    *Assert*: The ``vibe.request_sent`` event carries the user entry's message id.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.session_protocol import (
+        IdleSessionStatus,
+        LatestPublicHistoryPage,
+        PublicSession as HarnessPublicSession,
+        PublicSessionState as HarnessPublicSessionState,
+        TurnQueue as HarnessTurnQueue,
+    )
+    from mistralai_vibe_local_harness.vibe import RequestSentTelemetry
+
+    session = HarnessPublicSession(
+        id="session-root", status=IdleSessionStatus(), created_at=1, updated_at=1
+    )
+    user_entry: JsonObject = {
+        "type": "message",
+        "id": "msg-xyz",
+        "sessionId": "session-root",
+        "turnId": "turn-1",
+        "createdAt": 1,
+        "updatedAt": 1,
+        "generationStatus": "completed",
+        "relatedEntryId": None,
+        "role": "user",
+        "content": [{"type": "text", "text": "hello"}],
+    }
+    state = HarnessPublicSessionState(
+        session=session,
+        history=LatestPublicHistoryPage(entries=[user_entry]),
+        turn_queue=HarnessTurnQueue(items=[], paused=False, max_items=32),
+    )
+    telemetry = TelemetryClient(
+        config_getter=lambda: build_test_vibe_config(enable_telemetry=True),
+        harness_backend=ExperimentSurface.UNIFIED,
+    )
+    adapter = _inert_adapter(
+        SimpleNamespace(
+            session_id="session-root", configure_turn_settlement=lambda settle: None
+        ),
+        str(tmp_path),
+        str(tmp_path),
+        runtime=_priced_runtime(),
+        telemetry_client=telemetry,
+    )
+    # Simulate the runtime buffering a request-sent payload.
+    adapter._context.request_sent.record(
+        RequestSentTelemetry(
+            model="m1",
+            purpose="agent",
+            iteration=0,
+            nb_context_chars=10,
+            nb_context_messages=3,
+            nb_prompt_chars=5,
+        )
+    )
+    # _updated_state calls _record_tool_telemetry first (which learns the
+    # message id), then _forward_request_sent. Mirror that order.
+    adapter._record_tool_telemetry(state)
+    adapter._forward_request_sent()
+
+    events = [e for e in telemetry_events if e["event_name"] == "vibe.request_sent"]
+    assert len(events) == 1
+    assert events[0]["properties"]["message_id"] == "msg-xyz"
+
+
+def test_start_turn_sets_client_message_id_before_runtime(tmp_path: Path) -> None:
+    """*Prepare*: An inert adapter with a message id holder.
+    *Do*: Call ``_set_client_message_id`` (the method ``start_turn`` calls
+    before scheduling the runtime task).
+    *Assert*: Both ``_last_client_message_id`` and the holder are updated, so
+    the provider request metadata reads the id on the first completion.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter = _inert_adapter(_RecordingSession(), str(tmp_path), str(tmp_path))
+    adapter._message_id_holder = [None]
+
+    adapter._set_client_message_id("msg-start-turn")
+
+    assert adapter._last_client_message_id == "msg-start-turn"
+    assert adapter._message_id_holder[0] == "msg-start-turn"
+
+
 def _tool_effect(
-    effect_id: str, tool_name: str, status: str, tool_input: JsonObject | None = None
+    effect_id: str,
+    tool_name: str,
+    status: str,
+    tool_input: JsonObject | None = None,
+    *,
+    decision: str | None = None,
+    approval_type: str | None = None,
+    approval_source: str | None = None,
 ) -> JsonObject:
     state: JsonObject = {"status": status}
     if status == "failed":
         state["error"] = {"message": "boom", "code": "tool_failed"}
+    if decision is not None:
+        state["decision"] = decision
+    if approval_type is not None:
+        state["approvalType"] = approval_type
+    if approval_source is not None:
+        state["approvalSource"] = approval_source
     return {
         "type": "effect",
         "id": effect_id,
@@ -4783,7 +6539,7 @@ def test_ordinary_tool_call_finished_emits_once_with_file_metrics(
         harness_backend=ExperimentSurface.UNIFIED,
     )
     adapter = _inert_adapter(
-        SimpleNamespace(session_id="session-root", cwd=None),
+        _session_stub(session_id="session-root", cwd=None),
         str(tmp_path),
         str(tmp_path),
         runtime=_priced_runtime(),
@@ -4804,9 +6560,206 @@ def test_ordinary_tool_call_finished_emits_once_with_file_metrics(
     assert props["nb_files_modified"] == 0
     assert props["file_extension"] == ".py"
     assert props["decision"] is None
+    assert props["approval_type"] is None
+    assert props["approval_source"] is None
     assert props["harness_backend"] == "unified"
     # No harness background-process flag, so the field is never set.
     assert "bash_background" not in props
+
+
+def test_ordinary_tool_call_finished_carries_decision_and_approval_type(
+    tmp_path: Path, telemetry_events: list[dict[str, Any]]
+) -> None:
+    """*Prepare*: A completed effect with decision=execute, approval_type=ask.
+    *Do*: Reconcile the terminal state.
+    *Assert*: ``tool_call_finished`` carries the decision and approval_type.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.session_protocol import (
+        IdleSessionStatus,
+        LatestPublicHistoryPage,
+        PublicSession as HarnessPublicSession,
+        PublicSessionState as HarnessPublicSessionState,
+        TurnQueue as HarnessTurnQueue,
+    )
+
+    session = HarnessPublicSession(
+        id="session-root", status=IdleSessionStatus(), created_at=1, updated_at=1
+    )
+    state = HarnessPublicSessionState(
+        session=session,
+        history=LatestPublicHistoryPage(
+            entries=[
+                _tool_effect(
+                    "effect-1",
+                    "file_system.write_file",
+                    "completed",
+                    {"path": "a.py", "content": "x"},
+                    decision="execute",
+                    approval_type="ask",
+                    approval_source="user",
+                )
+            ]
+        ),
+        turn_queue=HarnessTurnQueue(items=[], paused=False, max_items=32),
+    )
+    telemetry = TelemetryClient(
+        config_getter=lambda: build_test_vibe_config(enable_telemetry=True),
+        harness_backend=ExperimentSurface.UNIFIED,
+    )
+    adapter = _inert_adapter(
+        _session_stub(session_id="session-root", cwd=None),
+        str(tmp_path),
+        str(tmp_path),
+        runtime=_priced_runtime(),
+        telemetry_client=telemetry,
+    )
+
+    adapter._record_tool_telemetry(state)
+
+    events = [
+        e for e in telemetry_events if e["event_name"] == "vibe.tool_call_finished"
+    ]
+    assert len(events) == 1
+    props = events[0]["properties"]
+    assert props["decision"] == "execute"
+    assert props["approval_type"] == "ask"
+    assert props["approval_source"] == "user"
+
+
+def test_terminal_tool_effect_extracts_decision_and_approval_type() -> None:
+    """*Prepare*: A completed effect with decision/approval_type in its state.
+    *Do*: Run through ``_terminal_tool_effect``.
+    *Assert*: The _ToolCallTelemetry carries the decision and approval_type.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import _terminal_tool_effect
+
+    result = _terminal_tool_effect(
+        _tool_effect(
+            "e1",
+            "file_system.write_file",
+            "completed",
+            {"path": "a.py"},
+            decision="skip",
+            approval_type="never",
+            approval_source="never",
+        )
+    )
+    assert result is not None
+    assert result.decision == "skip"
+    assert result.approval_type == "never"
+    assert result.approval_source == "never"
+
+    # Absent fields default to None.
+    result_none = _terminal_tool_effect(
+        _tool_effect("e2", "file_system.write_file", "completed", {"path": "b.py"})
+    )
+    assert result_none is not None
+    assert result_none.decision is None
+    assert result_none.approval_type is None
+    assert result_none.approval_source is None
+
+
+def test_ordinary_tool_call_finished_carries_turn_client_message_id(
+    tmp_path: Path, telemetry_events: list[dict[str, Any]]
+) -> None:
+    """*Prepare*: A user entry and a terminal tool effect sharing a turn id.
+    *Do*: Reconcile the state, then a follow-up page whose user entry is gone.
+    *Assert*: Both tool-finished events carry the user entry's client message id.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.session_protocol import (
+        IdleSessionStatus,
+        LatestPublicHistoryPage,
+        PublicSession as HarnessPublicSession,
+        PublicSessionState as HarnessPublicSessionState,
+        TurnQueue as HarnessTurnQueue,
+    )
+
+    session = HarnessPublicSession(
+        id="session-root", status=IdleSessionStatus(), created_at=1, updated_at=1
+    )
+    # The projection strips content-block meta and writes the client message
+    # id into the user entry's id, so the fixture mirrors that wire shape.
+    user_entry: JsonObject = {
+        "type": "message",
+        "id": "msg-abc",
+        "sessionId": "session-root",
+        "turnId": "turn-1",
+        "createdAt": 1,
+        "updatedAt": 1,
+        "generationStatus": "completed",
+        "relatedEntryId": None,
+        "role": "user",
+        "content": [{"type": "text", "text": "fix the bug"}],
+    }
+    effect = {
+        **_tool_effect(
+            "effect-write-1",
+            "file_system.write_file",
+            "completed",
+            {"path": "src/main.py", "content": "x"},
+        ),
+        "sessionId": "session-root",
+        "turnId": "turn-1",
+        "createdAt": 2,
+        "updatedAt": 2,
+        "generationStatus": "completed",
+        "relatedEntryId": None,
+    }
+    state = HarnessPublicSessionState(
+        session=session,
+        history=LatestPublicHistoryPage(entries=[user_entry, effect]),
+        turn_queue=HarnessTurnQueue(items=[], paused=False, max_items=32),
+    )
+    telemetry = TelemetryClient(
+        config_getter=lambda: build_test_vibe_config(enable_telemetry=True),
+        harness_backend=ExperimentSurface.UNIFIED,
+    )
+    adapter = _inert_adapter(
+        _session_stub(session_id="session-root"),
+        str(tmp_path),
+        str(tmp_path),
+        runtime=_priced_runtime(),
+        telemetry_client=telemetry,
+    )
+
+    adapter._record_tool_telemetry(state)
+    # A later snapshot without the user entry still attributes through the turn.
+    follow_up = HarnessPublicSessionState(
+        session=session,
+        history=LatestPublicHistoryPage(
+            entries=[
+                {
+                    **_tool_effect(
+                        "effect-edit-2",
+                        "file_system.search_replace",
+                        "completed",
+                        {"file_path": "src/main.py"},
+                    ),
+                    "sessionId": "session-root",
+                    "turnId": "turn-1",
+                    "createdAt": 3,
+                    "updatedAt": 3,
+                    "generationStatus": "completed",
+                    "relatedEntryId": None,
+                }
+            ]
+        ),
+        turn_queue=HarnessTurnQueue(items=[], paused=False, max_items=32),
+    )
+    adapter._record_tool_telemetry(follow_up)
+    adapter._record_tool_telemetry(state)
+
+    events = [
+        e for e in telemetry_events if e["event_name"] == "vibe.tool_call_finished"
+    ]
+    assert len(events) == 2
+    assert events[0]["properties"]["tool_name"] == "write_file"
+    assert events[0]["properties"]["message_id"] == "msg-abc"
+    assert events[1]["properties"]["tool_name"] == "edit"
+    assert events[1]["properties"]["message_id"] == "msg-abc"
 
 
 def _compaction_checkpoint(
@@ -4903,7 +6856,7 @@ def test_compaction_telemetry_emits_auto_compact_and_failed(
         harness_backend=ExperimentSurface.UNIFIED,
     )
     adapter = _inert_adapter(
-        SimpleNamespace(session_id="session-root", cwd=None),
+        _session_stub(session_id="session-root", cwd=None),
         str(tmp_path),
         str(tmp_path),
         runtime=_priced_runtime(),
@@ -4955,7 +6908,7 @@ def test_manual_compaction_skips_auto_compact_triggered(
         harness_backend=ExperimentSurface.UNIFIED,
     )
     adapter = _inert_adapter(
-        SimpleNamespace(session_id="session-root", cwd=None),
+        _session_stub(session_id="session-root", cwd=None),
         str(tmp_path),
         str(tmp_path),
         runtime=_priced_runtime(),
@@ -5009,7 +6962,7 @@ def test_context_gauge_retained_across_a_usageless_snapshot(
         harness_backend=ExperimentSurface.UNIFIED,
     )
     adapter = _inert_adapter(
-        SimpleNamespace(session_id="session-root", cwd=None),
+        _session_stub(session_id="session-root", cwd=None),
         str(tmp_path),
         str(tmp_path),
         runtime=_priced_runtime(),
@@ -5017,12 +6970,15 @@ def test_context_gauge_retained_across_a_usageless_snapshot(
     )
     adapter._context_tokens_before = 4321
 
-    adapter._updated_state(_event([], 1), 20)
+    adapter._updated_state(_event([], 1), 20, cwd=str(tmp_path), metadata=None)
     # The usage-less snapshot must not wipe the last reading.
     assert adapter._context_tokens_before == 4321
 
     adapter._updated_state(
-        _event([_compaction_checkpoint("auto-ret", "automatic", succeeded=True)], 2), 20
+        _event([_compaction_checkpoint("auto-ret", "automatic", succeeded=True)], 2),
+        20,
+        cwd=str(tmp_path),
+        metadata=None,
     )
     triggered = [
         e for e in telemetry_events if e["event_name"] == "vibe.auto_compact_triggered"
@@ -5055,6 +7011,9 @@ async def test_unified_flush_events_returns_after_an_event_carrying_a_signal(
     class FakeHarnessSession:
         session_id = "session-1"
         cwd: str | None = None
+
+        def configure_turn_settlement(self, settle: object) -> None:
+            """Unused: no queued turn is promoted here."""
 
         async def read(self, _params: object) -> object:
             return type("ReadResult", (), {"snapshot": self._snapshot(2)})()
@@ -5799,7 +7758,7 @@ async def test_fork_releases_pending_worktree_hold_when_open_fails() -> None:
         options=SessionOptions(), pending_hold=cast(Any, pending_hold)
     )
     raw_host = cast(Any, host)
-    raw_host._context = AsyncMock(return_value=(context, derivation))
+    raw_host._lifecycle_context = AsyncMock(return_value=(context, derivation))
     raw_host._pin_to_session_cwd = AsyncMock(
         return_value=(context, derivation, resolution)
     )
@@ -6005,7 +7964,10 @@ async def test_unified_runtime_counts_the_hooks_the_session_compiled(
 
     assert derivation.runtime.hooks_count == 2
     # The count stands for hooks that actually bound, not files that parsed.
-    assert len(context.hooks.bindings) == 2
+    assert [binding.id.rsplit(":", 1)[-1] for binding in context.hooks.bindings] == [
+        "guard",
+        "audit",
+    ]
 
 
 @pytest.mark.asyncio
@@ -6262,8 +8224,13 @@ async def test_unified_resume_discards_the_replaced_ephemeral_session(
 
 
 @pytest.mark.asyncio
-async def test_unified_harness_resume_and_list_use_the_persisted_store() -> None:
-    first_host = _harness_backend_host()
+async def test_unified_harness_resume_and_list_use_the_persisted_store(
+    tmp_path: Path,
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    first_host = _harness_backend_host(config)
     started = await first_host.start(SessionStartParams())
     session_id = started.backend.session_id
     await started.backend.start_turn(
@@ -6273,7 +8240,7 @@ async def test_unified_harness_resume_and_list_use_the_persisted_store() -> None
     )
     await first_host.shutdown()
 
-    second_host = _harness_backend_host()
+    second_host = _harness_backend_host(config)
     resumed = await second_host.resume(SessionResumeParams(session_id=session_id))
     listed = await second_host.list(SessionListParams())
     await second_host.shutdown()
@@ -6283,6 +8250,437 @@ async def test_unified_harness_resume_and_list_use_the_persisted_store() -> None
     assert resumed.backend.runtime_updated_params().session_id == session_id
     assert [session.id for session in listed.items] == [session_id]
     assert listed.continue_session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_unified_promotion_writes_vibe_session_metadata(tmp_path: Path) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    project_cwd = str((tmp_path / "project").resolve())
+    (tmp_path / "project").mkdir()
+    host = _harness_backend_host(config)
+    started = await host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=project_cwd))
+    )
+    session_id = started.backend.session_id
+    meta_path = tmp_path / "unified" / session_id / "meta.json"
+
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=session_id, message=[TextContentBlock(text="persist me")]
+        )
+    )
+    await host.shutdown()
+
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert metadata["session_id"] == session_id
+    assert metadata["parent_session_id"] is None
+    assert metadata["environment"]["working_directory"] == project_cwd
+    assert metadata["origin_directory"] == project_cwd
+    assert metadata["title_source"] == "auto"
+    datetime.fromisoformat(metadata["bumped_at"])
+    datetime.fromisoformat(metadata["start_time"])
+    datetime.fromisoformat(metadata["end_time"])
+
+
+@pytest.mark.asyncio
+async def test_unified_accepted_turn_persists_and_projects_bumped_at(
+    tmp_path: Path,
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    project_cwd = str((tmp_path / "project").resolve())
+    (tmp_path / "project").mkdir()
+    first_host = _harness_backend_host(config)
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=project_cwd))
+    )
+    session_id = started.backend.session_id
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=session_id, message=[TextContentBlock(text="persist me")]
+        )
+    )
+
+    await first_host.shutdown()
+
+    second_host = _harness_backend_host(config)
+    renamed = await second_host.rename(
+        SessionTitleUpdateParams(session_id=session_id, title="Manual title")
+    )
+
+    meta_path = tmp_path / "unified" / session_id / "meta.json"
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert renamed.title == "Manual title"
+    assert metadata["title"] == "Manual title"
+    assert metadata["title_source"] == "manual"
+    bumped_at = int(datetime.fromisoformat(metadata["bumped_at"]).timestamp() * 1000)
+
+    read = await second_host.read(SessionReadParams(session_id=session_id))
+    listed = await second_host.list(SessionListParams(cwd=project_cwd))
+    await second_host.shutdown()
+
+    assert read.state.session.bumped_at == bumped_at
+    rows = {item.id: item for item in listed.items}
+    assert rows[session_id].bumped_at == bumped_at
+
+
+@pytest.mark.asyncio
+async def test_unified_pin_is_available_through_the_app_server(tmp_path: Path) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    client, server = _connect_harness_host(config)
+    try:
+        await client.initialize(ClientInfo(name="test", version="0"))
+        await client.notify("initialized")
+        started = SessionReadResponse.model_validate(
+            await client.request("session/start", SessionStartParams())
+        )
+        session_id = started.state.session.id
+        pinned = SessionPinResponse.model_validate(
+            await client.request(
+                "session/pin", SessionPinParams(session_id=session_id, pinned=True)
+            )
+        )
+        read = SessionReadResponse.model_validate(
+            await client.request(
+                "session/read", SessionReadParams(session_id=session_id)
+            )
+        )
+        assert pinned.pinned_at is not None
+        assert read.state.session.pinned_at == pinned.pinned_at
+    finally:
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_unified_pin_persists_to_the_sidecar_and_survives_a_restart(
+    tmp_path: Path,
+) -> None:
+    """The Harness has no pin, so the whole of it lives in Vibe's sidecar."""
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    project_cwd = str((tmp_path / "project").resolve())
+    (tmp_path / "project").mkdir()
+    first_host = _harness_backend_host(config)
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=project_cwd))
+    )
+    session_id = started.backend.session_id
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=session_id, message=[TextContentBlock(text="persist me")]
+        )
+    )
+
+    assert isinstance(first_host, SessionBackendHostPin)
+    attached = await first_host.pin(
+        SessionPinParams(session_id=session_id, pinned=True)
+    )
+    repeated = await first_host.pin(
+        SessionPinParams(session_id=session_id, pinned=True)
+    )
+    await first_host.shutdown()
+
+    assert attached.pinned_at is not None
+    # Re-pinning keeps the first pin, so the pinned shelf keeps its order.
+    assert repeated.pinned_at == attached.pinned_at
+
+    meta_path = tmp_path / "unified" / session_id / "meta.json"
+    persisted = json.loads(meta_path.read_text(encoding="utf-8"))["pinned_at"]
+    assert (
+        int(datetime.fromisoformat(persisted).timestamp() * 1000) == attached.pinned_at
+    )
+
+    second_host = _harness_backend_host(config)
+    read = await second_host.read(SessionReadParams(session_id=session_id))
+    pinned_only = await second_host.list(
+        SessionListParams(cwd=project_cwd, pinned=True)
+    )
+    unpinned_only = await second_host.list(
+        SessionListParams(cwd=project_cwd, pinned=False)
+    )
+    # Detached this time: the session is closed, so the host rewrites the
+    # sidecar in place rather than going through the session's adapter.
+    assert isinstance(second_host, SessionBackendHostPin)
+    detached = await second_host.pin(
+        SessionPinParams(session_id=session_id, pinned=False)
+    )
+    after_unpin = await second_host.list(
+        SessionListParams(cwd=project_cwd, pinned=True)
+    )
+    await second_host.shutdown()
+
+    assert read.state.session.pinned_at == attached.pinned_at
+    assert [item.id for item in pinned_only.items] == [session_id]
+    assert [item.id for item in unpinned_only.items] == []
+    assert detached.pinned_at is None
+    assert after_unpin.items == []
+    assert json.loads(meta_path.read_text(encoding="utf-8"))["pinned_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_unified_pin_after_adapter_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    host = _harness_backend_host(config)
+    try:
+        started = await host.start(
+            SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path)))
+        )
+        session_id = started.backend.session_id
+        await started.backend.start_turn(
+            TurnStartParams(
+                session_id=session_id, message=[TextContentBlock(text="persist me")]
+            )
+        )
+        await started.backend.shutdown()
+
+        async def unexpected_persist(**_kwargs: object) -> None:
+            pytest.fail("pin attempted to persist through a closed adapter")
+
+        monkeypatch.setattr(
+            started.backend, "_persist_session_metadata", unexpected_persist
+        )
+        assert isinstance(host, SessionBackendHostPin)
+        pinned = await host.pin(SessionPinParams(session_id=session_id, pinned=True))
+        assert pinned.pinned_at is not None
+        read = await host.read(SessionReadParams(session_id=session_id))
+        assert read.state.session.pinned_at == pinned.pinned_at
+        unpinned = await host.pin(SessionPinParams(session_id=session_id, pinned=False))
+        assert unpinned.pinned_at is None
+        read = await host.read(SessionReadParams(session_id=session_id))
+        assert read.state.session.pinned_at is None
+    finally:
+        await host.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["callback", "queued_steer"])
+async def test_unified_activity_receipt_bumps_once_across_concurrent_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    from mistralai_vibe_local_harness.vibe import HarnessSessionNotFoundError
+
+    from vibe.app_server.protocol import CallbackResult, CallbackResultParams
+    from vibe.core.session.session_logger import SessionLogger
+
+    class Session(_RecordingSession):
+        ephemeral = False
+        reject = True
+
+        async def respond_to_callback(self, params: object) -> object:
+            if self.reject:
+                raise HarnessSessionNotFoundError(self.session_id)
+            # Harness vibe/_session.py returns accepted=True and no after_response
+            # for both the first callback response and an identical replay.
+            return SimpleNamespace(
+                response={"accepted": True, "last_event_id": 0}, after_response=None
+            )
+
+        async def steer_queued_turn(self, params: Any) -> Any:
+            if self.reject:
+                raise HarnessSessionNotFoundError(self.session_id)
+            return await super().steer_queued_turn(params)
+
+    session = Session()
+    adapter = _inert_adapter(session, None, str(tmp_path))
+    adapter._translated_state = (
+        await adapter.read(SessionReadParams(session_id="session-1"))
+    ).state
+    published = Mock()
+    monkeypatch.setattr(adapter, "_publish_local_event", published)
+    monkeypatch.setattr(adapter, "flush_events", AsyncMock())
+
+    async def submit(identity: str) -> Any:
+        if operation == "callback":
+            return await adapter.respond_to_callback(
+                CallbackResultParams(
+                    session_id="session-1",
+                    result=CallbackResult(
+                        callback_id=identity,
+                        output={"type": "approval", "decision": {"type": "allow_once"}},
+                    ),
+                )
+            )
+        # Harness vibe/_session.py also returns the same queued-steer response
+        # with no after_response for both the accepted mutation and its replay.
+        return await adapter.steer_queued_turn(
+            TurnQueueSteerParams(
+                session_id="session-1",
+                queue_item_id=identity,
+                expected_turn_id="turn-1",
+            )
+        )
+
+    with pytest.raises(SessionBackendError):
+        await submit("activity-1")
+    assert not (tmp_path / "unified" / "session-1" / "meta.json").exists()
+    session.reject = False
+
+    persist = SessionLogger.persist_metadata
+    writing = asyncio.Event()
+    release = asyncio.Event()
+    writes = 0
+
+    async def hold_write(metadata: Any, session_dir: Path) -> None:
+        nonlocal writes
+        writes += 1
+        writing.set()
+        await release.wait()
+        await persist(metadata, session_dir)
+
+    monkeypatch.setattr(SessionLogger, "persist_metadata", hold_write)
+    first = asyncio.create_task(submit("activity-1"))
+    try:
+        await writing.wait()
+        duplicate = await submit("activity-1")
+        assert duplicate.after_response is None
+        assert writes == 1
+        published.assert_not_called()
+    finally:
+        release.set()
+        result = await first
+
+    assert result.after_response is not None
+    result.after_response()
+    published.assert_called_once()
+    metadata = json.loads(
+        (tmp_path / "unified" / "session-1" / "meta.json").read_text()
+    )
+    bumped_at = int(datetime.fromisoformat(metadata["bumped_at"]).timestamp() * 1000)
+    event = published.call_args.args[0]
+    assert event.patch[0].path == "/bumpedAt"
+    assert event.patch[0].value == bumped_at
+
+    assert (await submit("activity-1")).after_response is None
+    assert writes == 1
+    assert (await submit("activity-2")).after_response is not None
+    assert writes == 2
+
+
+@pytest.mark.asyncio
+async def test_unified_queue_retries_do_not_bump_session(tmp_path: Path) -> None:
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+    )
+
+    host = _harness_backend_host(
+        build_test_vibe_config(
+            session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+        )
+    )
+    started = await host.start(SessionStartParams())
+    backend = started.backend
+    assert isinstance(backend, UnifiedHarnessBackendAdapter)
+    params = TurnEnqueueParams(
+        session_id=backend.session_id,
+        idempotency_key="enqueue",
+        entries=[TurnUserInputEntry(content=[SessionTextContentBlock(text="queued")])],
+    )
+    try:
+        enqueued = await backend.enqueue_turn(params)
+        meta_path = tmp_path / "unified" / backend.session_id / "meta.json"
+        initial = json.loads(meta_path.read_text())["bumped_at"]
+        assert initial is not None
+        # Harness _session.py enqueue_turn/replace_queued_turn omit after_response
+        # on duplicate receipts; resume_turn_queue omits it when already resumed.
+        retried = await backend.enqueue_turn(params)
+        assert retried.after_response is None
+        assert json.loads(meta_path.read_text())["bumped_at"] == initial
+
+        replacement = TurnQueueReplaceParams(
+            session_id=backend.session_id,
+            queue_item_id=enqueued.response.queue_item_id,
+            idempotency_key="replace",
+            entries=[
+                TurnUserInputEntry(content=[SessionTextContentBlock(text="edited")])
+            ],
+        )
+        await backend.replace_queued_turn(replacement)
+        replaced_at = json.loads(meta_path.read_text())["bumped_at"]
+        retried_replace = await backend.replace_queued_turn(replacement)
+        assert retried_replace.after_response is None
+        assert json.loads(meta_path.read_text())["bumped_at"] == replaced_at
+
+        resumed = await backend.resume_turn_queue(
+            TurnQueueResumeParams(session_id=backend.session_id)
+        )
+        assert resumed.after_response is None
+        assert json.loads(meta_path.read_text())["bumped_at"] == replaced_at
+    finally:
+        await host.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_bump", [None, datetime(2099, 1, 1, tzinfo=UTC)])
+async def test_unified_concurrent_metadata_writes_preserve_latest_bump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_bump: datetime | None
+) -> None:
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+    )
+    from vibe.core.session.session_logger import SessionLogger
+
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    host = _harness_backend_host(config)
+    started = await host.start(SessionStartParams())
+    backend = started.backend
+    assert isinstance(backend, UnifiedHarnessBackendAdapter)
+    await backend.start_turn(
+        TurnStartParams(
+            session_id=backend.session_id, message=[TextContentBlock(text="persist me")]
+        )
+    )
+
+    persist = SessionLogger.persist_metadata
+    writing = asyncio.Event()
+    release = asyncio.Event()
+    newest = datetime(2099, 1, 2, tzinfo=UTC)
+    writes = 0
+
+    async def hold_first_write(metadata: Any, session_dir: Path) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            writing.set()
+            await release.wait()
+        await persist(metadata, session_dir)
+
+    monkeypatch.setattr(SessionLogger, "persist_metadata", hold_first_write)
+    first = asyncio.create_task(backend._persist_session_metadata(bumped_at=newest))
+    await writing.wait()
+    second = asyncio.create_task(
+        backend._persist_session_metadata(bumped_at=second_bump)
+    )
+    try:
+        # Let the competing operation reach its first suspension point.
+        await asyncio.sleep(0)
+        assert writes == 1
+    finally:
+        release.set()
+        await asyncio.gather(first, second)
+        await host.shutdown()
+
+    metadata = json.loads(
+        (tmp_path / "unified" / backend.session_id / "meta.json").read_text()
+    )
+    assert metadata["bumped_at"] == newest.isoformat()
 
 
 @pytest.mark.asyncio
@@ -6917,8 +9315,10 @@ async def test_unified_list_excludes_retained_nested_repository_sessions(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pinned", [None, True, False])
+@pytest.mark.parametrize("continue_matches_project", [False, True])
 async def test_unified_list_uses_latest_matching_session_for_continue(
-    tmp_path: Path,
+    tmp_path: Path, pinned: bool | None, continue_matches_project: bool
 ) -> None:
     vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from mistralai_vibe_local_harness.session_protocol import (
@@ -6962,7 +9362,9 @@ async def test_unified_list_uses_latest_matching_session_for_continue(
                     item(newer_id, project, 2),
                     item(outside_id, tmp_path / "outside", 3),
                 ),
-                continue_session_id=outside_id,
+                continue_session_id=older_id
+                if continue_matches_project
+                else outside_id,
             )
 
     host = adapt_harness_host(
@@ -6976,9 +9378,14 @@ async def test_unified_list_uses_latest_matching_session_for_continue(
         ),
     )
 
-    listed = await host.list(SessionListParams(cwd=str(project)))
+    listed = await host.list(SessionListParams(cwd=str(project), pinned=pinned))
 
-    assert listed.continue_session_id == newer_id
+    assert listed.continue_session_id == (
+        older_id if continue_matches_project else newer_id
+    )
+    assert {item.id for item in listed.items} == (
+        set() if pinned else {older_id, newer_id}
+    )
 
 
 def test_legacy_and_unified_hosts_share_the_same_lease_namespace(
@@ -7056,6 +9463,350 @@ def test_public_turn_error_tolerates_unknown_harness_fields() -> None:
     assert result.code == "some_code"
 
 
+# Reads. None may build a session context.
+_READ_ONLY_HOST_OPERATIONS = frozenset({"delete", "list", "pin", "rename"})
+
+# Bind, move or fork a live runtime, so they legitimately build one.
+_LIFECYCLE_HOST_OPERATIONS = frozenset({
+    "clear_history",
+    # `read` rehydrates a blocked session's pending state after a restart,
+    # which needs the runtime.
+    "read",
+    "continue_latest",
+    "fork",
+    "resume",
+    "rewind_fork",
+    "start",
+})
+
+# Neither reads nor binds a runtime, so neither classification applies.
+_NON_SESSION_HOST_OPERATIONS = frozenset({
+    "harness_kind",
+    "shutdown",
+    "stop_background_tasks",
+})
+
+
+@pytest.mark.asyncio
+async def test_listing_several_cwds_returns_their_union_in_one_request(
+    tmp_path: Path,
+) -> None:
+    """`cwds` answers for many checkouts at once, and only those checkouts."""
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    wanted = [(tmp_path / "one").resolve(), (tmp_path / "two").resolve()]
+    unwanted = (tmp_path / "three").resolve()
+    for directory in [*wanted, unwanted]:
+        directory.mkdir()
+
+    host = _harness_backend_host(config)
+    ids: dict[Path, str] = {}
+    for directory in [*wanted, unwanted]:
+        started = await host.start(
+            SessionStartParams(agent_config=SessionOptions(cwd=str(directory)))
+        )
+        # A session with no turn is ephemeral and never listed.
+        await started.backend.start_turn(
+            TurnStartParams(
+                session_id=started.backend.session_id,
+                message=[TextContentBlock(text="persist me")],
+            )
+        )
+        ids[directory] = started.backend.session_id
+        await started.backend.shutdown()
+
+    listed = await host.list(
+        SessionListParams(cwds=[str(directory) for directory in wanted])
+    )
+    await host.shutdown()
+
+    returned = {item.id for item in listed.items}
+    assert returned == {ids[directory] for directory in wanted}
+    assert ids[unwanted] not in returned
+
+
+@pytest.mark.asyncio
+async def test_listing_an_empty_cwds_matches_nothing(tmp_path: Path) -> None:
+    """An explicit empty checkout set means nothing, not everything."""
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    project = (tmp_path / "project").resolve()
+    project.mkdir()
+
+    host = _harness_backend_host(config)
+    started = await host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=str(project)))
+    )
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=started.backend.session_id,
+            message=[TextContentBlock(text="persist me")],
+        )
+    )
+    await started.backend.shutdown()
+
+    populated = await host.list(SessionListParams(cwds=[str(project)]))
+    empty = await host.list(SessionListParams(cwds=[]))
+    await host.shutdown()
+
+    assert populated.items, "fixture produced nothing to contrast with"
+    assert empty.items == []
+
+
+@pytest.mark.asyncio
+async def test_listing_one_cwd_matches_listing_that_cwd_in_cwds(tmp_path: Path) -> None:
+    """`cwds=[x]` must mean exactly what `cwd=x` has always meant."""
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    project = (tmp_path / "project").resolve()
+    other = (tmp_path / "other").resolve()
+    project.mkdir()
+    other.mkdir()
+
+    host = _harness_backend_host(config)
+    for directory in (project, other):
+        started = await host.start(
+            SessionStartParams(agent_config=SessionOptions(cwd=str(directory)))
+        )
+        await started.backend.start_turn(
+            TurnStartParams(
+                session_id=started.backend.session_id,
+                message=[TextContentBlock(text="persist me")],
+            )
+        )
+        await started.backend.shutdown()
+
+    by_cwd = await host.list(SessionListParams(cwd=str(project)))
+    by_cwds = await host.list(SessionListParams(cwds=[str(project)]))
+    await host.shutdown()
+
+    assert by_cwd.items, "fixture produced nothing to compare"
+    assert [item.id for item in by_cwds.items] == [item.id for item in by_cwd.items]
+
+
+def test_every_host_operation_is_classified_read_or_lifecycle() -> None:
+    """Fails closed, so a new read cannot ship unclassified."""
+    from vibe.app_server import _session_backend_port as port
+
+    protocols = [
+        port.SessionBackendHost,
+        port.SessionBackendHostPin,
+        port.SessionBackendHostDelete,
+        port.SessionBackendHistoryClearHost,
+        port.SessionBackendRewindForkHost,
+        port.SessionBackendHostBackgroundTasks,
+    ]
+    declared = {
+        name
+        for protocol in protocols
+        for name in vars(protocol)
+        if not name.startswith("_")
+    }
+    classified = (
+        _READ_ONLY_HOST_OPERATIONS
+        | _LIFECYCLE_HOST_OPERATIONS
+        | _NON_SESSION_HOST_OPERATIONS
+    )
+    assert declared - classified == set(), (
+        "Unclassified Host operation(s). Add each to _READ_ONLY_HOST_OPERATIONS "
+        "if it only reads stored session state, else to the lifecycle set."
+    )
+    assert classified - declared == set(), (
+        "Classified operation(s) that no Host protocol declares any more."
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_only_host_operations_build_no_session_context(
+    tmp_path: Path,
+) -> None:
+    """None of the read operations may resolve plugins, MCP or connectors."""
+    vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
+
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    project_cwd = str((tmp_path / "project").resolve())
+    (tmp_path / "project").mkdir()
+
+    session_contexts: list[str | None] = []
+    inner = _test_session_runtime_builder(config)
+
+    async def counting_session_context(
+        options: SessionOptions,
+        *,
+        require_api_key: bool = True,
+        entrypoint: Any = "cli",
+    ) -> Any:
+        session_contexts.append(options.cwd)
+        return await inner(
+            options, require_api_key=require_api_key, entrypoint=entrypoint
+        )
+
+    read_contexts: list[str | None] = []
+    inner_read_context = _read_context_builder(config, str(tmp_path))
+
+    async def build_read_context(options: SessionOptions) -> Any:
+        read_contexts.append(options.cwd)
+        return await inner_read_context(options)
+
+    host = adapt_harness_host(
+        vibe_runtime.create_harness_host(),
+        counting_session_context,
+        build_read_context=build_read_context,
+    )
+    # Starting a session is a lifecycle operation and may build one; the reads
+    # below are measured against a real stored session, not an empty store.
+    started = await host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=project_cwd))
+    )
+    session_id = started.backend.session_id
+    await started.backend.shutdown()
+    session_contexts.clear()
+
+    calls = {
+        "list": lambda: host.list(SessionListParams(cwd=project_cwd)),
+        "rename": lambda: host.rename(
+            SessionTitleUpdateParams(session_id=session_id, title="Renamed")
+        ),
+        "pin": lambda: host.pin(SessionPinParams(session_id=session_id, pinned=True)),
+        "delete": lambda: host.delete(SessionDeleteParams(session_id=session_id)),
+    }
+    assert set(calls) == _READ_ONLY_HOST_OPERATIONS
+
+    # A failed lookup still proves the invariant: the contexts are resolved
+    # before the operation can fail.
+    for name in ("list", "rename", "pin", "delete"):
+        resolved_before = len(read_contexts)
+        with contextlib.suppress(SessionBackendError):
+            await calls[name]()
+        assert len(read_contexts) > resolved_before, (
+            f"{name} never resolved a read context"
+        )
+        assert session_contexts == [], (
+            f"{name} built a session context: {session_contexts}"
+        )
+    await host.shutdown()
+
+
+def _read_context_builder(config: VibeConfigSchema, storage_root: str) -> Any:
+    from mistralai_vibe_local_harness.vibe import LegacyImportSource
+
+    from vibe.app_server._unified_harness_backend_adapter import UnifiedReadContext
+
+    orchestrator = FakeConfigOrchestrator(config)
+
+    def load_legacy_source(session_id: str) -> LegacyImportSource:
+        del session_id
+        return LegacyImportSource(state="absent")
+
+    def resolve_legacy_source(session_id: str) -> None:
+        del session_id
+        return None
+
+    async def build(options: SessionOptions) -> UnifiedReadContext:
+        del options
+        return UnifiedReadContext(
+            storage_root=storage_root,
+            config_orchestrator=cast(Any, orchestrator),
+            legacy_source_loader=load_legacy_source,
+            legacy_source_resolver=resolve_legacy_source,
+        )
+
+    return build
+
+
+@pytest.mark.asyncio
+async def test_listing_reads_the_narrow_context_not_a_session_context(
+    tmp_path: Path,
+) -> None:
+    """A listing must not build a session context."""
+    vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedReadContext,
+        adapt_harness_host,
+    )
+
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    project_cwd = str((tmp_path / "project").resolve())
+    (tmp_path / "project").mkdir()
+
+    session_contexts: list[str | None] = []
+    inner = _test_session_runtime_builder(config)
+
+    async def counting_session_context(
+        options: SessionOptions,
+        *,
+        require_api_key: bool = True,
+        entrypoint: Any = "cli",
+    ) -> Any:
+        session_contexts.append(options.cwd)
+        return await inner(
+            options, require_api_key=require_api_key, entrypoint=entrypoint
+        )
+
+    listing_contexts: list[str | None] = []
+    inner_read_context = _read_context_builder(config, str(tmp_path))
+
+    async def build_read_context(options: SessionOptions) -> UnifiedReadContext:
+        listing_contexts.append(options.cwd)
+        return await inner_read_context(options)
+
+    host = adapt_harness_host(
+        vibe_runtime.create_harness_host(),
+        counting_session_context,
+        build_read_context=build_read_context,
+    )
+    await host.list(SessionListParams(cwd=project_cwd))
+    await host.shutdown()
+
+    assert listing_contexts == [project_cwd]
+    assert session_contexts == []
+
+
+@pytest.mark.asyncio
+async def test_listing_falls_back_to_the_session_context_without_a_narrow_builder(
+    tmp_path: Path,
+) -> None:
+    """A host without the narrow builder still lists correctly, at the old cost."""
+    vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
+
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    project_cwd = str((tmp_path / "project").resolve())
+    (tmp_path / "project").mkdir()
+
+    session_contexts: list[str | None] = []
+    inner = _test_session_runtime_builder(config)
+
+    async def counting_session_context(
+        options: SessionOptions,
+        *,
+        require_api_key: bool = True,
+        entrypoint: Any = "cli",
+    ) -> Any:
+        session_contexts.append(options.cwd)
+        return await inner(
+            options, require_api_key=require_api_key, entrypoint=entrypoint
+        )
+
+    host = adapt_harness_host(
+        vibe_runtime.create_harness_host(), counting_session_context
+    )
+    await host.list(SessionListParams(cwd=project_cwd))
+    await host.shutdown()
+
+    assert session_contexts == [project_cwd]
+
+
 def _harness_backend_host(
     config: VibeConfigSchema | None = None,
     *,
@@ -7075,6 +9826,7 @@ def _test_session_runtime_builder(
     *,
     hooks: Any = None,
     system_instructions: Callable[[], str] | None = None,
+    storage_root: str | None = None,
 ) -> SessionContextBuilder:
     orchestrator = FakeConfigOrchestrator(config or build_test_vibe_config())
 
@@ -7162,11 +9914,17 @@ def _test_session_runtime_builder(
                 ),
                 core_config=core_config,
                 adapter_config=LocalRuntimeAdapterConfig(),
+                skill_payloads={},
             )
 
         plugins = await resolve_session_plugins(harness_files, builtin_plugin_roots=[])
         return UnifiedSessionContext(
-            storage_root=orchestrator.config.session_logging.save_dir,
+            storage_root=(
+                storage_root
+                if storage_root is not None
+                else orchestrator.config.session_logging.save_dir
+            ),
+            session_logging_enabled=orchestrator.config.session_logging.enabled,
             legacy_source_loader=load_legacy_source,
             legacy_source_resolver=resolve_legacy_source,
             plugins=plugins,
@@ -7357,6 +10115,7 @@ async def test_unified_config_reload_refreshes_the_layer_stack(
         runtime=build_unified_runtime_snapshot(orchestrator, agents),
         core_config=_stub_core_config(),
         adapter_config=_stub_adapter_config(),
+        skill_payloads={},
     )
     context = UnifiedSessionContext(
         storage_root=str(tmp_path),
@@ -7431,6 +10190,7 @@ async def test_unified_config_reload_reports_the_admin_config_outcome(
         runtime=build_unified_runtime_snapshot(orchestrator, agents),
         core_config=_stub_core_config(),
         adapter_config=_stub_adapter_config(),
+        skill_payloads={},
     )
     context = UnifiedSessionContext(
         storage_root=str(tmp_path),
@@ -7623,6 +10383,7 @@ async def test_unified_account_read_persists_reconciliation_but_defers_the_push(
         runtime=build_unified_runtime_snapshot(orchestrator, agents),
         core_config=_stub_core_config(),
         adapter_config=_stub_adapter_config(),
+        skill_payloads={},
     )
     context = UnifiedSessionContext(
         storage_root=str(tmp_path),
@@ -7886,6 +10647,144 @@ def _usage_state(
             ]
         ),
     )
+
+
+def test_unified_retry_state_emits_snapshot_and_compatibility_notification(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A running Unified session before and during a provider retry.
+    *Do*: Translate the retry start and clear snapshots.
+    *Assert*: Numbered snapshots carry both transitions and retry start keeps legacy parity.
+    """
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter = _stats_adapter(tmp_path)
+    idle = _usage_state(turn=PublicTurnStatus.IN_PROGRESS)
+    retry = PublicRetryState(
+        turn_id="turn-1", category=PublicRetryCategory.RATE_LIMITED, detail="HTTP 429"
+    )
+    retrying = idle.model_copy(update={"retrying": retry})
+
+    # Do
+    started, current = adapter._translate_snapshot_update(idle, retrying)
+    cleared, final = adapter._translate_snapshot_update(current, idle)
+
+    # Assert
+    assert [event.method for event in started] == ["session/snapshot", "turn/retrying"]
+    assert isinstance(started[0].event, SessionSnapshot)
+    assert started[0].event.state.retrying == retry
+    assert started[0].event.state.event_id == started[0].event_id
+    assert isinstance(started[1].event, TurnRetrying)
+    assert started[1].event.params.category is PublicRetryCategory.RATE_LIMITED
+    assert started[1].event_id is None
+    assert [event.method for event in cleared] == ["session/snapshot"]
+    assert isinstance(cleared[0].event, SessionSnapshot)
+    assert cleared[0].event.state.retrying is None
+    assert final.retrying is None
+
+
+def test_unified_snapshot_update_carrying_a_queue_change_emits_queue_event(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: Two Unified snapshots that differ only in the turn queue.
+    *Do*: Translate the second snapshot against the first.
+    *Assert*: The queue change is enveloped as ``turn/queueUpdated``.
+
+    The Harness stamps its turn queue onto every state event it publishes, so a
+    state update minted for some other reason can be the first place a queue
+    change is seen. ``reconcile_snapshot`` reports that as a queue event like
+    any other, and an envelope that cannot carry it takes the whole app-server
+    down with an unhandled ``TypeError``.
+    """
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter = _stats_adapter(tmp_path)
+    idle = _usage_state(turn=PublicTurnStatus.IN_PROGRESS)
+    queued = idle.model_copy(
+        update={
+            "turn_queue": PublicTurnQueue(
+                items=[
+                    PublicQueuedTurn(
+                        id="queue-1",
+                        created_at=2,
+                        entries=[
+                            TurnUserInputEntry(
+                                content=[SessionTextContentBlock(text="queued")]
+                            )
+                        ],
+                    )
+                ]
+            )
+        },
+        deep=True,
+    )
+
+    # Do
+    translated, current = adapter._translate_snapshot_update(idle, queued)
+
+    # Assert
+    assert [event.method for event in translated] == ["turn/queueUpdated"]
+    event = translated[0]
+    assert isinstance(event.event, TurnQueueUpdated)
+    assert event.session_id == _RecordingSession.session_id
+    assert [item.id for item in event.event.queue.items] == ["queue-1"]
+    assert current.turn_queue == queued.turn_queue
+
+
+@pytest.mark.asyncio
+async def test_unified_child_retry_state_emits_compatibility_notification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A registered child session before, during, and after a provider retry.
+    *Do*: Translate the child's retry start and clear state updates.
+    *Assert*: Retry start emits a child notification without exposing child snapshots.
+    """
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter = _stats_adapter(tmp_path)
+    idle = _usage_state(turn=PublicTurnStatus.IN_PROGRESS)
+    child_id = "session-child"
+    idle = idle.model_copy(
+        update={
+            "session": idle.session.model_copy(update={"id": child_id}),
+            "turns": [
+                turn.model_copy(update={"session_id": child_id})
+                for turn in idle.turns or []
+            ],
+        }
+    )
+    retry = PublicRetryState(
+        turn_id="turn-1", category=PublicRetryCategory.RATE_LIMITED, detail="HTTP 429"
+    )
+    retrying = idle.model_copy(update={"retrying": retry})
+    adapter._child_states[child_id] = idle
+    states = iter(((retrying, 1), (idle, 2)))
+    monkeypatch.setattr(
+        adapter, "_updated_state", lambda *_args, **_kwargs: next(states)
+    )
+    wrapper = {
+        "type": "child_session_event",
+        "sessionId": child_id,
+        "eventId": 1,
+        "event": {"type": "session_state_updated", "sessionId": child_id},
+    }
+
+    # Do
+    started, root, _ = await adapter._translate_child_event(wrapper, 20, _usage_state())
+    cleared, _final, _ = await adapter._translate_child_event(
+        {**wrapper, "eventId": 2}, 20, root
+    )
+
+    # Assert
+    notices = [event for event in started if event.method == "turn/retrying"]
+    assert len(notices) == 1
+    assert isinstance(notices[0].event, TurnRetrying)
+    assert notices[0].session_id == child_id
+    assert notices[0].event.params.category is PublicRetryCategory.RATE_LIMITED
+    assert notices[0].event_id is None
+    assert not any(isinstance(event.event, SessionSnapshot) for event in started)
+    assert cleared == []
+    assert adapter._child_states[child_id].retrying is None
 
 
 def test_unified_runtime_snapshot_prices_the_active_model() -> None:
@@ -8538,6 +11437,7 @@ async def test_lifecycle_telemetry_carries_the_full_plan_snapshot(
         runtime=build_unified_runtime_snapshot(orchestrator, agents),
         core_config=_stub_core_config(),
         adapter_config=_stub_adapter_config(),
+        skill_payloads={},
     )
     manager = ExperimentManager()
     manager.set_attributes(
@@ -8690,6 +11590,217 @@ async def test_ready_wait_blocks_on_the_connector_resolve(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_resume_replays_a_legacy_connector_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A real pre-fix journal written with a connector capability.
+    *Do*: Resume through deferred discovery and send another message.
+    *Assert*: One resume replays it, because connectors were configured first.
+    """
+    # Prepare
+    vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.vibe._runtime import DurableSessionRuntime
+    from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
+
+    from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
+
+    config = build_test_vibe_config(
+        enable_connectors=True,
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path)),
+    )
+    catalog_service = FakeConnectorCatalogService(
+        FakeConnectorRegistry(
+            connectors={
+                "github": [RemoteTool(name="search", description="Search GitHub")]
+            }
+        )
+    )
+    base_builder = _test_session_runtime_builder(config)
+
+    async def build_context(options: SessionOptions, **kwargs: Any) -> Any:
+        context = await base_builder(options, **kwargs)
+        catalog = await catalog_service.resolve_catalog(context.config_orchestrator)
+        return replace(
+            context,
+            connector_catalog=catalog,
+            connector_selection=catalog_service.resolve_selection(
+                context.config_orchestrator, catalog
+            ),
+            connector_catalog_service=catalog_service,
+        )
+
+    first_host = adapt_harness_host(vibe_runtime.create_harness_host(), build_context)
+    started = await first_host.start(SessionStartParams())
+    session_id = started.backend.session_id
+    # Drop the capability baseline to write the journal the way the Harness wrote it
+    # before this fix. The star absorbs it on a Harness new enough to pass one, so the
+    # store stays pre-fix whichever Harness the app server resolves.
+    persist = UnifiedSessionStore.record_core_input
+    monkeypatch.setattr(
+        UnifiedSessionStore,
+        "record_core_input",
+        lambda store, value, transition, *_baseline: persist(store, value, transition),
+    )
+
+    async def skip_compaction(_runtime: DurableSessionRuntime) -> bool:
+        return False
+
+    monkeypatch.setattr(DurableSessionRuntime, "_compact_store", skip_compaction)
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=session_id, message=[TextContentBlock(text="first message")]
+        )
+    )
+    await first_host.shutdown()
+
+    resolve_catalog = AsyncMock(wraps=catalog_service.resolve_catalog)
+    monkeypatch.setattr(catalog_service, "resolve_catalog", resolve_catalog)
+
+    async def build_deferred_context(options: SessionOptions, **kwargs: Any) -> Any:
+        context = await base_builder(options, **kwargs)
+        return replace(context, connector_catalog_service=catalog_service)
+
+    harness = vibe_runtime.create_harness_host()
+    harness_resume = AsyncMock(wraps=harness.resume)
+    monkeypatch.setattr(harness, "resume", harness_resume)
+    second_host = adapt_harness_host(harness, build_deferred_context)
+
+    # Do
+    resumed = await second_host.resume(SessionResumeParams(session_id=session_id))
+    accepted = await resumed.backend.start_turn(
+        TurnStartParams(
+            session_id=session_id, message=[TextContentBlock(text="second message")]
+        )
+    )
+    await second_host.shutdown()
+
+    # Assert
+    # Once: the eager pass put the connector routes in place, so the journal replayed
+    # on the first attempt and never needed the divergence retry.
+    assert harness_resume.await_count == 1
+    resolve_catalog.assert_awaited_once()
+    assert accepted.response.turn.session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_resume_configures_connector_routes_before_host_recovery(
+    tmp_path: Path,
+) -> None:
+    """Resume makes connector routes available before pending actions recover."""
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendHostAdapter,
+    )
+
+    # Prepare
+    events: list[str] = []
+    config = build_test_vibe_config(
+        enable_connectors=True,
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path)),
+    )
+    context = await _test_session_runtime_builder(config)(SessionOptions())
+    service = FakeConnectorCatalogService(
+        FakeConnectorRegistry(
+            connectors={
+                "github": [RemoteTool(name="search", description="Search GitHub")]
+            }
+        )
+    )
+    resolve_catalog = service.resolve_catalog
+
+    async def resolve(*args: Any, **kwargs: Any) -> Any:
+        events.append("resolve")
+        return await resolve_catalog(*args, **kwargs)
+
+    service.resolve_catalog = AsyncMock(side_effect=resolve)
+    context = replace(context, connector_catalog_service=service)
+    harness = Mock()
+    harness.configure_connectors.side_effect = lambda *_args, **_kwargs: events.append(
+        "configure"
+    )
+
+    async def resume(*_args: Any, **_kwargs: Any) -> _RecordingSession:
+        events.append("resume")
+        return _RecordingSession()
+
+    harness.resume = AsyncMock(side_effect=resume)
+    host = UnifiedHarnessBackendHostAdapter(cast(Any, harness), AsyncMock())
+
+    # Do
+    _session, resolved_context = await host._resume_harness("session-1", 100, context)
+
+    # Assert
+    assert events == ["resolve", "configure", "resume"]
+    assert resolved_context.connector_catalog is not None
+
+
+@pytest.mark.asyncio
+async def test_resume_retries_the_catalog_when_replay_diverges_without_it(
+    tmp_path: Path,
+) -> None:
+    """A transient catalog outage before recovery is retried once replay complains.
+
+    The eager pass is what normally carries a legacy store, so this covers the only
+    way the retry is reachable: discovery failed on the way in.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.vibe import HarnessReplayDivergenceError
+
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendHostAdapter,
+    )
+    from vibe.app_server.connector_catalog import ConnectorCatalogUnavailableError
+
+    # Prepare
+    events: list[str] = []
+    config = build_test_vibe_config(
+        enable_connectors=True,
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path)),
+    )
+    context = await _test_session_runtime_builder(config)(SessionOptions())
+    service = FakeConnectorCatalogService(
+        FakeConnectorRegistry(
+            connectors={
+                "github": [RemoteTool(name="search", description="Search GitHub")]
+            }
+        )
+    )
+    resolve_catalog = service.resolve_catalog
+
+    async def resolve(*args: Any, **kwargs: Any) -> Any:
+        events.append("resolve")
+        if events.count("resolve") == 1:
+            raise ConnectorCatalogUnavailableError("catalog is down")
+        return await resolve_catalog(*args, **kwargs)
+
+    service.resolve_catalog = AsyncMock(side_effect=resolve)
+    context = replace(context, connector_catalog_service=service)
+    harness = Mock()
+    harness.configure_connectors.side_effect = lambda *_args, **_kwargs: events.append(
+        "configure"
+    )
+    divergence = HarnessReplayDivergenceError("session-1", 7)
+    assert divergence.details is not None
+    divergence.details["capabilities_required"] = True
+
+    async def resume(*_args: Any, **_kwargs: Any) -> _RecordingSession:
+        events.append("resume")
+        if events.count("resume") == 1:
+            raise divergence
+        return _RecordingSession()
+
+    harness.resume = AsyncMock(side_effect=resume)
+    host = UnifiedHarnessBackendHostAdapter(cast(Any, harness), AsyncMock())
+
+    # Do
+    _session, resolved_context = await host._resume_harness("session-1", 100, context)
+
+    # Assert
+    assert events == ["resolve", "resume", "resolve", "configure", "resume"]
+    assert resolved_context.connector_catalog is not None
+
+
+@pytest.mark.asyncio
 async def test_ready_wait_reports_not_ready_when_connector_resolve_cancelled(
     tmp_path: Path,
 ) -> None:
@@ -8759,6 +11870,7 @@ async def test_fresh_start_telemetry_is_suppressed_after_close(
         runtime=build_unified_runtime_snapshot(orchestrator, agents),
         core_config=_stub_core_config(),
         adapter_config=_stub_adapter_config(),
+        skill_payloads={},
     )
     context = UnifiedSessionContext(
         storage_root=str(tmp_path),
@@ -8853,6 +11965,32 @@ async def test_completion_attribution_is_not_shared_between_forked_sessions(
     )
     assert source.adapter_config.request_headers()["x-affinity"] == "session-source"
     assert forked.adapter_config.request_headers()["x-affinity"] == "session-forked"
+
+
+@pytest.mark.asyncio
+async def test_completion_attribution_carries_message_id(tmp_path: Path) -> None:
+    """*Prepare*: An attribution source with a live message-id getter.
+    *Do*: Call the attribution for an agent completion.
+    *Assert*: The metadata dict carries the getter's current message id.
+    """
+    from vibe.app_server._completion_attribution import build_completion_attribution
+
+    current_id: list[str | None] = ["msg-123"]
+    attribution = build_completion_attribution(
+        TelemetryClient(
+            config_getter=build_test_vibe_config,
+            session_id_getter=lambda: "session-root",
+        ),
+        None,
+        message_id_getter=lambda: current_id[0],
+    )
+    metadata = attribution("agent", 0)
+    assert metadata["message_id"] == "msg-123"
+
+    # The getter is read live, so a later turn's id flows through.
+    current_id[0] = "msg-456"
+    metadata = attribution("agent", 0)
+    assert metadata["message_id"] == "msg-456"
 
 
 @pytest.mark.asyncio
@@ -9311,7 +12449,7 @@ async def test_a_turn_deferred_behind_a_cancelled_setup_is_refused(
     from vibe.app_server._session_backend_port import SessionBackendError
 
     adapter = _inert_adapter(
-        SimpleNamespace(session_id="session-1", cwd=str(tmp_path)),
+        _session_stub(session_id="session-1", cwd=str(tmp_path)),
         str(tmp_path),
         str(tmp_path),
     )
@@ -9332,13 +12470,840 @@ async def test_a_turn_deferred_behind_a_cancelled_setup_is_refused(
 
 
 @pytest.mark.asyncio
+async def test_first_turn_is_accepted_before_deferred_setup_finishes(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    session = _RecordingSession()
+    adapter = _inert_adapter(
+        session, str(tmp_path), str(tmp_path), deferred_turns=session
+    )
+    setup_started = asyncio.Event()
+
+    async def never_finishes() -> WorktreeResolution:
+        setup_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    adapter.defer_turns(never_finishes())
+    await setup_started.wait()
+
+    result = await asyncio.wait_for(
+        adapter.start_turn(
+            TurnStartParams(
+                session_id=session.session_id,
+                message=[TextContentBlock(text="hello")],
+                client_user_message_id="message-1",
+            )
+        ),
+        timeout=1,
+    )
+
+    assert result.response.turn.id == "turn-1"
+    assert hasattr(session, "deferred_turn_params")
+    assert not adapter._deferred_setup_task.done()
+
+    adapter._deferred_setup_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await adapter._deferred_setup_task
+
+
+@pytest.mark.asyncio
+async def test_deferred_turn_sets_client_message_id_before_reservation(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A deferred session whose reservation observes attribution state.
+    *Do*: Start the first turn with a client user-message identity.
+    *Assert*: Attribution contains that identity before the Harness reserves work.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    # Prepare
+    observed_message_ids: list[str | None] = []
+
+    class _AttributionAwareSession(_RecordingSession):
+        async def start_deferred_turn(
+            self, params: HarnessDeferredTurnStartParams
+        ) -> HarnessDeferredTurnStartResult:
+            observed_message_ids.append(adapter._message_id_holder[0])
+            return await super().start_deferred_turn(params)
+
+    session = _AttributionAwareSession()
+    adapter = _inert_adapter(
+        session, str(tmp_path), str(tmp_path), deferred_turns=session
+    )
+
+    async def setup() -> WorktreeResolution:
+        return WorktreeResolution(options=SessionOptions(cwd=str(tmp_path)))
+
+    adapter.defer_turns(setup())
+    params = TurnStartParams(
+        session_id=session.session_id,
+        message=[TextContentBlock(text="hello")],
+        client_user_message_id="message-1",
+    )
+
+    # Do
+    result = await adapter.start_turn(params)
+
+    # Assert
+    assert observed_message_ids == ["message-1"]
+    assert result.on_response_abandoned is not None
+    result.on_response_abandoned()
+
+
+@pytest.mark.asyncio
+async def test_deferred_worktree_retry_uses_a_distinct_effect_id(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A deferred worktree turn whose first response is abandoned.
+    *Do*: Retry the first turn while reusing the same session and request values.
+    *Assert*: The retry has a new effect ID and keeps it for terminal replacement.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    # Prepare
+    session = _RecordingSession()
+    adapter = _inert_adapter(
+        session, str(tmp_path), str(tmp_path), deferred_turns=session
+    )
+
+    async def setup() -> WorktreeResolution:
+        return WorktreeResolution(options=SessionOptions(cwd=str(tmp_path)))
+
+    adapter.defer_turns(setup(), worktree_progress=WorktreeProgress(name="feature"))
+    params = TurnStartParams(
+        session_id=session.session_id,
+        message=[TextContentBlock(text="hello")],
+        client_user_message_id="message-1",
+    )
+    first = await adapter.start_turn(params)
+    first_preparation = session.deferred_turn_params.prepare
+    first_entry_id = first_preparation.pending_history_entries[0].id
+    assert first.on_response_abandoned is not None
+    first.on_response_abandoned()
+
+    # Do
+    adapter._settle_reserved_turn_configuration = AsyncMock(
+        side_effect=RuntimeError("setup stopped")
+    )
+    second = await adapter.start_turn(params)
+    second_preparation = session.deferred_turn_params.prepare
+    second_entry_id = second_preparation.pending_history_entries[0].id
+    with pytest.raises(HarnessDeferredTurnPreparationError) as exc_info:
+        await second_preparation.run(
+            HarnessDeferredTurnPreparationContext(
+                session_id=session.session_id, turn_id="turn-1", started_at=0
+            )
+        )
+    failed_entry_id = exc_info.value.history_entries[0].id
+
+    # Assert
+    assert second_entry_id != first_entry_id
+    assert failed_entry_id == second_entry_id
+    assert second.on_response_abandoned is not None
+    second.on_response_abandoned()
+
+
+@pytest.mark.asyncio
+async def test_deferred_turn_persists_activity_metadata_after_promotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    class _EphemeralSession(_RecordingSession):
+        ephemeral = True
+
+    session = _EphemeralSession()
+    services = Mock()
+    services.notify = AsyncMock()
+    adapter = _inert_adapter(
+        session, str(tmp_path), str(tmp_path), services=services, deferred_turns=session
+    )
+    runtime_update = cast(Any, object())
+    monkeypatch.setattr(
+        adapter, "runtime_updated_params", Mock(return_value=runtime_update)
+    )
+    params = TurnStartParams(
+        session_id=session.session_id,
+        message=[TextContentBlock(text="hello")],
+        client_user_message_id="message-1",
+    )
+
+    async def setup() -> WorktreeResolution:
+        return WorktreeResolution(options=SessionOptions(cwd=str(tmp_path)))
+
+    monkeypatch.setattr(adapter, "_settle_reserved_turn_configuration", AsyncMock())
+    pin_active_model = AsyncMock(return_value=True)
+    monkeypatch.setattr(adapter, "_pin_session_active_model", pin_active_model)
+    monkeypatch.setattr(
+        adapter, "_prepared_turn_params", AsyncMock(return_value=params)
+    )
+    persist_scheduled_loops = AsyncMock()
+    monkeypatch.setattr(
+        adapter, "_persist_scheduled_loops_after_promotion", persist_scheduled_loops
+    )
+    adapter.defer_turns(setup())
+
+    result = await adapter.start_turn(params)
+
+    assert adapter._metadata is not None
+    accepted_bumped_at = adapter._metadata.bumped_at
+    meta_path = tmp_path / "unified" / session.session_id / "meta.json"
+    assert not meta_path.exists()
+    services.notify.assert_not_awaited()
+    assert result.after_response is not None
+    result.after_response()
+
+    preparation = session.deferred_turn_params.prepare
+    prepared = await preparation.run(
+        HarnessDeferredTurnPreparationContext(
+            session_id=session.session_id, turn_id="turn-1", started_at=0
+        )
+    )
+    services.notify.assert_awaited_once_with("runtime/updated", runtime_update)
+    session.ephemeral = False
+    assert prepared.after_promotion is not None
+    await prepared.after_promotion()
+
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert metadata["bumped_at"] == accepted_bumped_at
+    pin_active_model.assert_awaited_once_with()
+    persist_scheduled_loops.assert_awaited_once_with(was_ephemeral=True)
+
+
+@pytest.mark.asyncio
+async def test_abandoned_deferred_turn_releases_claim_for_retry(tmp_path: Path) -> None:
+    """A dropped deferred response releases both adapter and Harness reservations."""
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    class _AbandonableSession(_RecordingSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.abandoned = False
+            self.deferred_starts = 0
+
+        async def start_deferred_turn(
+            self, params: HarnessDeferredTurnStartParams
+        ) -> HarnessDeferredTurnStartResult:
+            self.deferred_starts += 1
+            result = await super().start_deferred_turn(params)
+
+            def abandon() -> None:
+                self.abandoned = True
+
+            return HarnessDeferredTurnStartResult(
+                turn_id=result.turn_id,
+                session_id=result.session_id,
+                started_at=result.started_at,
+                last_event_id=result.last_event_id,
+                after_response=result.after_response,
+                on_response_abandoned=abandon,
+            )
+
+        async def start_turn(self, params: Any) -> Any:
+            raise AssertionError("retry must use the deferred path")
+
+    session = _AbandonableSession()
+    adapter = _inert_adapter(
+        session, str(tmp_path), str(tmp_path), deferred_turns=session
+    )
+    setup_started = asyncio.Event()
+
+    async def never_finishes() -> WorktreeResolution:
+        setup_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    adapter.defer_turns(never_finishes())
+    await setup_started.wait()
+    params = TurnStartParams(
+        session_id=session.session_id,
+        message=[TextContentBlock(text="hello")],
+        client_user_message_id="message-1",
+    )
+
+    first = await adapter.start_turn(params)
+    assert first.on_response_abandoned is not None
+    first.on_response_abandoned()
+    second = await adapter.start_turn(params)
+
+    assert session.abandoned
+    assert session.deferred_starts == 2
+    assert second.on_response_abandoned is not None
+    assert adapter._deferred_turn_claimed
+    adapter._deferred_setup_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await adapter._deferred_setup_task
+
+
+@pytest.mark.parametrize(
+    "response_callback",
+    ["after_response", "on_response_abandoned"],
+    ids=["delivered", "abandoned"],
+)
+@pytest.mark.asyncio
+async def test_interrupting_deferred_setup_releases_claim_for_retry(
+    tmp_path: Path, response_callback: str
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    class _InterruptibleSession(_RecordingSession):
+        ephemeral = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.deferred_starts = 0
+            self.interrupted = False
+
+        async def start_deferred_turn(
+            self, params: HarnessDeferredTurnStartParams
+        ) -> HarnessDeferredTurnStartResult:
+            self.deferred_starts += 1
+            result = await super().start_deferred_turn(params)
+
+            def after_response() -> None:
+                self.reserved_turn_id = result.turn_id
+
+            return HarnessDeferredTurnStartResult(
+                turn_id=result.turn_id,
+                session_id=result.session_id,
+                started_at=result.started_at,
+                last_event_id=result.last_event_id,
+                after_response=after_response,
+                on_response_abandoned=result.on_response_abandoned,
+            )
+
+        async def interrupt_turn(self, params: Any) -> Any:
+            assert self.reserved_turn_id == params.expected_turn_id
+            self.reserved_turn_id = None
+            response_settled = False
+
+            def settle_response() -> None:
+                nonlocal response_settled
+                if response_settled:
+                    return
+                response_settled = True
+                self.interrupted = True
+
+            return SimpleNamespace(
+                response={"accepted": True, "last_event_id": 0},
+                after_response=settle_response,
+                on_response_abandoned=settle_response,
+            )
+
+    session = _InterruptibleSession()
+    adapter = _inert_adapter(
+        session, str(tmp_path), str(tmp_path), deferred_turns=session
+    )
+    setup_started = asyncio.Event()
+
+    async def never_finishes() -> WorktreeResolution:
+        setup_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    adapter.defer_turns(never_finishes())
+    await setup_started.wait()
+    params = TurnStartParams(
+        session_id=session.session_id,
+        message=[TextContentBlock(text="hello")],
+        client_user_message_id="message-1",
+    )
+
+    first = await adapter.start_turn(params)
+    assert first.after_response is not None
+    first.after_response()
+    interrupted = await adapter.interrupt_turn(
+        TurnInterruptParams(
+            session_id=session.session_id, expected_turn_id=first.response.turn.id
+        )
+    )
+
+    assert adapter._deferred_turn_claimed
+    callback = getattr(interrupted, response_callback)
+    assert callback is not None
+    callback()
+    assert session.interrupted
+    assert not adapter._deferred_turn_claimed
+
+    second = await adapter.start_turn(params)
+    assert session.deferred_starts == 2
+    assert second.on_response_abandoned is not None
+    adapter._deferred_setup_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await adapter._deferred_setup_task
+
+
+@pytest.mark.asyncio
+async def test_later_turn_preparation_failure_keeps_created_worktree_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure after workspace setup must not report worktree creation as failed."""
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    session = _RecordingSession()
+    adapter = _inert_adapter(
+        session, str(tmp_path), str(tmp_path), deferred_turns=session
+    )
+    worktree_root = tmp_path / "created-worktree"
+    prepared = PreparedWorktree(
+        name="created-worktree",
+        branch="vibe/created-worktree",
+        root=worktree_root,
+        path=worktree_root,
+        repo_root=tmp_path,
+        base_commit="base",
+        created=True,
+        branch_created=True,
+    )
+
+    async def setup() -> WorktreeResolution:
+        return WorktreeResolution(
+            options=SessionOptions(cwd=str(worktree_root)), prepared_worktree=prepared
+        )
+
+    later_error = RuntimeError("prompt preparation failed")
+
+    async def fail_after_worktree() -> None:
+        raise later_error
+
+    monkeypatch.setattr(
+        adapter, "_settle_reserved_turn_configuration", fail_after_worktree
+    )
+    adapter.defer_turns(setup(), worktree_progress=WorktreeProgress(name=prepared.name))
+    await adapter.start_turn(
+        TurnStartParams(
+            session_id=session.session_id,
+            message=[TextContentBlock(text="hello")],
+            client_user_message_id="message-1",
+        )
+    )
+    preparation = session.deferred_turn_params.prepare
+
+    with pytest.raises(HarnessDeferredTurnPreparationError) as exc_info:
+        await preparation.run(
+            HarnessDeferredTurnPreparationContext(
+                session_id=session.session_id, turn_id="turn-1", started_at=0
+            )
+        )
+
+    entry = PublicEffectEntry.model_validate(
+        exc_info.value.history_entries[0], from_attributes=True
+    )
+    assert isinstance(entry.state, CompletedEffectState)
+    assert entry.state.display.message == "created-worktree on vibe/created-worktree"
+
+
+@pytest.mark.asyncio
+async def test_reused_worktree_is_not_reported_as_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A named worktree already linked elsewhere is reported as reused."""
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    session = _RecordingSession()
+    adapter = _inert_adapter(
+        session, str(tmp_path), str(tmp_path), deferred_turns=session
+    )
+    worktree_root = tmp_path / "existing-worktree"
+    prepared = PreparedWorktree(
+        name="existing-worktree",
+        branch="vibe/existing-worktree",
+        root=worktree_root,
+        path=worktree_root,
+        repo_root=tmp_path,
+        base_commit="base",
+        created=False,
+        branch_created=False,
+    )
+
+    async def setup() -> WorktreeResolution:
+        return WorktreeResolution(
+            options=SessionOptions(cwd=str(worktree_root)), prepared_worktree=prepared
+        )
+
+    params = TurnStartParams(
+        session_id=session.session_id,
+        message=[TextContentBlock(text="hello")],
+        client_user_message_id="message-1",
+    )
+    monkeypatch.setattr(adapter, "_settle_reserved_turn_configuration", AsyncMock())
+    monkeypatch.setattr(
+        adapter, "_pin_session_active_model", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        adapter, "_prepared_turn_params", AsyncMock(return_value=params)
+    )
+    adapter.defer_turns(setup(), worktree_progress=WorktreeProgress(name=prepared.name))
+    await adapter.start_turn(params)
+    prepared_result = await session.deferred_turn_params.prepare.run(
+        HarnessDeferredTurnPreparationContext(
+            session_id=session.session_id, turn_id="turn-1", started_at=0
+        )
+    )
+
+    entry = PublicEffectEntry.model_validate(
+        prepared_result.history_entries[0], from_attributes=True
+    )
+    assert isinstance(entry.state, CompletedEffectState)
+    assert entry.detail.display.settled_verb == "Reused"
+    assert entry.state.display.verb == "Reused"
+    assert entry.state.display.message == "existing-worktree on vibe/existing-worktree"
+
+
+@pytest.mark.asyncio
+async def test_missing_deferred_turn_capability_waits_for_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A Harness version without deferred-turn APIs and blocked setup.
+    *Do*: Apply the moved context and start the first turn.
+    *Assert*: Configuration uses the old signature and the turn waits for setup.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    # Prepare
+    session = _RecordingSession()
+    applied_configurations: list[tuple[object, object, object]] = []
+
+    async def apply_runtime_configuration(
+        settings: object,
+        adapter_config: object,
+        capabilities: object,
+        *,
+        plugins: tuple[object, ...] | None = None,
+    ) -> None:
+        del plugins
+        applied_configurations.append((settings, adapter_config, capabilities))
+
+    monkeypatch.setattr(
+        session, "apply_runtime_configuration", apply_runtime_configuration
+    )
+    adapter, _ = await _unified_adapter_with_real_context(tmp_path, session)
+    await adapter.adopt_context(adapter._context)
+    setup_started = asyncio.Event()
+    release_setup = asyncio.Event()
+
+    async def setup() -> WorktreeResolution:
+        setup_started.set()
+        await release_setup.wait()
+        return WorktreeResolution(options=SessionOptions(cwd=str(tmp_path)))
+
+    adapter.defer_turns(setup())
+    await setup_started.wait()
+
+    # Do
+    starting = asyncio.create_task(
+        adapter.start_turn(
+            TurnStartParams(
+                session_id=session.session_id,
+                message=[TextContentBlock(text="hello")],
+                client_user_message_id="message-1",
+            )
+        )
+    )
+    await asyncio.sleep(0)
+
+    # Assert
+    assert applied_configurations
+    assert not starting.done()
+    release_setup.set()
+    result = await asyncio.wait_for(starting, timeout=1)
+    assert result.response.turn.id == "turn-1"
+    assert not hasattr(session, "deferred_turn_params")
+
+
+@pytest.mark.asyncio
+async def test_first_turn_after_enqueue_skips_deferred_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A deferred session promoted by enqueueing its first turn.
+    *Do*: Start another turn after workspace setup finishes.
+    *Assert*: The promoted session uses the normal start path.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    class _PromotedSession(_RecordingSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ephemeral = True
+
+        async def enqueue_turn(self, params: Any) -> Any:
+            result = await super().enqueue_turn(params)
+            self.ephemeral = False
+            return result
+
+        async def start_deferred_turn(
+            self, params: HarnessDeferredTurnStartParams
+        ) -> HarnessDeferredTurnStartResult:
+            if not self.ephemeral:
+                raise RuntimeError(
+                    "Deferred turn preparation requires an ephemeral session"
+                )
+            return await super().start_deferred_turn(params)
+
+    # Prepare
+    session = _PromotedSession()
+    adapter, _ = await _unified_adapter_with_real_context(
+        tmp_path, session, deferred_turns=session
+    )
+
+    async def setup() -> WorktreeResolution:
+        return WorktreeResolution(options=SessionOptions(cwd=str(tmp_path)))
+
+    adapter.defer_turns(setup())
+    await adapter.enqueue_turn(
+        TurnEnqueueParams(
+            session_id=session.session_id,
+            entries=[
+                TurnUserInputEntry(content=[SessionTextContentBlock(text="queued")])
+            ],
+        )
+    )
+
+    # Do
+    result = await adapter.start_turn(
+        TurnStartParams(
+            session_id=session.session_id,
+            message=[TextContentBlock(text="hello")],
+            client_user_message_id="message-1",
+        )
+    )
+
+    # Assert
+    assert result.response.turn.id == "turn-1"
+    assert not hasattr(session, "deferred_turn_params")
+    assert session.ephemeral is False
+
+
+@pytest.mark.asyncio
+async def test_deferred_start_falls_back_when_concurrent_promotion_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    class _PromotedDuringDeferredStartSession(_RecordingSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ephemeral = True
+            self.deferred_starts = 0
+            self.normal_starts = 0
+
+        async def start_deferred_turn(
+            self, params: HarnessDeferredTurnStartParams
+        ) -> HarnessDeferredTurnStartResult:
+            del params
+            self.deferred_starts += 1
+            self.ephemeral = False
+            raise RuntimeError(
+                "Deferred turn preparation requires an ephemeral session"
+            )
+
+        async def start_turn(self, params: Any) -> Any:
+            self.normal_starts += 1
+            return await super().start_turn(params)
+
+    session = _PromotedDuringDeferredStartSession()
+    adapter = _inert_adapter(
+        session, str(tmp_path), str(tmp_path), deferred_turns=session
+    )
+    params = TurnStartParams(
+        session_id=session.session_id,
+        message=[TextContentBlock(text="hello")],
+        client_user_message_id="message-1",
+    )
+
+    async def setup() -> WorktreeResolution:
+        return WorktreeResolution(options=SessionOptions(cwd=str(tmp_path)))
+
+    monkeypatch.setattr(adapter, "_settle_reserved_turn_configuration", AsyncMock())
+    monkeypatch.setattr(
+        adapter, "_pin_session_active_model", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        adapter, "_prepared_turn_params", AsyncMock(return_value=params)
+    )
+    monkeypatch.setattr(
+        adapter, "_persist_scheduled_loops_after_promotion", AsyncMock()
+    )
+    monkeypatch.setattr(
+        adapter, "_persist_session_metadata_after_promotion", AsyncMock()
+    )
+    adapter.defer_turns(setup())
+
+    result = await adapter.start_turn(params)
+
+    assert result.response.turn.id == "turn-1"
+    assert session.deferred_starts == 1
+    assert session.normal_starts == 1
+    assert not adapter._deferred_turn_claimed
+
+
+@pytest.mark.asyncio
+async def test_pending_derivation_flushes_across_a_reserved_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A parked derivation and a reserved worktree setup turn.
+    *Do*: Attempt the idle push, then settle during deferred turn preparation.
+    *Assert*: Only the settle applies configuration across the reservation. A
+    reserved turn reads as running, so the idle push parks rather than landing
+    on a turn that has not started.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    # Prepare
+    session = _RecordingSession()
+    session.reserved_turn_id = "turn-reserved"
+    adapter, derivation = await _unified_adapter_with_real_context(
+        tmp_path, session, deferred_turns=session
+    )
+    adapter._deferred.park()
+
+    # Do
+    await adapter._apply_derivation_when_idle()
+    await adapter._settle_reserved_turn_configuration()
+
+    # Assert
+    assert session.allow_reserved_flags == [True]
+    assert len(session.settings) == 1
+    assert session.system_instructions == [derivation.core_config.system_instructions]
+
+
+@pytest.mark.asyncio
+async def test_a_pick_settled_for_a_reserved_turn_is_announced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A parked pick and a reserved worktree setup turn.
+    *Do*: Settle during deferred turn preparation.
+    *Assert*: ``runtime/updated`` is emitted. The write that parked the pick
+    answered ``pending``, and a reserved turn never reaches the boundary the
+    other settle announces from, so subscribers would otherwise be left on the
+    outgoing model for the whole of the turn that is about to run.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    # Prepare
+    session = _RecordingSession()
+    session.reserved_turn_id = "turn-reserved"
+    services = Mock()
+    services.notify = AsyncMock()
+    adapter, _ = await _unified_adapter_with_real_context(
+        tmp_path, session, deferred_turns=session, services=services
+    )
+    adapter._deferred.park()
+
+    # Do
+    await adapter._settle_reserved_turn_configuration()
+
+    # Assert
+    services.notify.assert_awaited_once()
+    assert services.notify.await_args.args[0] == "runtime/updated"
+
+
+@pytest.mark.asyncio
+async def test_a_reserved_turn_settle_waits_for_an_apply_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A turn reserved for workspace setup, and an apply already
+    mid-derive -- so the parked flag is clear while its push is still coming.
+    *Do*: Settle for the reserved turn, as deferred turn preparation does.
+    *Assert*: It waits for that apply, finds what the apply re-parked, and
+    lands it. Reading the flag outside the lock steps past a push in flight,
+    and the reserved turn then runs on the configuration being replaced.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    # Prepare
+    session = _RecordingSession()
+    session.reserved_turn_id = "turn-reserved"
+    adapter, _ = await _unified_adapter_with_real_context(
+        tmp_path, session, deferred_turns=session
+    )
+    release = asyncio.Event()
+    # Patched on the deferred configuration, not the adapter: it captured the
+    # bound method when it was built, so patching the adapter gates nothing.
+    derive = adapter._deferred._derive
+
+    async def gated_derive() -> Any:
+        await release.wait()
+        return await derive()
+
+    monkeypatch.setattr(adapter._deferred, "_derive", gated_derive)
+    adapter._deferred.park()
+    in_flight = asyncio.create_task(adapter._deferred.apply())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    # Do
+    settling = asyncio.create_task(adapter._settle_reserved_turn_configuration())
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(in_flight, settling)
+
+    # Assert
+    assert session.allow_reserved_flags == [True]
+    assert len(session.settings) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_parked_writes_projection_waits_for_the_configuration_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A running turn, so the write parks, and the configuration
+    lock held by another caller.
+    *Do*: Apply the written config.
+    *Assert*: The projection waits for the lock. Derived off-lock, it can be
+    computed before a settle adopts a newer configuration and assigned after,
+    leaving the session reporting a runtime it is no longer running.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    # Prepare
+    session = _RecordingSession()
+    session.active_turn_id = "turn-1"
+    adapter, _ = await _unified_adapter_with_real_context(tmp_path, session)
+    released = asyncio.Event()
+
+    async def hold_the_lock() -> None:
+        async with adapter._deferred.exclusive():
+            await released.wait()
+
+    holding = asyncio.create_task(hold_the_lock())
+    await asyncio.sleep(0)
+
+    # Do
+    writing = asyncio.create_task(adapter._apply_written_config())
+    # Long enough for an off-lock derivation to finish and assign: the point is
+    # that no wait makes it finish while another caller holds the lock.
+    await asyncio.sleep(0.1)
+
+    # Assert
+    assert writing.done() is False
+
+    released.set()
+    await asyncio.gather(holding, writing)
+    assert adapter._deferred.parked is True
+
+
+@pytest.mark.asyncio
 async def test_a_queued_turn_waits_behind_the_same_gate(tmp_path: Path) -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
 
     from vibe.app_server._session_backend_port import SessionBackendError
 
     adapter = _inert_adapter(
-        SimpleNamespace(session_id="session-1", cwd=str(tmp_path)),
+        _session_stub(session_id="session-1", cwd=str(tmp_path)),
         str(tmp_path),
         str(tmp_path),
     )
@@ -9379,7 +13344,7 @@ async def test_a_turn_is_refused_when_the_setup_failed(tmp_path: Path) -> None:
     from vibe.app_server._session_backend_port import SessionBackendError
 
     adapter = _inert_adapter(
-        SimpleNamespace(session_id="session-1", cwd=str(tmp_path)),
+        _session_stub(session_id="session-1", cwd=str(tmp_path)),
         str(tmp_path),
         str(tmp_path),
     )
@@ -9463,3 +13428,444 @@ async def test_unified_host_still_reports_a_session_neither_store_has(
         assert exc_info.value.error.code is ProtocolErrorCode.NOT_FOUND
     finally:
         await server.close()
+
+
+@pytest.mark.asyncio
+async def test_unified_pin_updates_legacy_session_and_projects_saved_pin(
+    tmp_path: Path,
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    legacy = build_test_agent_loop(config=config, cwd=tmp_path)
+    legacy.messages.append(LLMMessage(role=Role.user, content="legacy hello"))
+    await legacy.session_logger.save_interaction(
+        legacy.messages,
+        legacy.stats,
+        legacy.config,
+        legacy.tool_manager,
+        legacy.agent_profile,
+    )
+    session_id = legacy.session_id
+    await legacy.aclose()
+    host = _harness_backend_host(config)
+    try:
+        assert isinstance(host, SessionBackendHostPin)
+        pinned = await host.pin(SessionPinParams(session_id=session_id, pinned=True))
+        repeated = await host.pin(SessionPinParams(session_id=session_id, pinned=True))
+        assert pinned.pinned_at is not None
+        assert repeated.pinned_at == pinned.pinned_at
+        listed = await host.list(SessionListParams(pinned=True))
+        assert [(item.id, item.pinned_at) for item in listed.items] == [
+            (session_id, pinned.pinned_at)
+        ]
+        read = await host.read(SessionReadParams(session_id=session_id))
+        assert read.state.session.pinned_at == pinned.pinned_at
+        unpinned = await host.pin(SessionPinParams(session_id=session_id, pinned=False))
+        assert unpinned.pinned_at is None
+        assert (await host.list(SessionListParams(pinned=True))).items == []
+        with pytest.raises(SessionBackendError) as error:
+            await host.pin(SessionPinParams(session_id="missing-session", pinned=True))
+        assert error.value.code is ProtocolErrorCode.NOT_FOUND
+    finally:
+        await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unified_list_interleaves_pin_filtered_cursor_walks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibe.app_server import _unified_harness_backend_adapter as adapter_module
+    from vibe.core.session.resume_sessions import ResumeSessionInfo
+
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    stored = [
+        ResumeSessionInfo(
+            session_id=f"legacy-{index}",
+            cwd=str(tmp_path),
+            title=f"title {index}",
+            updated_at=f"2026-01-01T00:00:{index:02d}",
+            pinned_at="2026-01-01T00:00:00Z" if index % 2 else None,
+        )
+        for index in range(6)
+    ]
+    monkeypatch.setattr(
+        adapter_module, "list_local_resume_sessions", lambda _config, _cwd: stored
+    )
+    host = _harness_backend_host(config)
+    try:
+        pinned = await host.list(SessionListParams(pinned=True, limit=1))
+        unpinned = await host.list(SessionListParams(pinned=False, limit=1))
+        assert pinned.next_cursor is not None
+        assert unpinned.next_cursor is not None
+        pinned_next = await host.list(
+            SessionListParams(pinned=True, limit=10, cursor=pinned.next_cursor)
+        )
+        unpinned_next = await host.list(
+            SessionListParams(pinned=False, limit=10, cursor=unpinned.next_cursor)
+        )
+        assert [item.id for item in pinned.items + pinned_next.items] == [
+            "legacy-5",
+            "legacy-3",
+            "legacy-1",
+        ]
+        assert [item.id for item in unpinned.items + unpinned_next.items] == [
+            "legacy-4",
+            "legacy-2",
+            "legacy-0",
+        ]
+    finally:
+        await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_disabled_session_logging_keeps_the_context_off_the_save_dir(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    save_dir = tmp_path / "sessions"
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["session_logging"] = {"enabled": False, "save_dir": str(save_dir)}
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    process = runtime_module.HarnessProcess(experimental_harness=True)
+    try:
+        # Do
+        first = await process.build_unified_session_context(
+            SessionOptions(cwd=str(tmp_path))
+        )
+        second = await process.build_unified_session_context(
+            SessionOptions(cwd=str(tmp_path))
+        )
+
+        # Assert
+        root = Path(first.storage_root)
+        assert first.session_logging_enabled is False
+        assert root.is_dir()
+        assert root != save_dir and save_dir not in root.parents
+        assert second.storage_root == first.storage_root
+    finally:
+        await process.close()
+
+    assert not root.exists()
+    assert not (save_dir / "unified").exists()
+
+
+@pytest.mark.asyncio
+async def test_enabled_session_logging_still_uses_the_configured_save_dir(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    save_dir = tmp_path / "sessions"
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["session_logging"] = {"enabled": True, "save_dir": str(save_dir)}
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    process = runtime_module.HarnessProcess(experimental_harness=True)
+    try:
+        context = await process.build_unified_session_context(
+            SessionOptions(cwd=str(tmp_path))
+        )
+    finally:
+        await process.close()
+
+    assert context.storage_root == str(save_dir)
+    assert context.session_logging_enabled is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_logging_enabled", [True, False])
+async def test_session_log_summary_and_store_follow_session_logging_enabled(
+    tmp_path: Path, session_logging_enabled: bool
+) -> None:
+    # Prepare
+    vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
+
+    save_dir = tmp_path / "sessions"
+    throwaway = tmp_path / "throwaway"
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=session_logging_enabled, save_dir=str(save_dir)
+        )
+    )
+    host = adapt_harness_host(
+        vibe_runtime.create_harness_host(),
+        _test_session_runtime_builder(
+            config, storage_root=str(save_dir if session_logging_enabled else throwaway)
+        ),
+    )
+    try:
+        started = await host.start(SessionStartParams())
+        backend = cast(Any, started.backend)
+
+        # Do
+        turn = await backend.start_turn(
+            TurnStartParams(
+                session_id=backend.session_id, message=[TextContentBlock(text="hello")]
+            )
+        )
+        summary = await backend._session_log_summary()
+
+        # Assert
+        assert turn.response.turn.id is not None
+        assert summary.enabled is session_logging_enabled
+        assert summary.persisted is session_logging_enabled
+        session_id = backend.session_id
+    finally:
+        await host.shutdown()
+
+    if session_logging_enabled:
+        assert summary.path == str(save_dir / "unified" / session_id)
+        assert (save_dir / "unified" / session_id / "CURRENT").is_file()
+        assert (save_dir / "unified" / session_id / "meta.json").is_file()
+    else:
+        assert summary.path is None
+        assert not (save_dir / "unified").exists()
+        assert (throwaway / "unified" / session_id / "CURRENT").is_file()
+        # The summary says the session is not persisted, so the writers that
+        # answer to the same question must not have run either.
+        assert not (throwaway / "unified" / session_id / "meta.json").exists()
+        assert not (
+            throwaway / "unified" / session_id / "scheduled-loops.json"
+        ).exists()
+
+
+@pytest.mark.asyncio
+async def test_disabled_session_logging_store_is_removed_when_the_session_closes(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    save_dir = tmp_path / "sessions"
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["session_logging"] = {"enabled": False, "save_dir": str(save_dir)}
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    process = runtime_module.HarnessProcess(experimental_harness=True)
+    client_transport, server_transport = memory_transport_pair()
+    harness = await runtime_module.create_harness_server(
+        server_transport, transport_kind="in_process", process=process
+    )
+    client = AppServerClient(client_transport, run_peer=harness.serve)
+    session = await AppServerSession.start(
+        client,
+        client_info=ClientInfo(name="test", version="0"),
+        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(cwd=str(tmp_path)),
+    )
+    root = process._throwaway_storage_root.current
+    assert root is not None and root.is_dir()
+
+    # Do — closing the session is as far out as the TUI and ``vibe -p`` get, so
+    # ``HarnessProcess.close`` is deliberately never called.
+    await session.close()
+
+    # Assert
+    assert not root.exists()
+    assert not (save_dir / "unified").exists()
+
+
+async def _disabled_logging_session(
+    process: runtime_module.HarnessProcess, cwd: Path
+) -> AppServerSession:
+    client_transport, server_transport = memory_transport_pair()
+    harness = await runtime_module.create_harness_server(
+        server_transport, transport_kind="in_process", process=process
+    )
+    return await AppServerSession.start(
+        AppServerClient(client_transport, run_peer=harness.serve),
+        client_info=ClientInfo(name="test", version="0"),
+        capabilities=ClientCapabilities(),
+        session_options=SessionOptions(cwd=str(cwd)),
+    )
+
+
+def _write_disabled_session_logging(config_dir: Path, save_dir: Path) -> None:
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["session_logging"] = {"enabled": False, "save_dir": str(save_dir)}
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_disabled_session_logging_builds_a_fresh_store_after_the_last_release(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Prepare — ACP keeps one HarnessProcess across close_session / new_session,
+    # so releasing the store on a stop must not stop the next session getting one.
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    save_dir = tmp_path / "sessions"
+    _write_disabled_session_logging(config_dir, save_dir)
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    process = runtime_module.HarnessProcess(experimental_harness=True)
+    try:
+        lease = process._throwaway_storage_root.lease()
+        first = await process.build_unified_session_context(
+            SessionOptions(cwd=str(tmp_path))
+        )
+        first_root = Path(first.storage_root)
+        assert first_root.is_dir()
+
+        # Do
+        lease.release()
+        assert not first_root.exists()
+        second = await process.build_unified_session_context(
+            SessionOptions(cwd=str(tmp_path))
+        )
+
+        # Assert
+        second_root = Path(second.storage_root)
+        assert second_root.is_dir()
+        assert second_root != first_root
+    finally:
+        await process.close()
+
+    assert not (save_dir / "unified").exists()
+
+
+def test_releasing_one_throwaway_lease_twice_leaves_the_other_holder_alone() -> None:
+    # Prepare — `session/stop` and a later disconnect each shut the same app
+    # server's host down, so one lease is released twice while a second app
+    # server still holds the store.
+    root = runtime_module.ThrowawayStorageRoot()
+    first = root.lease()
+    second = root.lease()
+    path = root.path()
+    assert path.is_dir()
+
+    # Do
+    first.release()
+    first.release()
+
+    # Assert
+    assert path.is_dir()
+    assert root.current == path
+    second.release()
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_disabled_session_logging_keeps_the_store_while_a_session_still_holds_it(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    save_dir = tmp_path / "sessions"
+    _write_disabled_session_logging(config_dir, save_dir)
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    process = runtime_module.HarnessProcess(experimental_harness=True)
+    try:
+        first = await _disabled_logging_session(process, tmp_path)
+        second = await _disabled_logging_session(process, tmp_path)
+        root = process._throwaway_storage_root.current
+        assert root is not None and root.is_dir()
+
+        # Do
+        await first.close()
+
+        # Assert — the second session is still writing into this directory.
+        assert root.is_dir()
+        await second.close()
+        assert not root.exists()
+    finally:
+        await process.close()
+
+    assert not (save_dir / "unified").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lifecycle", ["resume", "continue"])
+async def test_disabled_session_logging_refuses_to_reopen_a_stored_session(
+    tmp_path: Path, lifecycle: str
+) -> None:
+    # Prepare
+    vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
+
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=False, save_dir=str(tmp_path / "sessions")
+        )
+    )
+    host = adapt_harness_host(
+        vibe_runtime.create_harness_host(),
+        _test_session_runtime_builder(config, storage_root=str(tmp_path / "throwaway")),
+    )
+
+    try:
+        # Do
+        with pytest.raises(SessionBackendError) as caught:
+            if lifecycle == "resume":
+                await host.resume(SessionResumeParams(session_id="stored-session"))
+            else:
+                await host.continue_latest(SessionContinueParams())
+    finally:
+        await host.shutdown()
+
+    # Assert
+    assert caught.value.code == ProtocolErrorCode.NOT_FOUND
+    assert "Session logging is disabled" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_disabled_session_logging_inlines_mentioned_images(
+    tmp_path: Path,
+) -> None:
+    # Prepare
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    (tmp_path / "shot.png").write_bytes(image_bytes)
+    save_dir = tmp_path / "sessions"
+    config = build_test_vibe_config(
+        active_model="local",
+        session_logging=SessionLoggingConfig(enabled=False, save_dir=str(save_dir)),
+    )
+    client, server = _connect_harness_host(config)
+    await client.initialize(ClientInfo(name="test", version="0"))
+    await client.notify("initialized")
+    started = SessionReadResponse.model_validate(
+        await client.request(
+            "session/start",
+            SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path))),
+        )
+    )
+
+    try:
+        # Do
+        response = WorkspacePromptPrepareResponse.model_validate(
+            await client.request(
+                "workspace/prompt/prepare",
+                WorkspacePromptPrepareParams(
+                    session_id=started.state.session.id, message="look at @shot.png"
+                ),
+            )
+        )
+    finally:
+        await server.close()
+
+    # Assert
+    assert len(response.prompt.images) == 1
+    source = response.prompt.images[0].source
+    assert isinstance(source, InlineImageSource)
+    assert base64.b64decode(source.data) == image_bytes
+    assert not (save_dir / "unified").exists()

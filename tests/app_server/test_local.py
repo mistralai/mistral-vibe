@@ -2405,6 +2405,24 @@ async def test_harness_process_configures_globals_once_and_shares_cache(
 
 
 @pytest.mark.asyncio
+async def test_session_config_build_starts_session_log_permission_sweep(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The unified harness never builds the legacy loop, so the sweep starts here too."""
+    started: list[object] = []
+    monkeypatch.setattr(
+        runtime, "start_restrict_session_log_permissions", started.append
+    )
+    process = runtime.HarnessProcess()
+
+    session_config = await process._build_session_config(
+        SessionOptions(cwd=str(tmp_path))
+    )
+
+    assert started == [session_config.config_orchestrator.config.session_logging]
+
+
+@pytest.mark.asyncio
 async def test_runtime_is_built_only_when_session_start_crosses_json_rpc(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

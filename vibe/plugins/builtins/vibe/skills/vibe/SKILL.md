@@ -461,10 +461,12 @@ and the API key env var is set. Toggle the master switch or hide individual
 connectors / tools:
 
 The legacy backend keeps a discovered connector disabled until it has an
-explicit `[[connectors]]` entry. The Unified backend selected with
-`--experimental-harness` enables ready connectors by default in memory. It
-does not write that default to TOML, and the master switch plus explicit
-connector, tool, allowlist, and denylist settings always take precedence.
+explicit `[[connectors]]` entry. The Unified Harness backend (selected via
+`--experimental-harness` or through the GrowthBook rollout) enables ready
+connectors by default in memory. It does not write that default to TOML, and
+the master switch plus explicit connector, tool, allowlist, and denylist
+settings always take precedence. Use `--legacy-harness` to force the legacy
+backend if you are enrolled in the rollout and prefer the old behavior.
 
 ```toml
 enable_connectors = true          # Master switch (default: true)
@@ -741,6 +743,8 @@ vibe --max-tokens N                 # Max total session tokens (programmatic mod
 vibe --enabled-tools TOOL           # Enable specific tools (repeatable)
 vibe --disabled-tools TOOL          # Disable specific tools (repeatable)
 vibe --output text|json|streaming   # Output format (programmatic mode)
+vibe --experimental-harness        # Force the Unified Harness backend (requires internal installation)
+vibe --legacy-harness             # Force the legacy Python harness, overriding the GrowthBook rollout
 ```
 
 ## Built-in Agents
@@ -809,9 +813,11 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
   bar, and Up again to wrap to the last item. Pass a server or connector name to
   list its tools or open its auth panel when authentication is required
 - `/mcp add <url>` - Add a hosted OAuth MCP server. Supports `--name <alias>`,
-  repeatable `--scope <scope>`, `--transport <http|streamable-http>`, and
-  `--no-login`. Starts OAuth login by default. OAuth-only; use
-  `vibe mcp add <name> --url <url> --api-key-env <var>` for API-key/static auth.
+  repeatable `--scope <scope>`, `--transport <http|streamable-http>`,
+  `--no-login`, and `--allow-insecure-http` (permit a plaintext `http://` URL on
+  a non-localhost host such as a LAN server). Starts OAuth login by default.
+  OAuth-only; use `vibe mcp add <name> --url <url> --api-key-env <var>` for
+  API-key/static auth.
 - `vibe mcp remove <name>` - Remove an MCP server from the user configuration
   and delete its stored OAuth credentials when available.
 - `/mcp status` - Display MCP auth state (`ok`, `needs_auth`, `static`, `stdio`)
@@ -838,12 +844,11 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/proxy-setup` - Configure proxy and SSL certificate settings
 - `/leanstall` - Install the Lean 4 agent (leanstral)
 - `/unleanstall` - Uninstall the Lean 4 agent
-- `/plugins` - Display the plugins this session is running (experimental harness
-  mode only). Shows each plugin's name, scope, source format, content digest, and
+- `/plugins` - Display the plugins this session is running (Unified Harness only). Shows each plugin's name, scope, source format, content digest, and
   components (skills, MCP servers, agents, hooks, knowledge, connectors, tools).
   Press `r` inside the view to reload.
 - `/reload-plugins` - Re-pin this session's plugins and report what changed
-  (experimental harness mode only). Re-discovers plugins from disk, re-pins the
+  (Unified Harness only). Re-discovers plugins from disk, re-pins the
   snapshot, and prints a diff of added, removed, and updated plugins.
 - `/data-retention` - Show data retention information
 - `/teleport` - Teleport session to Vibe Code Web (only available when Vibe Code is enabled)
@@ -1087,6 +1092,11 @@ Two entry points:
 Skills with `user-invocable: false` are model-only: they are hidden from the
 slash menu and `/skill-name` will not resolve them (it is treated as a plain
 prompt). The model can still load them via the `skill` tool.
+
+Skills with `disable-model-invocation: true` stay in the slash menu but are
+hidden from the model and cannot be loaded through the `skill` tool. Skills
+using OpenAI's `agents/openai.yaml` convention can set
+`policy.allow_implicit_invocation: false` for the same provider-independent behavior.
 
 A `/` at the very start of the input opens the slash menu (commands and skills).
 A `/word` typed mid-prompt (not the first word) instead shows an inline ghost-text

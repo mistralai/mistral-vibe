@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import array
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Generator
 import io
 import struct
 import threading
@@ -13,28 +14,26 @@ from vibe.cli.audio_recorder.audio_recorder_port import (
     AlreadyRecordingError,
     AudioBackendUnavailableError,
     AudioRecording,
-    IncompatibleSampleRateError,
     NoAudioInputDeviceError,
     RecordingMode,
 )
 from vibe.observability.logging import logger
 
-# sounddevice raises OSError on import when no audio driver is available.
-_SD_IMPORT_ERROR: OSError | None = None
+# miniaudio raises OSError or ImportError on import when no audio driver is available.
+_MA_IMPORT_ERROR: OSError | ImportError | None = None
 try:
-    import sounddevice as sd
+    import miniaudio as ma
 
     if TYPE_CHECKING:
-        from sounddevice import CallbackFlags, RawInputStream
-except OSError as e:
-    logger.warning("sounddevice unavailable, voice disabled: %r", e)
-    _SD_IMPORT_ERROR = e
-    sd = None  # type: ignore[assignment]
+        from miniaudio import CaptureDevice
+except (OSError, ImportError) as e:
+    logger.warning("miniaudio unavailable, voice disabled: %r", e)
+    _MA_IMPORT_ERROR = e
+    ma = None  # type: ignore[assignment]
 
 DEFAULT_SAMPLE_RATE = 48_000
 DEFAULT_CHANNELS = 1
-DTYPE = "int16"
-DEFAULT_BLOCKSIZE = 4096
+DEFAULT_BUFFER_MS = 200
 DEFAULT_SAMPLE_WIDTH = 2  # 16-bit = 2 bytes
 INT16_ABS_MAX = 2**15 - 1
 # A denied or muted microphone returns pure-silence buffers,
@@ -45,7 +44,7 @@ DEFAULT_MAX_DURATION = 300.0  # 5 min
 
 
 class AudioRecorder:
-    """Records audio from the default microphone using sounddevice.
+    """Records audio from the default microphone using miniaudio.
 
     Supports both buffer mode (stop returns WAV bytes) and streaming
     mode (async generator yields chunks).
@@ -55,7 +54,8 @@ class AudioRecorder:
         self._lock = threading.Lock()
         self._mode: RecordingMode = RecordingMode.BUFFER
         self._sample_rate: int = 0
-        self._stream: RawInputStream | None = None
+        self._channels: int = DEFAULT_CHANNELS
+        self._stream: CaptureDevice | None = None
         self._frames: list[bytes] = []
         self._peak: float = 0.0
         self._signal_detected: bool = False
@@ -98,25 +98,18 @@ class AudioRecorder:
             if self._recording:
                 raise AlreadyRecordingError("Already recording")
 
-            if not sd:
-                error_message = "sounddevice is not available, audio recording disabled"
-                if _SD_IMPORT_ERROR is not None:
-                    error_message = f"{error_message}: {_SD_IMPORT_ERROR}"
+            if not ma:
+                error_message = "miniaudio is not available, audio recording disabled"
+                if _MA_IMPORT_ERROR:
+                    error_message = f"{error_message}: {_MA_IMPORT_ERROR}"
                 logger.error(error_message)
-                raise AudioBackendUnavailableError(error_message) from _SD_IMPORT_ERROR
+                raise AudioBackendUnavailableError(error_message) from _MA_IMPORT_ERROR
 
             try:
-                sample_rate = self._guard_audio_input(sample_rate, channels)
+                self._guard_audio_input()
             except NoAudioInputDeviceError as exc:
                 logger.error("No audio input device available, recording disabled")
                 raise exc
-            except IncompatibleSampleRateError as exc:
-                logger.warning(
-                    "Requested sample rate %d Hz not supported, falling back to %d Hz",
-                    sample_rate,
-                    exc.fallback_sample_rate,
-                )
-                sample_rate = exc.fallback_sample_rate
 
             self._mode = mode
             self._sample_rate = sample_rate
@@ -139,14 +132,15 @@ class AudioRecorder:
                     self._loop = None
                     self._audio_queue = None
 
-            self._stream = sd.RawInputStream(
-                samplerate=self._sample_rate,
-                channels=self._channels,
-                dtype=DTYPE,
-                blocksize=DEFAULT_BLOCKSIZE,
-                callback=self._audio_callback,
+            gen = self._capture_generator()
+            next(gen)  # prime the generator
+            self._stream = ma.CaptureDevice(
+                input_format=ma.SampleFormat.SIGNED16,
+                nchannels=channels,
+                sample_rate=sample_rate,
+                buffersize_msec=DEFAULT_BUFFER_MS,
             )
-            self._stream.start()
+            self._stream.start(gen)
             self._recording = True
 
             self._on_expire = on_expire
@@ -154,7 +148,7 @@ class AudioRecorder:
 
     def stop(self, *, wait_for_queue_drained: bool = True) -> AudioRecording:
         with self._lock:
-            if not self._recording or self._stream is None:
+            if not self._recording or not self._stream:
                 return AudioRecording(data=b"", duration=0.0)
 
             self._reset_max_duration_timer()
@@ -174,17 +168,13 @@ class AudioRecorder:
             on_event_loop = asyncio.get_running_loop() is loop
         except RuntimeError:
             on_event_loop = False
-        if (
-            wait_for_queue_drained
-            and self._audio_queue_drained is not None
-            and not on_event_loop
-        ):
+        if wait_for_queue_drained and self._audio_queue_drained and not on_event_loop:
             self._audio_queue_drained.wait(timeout=DRAIN_TIMEOUT)
         return AudioRecording(data=b"", duration=duration)
 
     def cancel(self) -> None:
         with self._lock:
-            if not self._recording or self._stream is None:
+            if not self._recording or not self._stream:
                 return
 
             self._reset_max_duration_timer()
@@ -198,7 +188,7 @@ class AudioRecorder:
 
     async def audio_stream(self) -> AsyncGenerator[bytes, None]:
         queue = self._audio_queue
-        if queue is None:
+        if not queue:
             return
         audio_queue_drained = self._audio_queue_drained
 
@@ -209,18 +199,26 @@ class AudioRecorder:
                     break
                 yield chunk
         finally:
-            if audio_queue_drained is not None:
+            if audio_queue_drained:
                 audio_queue_drained.set()
 
-    def _audio_callback(
-        self, indata: bytes, frames: int, time_info: object, status: CallbackFlags
-    ) -> None:
-        if status:
-            logger.warning("Audio callback status: %s", status)
+    def _capture_generator(self) -> Generator[None, bytes | array.array, None]:
+        """Generator that receives captured audio data from miniaudio.
 
-        raw = bytes(indata)
+        miniaudio sends ``array.array`` objects; we convert to ``bytes``
+        for downstream processing.
+        """
+        try:
+            while True:
+                data = yield
+                raw = bytes(data)
+                self._process_audio(raw)
+        except GeneratorExit:
+            pass
 
-        n_samples = frames * self._channels
+    def _process_audio(self, raw: bytes) -> None:
+        """Process a chunk of raw PCM int16 data."""
+        n_samples = len(raw) // DEFAULT_SAMPLE_WIDTH
         if n_samples > 0:
             samples = struct.unpack(f"<{n_samples}h", raw)
             self._peak = min(max(abs(s) for s in samples) / INT16_ABS_MAX, 1.0)
@@ -230,48 +228,32 @@ class AudioRecorder:
         if self._mode == RecordingMode.BUFFER:
             self._frames.append(raw)
 
-        if (
-            self._mode == RecordingMode.STREAM
-            and self._loop is not None
-            and self._audio_queue is not None
-        ):
+        if self._mode == RecordingMode.STREAM and self._loop and self._audio_queue:
             self._loop.call_soon_threadsafe(self._audio_queue.put_nowait, raw)
 
     def _stop_stream(self) -> None:
-        if self._stream is not None:
-            self._stream.stop()
+        if self._stream:
             self._stream.close()
             self._stream = None
 
     def _push_sentinel(self) -> None:
         """Push None to the audio queue to signal end-of-stream to the consumer."""
-        if self._loop is not None and self._audio_queue is not None:
+        if self._loop and self._audio_queue:
             self._loop.call_soon_threadsafe(self._audio_queue.put_nowait, None)
         self._audio_queue = None
         self._loop = None
 
-    @staticmethod
-    def _guard_audio_input(sample_rate: int, channels: int) -> int:
-        if sd is None:
-            raise RuntimeError("sounddevice is not available")
+    def _guard_audio_input(self) -> None:
+        """Verify that at least one capture device is available."""
+        if not ma:
+            raise RuntimeError("miniaudio is not available")
         try:
-            device_info = sd.query_devices(kind="input")
+            devices = ma.Devices()
+            captures = devices.get_captures()
         except Exception as exc:
             raise NoAudioInputDeviceError("No audio input device available") from exc
-
-        try:
-            sd.check_input_settings(
-                samplerate=sample_rate, channels=channels, dtype=DTYPE
-            )
-        except sd.PortAudioError as exc:
-            fallback = int(device_info["default_samplerate"])
-            raise IncompatibleSampleRateError(
-                f"Requested sample rate {sample_rate} Hz is not supported by the default "
-                f"input device; device default is {fallback} Hz",
-                fallback_sample_rate=fallback,
-            ) from exc
-
-        return sample_rate
+        if not captures:
+            raise NoAudioInputDeviceError("No audio input device available")
 
     def _encode_wav(self) -> bytes:
         buf = io.BytesIO()
@@ -284,7 +266,7 @@ class AudioRecorder:
 
     def _on_max_duration_expired(self) -> None:
         result = self.stop()
-        if self._on_expire is not None:
+        if self._on_expire:
             self._on_expire(result)
 
     def _start_max_duration_timer(self, max_duration: float) -> None:
@@ -298,7 +280,7 @@ class AudioRecorder:
         self._max_duration_timer.start()
 
     def _reset_max_duration_timer(self) -> None:
-        if self._max_duration_timer is None:
+        if not self._max_duration_timer:
             return
 
         self._max_duration_timer.cancel()

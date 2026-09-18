@@ -75,7 +75,7 @@ import sys
 import vibe.cli.textual_ui.app
 
 blocked = [
-    "sounddevice",
+    "miniaudio",
     "vibe.cli.narrator_manager.narrator_manager",
     "vibe.cli.voice_manager.voice_manager",
     "vibe.cli.audio_player.audio_player",

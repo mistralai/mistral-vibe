@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import stat
+
 import pytest
 
 from vibe.core.paths import GLOBAL_ENV_FILE
@@ -116,6 +119,14 @@ class TestSetProxyVar:
 
         result = get_current_proxy_settings()
         assert result["HTTP_PROXY"] == "http://proxy:8080"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+    def test_creates_owner_only_env_file(self) -> None:
+        GLOBAL_ENV_FILE.path.unlink(missing_ok=True)
+
+        set_proxy_var("HTTP_PROXY", "http://proxy:8080")
+
+        assert stat.S_IMODE(GLOBAL_ENV_FILE.path.stat().st_mode) & 0o077 == 0
 
     @pytest.mark.parametrize("key", SUPPORTED_PROXY_VARS.keys())
     def test_sets_all_supported_vars(self, key: str) -> None:

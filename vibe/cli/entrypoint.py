@@ -396,6 +396,13 @@ def main() -> None:
 
     silence_proactor_transport_teardown_warnings()
 
+    # The gate must run before the mcp subcommand and init_file_logging: their
+    # mkdir(parents=True) calls are otherwise the first to materialize
+    # ~/.vibe, at permissive modes.
+    from vibe.core.paths import bootstrap_vibe_home
+
+    bootstrap_vibe_home()
+
     if sys.argv[1:2] == ["mcp"]:
         from vibe.cli.mcp_command import run_mcp_cli
 

@@ -20,9 +20,13 @@ from vibe.core.tools.base import (
 )
 from vibe.core.tools.builtins._shell_command_policy import (
     analyze_shell_command_policy,
+    has_option_guardrails,
     path_candidates,
 )
-from vibe.core.tools.builtins._shell_permission_analysis import analyze_shell_command
+from vibe.core.tools.builtins._shell_permission_analysis import (
+    ShellPermissionAnalysis,
+    analyze_shell_command,
+)
 from vibe.core.tools.io_port import ShellCommandRequest
 from vibe.core.tools.permissions import (
     PermissionContext,
@@ -264,6 +268,61 @@ def _matches_pattern(command: str, pattern: str) -> bool:
     return command == pattern or command.startswith(pattern + " ")
 
 
+def command_session_pattern(tokens: list[str]) -> tuple[str, bool]:
+    """The pattern a grant on this command is recorded under, and whether it is literal.
+
+    ``build_session_pattern`` stars everything past the command's name, which is
+    where guardrailed options sit: ``git log *``, earned by an innocuous
+    ``git log $REF``, would cover ``git log --ext-diff`` and the guardrail would
+    never be asked. A guardrailed command therefore keeps its own text -- read as
+    text, since that text can itself hold the glob characters it is escaping.
+    """
+    if has_option_guardrails(tokens):
+        return " ".join(tokens), True
+    return build_session_pattern(tokens), False
+
+
+def scoped_command_parts(
+    analysis: ShellPermissionAnalysis, command_parts: list[str]
+) -> tuple[list[str], bool]:
+    """The parts a grant may be recorded against, and whether to include allowlisted.
+
+    Once the extract stops describing what runs, no part is offered: emitting
+    ``git *`` for ``git $SUB`` beside the exact command hands the widening over
+    anyway.
+
+    Where it does describe it, allowlisted parts contribute too. The approval
+    owed for unreadable syntax has to sit on the commands that carried it rather
+    than ride on whatever else the call needed -- an outside-workdir glob, a
+    shell override -- and the allowlist already grants those commands every
+    argument it can read.
+    """
+    if analysis.invalidates_scope:
+        return [], False
+    return command_parts, analysis.requires_approval
+
+
+def needs_exact_command_scope(
+    analysis: ShellPermissionAnalysis, required: list[RequiredPermission]
+) -> bool:
+    """Whether the command as written is the only scope left to record.
+
+    Never added beside a pattern that would have generalised: the exact text
+    releases this call and no other, so the user would answer for the session
+    and still be asked next time.
+
+    ``required`` must hold only what the commands earned. A context permission
+    is ``COMMAND_PATTERN``-scoped too, and counting one would read ``[[ -n $FOO
+    ]]`` under a shell override as a command that came out scoped when nothing
+    about it was recorded at all.
+    """
+    if analysis.invalidates_scope:
+        return True
+    return analysis.requires_approval and not any(
+        rp.scope is PermissionScope.COMMAND_PATTERN for rp in required
+    )
+
+
 class BashToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ASK
     max_output_bytes: int = Field(
@@ -336,6 +395,11 @@ class Bash(
 ):
     effect_kind = ToolEffectKind.SHELL
     shell_rollout: ClassVar[str | None] = "legacy"
+    # A shell reads its allowlist as command prefixes, so an outside-workdir
+    # glob persisted there would match no command at all.
+    allowlist_scopes: ClassVar[frozenset[PermissionScope]] = frozenset({
+        PermissionScope.COMMAND_PATTERN
+    })
 
     @classmethod
     def format_call_display(cls, args: BashArgs) -> ToolCallDisplay:
@@ -362,13 +426,18 @@ class Bash(
 
     @staticmethod
     def _build_command_required_permission(
-        invocation_pattern: str, session_pattern: str, label: str
+        invocation_pattern: str,
+        session_pattern: str,
+        label: str,
+        *,
+        literal: bool = False,
     ) -> RequiredPermission:
         return RequiredPermission(
             scope=PermissionScope.COMMAND_PATTERN,
             invocation_pattern=invocation_pattern,
             session_pattern=session_pattern,
             label=label,
+            literal=literal,
         )
 
     @staticmethod
@@ -435,7 +504,10 @@ class Bash(
             seen_option_required.add(part)
             option_required.append(
                 self._build_command_required_permission(
-                    invocation_pattern=part, session_pattern=part, label=part
+                    invocation_pattern=part,
+                    session_pattern=part,
+                    label=part,
+                    literal=True,
                 )
             )
 
@@ -459,7 +531,11 @@ class Bash(
         )
 
     def _build_required_permissions(
-        self, command_parts: list[str], outside_dirs: set[str]
+        self,
+        command_parts: list[str],
+        outside_dirs: set[str],
+        *,
+        include_allowlisted: bool = False,
     ) -> list[RequiredPermission]:
         required: list[RequiredPermission] = []
         seen_session: set[str] = set()
@@ -472,18 +548,25 @@ class Bash(
                 continue
 
             is_sensitive = self._is_sensitive(part)
-            if not is_sensitive and self._is_allowlisted(part):
+            if (
+                not is_sensitive
+                and not include_allowlisted
+                and self._is_allowlisted(part)
+            ):
                 continue
 
             if is_sensitive:
                 required.append(
                     self._build_command_required_permission(
-                        invocation_pattern=part, session_pattern=part, label=part
+                        invocation_pattern=part,
+                        session_pattern=part,
+                        label=part,
+                        literal=True,
                     )
                 )
                 continue
 
-            session_pat = build_session_pattern(tokens)
+            session_pat, literal = command_session_pattern(tokens)
             if session_pat in seen_session:
                 continue
             seen_session.add(session_pat)
@@ -492,6 +575,7 @@ class Bash(
                     invocation_pattern=part,
                     session_pattern=session_pat,
                     label=session_pat,
+                    literal=literal,
                 )
             )
 
@@ -525,15 +609,21 @@ class Bash(
         ):
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
-        required = self._build_required_permissions(command_parts, outside_dirs)
+        scoped_parts, include_allowlisted = scoped_command_parts(
+            analysis, command_parts
+        )
+        required = self._build_required_permissions(
+            scoped_parts, outside_dirs, include_allowlisted=include_allowlisted
+        )
         if guardrail_permission:
             required.extend(guardrail_permission.required_permissions)
-        if analysis.requires_approval:
+        if needs_exact_command_scope(analysis, required):
             required.append(
                 self._build_command_required_permission(
                     invocation_pattern=args.command,
                     session_pattern=args.command,
                     label=analysis.approval_label,
+                    literal=True,
                 )
             )
         if not required:

@@ -21,6 +21,7 @@ from vibe.app_server._config_introspect import (
 from vibe.app_server._config_write import (
     config_write_ops_to_patches,
     config_write_targets,
+    model_config_write_ops,
 )
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._execution import SessionExecution
@@ -96,6 +97,7 @@ from vibe.app_server.protocol import (
     LoopsDeleteResponse,
     LoopsListParams,
     LoopsListResponse,
+    ModelConfigWriteParams,
     NarrationSummarizeParams,
     NarrationSummarizeResponse,
     ProtocolErrorCode,
@@ -115,7 +117,7 @@ from vibe.core.config.admin_config import (
     AdminConfigApplyResult,
     AdminConfigOutcome,
 )
-from vibe.core.config.orchestrator import ConfigPatchValidationError
+from vibe.core.config.orchestrator import ConfigOrchestrator, ConfigPatchValidationError
 from vibe.core.feedback import (
     record_feedback_asked,
     record_feedback_given,
@@ -158,6 +160,10 @@ class _LegacySkillsHost:
     @property
     def config(self) -> VibeConfigSchema:
         return self._agent_loop.config
+
+    @property
+    def config_orchestrator(self) -> ConfigOrchestrator[VibeConfigSchema]:
+        return self._agent_loop.config_orchestrator
 
     @property
     def skill_roots(self) -> list[Path]:
@@ -338,14 +344,17 @@ class ResourceRequestHandler:
                     validate_wire(ConfigReadParams, raw_params)
                 )
                 runtime_updated = False
-            case "config/write":
-                write_response = await self._config_write(
+            case "config/write" | "config/model/write":
+                write_params = (
                     validate_wire(ConfigWriteParams, raw_params)
+                    if method == "config/write"
+                    else self._model_config_write_params(
+                        validate_wire(ModelConfigWriteParams, raw_params)
+                    )
                 )
+                write_response = await self._config_write(write_params)
                 response = write_response
-                runtime_updated = not write_response.rejected and not (
-                    write_response.failures
-                )
+                runtime_updated = write_response.applied
             case "config/fields/read":
                 response = await self._config_fields_read(
                     validate_wire(ConfigFieldsReadParams, raw_params)
@@ -460,7 +469,6 @@ class ResourceRequestHandler:
                         loops=[_project_loop(loop) for loop in self._loops.loops]
                     )
                 case "loops/create":
-                    self._execution.require_idle()
                     params = validate_wire(LoopsCreateParams, raw_params)
                     self._require_session(params.session_id)
                     response = LoopsCreateResponse(
@@ -469,14 +477,12 @@ class ResourceRequestHandler:
                         )
                     )
                 case "loops/delete":
-                    self._execution.require_idle()
                     params = validate_wire(LoopsDeleteParams, raw_params)
                     self._require_session(params.session_id)
                     response = LoopsDeleteResponse(
                         loop=_project_loop(await self._loops.delete(params.loop_id))
                     )
                 case "loops/clear":
-                    self._execution.require_idle()
                     params = validate_wire(LoopsClearParams, raw_params)
                     self._require_session(params.session_id)
                     response = LoopsClearResponse(count=await self._loops.clear())
@@ -562,6 +568,29 @@ class ResourceRequestHandler:
             hooks_count=hooks_count,
             mcp_servers_total=mcp_servers_total,
             mcp_servers_enabled=mcp_servers_enabled,
+        )
+
+    def _model_config_write_params(
+        self, params: ModelConfigWriteParams
+    ) -> ConfigWriteParams:
+        """Lower a model pick onto this backend's generic write.
+
+        The legacy backend applies configuration synchronously, so a pick keeps
+        the idle-only contract here; only the Unified backend can park one.
+        """
+        try:
+            ops = model_config_write_ops(
+                self._agent_loop.config,
+                model_alias=params.model_alias,
+                reasoning_effort=params.reasoning_effort,
+            )
+        except ValueError as exc:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
+        return ConfigWriteParams(
+            session_id=params.session_id,
+            ops=ops,
+            reason="model configuration",
+            reload_runtime=True,
         )
 
     async def _config_write(self, params: ConfigWriteParams) -> ConfigWriteResponse:

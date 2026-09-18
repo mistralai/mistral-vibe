@@ -515,6 +515,89 @@ class TestSessionLoggerTitleManagement:
         assert metadata.title_source == "manual"
 
     @pytest.mark.asyncio
+    async def test_persist_bumped_at_updates_memory_and_disk_monotonically(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+        await logger.save_interaction(
+            [LLMMessage(role=Role.user, content="hi")],
+            stats=AgentStats(),
+            config=build_test_vibe_config(),
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        older = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+        newer = datetime(2026, 9, 10, 12, 5, tzinfo=UTC)
+
+        assert await logger.persist_bumped_at(newer) == newer
+        assert await logger.persist_bumped_at(older) == newer
+
+        assert logger.session_metadata is not None
+        assert logger.session_metadata.bumped_at == "2026-09-10T12:05:00+00:00"
+        assert logger.session_dir is not None
+        metadata = SessionLoader.load_metadata(logger.session_dir)
+        assert metadata.bumped_at == "2026-09-10T12:05:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_failed_bump_can_be_retried(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+        await logger.save_interaction(
+            [LLMMessage(role=Role.user, content="hi")],
+            stats=AgentStats(),
+            config=build_test_vibe_config(),
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+        bumped_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+        with patch.object(
+            SessionLogger, "persist_metadata", side_effect=OSError("disk full")
+        ):
+            with pytest.raises(OSError, match="disk full"):
+                await logger.persist_bumped_at(bumped_at)
+
+        assert logger.session_metadata is not None
+        assert logger.session_metadata.bumped_at is None
+        assert await logger.persist_bumped_at(bumped_at) == bumped_at
+        assert logger.session_dir is not None
+        assert (
+            SessionLoader.load_metadata(logger.session_dir).bumped_at
+            == bumped_at.isoformat()
+        )
+
+    @pytest.mark.asyncio
+    async def test_save_interaction_persists_in_memory_bumped_at(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+        bumped_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+
+        assert await logger.persist_bumped_at(bumped_at) == bumped_at
+
+        await logger.save_interaction(
+            [LLMMessage(role=Role.user, content="hi")],
+            stats=AgentStats(),
+            config=build_test_vibe_config(),
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        assert logger.session_dir is not None
+        metadata = SessionLoader.load_metadata(logger.session_dir)
+        assert metadata.bumped_at == "2026-09-10T12:00:00+00:00"
+
+    @pytest.mark.asyncio
     async def test_apply_manual_title_rejects_empty(
         self, session_config: SessionLoggingConfig
     ) -> None:

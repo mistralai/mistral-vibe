@@ -62,6 +62,12 @@ class ExperimentsConfig(BaseSettings):
 
 
 class SessionLoggingConfig(BaseSettings):
+    # Matches its sibling groups. Under per-field merging the union of keys
+    # from every layer reaches the validator, so forbidding extras would turn
+    # one unrecognised key in any layer -- a project file naming a setting from
+    # a newer Vibe, say -- into a hard config-load failure.
+    model_config = SettingsConfigDict(extra="ignore")
+
     save_dir: str = ""
     session_prefix: str = "session"
     enabled: bool = True

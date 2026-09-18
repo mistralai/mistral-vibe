@@ -25,10 +25,16 @@ from textual.containers import Horizontal, VerticalGroup, VerticalScroll
 from textual.dom import NoScreen
 from textual.driver import Driver
 from textual.events import AppBlur, AppFocus, MouseScrollDown, MouseScrollUp, MouseUp
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
 from textual.widgets import Static
-from textual.worker import Worker, WorkerError, WorkerFailed, WorkerState
+from textual.worker import (
+    Worker,
+    WorkerCancelled,
+    WorkerError,
+    WorkerFailed,
+    WorkerState,
+)
 
 from vibe import __version__ as CORE_VERSION
 from vibe.app_server import (
@@ -41,10 +47,12 @@ from vibe.app_server.config import THINKING_LEVELS, ConfigView, ThinkingLevel
 from vibe.app_server.events import (
     AppServerEvent,
     CallbackRequested,
+    ChildSessionUpdated,
     HistoryEntryAdded,
     HistoryEntryUpdated,
     ServerError,
     ServerWarning,
+    SessionContextCleared,
     SessionSnapshot,
     StatsUpdated,
     TurnCompleted,
@@ -65,7 +73,9 @@ from vibe.app_server.models import (
     MentionStats,
     PreparedPrompt,
     PublicCallbackEntry,
+    PublicChildSession,
     PublicEffectEntry,
+    PublicEntryGenerationStatus,
     PublicError,
     PublicHistoryEntry,
     PublicMessageEntry,
@@ -76,6 +86,7 @@ from vibe.app_server.models import (
     PublicTurnStatus,
     QuestionChoice,
     RequiredPermission,
+    SubagentEffectDetail,
     TeleportCheckingGit,
     TeleportComplete,
     TeleportEvent,
@@ -84,6 +95,7 @@ from vibe.app_server.models import (
     TeleportPushRequired,
     TeleportStartingWorkflow,
     TeleportSummarizingContext,
+    TextContentBlock,
     TokenUsage,
     TurnErrorCode,
     UserInputCallbackDetail,
@@ -99,6 +111,7 @@ from vibe.app_server.protocol import (
     ConfigWriteOpWire,
     ProtocolError,
     ProtocolErrorCode,
+    RuntimeMutationStatus,
 )
 from vibe.app_server.session import AppServerTurnError
 from vibe.cli._process_title import process_id_label
@@ -144,6 +157,7 @@ from vibe.cli.textual_ui.notifications import (
 )
 from vibe.cli.textual_ui.quit_manager import QuitManager
 from vibe.cli.textual_ui.scheduled_loop_runner import ScheduledLoopCommands
+from vibe.cli.textual_ui.todo_tracker import TodoTracker, todo_deltas
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
 from vibe.cli.textual_ui.widgets.branch_created_message import BranchCreatedMessage
@@ -159,6 +173,10 @@ from vibe.cli.textual_ui.widgets.chat_input.input_kinds import (
 )
 from vibe.cli.textual_ui.widgets.chat_input.paste_image import (
     handle_clipboard_image_paste,
+)
+from vibe.cli.textual_ui.widgets.chat_input.subagent_list import (
+    SubagentList,
+    subagent_loading_status,
 )
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.textual_ui.widgets.collapsible import CollapsibleSection
@@ -191,6 +209,7 @@ from vibe.cli.textual_ui.widgets.messages import (
     TeleportUserMessage,
     UserCommandMessage,
     UserMessage,
+    UserMessageSeverity,
     VscodeExtensionPromoMessage,
     WarningMessage,
     WhatsNewMessage,
@@ -206,9 +225,11 @@ from vibe.cli.textual_ui.widgets.rewind_app import RewindApp
 from vibe.cli.textual_ui.widgets.rewind_fork_message import RewindForkMessage
 from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
 from vibe.cli.textual_ui.widgets.skills_browser import SkillsBrowserApp
+from vibe.cli.textual_ui.widgets.subagent_transcripts import SubagentTranscripts
 from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
 from vibe.cli.textual_ui.widgets.theme_picker import ThemePickerApp, sorted_theme_names
 from vibe.cli.textual_ui.widgets.thinking_picker import ThinkingPickerApp
+from vibe.cli.textual_ui.widgets.todo_status import TodoStatusRow
 from vibe.cli.textual_ui.widgets.tool_widgets import (
     EditApprovalWidget,
     EditResultWidget,
@@ -462,6 +483,7 @@ PRUNE_LOW_MARK = 1000
 PRUNE_HIGH_MARK = 1500
 DOUBLE_ESC_DELAY = 0.2
 MODE_SWITCH_SPINNER_DELAY = 0.5
+SLOW_INTERRUPT_HINT_DELAY = 2.0
 
 _DEFAULT_TYPING_DEBOUNCE_MS = 1000
 _TYPING_DEBOUNCE_ENV_VAR = "VIBE_TYPING_GRACE_PERIOD_MS"
@@ -632,6 +654,14 @@ def _indicator_safety(
 
 _REJECT_HINT_BUSY = "wait for the current job to finish."
 _REJECT_HINT_PAUSED = "clear the queue first or remove this input."
+_SUBAGENT_READ_ONLY_MESSAGE = (
+    "You can't interact with a subagent directly. Return to Main conversation and "
+    "ask the main agent to stop it."
+)
+_SUBAGENT_READY_MESSAGE = (
+    "This subagent is ready for a new instruction. Return to Main conversation "
+    "and ask the main agent to give it a new goal or stop it."
+)
 
 # Greeting interval in seconds (default: 24 hours)
 _GREETING_INTERVAL_SECONDS = 24 * 60 * 60
@@ -793,9 +823,19 @@ class VibeApp(App):  # noqa: PLR0904
         self._banner: Banner | None = None
         self._whats_new_message: WhatsNewMessage | None = None
         self._cached_messages_area: Widget | None = None
+        self._cached_subagent_transcripts: SubagentTranscripts | None = None
         self._cached_chat: ChatScroll | None = None
         self._cached_loading_area: Widget | None = None
+        self._subagent_loading_widget: LoadingWidget | None = None
+        self._viewed_subagent_id: str | None = None
+        self._transcript_scroll_offsets: dict[str | None, float] = {}
+        self._subagent_refresh_requested = False
+        self._subagent_refresh_worker: Worker[None] | None = None
+        self._subagent_refresh_generation = 0
         self._context_progress: ContextProgress | None = None
+        self._todo_status_row: TodoStatusRow | None = None
+        # Unset on the legacy harness, which is what gates the whole todo surface.
+        self._todo_tracker: TodoTracker | None = None
         self._debug_console: DebugConsole | None = None
         self._desired_agent: str | None = None
         self._agent_switch_active = False
@@ -1101,6 +1141,7 @@ class VibeApp(App):  # noqa: PLR0904
             )
             yield self._banner
             yield VerticalGroup(id="messages")
+            yield SubagentTranscripts(id="subagent-transcripts")
 
         with Horizontal(id="loading-area"):
             yield NarratorStatus(self._narrator_manager)
@@ -1138,6 +1179,9 @@ class VibeApp(App):  # noqa: PLR0904
                 queue_selected_index_getter=self._queue_selected_queue_index,
             )
 
+        self._todo_status_row = TodoStatusRow()
+        yield self._todo_status_row
+
         with Horizontal(id="bottom-bar"):
             yield PathDisplay(self.app_server.cwd if has_session else str(Path.cwd()))
             yield NoMarkupStatic(process_id_label(), id="process-title")
@@ -1156,6 +1200,12 @@ class VibeApp(App):  # noqa: PLR0904
         if self._cached_messages_area is None:
             self._cached_messages_area = self.query_one("#messages")
         return self._cached_messages_area
+
+    @property
+    def _subagent_transcripts(self) -> SubagentTranscripts:
+        if self._cached_subagent_transcripts is None:
+            self._cached_subagent_transcripts = self.query_one(SubagentTranscripts)
+        return self._cached_subagent_transcripts
 
     @property
     def _chat_widget(self) -> ChatScroll:
@@ -1247,8 +1297,11 @@ class VibeApp(App):  # noqa: PLR0904
         set_config_log_level(config.log_level)
         self._refresh_banner()
         self._refresh_context_progress()
+        self._refresh_subagent_list()
 
     async def _complete_mount(self) -> None:
+        if self.app_server.resources.runtime.experimental_harness:
+            self._todo_tracker = TodoTracker()
         self.event_handler = EventHandler(
             mount_callback=self._mount_and_scroll,
             get_tools_collapsed=lambda: self._tools_collapsed,
@@ -1256,6 +1309,8 @@ class VibeApp(App):  # noqa: PLR0904
             get_show_thinking=lambda: self.config.show_thinking_nodes,
             on_context_cleared=self._on_context_cleared,
             on_session_title_changed=self._on_session_title_changed,
+            todo_tracker=self._todo_tracker,
+            on_todos_changed=self._refresh_todo_status,
         )
 
         self._chat_input_container = self.query_one(ChatInputContainer)
@@ -1266,6 +1321,7 @@ class VibeApp(App):  # noqa: PLR0904
         # Re-bind them into the already-mounted widgets so voice input (Ctrl+R)
         # and narrator status actually drive the real managers.
         self._chat_input_container.replace_voice_manager(self._voice_manager)
+        self._refresh_subagent_list()
         self.query_one(NarratorStatus).replace_narrator_manager(self._narrator_manager)
 
         self._refresh_profile_widgets()
@@ -1296,12 +1352,202 @@ class VibeApp(App):  # noqa: PLR0904
         gc.freeze()
 
     def _update_context_progress(self, event: StatsUpdated) -> None:
-        if self._context_progress is None:
+        if self._context_progress is None or self._viewed_subagent_id is not None:
             return
         self._context_progress.tokens = TokenState(
             max_tokens=event.params.context_window,
             current_tokens=event.params.stats.context_tokens,
         )
+
+    def _refresh_subagent_list(self) -> None:
+        if self._chat_input_container is None or self._app_server is None:
+            return
+        if not self.config.show_subagent_status_list:
+            if self._viewed_subagent_id is not None:
+                self._show_main_chat()
+                return
+            self.query_one(SubagentList).update_sessions(())
+            return
+        sessions = self.app_server.child_sessions
+        if self._viewed_subagent_id is not None and all(
+            session.id != self._viewed_subagent_id for session in sessions
+        ):
+            self._show_main_chat()
+            return
+        self.query_one(SubagentList).update_sessions(
+            sessions, selected_session_id=self._viewed_subagent_id
+        )
+
+    def _remember_transcript_scroll(self) -> None:
+        self._transcript_scroll_offsets[self._viewed_subagent_id] = float(
+            self._chat_widget.scroll_offset.y
+        )
+
+    def _restore_transcript_scroll(self, session_id: str | None) -> None:
+        if self._viewed_subagent_id != session_id:
+            return
+        scroll_y = self._transcript_scroll_offsets.get(session_id)
+        if scroll_y is None:
+            self._chat_widget.anchor()
+            return
+        self._chat_widget.scroll_to(
+            y=scroll_y, animate=False, force=True, immediate=True
+        )
+
+    def _show_main_chat(self, *, focus_input: bool = True) -> None:
+        if self._viewed_subagent_id is not None:
+            self._remember_transcript_scroll()
+            self._quit_manager.cancel_confirmation()
+        self._viewed_subagent_id = None
+        self._refresh_session_indicators()
+        self._subagent_transcripts.select(None)
+        self._messages_area.display = True
+        if self._chat_input_container is not None:
+            self._chat_input_container.set_subagent_view(
+                False, restore_input_focus=focus_input
+            )
+        self.query_one(SubagentList).update_sessions(
+            self.app_server.child_sessions
+            if self.config.show_subagent_status_list
+            else (),
+            selected_session_id=None,
+        )
+        self.call_after_refresh(partial(self._restore_transcript_scroll, None))
+        if focus_input:
+            self.call_after_refresh(self._focus_current_bottom_app)
+
+    async def _show_subagent_chat(self, session_id: str) -> None:
+        if not self.config.show_subagent_status_list:
+            return
+        if self._viewed_subagent_id != session_id:
+            self._remember_transcript_scroll()
+        self._viewed_subagent_id = session_id
+        selected = self._viewed_subagent()
+        if selected is not None:
+            await self._ensure_subagent_loading_widget(selected)
+        self._refresh_session_indicators()
+        self._messages_area.display = False
+        cached = self._subagent_transcripts.select(session_id)
+        self.query_one(SubagentList).update_sessions(
+            self.app_server.child_sessions, selected_session_id=session_id
+        )
+        if self._chat_input_container is not None:
+            self._chat_input_container.set_subagent_view(True)
+        if not cached:
+            await self._subagent_transcripts.prepare(session_id)
+            self._subagent_transcripts.select(session_id)
+        self.call_after_refresh(partial(self._restore_transcript_scroll, session_id))
+        self._schedule_subagent_transcript_refresh()
+
+    def _schedule_subagent_transcript_refresh(self) -> None:
+        self._subagent_refresh_requested = True
+        if self._subagent_refresh_worker is not None:
+            return
+        self._subagent_refresh_generation += 1
+        generation = self._subagent_refresh_generation
+        self._subagent_refresh_worker = self.run_worker(
+            self._drain_subagent_transcript_refreshes(generation),
+            exclusive=False,
+            group="subagent-transcript-refresh",
+        )
+
+    async def _drain_subagent_transcript_refreshes(self, generation: int) -> None:
+        try:
+            while self._subagent_refresh_requested:
+                self._subagent_refresh_requested = False
+                await asyncio.sleep(0.05)
+                if session_id := self._viewed_subagent_id:
+                    await self._refresh_subagent_transcript(session_id)
+        finally:
+            if generation == self._subagent_refresh_generation:
+                self._subagent_refresh_worker = None
+
+    async def _refresh_subagent_transcript(self, session_id: str) -> None:
+        try:
+            history = await self.app_server.resources.sessions.get_session_history(
+                session_id, history_limit=HISTORY_RESUME_TAIL_MESSAGES
+            )
+            history_complete = len(history) < HISTORY_RESUME_TAIL_MESSAGES
+            if (
+                not history_complete
+                and self._subagent_transcripts.needs_complete_history(
+                    session_id, history
+                )
+            ):
+                cursor = history[0].id
+                while cursor is not None:
+                    page = await self.app_server.resources.sessions.list_history(
+                        session_id=session_id, before=cursor, limit=500
+                    )
+                    history = [*page.items, *history]
+                    cursor = page.next_cursor
+                history_complete = True
+        except Exception:
+            logger.exception("Failed to read subagent session %s", session_id)
+            if self._viewed_subagent_id == session_id:
+                await self._subagent_transcripts.show_error(session_id)
+            return
+        if self._viewed_subagent_id != session_id:
+            return
+
+        was_at_bottom = self._chat_widget.is_at_bottom
+        scroll_y = float(self._chat_widget.scroll_offset.y)
+        changed = await self._subagent_transcripts.replace_history(
+            session_id,
+            history,
+            tools_collapsed=self._tools_collapsed,
+            show_thinking=self.config.show_thinking_nodes,
+            history_complete=history_complete,
+        )
+        if not changed:
+            return
+        if was_at_bottom:
+            self.call_after_refresh(self._chat_widget.anchor)
+        else:
+            self.call_after_refresh(
+                partial(
+                    self._chat_widget.scroll_to,
+                    y=scroll_y,
+                    animate=False,
+                    force=True,
+                    immediate=True,
+                )
+            )
+
+    async def _reset_subagent_views(self) -> None:
+        worker = self._subagent_refresh_worker
+        self._subagent_refresh_generation += 1
+        self._subagent_refresh_requested = False
+        self._subagent_refresh_worker = None
+        if worker is not None:
+            worker.cancel()
+            with suppress(WorkerCancelled):
+                await worker.wait()
+        self._viewed_subagent_id = None
+        self._refresh_session_indicators()
+        if (
+            self._subagent_loading_widget is not None
+            and self._subagent_loading_widget.parent
+        ):
+            await self._subagent_loading_widget.remove()
+        self._subagent_loading_widget = None
+        self._transcript_scroll_offsets.clear()
+        await self._subagent_transcripts.clear()
+        self._messages_area.display = True
+        if self._chat_input_container is not None:
+            self._chat_input_container.set_subagent_view(False)
+        self._refresh_subagent_list()
+
+    async def on_subagent_list_selected(self, event: SubagentList.Selected) -> None:
+        if event.session_id is None:
+            self._show_main_chat(focus_input=False)
+            return
+        if all(
+            session.id != event.session_id for session in self.app_server.child_sessions
+        ):
+            self._show_main_chat()
+            return
+        await self._show_subagent_chat(event.session_id)
 
     def _start_post_ready_startup(self) -> None:
         self.run_worker(self._complete_post_ready_startup(), exclusive=False)
@@ -1433,7 +1679,7 @@ class VibeApp(App):  # noqa: PLR0904
         if not self.app_server.resources.runtime.experimental_harness:
             return
         message = (
-            "You are using the Unified Harness (experimental). "
+            "You are using our new unified harness. "
             "If you encounter issues, restart with --legacy-harness."
         )
         try:
@@ -2088,6 +2334,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         if self._loading_widget and self._loading_widget.parent:
             self._loading_widget.set_status(status)
+            self._loading_widget.display = self._viewed_subagent_id is None
             return
 
         try:
@@ -2095,8 +2342,27 @@ class VibeApp(App):  # noqa: PLR0904
         except Exception:
             return
         loading = LoadingWidget(status=status, show_hint=show_hint)
+        loading.display = self._viewed_subagent_id is None
         self._loading_widget = loading
         await loading_area.mount(loading)
+
+    async def _ensure_subagent_loading_widget(
+        self, session: PublicChildSession
+    ) -> None:
+        status = subagent_loading_status(session)
+        if (
+            self._subagent_loading_widget is not None
+            and self._subagent_loading_widget.parent
+        ):
+            if status is not None:
+                self._subagent_loading_widget.set_status(status)
+            self._subagent_loading_widget.display = status is not None
+            return
+
+        loading = LoadingWidget(status=status or "Running", show_hint=False)
+        loading.display = status is not None
+        self._subagent_loading_widget = loading
+        await self._loading_area.mount(loading)
 
     async def on_voice_app_config_closed(self, message: VoiceApp.ConfigClosed) -> None:
         await self._handle_voice_settings_closed(message.changes)
@@ -2159,7 +2425,19 @@ class VibeApp(App):  # noqa: PLR0904
         await self._switch_to_input_app()
 
     async def _persist_model(self, alias: str) -> None:
-        await self.app_server.resources.config.update({"active_model": alias})
+        status = await self.app_server.resources.config.write_model(model_alias=alias)
+        await self._reload_settled_pick(status)
+
+    async def _reload_settled_pick(self, status: RuntimeMutationStatus) -> None:
+        """Reload for a pick the session is already running, and only then.
+
+        ``config/reload`` requires an idle session, so one run behind a pick a
+        turn has parked fails, and that failure reads as the pick itself having
+        failed. It has not: the session announces the pick with
+        ``runtime/updated`` when the turn ends.
+        """
+        if status is RuntimeMutationStatus.PENDING:
+            return
         await self._reload_config()
 
     async def on_model_picker_app_cancelled(
@@ -2317,8 +2595,8 @@ class VibeApp(App):  # noqa: PLR0904
         await self._switch_to_input_app()
 
     async def _persist_thinking(self, level: ThinkingLevel) -> None:
-        await self.app_server.resources.config.set_thinking(level)
-        await self._reload_config()
+        status = await self.app_server.resources.config.set_thinking(level)
+        await self._reload_settled_pick(status)
 
     async def on_thinking_picker_app_cancelled(
         self, _event: ThinkingPickerApp.Cancelled
@@ -2413,7 +2691,7 @@ class VibeApp(App):  # noqa: PLR0904
             widget.request_diff_render(ansi=ansi, dark=dark)
 
     async def on_mcpapp_mcpclosed(self, _message: MCPApp.MCPClosed) -> None:
-        await self._mount_and_scroll(UserCommandMessage("MCP servers closed."))
+        await self._mount_and_scroll(UserCommandMessage("MCP and connectors closed."))
         await self._switch_to_input_app()
 
     async def on_mcpapp_mcptoggled(self, message: MCPApp.MCPToggled) -> None:
@@ -2657,6 +2935,9 @@ class VibeApp(App):  # noqa: PLR0904
         )
 
     async def _resume_history_from_messages(self) -> None:
+        # The pinned row is deliberately not seeded from history: the todo list lives
+        # in the harness session's memory and a resumed process rebuilds it empty, so
+        # a seeded row would advertise a list `todo read` reports as empty.
         messages_area = self._messages_area
         if not should_resume_history(list(messages_area.children)):
             return
@@ -2693,6 +2974,12 @@ class VibeApp(App):  # noqa: PLR0904
             history_widget_indices=self._history_widget_indices,
             tools_collapsed=self._tools_collapsed,
             show_thinking=self.config.show_thinking_nodes,
+            # Unset on the legacy harness, where a todo result prints the full list.
+            todo_deltas=(
+                todo_deltas(self.app_server.history)
+                if self._todo_tracker is not None
+                else None
+            ),
         )
 
         with self.batch_update():
@@ -2864,21 +3151,18 @@ class VibeApp(App):  # noqa: PLR0904
             and event.entry.source == "turn_steer"
         ):
             await self._queue.steering_history_added(event.entry.id)
+        if isinstance(event, HistoryEntryAdded | HistoryEntryUpdated):
+            self._remember_subagent_instruction(event.entry)
         self._track_narrator_event(event)
-        if isinstance(event, TurnQueueUpdated):
-            await self._queue.sync_server_queue(event.queue)
-            return
-        if isinstance(event, ServerWarning):
-            self.notify(event.params.warning.message, severity="warning")
-            return
-        if isinstance(event, ServerError):
-            self.notify(event.params.error.message, severity="error")
-            return
-        if isinstance(event, CallbackRequested):
-            await self._show_callback(event.callback)
-            return
-        if isinstance(event, StatsUpdated):
-            self._update_context_progress(event)
+        if isinstance(
+            event,
+            ChildSessionUpdated
+            | HistoryEntryAdded
+            | HistoryEntryUpdated
+            | SessionContextCleared,
+        ):
+            self._refresh_subagent_list()
+        if await self._handle_immediate_turn_event(event):
             return
         entry = _public_entry(event)
         if isinstance(entry, PublicNoticeEntry) and isinstance(
@@ -2891,6 +3175,50 @@ class VibeApp(App):  # noqa: PLR0904
             await self.event_handler.handle_event(
                 event, loading_widget=self._loading_widget
             )
+
+    def _remember_subagent_instruction(self, entry: PublicHistoryEntry) -> None:
+        if not isinstance(entry, PublicEffectEntry):
+            return
+        detail = entry.detail
+        if (
+            not isinstance(detail, SubagentEffectDetail)
+            or detail.tool_name != "subagent.spawn"
+            or detail.child_session_id is None
+            or detail.input is None
+        ):
+            return
+        self._subagent_transcripts.remember_parent_instruction(
+            PublicMessageEntry(
+                id=f"parent-instruction:{detail.child_session_id}",
+                session_id=detail.child_session_id,
+                created_at=entry.created_at,
+                updated_at=entry.updated_at,
+                generation_status=PublicEntryGenerationStatus.COMPLETED,
+                role="user",
+                content=[TextContentBlock(text=detail.input.task)],
+                source="turn_start",
+            )
+        )
+
+    async def _handle_immediate_turn_event(self, event: AppServerEvent) -> bool:
+        if isinstance(event, ChildSessionUpdated):
+            await self._update_subagent_ready_message(event.child_session)
+            if event.child_session.id == self._viewed_subagent_id:
+                self._refresh_session_indicators()
+                self._schedule_subagent_transcript_refresh()
+        elif isinstance(event, TurnQueueUpdated):
+            await self._queue.sync_server_queue(event.queue)
+        elif isinstance(event, ServerWarning):
+            self.notify(event.params.warning.message, severity="warning")
+        elif isinstance(event, ServerError):
+            self.notify(event.params.error.message, severity="error")
+        elif isinstance(event, CallbackRequested):
+            await self._show_callback(event.callback)
+        elif isinstance(event, StatsUpdated):
+            self._update_context_progress(event)
+        else:
+            return False
+        return True
 
     async def _shutdown(self) -> None:
         # Stop consuming app-server events before Textual tears down the DOM.
@@ -3179,6 +3507,7 @@ class VibeApp(App):  # noqa: PLR0904
                 await self.event_handler.finalize_streaming()
                 self.event_handler.escalate_unresolved_errors()
             self._on_busy_state_changed(False)
+            self._refresh_subagent_list()
             if not notify_complete:
                 return
             await self._refresh_windowing_from_history()
@@ -3528,7 +3857,7 @@ class VibeApp(App):  # noqa: PLR0904
             except asyncio.CancelledError:
                 pass
         elif self.app_server.turn_active:
-            await self.app_server.interrupt()
+            await self._interrupt_server_turn()
 
         if self.event_handler:
             self.event_handler.stop_current_tool_call(cancelled=True)
@@ -3541,6 +3870,32 @@ class VibeApp(App):  # noqa: PLR0904
         await self._mount_and_scroll(InterruptMessage())
 
         self._interrupt_requested = False
+
+    async def _interrupt_server_turn(self) -> None:
+        interrupt = asyncio.create_task(self.app_server.interrupt())
+        try:
+            done, _ = await asyncio.wait({interrupt}, timeout=SLOW_INTERRUPT_HINT_DELAY)
+            if not done:
+                # Keep waiting rather than giving up: the app-server is in-process, so
+                # there is no peer to lose faith in, and a turn this side abandoned is
+                # still running over there. Tearing the UI down now would report an
+                # interrupt that did not happen. The hint is the honest recovery --
+                # the wedge itself belongs to the harness runtime (VIBE-4467).
+                self.app_server.resources.telemetry.record(
+                    "vibe.user_cancelled_action",
+                    {"action": "interrupt_agent", "outcome": "slow"},
+                )
+                self.notify(
+                    "Interrupt is taking unusually long. "
+                    "Press Ctrl+C twice to force quit.",
+                    severity="warning",
+                    markup=False,
+                    timeout=10,
+                )
+            await interrupt
+        except asyncio.CancelledError:
+            interrupt.cancel()
+            raise
 
     async def _show_help(self, **kwargs: Any) -> None:
         help_text = self.commands.get_help_text()
@@ -3700,6 +4055,7 @@ class VibeApp(App):  # noqa: PLR0904
                 name=args.name,
                 scopes=args.scopes,
                 transport=args.transport,
+                allow_insecure_http=args.allow_insecure_http,
             )
         except AppServerResponseError as exc:
             await self._mount_and_scroll(
@@ -3733,7 +4089,7 @@ class VibeApp(App):  # noqa: PLR0904
         if state.connector_error:
             await self._mount_and_scroll(
                 ErrorMessage(
-                    f"Could not load workspace connectors.\n{state.connector_error}",
+                    f"Could not load connectors.\n{state.connector_error}",
                     collapsed=False,
                 )
             )
@@ -3758,7 +4114,7 @@ class VibeApp(App):  # noqa: PLR0904
             )
             return
         mcp_app_class = _get_mcp_app_class()
-        await self._mount_and_scroll(UserCommandMessage("MCP servers opened..."))
+        await self._mount_and_scroll(UserCommandMessage("MCP and connectors opened..."))
         await self._switch_from_input(
             mcp_app_class(
                 state=state,
@@ -4302,6 +4658,10 @@ class VibeApp(App):  # noqa: PLR0904
 
             await self._remove_loading_widget()
             self._loading_widget = None
+            # The attached session changed, and a resumed one rebuilds its todo list
+            # empty.
+            self._reset_todo_presentation()
+            await self._reset_subagent_views()
             await self._queue.clear_server_queue()
             self._on_busy_state_changed(False)
 
@@ -4466,6 +4826,7 @@ class VibeApp(App):  # noqa: PLR0904
             self._chat_input_container.set_custom_border(None)
         if self.event_handler:
             await self.event_handler.finalize_streaming()
+        await self._reset_subagent_views()
         await self._messages_area.remove_children()
 
     async def _clear_history(self, cmd_args: str = "", **kwargs: Any) -> None:
@@ -4481,6 +4842,8 @@ class VibeApp(App):  # noqa: PLR0904
             # call -- so it would keep showing the context the clear discarded.
             self._refresh_context_progress()
             self._refresh_banner()
+            # The clear starts a fresh harness session, so its todo list is empty.
+            self._reset_todo_presentation()
             await self._reset_message_widgets()
 
             await self._messages_area.mount(SlashCommandMessage("clear"))
@@ -5173,6 +5536,9 @@ class VibeApp(App):  # noqa: PLR0904
             self.notify(error, severity="warning")
 
         self._clear_rewind_state()
+        # Either rewind mode leaves the session without its todo list: a fork starts a
+        # new one, and an in-place rewind drops the one the truncated history wrote.
+        self._reset_todo_presentation()
         await self._switch_to_input_app()
         await self._reset_message_widgets()
         await self._resume_history_from_messages()
@@ -5350,7 +5716,35 @@ class VibeApp(App):  # noqa: PLR0904
             interrupted = True
         return interrupted
 
+    def _show_subagent_read_only_message(self) -> None:
+        session_id = self._viewed_subagent_id
+        if session_id is None:
+            return
+        self.run_worker(
+            self._append_subagent_read_only_message(session_id),
+            exclusive=False,
+            group="subagent-local-message",
+        )
+
+    async def _append_subagent_read_only_message(self, session_id: str) -> None:
+        await self._subagent_transcripts.append_local_user_message(
+            session_id, _SUBAGENT_READ_ONLY_MESSAGE, severity=UserMessageSeverity.ERROR
+        )
+        if self._viewed_subagent_id == session_id:
+            self.call_after_refresh(self._chat_widget.anchor)
+
+    async def _update_subagent_ready_message(self, session: PublicChildSession) -> None:
+        added = await self._subagent_transcripts.announce_ready_transition(
+            session, message=_SUBAGENT_READY_MESSAGE
+        )
+        if added and self._viewed_subagent_id == session.id:
+            self.call_after_refresh(self._chat_widget.anchor)
+
     def _try_interrupt(self) -> bool:
+        if self._viewed_subagent_id is not None:
+            self._last_escape_time = None
+            self._show_main_chat()
+            return True
         if self._try_interrupt_no_job_steps():
             return True
 
@@ -5363,11 +5757,12 @@ class VibeApp(App):  # noqa: PLR0904
         return interrupted
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Disable the priority escape->interrupt binding on config modals and queue selection so escape falls through."""
+        """Disable the priority escape->interrupt binding on modals and queue selection so escape falls through."""
         if action != "interrupt":
             return True
-        screen_id = self.screen.id
-        if screen_id is not None and screen_id.startswith("config-"):
+        # Every modal binds escape to dismiss itself, and the priority binding here
+        # would otherwise win and trap the user inside it.
+        if isinstance(self.screen, ModalScreen):
             return False
         containers = self.query(ChatInputContainer)
         if not containers:
@@ -5463,14 +5858,81 @@ class VibeApp(App):  # noqa: PLR0904
     def _refresh_profile_widgets(self) -> None:
         self._update_profile_widgets(self.app_server.resources.agents.active)
 
+    def _viewed_subagent(self) -> PublicChildSession | None:
+        if self._viewed_subagent_id is None:
+            return None
+        return next(
+            (
+                session
+                for session in self.app_server.child_sessions
+                if session.id == self._viewed_subagent_id
+            ),
+            None,
+        )
+
+    def _refresh_session_indicators(self) -> None:
+        selected = self._viewed_subagent()
+        if self._subagent_loading_widget is not None:
+            status = subagent_loading_status(selected) if selected is not None else None
+            if status is not None:
+                self._subagent_loading_widget.set_status(status)
+            self._subagent_loading_widget.display = status is not None
+        if self._loading_widget is not None and self._loading_widget.parent:
+            self._loading_widget.display = selected is None
+        self._refresh_context_progress()
+
     def _refresh_context_progress(self) -> None:
         if self._context_progress is None:
             return
         runtime = self.app_server.resources.runtime
+        child_session = self._viewed_subagent()
+        if child_session is not None:
+            context_tokens = (
+                child_session.context_usage.total_tokens
+                if child_session.context_usage is not None
+                else 0
+            )
+            self._context_progress.tokens = TokenState(
+                max_tokens=runtime.context_window, current_tokens=context_tokens
+            )
+            return
         self._context_progress.tokens = TokenState(
             max_tokens=runtime.context_window,
             current_tokens=runtime.stats.context_tokens,
         )
+
+    async def _show_todos(self, **kwargs: Any) -> None:
+        if self._todo_tracker is None or not self._todo_tracker.todos:
+            await self._mount_and_scroll(UserCommandMessage("No todos yet."))
+            return
+        self.action_show_todos()
+
+    def _refresh_todo_status(self) -> None:
+        if self._todo_tracker is None or self._todo_status_row is None:
+            return
+        self._todo_status_row.set_summary(self._todo_tracker.summary)
+
+    def _reset_todo_presentation(self) -> None:
+        """Drop the pinned row's list, for when the session behind it no longer holds it.
+
+        Nothing reseeds it from history -- see `_resume_history_from_messages` -- so
+        the row would otherwise keep advertising todos `todo read` no longer returns.
+        """
+        if self._todo_tracker is None:
+            return
+        self._todo_tracker.seed([])
+        self._refresh_todo_status()
+
+    def action_show_todos(self) -> None:
+        from vibe.cli.textual_ui.screens.todo_overlay import TodoOverlayScreen
+
+        if self._todo_tracker is None:
+            return
+        self.push_screen(TodoOverlayScreen(self._todo_tracker.todos))
+
+    def on_todo_status_row_activated(self, event: TodoStatusRow.Activated) -> None:
+        event.stop()
+        self.action_show_todos()
 
     def _on_profile_changed(self) -> None:
         self._refresh_profile_widgets()
@@ -5607,6 +6069,15 @@ class VibeApp(App):  # noqa: PLR0904
         if self._app_server is None:
             self._force_quit()
             return
+        if self._viewed_subagent_id is not None:
+            if self._quit_manager.is_confirmed("Ctrl+C"):
+                self._force_quit()
+            else:
+                self._show_subagent_read_only_message()
+                self._quit_manager.request_confirmation(
+                    "Ctrl+C", self._queue.quit_warning_extra()
+                )
+            return
         if (container := self._get_chat_input()) and container.value:
             container.value = ""
             return
@@ -5620,11 +6091,10 @@ class VibeApp(App):  # noqa: PLR0904
             if queue_item_removable:
                 self.run_worker(self._queue.pop_last(), exclusive=False)
             return
-        if self._try_interrupt_running_job():
-            return
-        self._quit_manager.request_confirmation(
-            "Ctrl+C", self._queue.quit_warning_extra()
-        )
+        if not self._try_interrupt_running_job():
+            self._quit_manager.request_confirmation(
+                "Ctrl+C", self._queue.quit_warning_extra()
+            )
 
     def action_delete_right_or_quit(self) -> None:
         if self._app_server is None:
@@ -6001,7 +6471,10 @@ class VibeApp(App):  # noqa: PLR0904
     def on_app_focus(self, event: AppFocus) -> None:
         self._terminal_notifier.on_focus()
         if self._chat_input_container and self._chat_input_container.input_widget:
-            self._chat_input_container.input_widget.set_app_focus(True)
+            self._chat_input_container.input_widget.set_app_focus(
+                self._viewed_subagent_id is None
+                and not self.query_one(SubagentList).has_focus
+            )
 
     def action_open_plan_in_editor(self) -> None:
         if self.event_handler is None:

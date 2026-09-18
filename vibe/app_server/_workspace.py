@@ -53,6 +53,40 @@ class WorkspaceTrustError(ValueError):
     pass
 
 
+def is_trust_grant(decision: WorkspaceTrustDecision) -> bool:
+    """Grants reload config and re-derive the runtime; a decline does not."""
+    return decision in {"trust_repo", "trust_cwd"}
+
+
+def require_trust_session_id(session_id: str | None) -> str:
+    """A trust decision is a persistent write, so it must name its session."""
+    if session_id is None:
+        raise WorkspaceTrustError(
+            "Active workspace trust decisions require a session ID"
+        )
+    return session_id
+
+
+def resolve_session_trust_target(
+    session_cwd: Path | str, requested: str | None
+) -> Path:
+    """The directory a session-scoped trust decision may target.
+
+    A trust decision is a persistent write to the trust store, so a
+    caller-supplied ``requested`` path may only be the session's own working
+    directory, after ``~`` and symlink resolution.
+    """
+    target = Path(session_cwd).expanduser().resolve()
+    if requested is None:
+        return target
+    resolved = Path(requested).expanduser().resolve()
+    if resolved != target:
+        raise WorkspaceTrustError(
+            "Workspace trust decisions must target the session's working directory"
+        )
+    return resolved
+
+
 def read_workspace_trust(
     cwd: Path, trust_store: TrustedFoldersManager
 ) -> WorkspaceTrustStatusResponse:
@@ -116,40 +150,24 @@ def _workspace_trust_details(prompt: WorkspaceTrustPrompt) -> WorkspaceTrustDeta
     )
 
 
-def prepare_prompt(
-    agent_loop: AgentLoop, message: str, title_content: list[ContentBlock] | None = None
-) -> PreparedPrompt:
+def prepare_prompt(agent_loop: AgentLoop, message: str) -> PreparedPrompt:
     model = agent_loop.config.get_active_model()
-    return prepare_prompt_from_context(
-        message,
-        cwd=agent_loop.cwd,
-        session_dir=agent_loop.session_logger.session_dir,
-        model_alias=model.alias,
-        model_display_name=model.display_name,
-        model_supports_images=model.supports_images,
-        needs_initial_auto_title=agent_loop.session_logger.needs_initial_auto_title(),
-        title_content=title_content,
+    prompt = prepare_prompt_from_context(
+        message, cwd=agent_loop.cwd, session_dir=agent_loop.session_logger.session_dir
     )
+    if prompt.images and not model.supports_images:
+        raise PromptPreparationError(
+            f"Model `{model.display_name or model.alias}` does not support images. "
+            "Switch with /model or remove the attachment."
+        )
+    return prompt
 
 
 def prepare_prompt_from_context(
-    message: str,
-    *,
-    cwd: Path,
-    session_dir: Path | None,
-    model_alias: str,
-    model_supports_images: bool,
-    needs_initial_auto_title: bool,
-    model_display_name: str | None = None,
-    title_content: list[ContentBlock] | None = None,
+    message: str, *, cwd: Path, session_dir: Path | None
 ) -> PreparedPrompt:
     payload = build_path_prompt_payload(message, base_dir=cwd)
     images = _snapshot_images(session_dir, payload)
-    if images and not model_supports_images:
-        raise PromptPreparationError(
-            f"Model `{model_display_name or model_alias}` does not support images. "
-            "Switch with /model or remove the attachment."
-        )
     # The title is left unset here; it is generated in the background by the
     # agent loop once there is a transcript to summarize.
     return PreparedPrompt(

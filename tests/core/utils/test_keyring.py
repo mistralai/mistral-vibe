@@ -215,6 +215,21 @@ def test_get_prefers_current_service(monkeypatch: pytest.MonkeyPatch) -> None:
     assert reads == [(_CURRENT_SERVICE, "CUSTOM_API_KEY")]
 
 
+def test_get_skips_legacy_services_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    reads: list[tuple[str, str]] = []
+
+    def _get(service: str, username: str) -> str | None:
+        reads.append((service, username))
+        return "legacy-key" if service == _RELEASED_LEGACY_SERVICE else None
+
+    monkeypatch.setattr(keyring, "get_password", _get)
+
+    assert (
+        get_api_key_from_keyring("CUSTOM_API_KEY", search_legacy_services=False) is None
+    )
+    assert reads == [(_CURRENT_SERVICE, "CUSTOM_API_KEY")]
+
+
 @pytest.mark.parametrize("legacy_service", _LEGACY_SERVICES)
 def test_get_migrates_legacy_service_value(
     monkeypatch: pytest.MonkeyPatch, legacy_service: str
@@ -441,7 +456,7 @@ def test_delete_raises_missing_when_all_services_are_missing(
     assert deleted == [(service, "CUSTOM_API_KEY") for service in _ALL_SERVICES]
 
 
-def test_macos_set_recreates_item_with_security_stdin_and_unrestricted_acl(
+def test_macos_set_recreates_item_with_security_argv_and_unrestricted_acl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
@@ -466,24 +481,25 @@ def test_macos_set_recreates_item_with_security_stdin_and_unrestricted_acl(
         "CUSTOM_API_KEY",
     ]
     assert "new-key" not in delete_args
-    assert delete_kwargs["input"] is None
+    assert "input" not in delete_kwargs
 
     args, kwargs = calls[1]
-    assert args == ["/usr/bin/security", "-i"]
+    assert args == [
+        "/usr/bin/security",
+        "add-generic-password",
+        "-s",
+        _CURRENT_SERVICE,
+        "-a",
+        "CUSTOM_API_KEY",
+        "-w",
+        "new-key",
+        "-A",
+    ]
     assert kwargs["text"] is True
     assert kwargs["capture_output"] is True
     assert kwargs["check"] is True
-    assert "new-key" not in args
-
-    command = kwargs["input"]
-    assert isinstance(command, str)
-    assert command.endswith("\n")
-    assert "add-generic-password" in command
-    assert "-A" in command
-    assert "-U" not in command
-    assert _CURRENT_SERVICE in command
-    assert "CUSTOM_API_KEY" in command
-    assert "new-key" in command
+    assert "input" not in kwargs
+    assert "-U" not in args
     assert [call[0] for call in calls[2:]] == [
         [
             "/usr/bin/security",
@@ -494,6 +510,29 @@ def test_macos_set_recreates_item_with_security_stdin_and_unrestricted_acl(
             "CUSTOM_API_KEY",
         ]
     ]
+
+
+def test_macos_set_passes_token_verbatim_as_single_argv_element(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression for VIBE-4008: OAuth tokens contain quotes, newlines and are
+    # large. The old `security -i` + shlex.join path misparsed them. The token
+    # must reach `security` as one exact exec argument, immune to tokenization.
+    token = '{"access_token": "a\'b\\nc", "payload": "' + "x" * 4096 + '"}'
+    add_args: list[list[str]] = []
+    monkeypatch.setattr(keyring_utils, "_should_use_macos_security", lambda: True)
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[1] == "add-generic-password":
+            add_args.append(args)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(keyring_utils.subprocess, "run", _run)
+
+    set_api_key_in_keyring("CUSTOM_API_KEY", token)
+
+    assert len(add_args) == 1
+    assert add_args[0][add_args[0].index("-w") + 1] == token
 
 
 def test_macos_set_ignores_missing_item_before_recreate(
@@ -525,7 +564,17 @@ def test_macos_set_ignores_missing_item_before_recreate(
             "-a",
             "CUSTOM_API_KEY",
         ],
-        ["/usr/bin/security", "-i"],
+        [
+            "/usr/bin/security",
+            "add-generic-password",
+            "-s",
+            _CURRENT_SERVICE,
+            "-a",
+            "CUSTOM_API_KEY",
+            "-w",
+            "new-key",
+            "-A",
+        ],
         [
             "/usr/bin/security",
             "delete-generic-password",
@@ -559,12 +608,14 @@ def test_macos_get_uses_security_find_password(monkeypatch: pytest.MonkeyPatch) 
                 "CUSTOM_API_KEY",
                 "-w",
             ],
-            {"input": None, "text": True, "capture_output": True, "check": True},
+            {"text": True, "capture_output": True, "check": True},
         )
     ]
 
 
-def test_macos_get_raises_when_item_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_macos_get_returns_none_when_item_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(keyring_utils, "_should_use_macos_security", lambda: True)
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -574,8 +625,7 @@ def test_macos_get_raises_when_item_is_missing(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(keyring_utils.subprocess, "run", _run)
 
-    with pytest.raises(keyring_utils._PasswordNotFoundError):
-        keyring_utils._get_password(_CURRENT_SERVICE, "CUSTOM_API_KEY")
+    assert keyring_utils._get_password(_CURRENT_SERVICE, "CUSTOM_API_KEY") is None
 
 
 def test_macos_get_checks_legacy_service_when_current_item_is_missing(

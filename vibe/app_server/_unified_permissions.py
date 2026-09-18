@@ -41,6 +41,7 @@ from vibe.core.tools.models import (
     ToolPermission,
 )
 from vibe.core.tools.permissions import PermissionStore, wildcard_match
+from vibe.observability.logging import logger
 from vibe.permissions import RequiredPermission
 
 # The Rust Runtime's builtin tools and Vibe's tool catalogue are separate
@@ -52,6 +53,36 @@ RUST_BUILTIN_TOOL_SOURCES: dict[RustRuntimeBuiltinToolName, frozenset[str]] = {
     "file_system.bash": frozenset({"bash", "powershell", "git_bash"}),
     "skill.read": frozenset({"skill"}),
 }
+
+
+class ProvidedToolNames:
+    """Runtime route -> the name Vibe publishes and configures the tool under.
+
+    The two disagree, and not recoverably: a route is built from normalized
+    identifier segments (``mcp_data_api.create_issue``) while Vibe's config key
+    keeps the raw alias and remote name (``data-api_create-issue``), and a
+    collision on either side adds a digest computed over different input. Only
+    the catalogue that built the routes knows which pairs with which, so it
+    registers them here as it publishes them.
+    """
+
+    def __init__(self) -> None:
+        self._by_catalogue: dict[str, Mapping[str, str]] = {}
+
+    def register(self, catalogue: str, names: Mapping[str, str]) -> None:
+        self._by_catalogue[catalogue] = dict(names)
+
+    def adopt(self, other: ProvidedToolNames) -> None:
+        self._by_catalogue = dict(other._by_catalogue)
+
+    def resolve(self, route: str) -> str:
+        for names in self._by_catalogue.values():
+            published = names.get(route)
+            if published is not None:
+                return published
+        # A plugin's own tool group publishes no Vibe name, so it is configured
+        # under the route the Runtime gates it by.
+        return route
 
 
 def _first_block(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -134,14 +165,20 @@ class UnifiedPermissionResolver:
         tools: ToolManager,
         store: PermissionStore,
         config: ConfigOrchestrator[VibeConfigSchema],
+        provided_names: ProvidedToolNames | None = None,
     ) -> None:
         self._tools = tools
         self._store = store
         self._config = config
+        self._provided_names = provided_names or ProvidedToolNames()
 
     @property
     def store(self) -> PermissionStore:
         return self._store
+
+    @property
+    def provided_names(self) -> ProvidedToolNames:
+        return self._provided_names
 
     def vibe_tool_names(self, builtin: str) -> tuple[str, ...]:
         sources = RUST_BUILTIN_TOOL_SOURCES.get(
@@ -164,6 +201,10 @@ class UnifiedPermissionResolver:
         shell could read the command at all, the command itself becomes the
         scope, so that grant stays narrow too.
         """
+        if builtin not in RUST_BUILTIN_TOOL_SOURCES:
+            # The Runtime reserves the builtin namespaces for itself, so a name that is
+            # not a builtin is a provided tool's ``group.tool`` route and nothing else.
+            return self._resolve_provided_tool(builtin)
         names = self.vibe_tool_names(builtin)
         if not names:
             # The mode already denies a builtin with no catalogue entry; leaving
@@ -229,6 +270,20 @@ class UnifiedPermissionResolver:
             )
         return PermissionOutcome(decision="allow", authorized_path=authorized_path)
 
+    def _resolve_provided_tool(self, route: str) -> PermissionOutcome:
+        """A provided tool has no call-scoped rules, so its permission is the verdict."""
+        name = self._provided_names.resolve(route)
+        permission = self._tools.get_tool_config(name).permission
+        match permission:
+            case ToolPermission.ALWAYS:
+                return PermissionOutcome(decision="allow")
+            case ToolPermission.NEVER:
+                return PermissionOutcome(
+                    decision="deny", reason=f"Tool '{name}' is permanently disabled"
+                )
+            case _:
+                return PermissionOutcome(decision="ask")
+
     def _fallback_permission(
         self, builtin: str, arguments: Mapping[str, Any]
     ) -> RequiredPermission | None:
@@ -244,6 +299,7 @@ class UnifiedPermissionResolver:
             invocation_pattern=command,
             session_pattern=command,
             label=command,
+            literal=True,
         )
 
     def _covered(self, name: str, fallback: RequiredPermission) -> bool:
@@ -321,6 +377,22 @@ class UnifiedPermissionResolver:
         permanent: bool,
     ) -> None:
         """Record what the user approved, scoped the way legacy scopes it."""
+        if builtin not in RUST_BUILTIN_TOOL_SOURCES:
+            name = self._provided_names.resolve(builtin)
+            if required_permissions:
+                for rp in required_permissions:
+                    self._store.add_rule(
+                        ApprovedRule(
+                            tool_name=name,
+                            scope=rp.scope,
+                            session_pattern=rp.session_pattern,
+                        )
+                    )
+            else:
+                self._store.set_tool_permission(name, ToolPermission.ALWAYS)
+            if permanent:
+                await self._persist(name, required_permissions)
+            return
         if not required_permissions and builtin in _FALLBACK_SCOPES:
             # A builtin that can always scope a call it can read has no honest
             # tool-wide grant. What still arrives here with nothing attached is a
@@ -347,6 +419,14 @@ class UnifiedPermissionResolver:
             if permanent:
                 await self._persist(name, required_permissions)
 
+    def _allowlist_scopes(self, name: str) -> frozenset[PermissionScope]:
+        tool_class = self._tools.available_tools.get(name)
+        if tool_class is None:
+            # A provided tool has no class here to ask, and its allowlist is read
+            # by whichever catalogue published it. Persist as before.
+            return frozenset(PermissionScope)
+        return tool_class.allowlist_scopes
+
     async def _persist(
         self, name: str, required_permissions: Sequence[RequiredPermission]
     ) -> None:
@@ -356,18 +436,29 @@ class UnifiedPermissionResolver:
                 f"/tools/{name}/permission", ToolPermission.ALWAYS.value
             )
             return
-        patterns = [
-            rp.session_pattern
-            for rp in required_permissions
-            if rp.session_pattern.strip()
-        ]
+        scopes = self._allowlist_scopes(name)
+        patterns: list[str] = []
+        dropped: list[RequiredPermission] = []
+        for rp in required_permissions:
+            # A blank entry in a shell's prefix-matched allowlist is junk that
+            # matches the empty command and anything the tool later hands it with
+            # a leading space.
+            if rp.session_pattern.strip() and rp.scope in scopes:
+                patterns.append(rp.session_pattern)
+            else:
+                dropped.append(rp)
+        if dropped:
+            # Warned per scope rather than only when nothing survives: a grant
+            # half-written is still a grant the next session re-prompts for, and
+            # silence there reads as "persisted".
+            logger.warning(
+                "Permanent grant for %s keeps scopes %s to this session: the tool's "
+                "allowlist holds only %s",
+                name,
+                sorted({rp.scope.value for rp in dropped}),
+                sorted(scope.value for scope in scopes),
+            )
         if not patterns:
-            # A blank command scopes a session grant exactly, but there is
-            # nothing worth writing down about a call that runs nothing -- and
-            # the shells match an allowlist by prefix, where a blank entry is
-            # junk that matches the empty command and anything the tool ever
-            # hands it with a leading space. The session store already covers
-            # this call; the next session can ask again for free.
             return
         update = self._config.config.build_tool_allowlist_update(
             name,
@@ -381,4 +472,8 @@ class UnifiedPermissionResolver:
         )
 
 
-__all__ = ["RUST_BUILTIN_TOOL_SOURCES", "UnifiedPermissionResolver"]
+__all__ = [
+    "RUST_BUILTIN_TOOL_SOURCES",
+    "ProvidedToolNames",
+    "UnifiedPermissionResolver",
+]

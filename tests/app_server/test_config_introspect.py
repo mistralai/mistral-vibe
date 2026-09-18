@@ -66,6 +66,8 @@ def test_build_field_wires_covers_schema_and_defaults(
     assert by_name.keys() == set(type(config).model_fields) - HIDDEN_SETTINGS
     assert not HIDDEN_SETTINGS & by_name.keys()
     assert by_name["autocopy_to_clipboard"].kind is ConfigFieldKind.BOOL
+    assert by_name["show_subagent_status_list"].kind is ConfigFieldKind.BOOL
+    assert by_name["show_subagent_status_list"].value is True
     assert by_name["otel_redaction"].kind is ConfigFieldKind.ENUM
     assert by_name["models"].kind is ConfigFieldKind.COMPLEX
     assert by_name["theme"].path == "/theme"
@@ -81,6 +83,15 @@ def test_tracing_settings_are_public_and_described(
     for name in ("enable_otel", "otel_endpoint", "otel_redaction"):
         assert name in by_name
         assert by_name[name].description
+
+
+def test_subagent_status_list_is_public_and_described(
+    make_config: Callable[..., VibeConfigSchema],
+) -> None:
+    config = make_config()
+    by_name = {wire.name: wire for wire in build_field_wires(config, {})}
+
+    assert by_name["show_subagent_status_list"].description
 
 
 def test_build_field_wires_resolves_layers(

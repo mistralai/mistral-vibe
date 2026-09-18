@@ -1,4 +1,4 @@
-"""Smart-approve activation over the experimental Unified Harness backend.
+"""Smart-approve activation over the Unified Harness backend.
 
 Activation is the `--smart-approve` CLI flag, which selects the smart-approve
 agent; the Runtime then gates each tool call with the risk classifier via the

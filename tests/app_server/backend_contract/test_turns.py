@@ -25,6 +25,8 @@ from vibe.app_server.models import (
     ApprovalDecisionType,
     CompletedEffectState,
     PublicEffectEntry,
+    PublicEntryGenerationStatus,
+    PublicHistoryEntry,
     PublicMessageEntry,
     ResourceContentBlock,
     SubagentEffectDetail,
@@ -605,6 +607,91 @@ async def test_interrupt_terminates_an_active_public_turn(
     )
     assert user.text == "wait"
     assert backend_contract_session.state.session.status.type == "idle"
+    assert backend_contract_session.state.latest_turn is not None
+    assert backend_contract_session.state.latest_turn.status == "interrupted"
+
+
+async def _await_entry(
+    session: AppServerSession,
+    predicate: Callable[[PublicHistoryEntry], bool],
+    *,
+    timeout: float = 5.0,
+) -> PublicHistoryEntry:
+    """Poll history until an entry satisfies ``predicate``, and return it.
+
+    History entries are replaced rather than mutated, so the snapshot returned
+    here is frozen at the moment it matched. The predicate therefore has to
+    name everything the caller is about to assert on -- matching something
+    broad and asserting the detail afterwards reads whatever happened to exist
+    on the first poll.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        for entry in session.history:
+            if predicate(entry):
+                return entry
+        await asyncio.sleep(0.01)
+    raise AssertionError("the expected history entry never arrived")
+
+
+@pytest.mark.asyncio
+async def test_interrupting_a_streamed_answer_closes_it_instead_of_dropping_it(
+    backend_contract_partial_mistral_response: Callable[..., httpx.Response],
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_session: AppServerSession,
+) -> None:
+    """Both backends show a partial answer and close it when interrupted.
+
+    Two things hold while the provider is still talking: text is already on
+    screen, and the turn is still open. Interrupting there has to leave that
+    text visible and settled. The client reduces history from added/updated
+    events and is never told an entry went away, so a partial answer a backend
+    merely stops reporting spins in_progress for the rest of the session.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_partial_mistral_response(
+            "Half a sentence", started=started, release=release
+        )
+    )
+
+    async def consume_turn() -> None:
+        _ = [event async for event in backend_contract_session.act("wait")]
+
+    turn = asyncio.create_task(consume_turn())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        streaming = await _await_entry(
+            backend_contract_session,
+            lambda entry: (
+                isinstance(entry, PublicMessageEntry)
+                and entry.role == "assistant"
+                and entry.text == "Half a sentence"
+            ),
+        )
+        assert isinstance(streaming, PublicMessageEntry)
+        # The provider is still held open, so the answer cannot have settled.
+        assert streaming.generation_status is PublicEntryGenerationStatus.IN_PROGRESS
+
+        await backend_contract_session.interrupt()
+        await turn
+    finally:
+        release.set()
+        if not turn.done():
+            turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await turn
+
+    assistants = [
+        entry
+        for entry in backend_contract_session.history
+        if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
+    ]
+    assert len(assistants) == 1
+    assert assistants[0].id == streaming.id
+    assert assistants[0].text == "Half a sentence"
+    assert assistants[0].generation_status is PublicEntryGenerationStatus.COMPLETED
     assert backend_contract_session.state.latest_turn is not None
     assert backend_contract_session.state.latest_turn.status == "interrupted"
 

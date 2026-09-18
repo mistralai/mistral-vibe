@@ -37,6 +37,9 @@ class SessionLease:
             raise ValueError("session lease path cannot contain a symbolic link")
         self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with _lease_directory_lock(self._path.parent):
+            # The lock file names the session and the pid holding it, so it is
+            # created owner-only; an existing file keeps its current mode.
+            self._path.touch(mode=0o600, exist_ok=True)
             file = self._path.open("a+b")
             try:
                 _acquire_file_lock(file)
@@ -86,7 +89,9 @@ class SessionLease:
 
 @contextmanager
 def _lease_directory_lock(directory: Path) -> Iterator[None]:
-    file = (directory / ".registry").open("a+b")
+    registry = directory / ".registry"
+    registry.touch(mode=0o600, exist_ok=True)
+    file = registry.open("a+b")
     try:
         _acquire_file_lock(file, blocking=True)
     except BaseException:

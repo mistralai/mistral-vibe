@@ -86,6 +86,7 @@ def send_unified_subagent_tool_call_finished(
     outcome: SubagentOutcome,
     model: str,
     profile_source: SubagentProfileSource | None = None,
+    message_id: str | None = None,
 ) -> None:
     """Record one terminal Unified subagent operation without user content.
 
@@ -106,7 +107,7 @@ def send_unified_subagent_tool_call_finished(
         "nb_files_created": 0,
         "nb_files_modified": 0,
         "file_extension": None,
-        "message_id": None,
+        "message_id": message_id,
         "subagent_operation": operation,
         "subagent_outcome": outcome,
         "subagent_depth": 1,
@@ -116,7 +117,7 @@ def send_unified_subagent_tool_call_finished(
     client.send_telemetry_event("vibe.tool_call_finished", payload)
 
 
-def send_unified_tool_call_finished(
+def send_unified_tool_call_finished(  # noqa: PLR0913
     client: TelemetryClient,
     *,
     tool_name: str,
@@ -127,20 +128,25 @@ def send_unified_tool_call_finished(
     nb_files_modified: int = 0,
     file_extension: str | None = None,
     message_id: str | None = None,
+    decision: Literal["execute", "skip"] | None = None,
+    approval_type: Literal["always", "never", "ask"] | None = None,
+    approval_source: Literal["config", "smart", "user", "bypass", "never"]
+    | None = None,
 ) -> None:
     """Record one terminal ordinary (non-subagent) Unified tool call.
 
     The harness runs tool calls in Core, so they never pass through the legacy
     ``ResolvedToolCall`` path. Hand-build the same ``vibe.tool_call_finished``
     payload the legacy loop emits, sourcing name/status/file counts from the
-    reconciled effect. ``decision``/``approval_type`` are unavailable in the
-    snapshot and stay ``None`` (the harness resolves approvals in Core).
+    reconciled effect and ``decision``/``approval_type``/``approval_source``
+    from the effect state.
     """
     payload: dict[str, Any] = {
         "tool_name": tool_name,
         "status": status,
-        "decision": None,
-        "approval_type": None,
+        "decision": decision,
+        "approval_type": approval_type,
+        "approval_source": approval_source,
         "agent_profile_name": agent_profile_name,
         "model": model,
         "nb_files_created": nb_files_created,
@@ -354,6 +360,11 @@ class TelemetryClient:
     ) -> None:
         verdict_value = decision.verdict.value if decision else None
         approval_type_value = decision.approval_type.value if decision else None
+        approval_source_value = (
+            decision.approval_source.value
+            if decision and decision.approval_source
+            else None
+        )
 
         nb_files_created, nb_files_modified, file_extension = (
             self._calculate_file_metrics(tool_call, status, result)
@@ -365,6 +376,7 @@ class TelemetryClient:
             "status": status,
             "decision": verdict_value,
             "approval_type": approval_type_value,
+            "approval_source": approval_source_value,
             "agent_profile_name": agent_profile_name,
             "model": model,
             "nb_files_created": nb_files_created,

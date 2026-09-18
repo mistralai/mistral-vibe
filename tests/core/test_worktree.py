@@ -95,6 +95,48 @@ def _release(cwd: Path, session_id: str | None = None) -> WorktreeRelease:
     return managed.release(session_id)
 
 
+def _write_hook(repo: Repo, marker: Path, name: str) -> None:
+    # The marker has to be absolute: hooks run with the new worktree (or
+    # wherever git runs them) as their cwd, so a relative marker would be
+    # written somewhere else and the test would pass even when the hook
+    # runs.
+    hooks = Path(repo.git_dir) / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    hook = hooks / name
+    hook.write_text(f'#!/bin/sh\necho ran > "{marker}"\n')
+    hook.chmod(0o755)
+
+
+def _skip_unless_control_fires(
+    root: Path, marker: Path, *control: tuple[str, ...]
+) -> None:
+    # Control: every command here is one that would execute the thing under
+    # test, so confirm this environment runs it at all. Without it the
+    # assertions below could pass on a machine where it never runs.
+    fired = False
+    for args in control:
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+        if marker.exists():
+            fired = True
+            marker.unlink()
+    if not fired:
+        pytest.skip("git did not execute the control command in this environment")
+
+
+# Creating and then deleting a branch is the smallest pair of commands that
+# both update a ref, which is what fires reference-transaction.
+_REF_UPDATE_CONTROL = (
+    ("branch", "ref-hook-control"),
+    ("branch", "-D", "ref-hook-control"),
+)
+
+
+def _commit_on_head(repo: Repo, message: str) -> None:
+    (Path(repo.working_dir) / "file.txt").write_text(f"{message}\n")
+    repo.index.add(["file.txt"])
+    repo.index.commit(message)
+
+
 def _init_repo(root: Path, *, separate_git_dir: Path | None = None) -> Repo:
     repo = _track_repo(
         Repo.init(
@@ -135,6 +177,146 @@ def _claim(repo: Repo, name: str) -> WorktreeClaim:
     paths = git_repo_module.GitRepo(repo).paths
     bucket = managed_bucket_name(paths.repo_root, paths.common_git_dir)
     return WorktreeClaim(bucket=bucket, name=name)
+
+
+def test_worktree_creation_does_not_run_repository_hooks(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    marker = tmp_path / "hook-ran"
+    _write_hook(repo, marker, "post-checkout")
+    _skip_unless_control_fires(
+        tmp_path,
+        marker,
+        ("worktree", "add", str(tmp_path / "control"), "-b", "control"),
+    )
+
+    worktree = _prepare("hooked-worktree", tmp_path, branch="feat/hooked")
+
+    assert not marker.exists()
+    assert Path(worktree.root).is_dir()
+
+
+def test_worktree_reuse_of_existing_branch_does_not_run_repository_hooks(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    repo.create_head("feat/existing")
+    marker = tmp_path / "hook-ran"
+    _write_hook(repo, marker, "post-checkout")
+    _skip_unless_control_fires(
+        tmp_path,
+        marker,
+        ("worktree", "add", str(tmp_path / "control"), "-b", "control"),
+    )
+
+    worktree = _prepare("existing-worktree", tmp_path, branch="feat/existing")
+
+    assert not marker.exists()
+    assert Path(worktree.root).is_dir()
+
+
+def test_fetching_a_base_ref_does_not_run_repository_hooks(tmp_path: Path) -> None:
+    origin = _init_repo(tmp_path / "origin")
+    clone = _track_repo(Repo.clone_from(origin.working_dir, tmp_path / "clone"))
+    marker = tmp_path / "hook-ran"
+    _write_hook(clone, marker, "reference-transaction")
+    _skip_unless_control_fires(Path(clone.working_dir), marker, *_REF_UPDATE_CONTROL)
+
+    _commit_on_head(origin, "second")
+    git_repo_module.GitRepo(clone).fetch_branch("origin", "main")
+
+    assert not marker.exists()
+    # The fetch really moved the ref; without a ref update no hook could
+    # have fired anyway.
+    assert clone.rev_parse("origin/main").hexsha == origin.head.commit.hexsha
+
+
+@pytest.mark.parametrize("force", [True, False])
+def test_branch_deletion_does_not_run_repository_hooks(
+    tmp_path: Path, force: bool
+) -> None:
+    repo = _init_repo(tmp_path)
+    marker = tmp_path / "hook-ran"
+    _write_hook(repo, marker, "reference-transaction")
+    _skip_unless_control_fires(tmp_path, marker, *_REF_UPDATE_CONTROL)
+
+    # Points at HEAD, so the safe `-d` delete accepts it too.
+    repo.create_head("feat/deleted")
+    git_repo_module.GitRepo(repo).delete_branch("feat/deleted", force=force)
+
+    assert not marker.exists()
+    assert not git_repo_module.GitRepo(repo).branch_exists("feat/deleted")
+
+
+def test_managed_worktree_removal_does_not_run_repository_hooks(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    marker = tmp_path / "hook-ran"
+    _write_hook(repo, marker, "reference-transaction")
+    _skip_unless_control_fires(tmp_path, marker, *_REF_UPDATE_CONTROL)
+
+    worktree = _prepare("removed-worktree", tmp_path, branch="feat/removed")
+    worktree.remove()
+
+    assert not marker.exists()
+    assert not git_repo_module.GitRepo(repo).branch_exists("feat/removed")
+
+
+def test_snapshotting_a_worktree_does_not_run_repository_hooks(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="snapshotted")
+    marker = tmp_path / "hook-ran"
+    _write_hook(repo, marker, "reference-transaction")
+    _skip_unless_control_fires(Path(repo.working_dir), marker, *_REF_UPDATE_CONTROL)
+
+    ref = worktree.snapshot()
+
+    assert not marker.exists()
+    # The snapshot really wrote the ref; without a ref update no hook could
+    # have fired anyway.
+    assert repo.rev_parse(ref).hexsha
+
+
+def test_discarding_a_retained_snapshot_does_not_run_repository_hooks(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    worktree = _prepare_auto(Path(repo.working_dir), suggested_name="discarded")
+    _finish_starts(worktree)
+    claim = _claim(repo, worktree.name)
+    assert ManagedWorktree.prune(limit=0) == 1
+    recovery = claim.read_recovery()
+    assert recovery is not None
+    marker = tmp_path / "hook-ran"
+    _write_hook(repo, marker, "reference-transaction")
+    _skip_unless_control_fires(Path(repo.working_dir), marker, *_REF_UPDATE_CONTROL)
+
+    assert _release(worktree.root).outcome is WorktreeReleaseOutcome.REMOVED
+
+    assert not marker.exists()
+    # The discard really deleted the ref; without a ref update no hook could
+    # have fired anyway.
+    with pytest.raises(GitCommandError):
+        repo.git.show_ref("--verify", recovery.snapshot_ref)
+
+
+def test_worktree_creation_does_not_run_the_repository_fsmonitor_command(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    marker = tmp_path / "fsmonitor-ran"
+    fsmonitor = tmp_path / "fsmonitor"
+    fsmonitor.write_text(f'#!/bin/sh\necho ran > "{marker}"\n')
+    fsmonitor.chmod(0o755)
+    repo.config_writer().set_value("core", "fsmonitor", str(fsmonitor)).release()
+    _skip_unless_control_fires(
+        tmp_path,
+        marker,
+        ("worktree", "add", str(tmp_path / "control"), "-b", "control"),
+    )
+
+    worktree = _prepare("fsmonitor-worktree", tmp_path, branch="feat/fsmonitor")
+
+    assert not marker.exists()
+    assert Path(worktree.root).is_dir()
 
 
 def test_creates_named_worktree_for_separate_branch(tmp_path: Path) -> None:
@@ -2123,8 +2305,22 @@ class _RecordingGit:
     def __init__(self, *, hangs: bool = False) -> None:
         self.process = _StubProcess(hangs=hangs)
         self.fetch_kwargs: dict[str, Any] = {}
+        # What the next command will run with, and what __call__ last
+        # applied; they come apart because fetch() consumes the overrides.
+        self.config_kwargs: dict[str, Any] = {}
+        self.applied_config: dict[str, Any] = {}
+
+    def __call__(self, **config: Any) -> _RecordingGit:
+        # GitPython's Git is callable: git(c=...) returns a git with that
+        # config applied. Stand in for the returned handle.
+        self.config_kwargs = config
+        self.applied_config = config
+        return self
 
     def fetch(self, *_args: Any, **kwargs: Any) -> Any:
+        # GitPython consumes the -c overrides after one command; model that,
+        # so a stored handle cannot keep reporting itself sanitized.
+        self.config_kwargs = {}
         self.fetch_kwargs = kwargs
         return type("_AutoInterrupt", (), {"proc": self.process})()
 
@@ -2151,6 +2347,12 @@ def test_fetch_refuses_to_stop_and_ask_for_credentials() -> None:
     _fetch_with(git)
 
     assert git.fetch_kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    # Pins the sanitizer at the argument level, so it holds even where hooks
+    # never run. The live config_kwargs is empty by now: fetch consumed it.
+    assert git.applied_config == {
+        "c": ["core.fsmonitor=", git_repo_module._NO_HOOKS_CONFIG]
+    }
+    assert git.config_kwargs == {}
 
 
 def test_fetch_does_not_use_the_timeout_windows_rejects() -> None:

@@ -17,7 +17,7 @@ class TokenState:
     current_tokens: int = 0
 
 
-def _format_token_count(tokens: int) -> str:
+def format_token_count(tokens: int) -> str:
     if tokens >= _MILLION:
         return f"{tokens / _MILLION:.1f}M"
     if tokens >= _THOUSAND:
@@ -38,7 +38,7 @@ class ContextProgress(NoMarkupStatic):
 
         ratio = min(1, new_state.current_tokens / new_state.max_tokens)
         text = (
-            f"{_format_token_count(new_state.current_tokens)}/"
-            f"{_format_token_count(new_state.max_tokens)} tokens ({ratio:.0%})"
+            f"{format_token_count(new_state.current_tokens)}/"
+            f"{format_token_count(new_state.max_tokens)} tokens ({ratio:.0%})"
         )
         self.update(text)

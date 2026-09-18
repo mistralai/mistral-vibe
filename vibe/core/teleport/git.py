@@ -18,11 +18,27 @@ from vibe.core.teleport.errors import (
     ServiceTeleportNotSupportedError,
 )
 from vibe.core.utils import AsyncExecutor
+from vibe.utils.platform import configure_git_python_executable
+
+_GIT_EXECUTABLE = configure_git_python_executable()
+if _GIT_EXECUTABLE is None:
+    raise ServiceTeleportError(
+        "Teleport requires a trusted Git executable. Install Git or set "
+        "GIT_PYTHON_GIT_EXECUTABLE to an absolute path."
+    )
 
 try:
-    from git import InvalidGitRepositoryError, NoSuchPathError, Repo
-    from git.exc import GitCommandError
+    from git import Git, InvalidGitRepositoryError, NoSuchPathError, Repo, refresh
+    from git.exc import GitCommandError, GitCommandNotFound
 except ImportError as e:
+    raise ServiceTeleportError(
+        "Teleport requires git to be installed. Please install git and try again."
+    ) from e
+
+try:
+    if Git.GIT_PYTHON_GIT_EXECUTABLE != _GIT_EXECUTABLE:
+        refresh(_GIT_EXECUTABLE)
+except (GitCommandNotFound, PermissionError) as e:
     raise ServiceTeleportError(
         "Teleport requires git to be installed. Please install git and try again."
     ) from e
@@ -194,12 +210,20 @@ class GitRepository:
             temporary_dir = Path(tempfile.mkdtemp(prefix="vibe-teleport-index-"))
             temporary_index = temporary_dir / "index"
             try:
-                index_path = Path(repo.index.path)
+                index_path = Path(
+                    repo.git(c="core.fsmonitor=").rev_parse("--git-path", "index")
+                )
+                if not index_path.is_absolute():
+                    index_path = (
+                        Path(repo.working_tree_dir or self._workdir) / index_path
+                    )
                 if index_path.exists():
                     shutil.copy2(index_path, temporary_index)
                 with repo.git.custom_environment(GIT_INDEX_FILE=str(temporary_index)):
-                    repo.git.add("-N", ".")
-                    return repo.git.diff("HEAD", binary=True)
+                    repo.git(c="core.fsmonitor=").add("-N", ".")
+                    return repo.git(c="core.fsmonitor=").diff(
+                        "HEAD", binary=True, no_textconv=True, no_ext_diff=True
+                    )
             finally:
                 shutil.rmtree(temporary_dir, ignore_errors=True)
 

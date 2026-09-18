@@ -142,9 +142,7 @@ class CommandRegistry:
                 aliases=frozenset(["/teleport"]),
                 description="Teleport session to Vibe Code Web",
                 handler="_teleport_command",
-                is_available=lambda ctx: (
-                    ctx.vibe_code_enabled and not ctx.experimental_harness
-                ),
+                is_available=lambda ctx: ctx.vibe_code_enabled,
             ),
             "remote-project": Command(
                 aliases=frozenset(["/remote-project"]),
@@ -188,6 +186,12 @@ class CommandRegistry:
                 aliases=frozenset(["/reload-plugins"]),
                 description="Re-pin this session's plugins and report what changed",
                 handler="_reload_plugins",
+                is_available=lambda ctx: ctx.experimental_harness,
+            ),
+            "todo": Command(
+                aliases=frozenset(["/todo"]),
+                description="Show the current todo list",
+                handler="_show_todos",
                 is_available=lambda ctx: ctx.experimental_harness,
             ),
             "voice": Command(

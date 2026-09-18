@@ -325,6 +325,7 @@ class SessionResource:
     async def _fetch_history_page(
         self,
         *,
+        session_id: str | None = None,
         turn_id: str | None = None,
         cursor: str | None = None,
         limit: int,
@@ -336,7 +337,7 @@ class SessionResource:
             await client.request(
                 "session/history/list",
                 SessionHistoryListParams(
-                    session_id=self._state.session_id,
+                    session_id=session_id or self._state.session_id,
                     turn_id=turn_id,
                     page=PageRequest(
                         cursor=cursor, limit=limit, direction=sort_direction
@@ -359,12 +360,14 @@ class SessionResource:
     async def list_history(
         self,
         *,
+        session_id: str | None = None,
         turn_id: str | None = None,
         before: str | None = None,
         after: str | None = None,
         limit: int = 200,
     ) -> SessionHistoryListResponse:
         return await self._fetch_history_page(
+            session_id=session_id,
             turn_id=turn_id,
             cursor=before or after,
             limit=limit,

@@ -226,6 +226,9 @@ class ChatInputBody(VoiceManagerListener, Widget):
         next_entry = self.history.get_next()
         if next_entry is not None:
             self._load_history_entry(next_entry)
+            if not self.history.is_navigating():
+                self.input_widget._cursor_pos_after_load = None
+                self.input_widget._cursor_moved_since_load = False
 
     def on_chat_text_area_history_reset(
         self, _event: ChatTextArea.HistoryReset

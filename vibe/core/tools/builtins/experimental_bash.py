@@ -29,7 +29,6 @@ from pydantic import (
 
 from vibe.core.paths import VIBE_HOME
 from vibe.core.scratchpad import is_scratchpad_path
-from vibe.core.tools.arity import build_session_pattern
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -43,7 +42,13 @@ from vibe.core.tools.builtins._shell_command_policy import (
     path_candidates,
 )
 from vibe.core.tools.builtins._shell_permission_analysis import analyze_shell_command
-from vibe.core.tools.builtins.bash import BashToolConfig, _expand_guardrail_commands
+from vibe.core.tools.builtins.bash import (
+    BashToolConfig,
+    _expand_guardrail_commands,
+    command_session_pattern,
+    needs_exact_command_scope,
+    scoped_command_parts,
+)
 from vibe.core.tools.builtins.managed_shell import backend as managed_shell_backend
 from vibe.core.tools.builtins.managed_shell.backend import (
     UNKNOWN_EXIT_CODE,
@@ -1406,6 +1411,12 @@ class BashLogFileResult(BaseModel):
 
 
 class _BashPermissionMixin[ConfigT: BashToolConfig]:
+    # A shell reads its allowlist as command prefixes, so an outside-workdir
+    # glob persisted there would match no command at all.
+    allowlist_scopes: ClassVar[frozenset[PermissionScope]] = frozenset({
+        PermissionScope.COMMAND_PATTERN
+    })
+
     if TYPE_CHECKING:
 
         @property
@@ -1418,13 +1429,18 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
 
     @staticmethod
     def _build_command_required_permission(
-        invocation_pattern: str, session_pattern: str, label: str
+        invocation_pattern: str,
+        session_pattern: str,
+        label: str,
+        *,
+        literal: bool = False,
     ) -> RequiredPermission:
         return RequiredPermission(
             scope=PermissionScope.COMMAND_PATTERN,
             invocation_pattern=invocation_pattern,
             session_pattern=session_pattern,
             label=label,
+            literal=literal,
         )
 
     @staticmethod
@@ -1496,7 +1512,10 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
             seen_option_required.add(part)
             option_required.append(
                 self._build_command_required_permission(
-                    invocation_pattern=part, session_pattern=part, label=part
+                    invocation_pattern=part,
+                    session_pattern=part,
+                    label=part,
+                    literal=True,
                 )
             )
 
@@ -1527,9 +1546,16 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         self,
         command_parts: list[str],
         outside_dirs: set[str],
-        required_context_permissions: list[RequiredPermission] | None = None,
+        *,
+        include_allowlisted: bool = False,
     ) -> list[RequiredPermission]:
-        required_context_permissions = required_context_permissions or []
+        """What this call needs on account of the commands it runs.
+
+        Context permissions are the caller's to append: they scope the shell and
+        the environment a call was handed, not the command, and
+        ``needs_exact_command_scope`` reads this list for whether the command
+        itself came out scoped.
+        """
         required: list[RequiredPermission] = []
         seen_session: set[str] = set()
 
@@ -1541,18 +1567,25 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
                 continue
 
             is_sensitive = self._is_sensitive(part)
-            if not is_sensitive and self._is_allowlisted(part):
+            if (
+                not is_sensitive
+                and not include_allowlisted
+                and self._is_allowlisted(part)
+            ):
                 continue
 
             if is_sensitive:
                 required.append(
                     self._build_command_required_permission(
-                        invocation_pattern=part, session_pattern=part, label=part
+                        invocation_pattern=part,
+                        session_pattern=part,
+                        label=part,
+                        literal=True,
                     )
                 )
                 continue
 
-            session_pattern = build_session_pattern(tokens)
+            session_pattern, literal = command_session_pattern(tokens)
             if session_pattern in seen_session:
                 continue
             seen_session.add(session_pattern)
@@ -1561,13 +1594,13 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
                     invocation_pattern=part,
                     session_pattern=session_pattern,
                     label=session_pattern,
+                    literal=literal,
                 )
             )
 
         for glob in sorted(str(Path(directory) / "*") for directory in outside_dirs):
             required.append(self._build_outside_directory_permission(glob))
 
-        required.extend(required_context_permissions)
         return required
 
     def _resolve_posix_shell_permission(
@@ -1606,19 +1639,24 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         ):
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
+        scoped_parts, include_allowlisted = scoped_command_parts(
+            analysis, command_parts
+        )
         required = self._build_required_permissions(
-            command_parts, outside_dirs, context_required
+            scoped_parts, outside_dirs, include_allowlisted=include_allowlisted
         )
         if guardrail_permission:
             required.extend(guardrail_permission.required_permissions)
-        if analysis.requires_approval:
+        if needs_exact_command_scope(analysis, required):
             required.append(
                 self._build_command_required_permission(
                     invocation_pattern=command,
                     session_pattern=command,
                     label=analysis.approval_label,
+                    literal=True,
                 )
             )
+        required.extend(context_required)
         if not required:
             return None
 

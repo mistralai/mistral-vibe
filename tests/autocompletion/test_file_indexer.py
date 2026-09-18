@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -315,6 +316,27 @@ def test_git_catalog_refreshes_lazily_after_watcher_event(
 
     assert "new.py" in _current_entries(file_indexer)
     assert file_indexer.stats.rebuilds == rebuilds_before + 1
+
+
+def test_file_index_does_not_execute_project_local_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file_indexer: FileIndexer
+) -> None:
+    marker = tmp_path / "executed"
+    git_name = "git.exe" if os.name == "nt" else "git"
+    fake_git = tmp_path / git_name
+    fake_git.write_text(f'#!/bin/sh\ntouch "{marker}"\n')
+    fake_git.chmod(0o755)
+    monkeypatch.delenv("GIT_PYTHON_GIT_EXECUTABLE", raising=False)
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    file_indexer.get_index(Path("."))
+
+    assert not marker.exists()
+    assert not file_indexer._store.is_git_backed
 
 
 def test_non_git_walk_stops_when_cancelled(tmp_path: Path) -> None:

@@ -231,7 +231,7 @@ class SnapshotTestAppConnectorBootstrapError(BaseSnapshotTestApp):
         config = default_config(enable_connectors=True, mcp_servers=[])
         registry = FakeConnectorRegistry(
             bootstrap_error=(
-                "Failed to load workspace connectors (HTTP 502).\n"
+                "Failed to load connectors (HTTP 502).\n"
                 "Server response: Bad Gateway\n"
                 "This looks like a temporary server issue — "
                 "retry with `/reload` in a few minutes."

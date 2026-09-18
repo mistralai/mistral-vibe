@@ -261,6 +261,9 @@ class TrustedFoldersManager:
 
     def _save(self) -> None:
         self._file_path.parent.mkdir(parents=True, exist_ok=True)
+        # The trust store is a security-decision record, so it is created
+        # owner-only; an existing file keeps its current mode.
+        self._file_path.touch(mode=0o600, exist_ok=True)
         data = {"trusted": self._trusted, "untrusted": self._untrusted}
         try:
             with self._file_path.open("wb") as f:

@@ -9,6 +9,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
+import tempfile
 import threading
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
@@ -26,6 +29,7 @@ from vibe.app_server._projection import (
     project_skill_summaries,
     project_unified_agent_summaries,
 )
+from vibe.app_server._provided_tools import vibe_tool_groups
 from vibe.app_server._session_backend_port import SessionBackendHost
 from vibe.app_server._session_backend_services import SessionBackendServices
 from vibe.app_server._session_model import (
@@ -100,8 +104,9 @@ from vibe.core.session.session_interop import (
 from vibe.core.session.session_lease import SessionLease
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.session.session_logger import SessionLogger
+from vibe.core.session.session_permissions import start_restrict_session_log_permissions
 from vibe.core.skills.models import SkillInfo
-from vibe.core.system_prompt import get_agents_md_section
+from vibe.core.system_prompt import ProjectContextProvider, get_agents_md_section
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.telemetry.types import LaunchContext
 from vibe.core.tools.manager import ToolManager
@@ -115,6 +120,7 @@ from vibe.observability.logging import logger, set_config_log_level
 from vibe.utils import AgentEntrypoint
 from vibe.utils.cache_store import FileSystemCacheStore
 from vibe.utils.http import get_server_url_from_api_base
+from vibe.utils.paths import is_dangerous_directory
 
 _SHORT_SESSION_ID_LENGTH = 8
 _PUBLIC_MISTRAL_API_ORIGIN = ("https", "api.mistral.ai", 443)
@@ -140,8 +146,46 @@ def _is_public_mistral_api(api_base: str) -> bool:
     return origin == _PUBLIC_MISTRAL_API_ORIGIN
 
 
+def _build_project_context_section(
+    config: VibeConfigSchema, harness_files: HarnessFilesManager, cwd: Path
+) -> str:
+    """Replicate the legacy system prompt's project-context block.
+
+    Includes the absolute working directory, git status (branch, main
+    branch, porcelain status, recent commits), and any extra working
+    directories — the same information ``build_system_prompt`` injects for
+    the legacy backend.
+    """
+    from string import Template
+
+    from vibe.core.prompts import UtilityPrompt
+
+    is_dangerous, reason = is_dangerous_directory(cwd)
+    if is_dangerous:
+        template = UtilityPrompt.DANGEROUS_DIRECTORY.read()
+        return Template(template).safe_substitute(
+            reason=reason.lower(), abs_path=cwd.resolve()
+        )
+
+    context = ProjectContextProvider(
+        config=config.project_context, root_path=cwd
+    ).get_full_context()
+
+    cwd_resolved = cwd.resolve()
+    extra_roots = [
+        root for root in harness_files.project_roots if root.resolve() != cwd_resolved
+    ]
+    if extra_roots:
+        dirs_lines = "\n".join(f" - {d}" for d in extra_roots)
+        context = (
+            f"{context}\n\nAdditional working directories (treated with the same "
+            f"file-access permissions as the primary working directory):\n" + dirs_lines
+        )
+    return context
+
+
 def _build_unified_system_instructions(
-    config: VibeConfigSchema, harness_files: HarnessFilesManager
+    config: VibeConfigSchema, harness_files: HarnessFilesManager, *, cwd: Path
 ) -> str:
     from mistralai_vibe_local_harness.vibe import build_vibe_code_system_instructions
 
@@ -153,6 +197,7 @@ def _build_unified_system_instructions(
     # above skills/plugins in the final prompt.
     instructions = build_vibe_code_system_instructions(variant=config.system_prompt_id)
     if config.include_project_context:
+        instructions = f"{instructions}\n\n{_build_project_context_section(config, harness_files, cwd)}"
         agents_md_section = get_agents_md_section(
             harness_files.load_user_doc(), harness_files.load_project_docs()
         )
@@ -228,6 +273,8 @@ def _utility_provider_route(
 if TYPE_CHECKING:
     from mistralai_vibe_local_harness.protocol import RustRuntimeBuiltinToolName
     from mistralai_vibe_local_harness.vibe import (
+        LegacySourceLoader,
+        LegacySourceResolver,
         LocalProviderRoute,
         ProviderCredentialProvider,
     )
@@ -238,7 +285,10 @@ if TYPE_CHECKING:
     from vibe.app_server._plugin_mcp import PluginMCPCatalog
     from vibe.app_server._plugins import SessionPlugins, UnifiedPluginProvider
     from vibe.app_server._session_backend_port import ResolvedMCPCatalog
-    from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionContext
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedReadContext,
+        UnifiedSessionContext,
+    )
     from vibe.app_server.server import AppServer
     from vibe.core.config import ProviderConfig
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
@@ -445,6 +495,10 @@ class RootOpenRequest:
     def __post_init__(self) -> None:
         if self.session_id is not None and self.continue_latest:
             raise ValueError("Cannot resume a session and continue the latest")
+        if self.options.cwd == "":
+            # An empty cwd would silently resolve to the server process cwd,
+            # making a directory the caller never named trustable.
+            raise ValueError("Session cwd must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -587,6 +641,98 @@ class _RootRuntimeBlueprint:
             mcp_registry=self.mcp_registry,
             connector_registry=self.connector_registry,
         ).build()
+
+
+# The harness always binds a session to a concrete on-disk store: there is no
+# in-memory backend, and a ``None`` root silently falls back to the configured save
+# dir. One root per process, because ``configure_storage`` refuses to move the root
+# while a session is bound to it. Every app-server on the process holds a lease, so
+# the last one out removes the tree: a stop is not the end of the process, and ACP
+# keeps opening sessions on it. A later session gets a fresh root, which
+# ``configure_storage`` accepts because nothing is bound by then.
+class ThrowawayStorageRoot:
+    PREFIX = "vibe-session-logging-disabled-"
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._path: Path | None = None
+        self._leases: set[ThrowawayStorageLease] = set()
+
+    @property
+    def current(self) -> Path | None:
+        with self._lock:
+            return self._path
+
+    def lease(self) -> ThrowawayStorageLease:
+        lease = ThrowawayStorageLease(self)
+        with self._lock:
+            self._leases.add(lease)
+        return lease
+
+    def path(self) -> Path:
+        with self._lock:
+            if self._path is None:
+                try:
+                    self._path = Path(tempfile.mkdtemp(prefix=self.PREFIX))
+                except OSError as exc:
+                    raise RuntimeError(
+                        "session_logging.enabled is false and no temporary "
+                        "directory is available to hold the session store"
+                    ) from exc
+                logger.debug("Throwaway session store created at %s", self._path)
+            return self._path
+
+    def release(self, lease: ThrowawayStorageLease) -> None:
+        with self._lock:
+            # Dropping a lease rather than counting down, because the same lease
+            # is released twice: `session/stop` closes the root, and a disconnect
+            # closes it again, the first never having marked the app server shut
+            # down. Idempotent here by construction, not by a flag the callers
+            # race on from worker threads.
+            self._leases.discard(lease)
+            if self._leases:
+                return
+            path, self._path = self._path, None
+        self._remove(path)
+
+    def discard(self) -> None:
+        with self._lock:
+            self._leases.clear()
+            path, self._path = self._path, None
+        self._remove(path)
+
+    def _remove(self, path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            shutil.rmtree(path, onexc=_reopen_and_retry)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning(
+                "Failed to remove the throwaway session store at %s", path, exc_info=exc
+            )
+
+
+class ThrowawayStorageLease:
+    def __init__(self, root: ThrowawayStorageRoot) -> None:
+        self._root = root
+
+    def release(self) -> None:
+        self._root.release(self)
+
+
+def _reopen_and_retry(
+    func: Callable[[str], None], path: str, exc: BaseException
+) -> None:
+    # The Harness checks plugin packages out as read-only trees under the same
+    # storage root the sessions live in, and nothing can be unlinked from one until
+    # its directory is writable again.
+    if not isinstance(exc, PermissionError):
+        raise exc
+    parent = Path(path).parent
+    parent.chmod(parent.stat().st_mode | stat.S_IRWXU)
+    func(path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -983,6 +1129,7 @@ class HarnessProcess:
         self._staged_roots_lock = asyncio.Lock()
         self._closed = False
         self._experimental_harness_host: object | None = None
+        self._throwaway_storage_root = ThrowawayStorageRoot()
         self.harness_selection_source: str = "default"
 
         # Resolve which harness to use. The rollout variant is read from the
@@ -1044,9 +1191,14 @@ class HarnessProcess:
                 host,
                 self.build_unified_session_context,
                 services,
+                build_read_context=self.build_unified_read_context,
                 launch_context_getter=lambda: _build_launch_context_from_services(
                     services
                 ),
+                # Neither the TUI nor ``vibe -p`` reaches ``HarnessProcess.close``
+                # on the way out; both stop at the host's shutdown. A store hung
+                # off ``close`` alone would survive every interactive run.
+                release_storage=self._throwaway_storage_root.lease().release,
             )
 
         from vibe.app_server._legacy_session_runtime import (
@@ -1093,10 +1245,16 @@ class HarnessProcess:
                 await close_agent_loop(root)
             except BaseException as exc:
                 errors.append(exc)
+        await asyncio.to_thread(self._throwaway_storage_root.discard)
         if len(errors) == 1:
             raise errors[0]
         if errors:
             raise BaseExceptionGroup("Failed to close staged session runtimes", errors)
+
+    def _unified_storage_root(self, session_logging: SessionLoggingConfig) -> str:
+        if session_logging.enabled:
+            return session_logging.save_dir
+        return str(self._throwaway_storage_root.path())
 
     async def build_session_runtime(self, options: SessionOptions) -> RuntimeSnapshot:
         session_config = await self._build_session_config(options)
@@ -1109,6 +1267,28 @@ class HarnessProcess:
     ) -> ConfigOrchestrator[VibeConfigSchema]:
         session_config = await self._build_session_config(SessionOptions())
         return session_config.config_orchestrator
+
+    async def build_unified_read_context(
+        self, options: SessionOptions
+    ) -> UnifiedReadContext:
+        """Deliberately not ``build_unified_session_context``: a read resolves no
+        model, tool, plugin, MCP server or connector.
+        """
+        from vibe.app_server._unified_harness_backend_adapter import UnifiedReadContext
+
+        session_config = await self._build_session_config(options)
+        config_orchestrator = session_config.config_orchestrator
+        load_legacy_source, resolve_legacy_source = _legacy_source_callables(
+            config_orchestrator
+        )
+        return UnifiedReadContext(
+            storage_root=self._unified_storage_root(
+                config_orchestrator.config.session_logging
+            ),
+            config_orchestrator=config_orchestrator,
+            legacy_source_loader=load_legacy_source,
+            legacy_source_resolver=resolve_legacy_source,
+        )
 
     async def build_unified_session_context(  # noqa: PLR0914, PLR0915 - composition root
         self,
@@ -1137,8 +1317,6 @@ class HarnessProcess:
             RustUnixCommandEnvironment,
         )
         from mistralai_vibe_local_harness.vibe import (
-            LegacyImportSource,
-            LegacySessionReference as HarnessLegacySessionReference,
             LocalModelRoute,
             LocalRuntimeAdapterConfig,
             compile_foreign_hooks,
@@ -1161,7 +1339,47 @@ class HarnessProcess:
             UnifiedSessionContext,
             UnifiedSessionSettings,
         )
-        from vibe.app_server._unified_permissions import UnifiedPermissionResolver
+        from vibe.app_server._unified_permissions import (
+            ProvidedToolNames,
+            UnifiedPermissionResolver,
+        )
+
+        route_type: Any = LocalModelRoute
+        route_fields = getattr(LocalModelRoute, "__dataclass_fields__", {})
+        context_settings_type: Any = RustContextSettings
+        context_settings_fields = getattr(RustContextSettings, "model_fields", {})
+
+        def local_model_route(
+            *, model: str, temperature: float, thinking: str, supports_images: bool
+        ) -> LocalModelRoute:
+            route_kwargs: dict[str, object] = {
+                "model": model,
+                "temperature": temperature,
+                "thinking": thinking,
+            }
+            # The released runtime may lag behind Vibe while a new Harness field
+            # is being prepared. Pass the capability only when that runtime accepts
+            # it; the editable frontier job exercises the new field immediately.
+            if "supports_images" in route_fields:
+                route_kwargs["supports_images"] = supports_images
+            return route_type(**route_kwargs)
+
+        def core_context_settings(
+            *,
+            compaction: object,
+            agent_supports_images: bool,
+            compaction_supports_images: bool,
+        ) -> RustContextSettings:
+            context_kwargs: dict[str, object] = {"compaction": compaction}
+            if "image_delivery" in context_settings_fields:
+                context_kwargs["image_delivery"] = {
+                    "agent": "native" if agent_supports_images else "resource_link",
+                    "compaction": "native"
+                    if compaction_supports_images
+                    else "resource_link",
+                }
+            return context_settings_type(**context_kwargs)
+
         from vibe.core.llm.utility_completion import (
             is_fast_utility_model,
             select_utility_model,
@@ -1238,40 +1456,17 @@ class HarnessProcess:
             harness_files=harness_files,
             permission_getter=permissions.get_tool_permission,
         )
+        # The MCP and connector projections write the routes they published into
+        # this map; the resolver reads it to find the name they were configured
+        # under. Both need the same instance, so the context carries it.
+        provided_names = ProvidedToolNames()
         permission_resolver = UnifiedPermissionResolver(
-            tools, permissions, config_orchestrator
+            tools, permissions, config_orchestrator, provided_names
         )
 
-        def resolve_legacy_source(
-            session_id: str,
-        ) -> HarnessLegacySessionReference | None:
-            reference = resolve_legacy_session_reference(
-                session_id, config_orchestrator.config.session_logging
-            )
-            if reference is None:
-                return None
-            return HarnessLegacySessionReference(
-                session_id=reference.session_id, cwd=reference.cwd
-            )
-
-        def load_legacy_source(session_id: str) -> LegacyImportSource:
-            try:
-                export = export_legacy_committed_history(
-                    session_id, config_orchestrator.config.session_logging
-                )
-            except InvalidLegacyInteropSourceError as exc:
-                return LegacyImportSource(state="invalid", error=str(exc))
-            if export is None:
-                return LegacyImportSource(state="absent")
-            return LegacyImportSource(
-                state="quiescent",
-                reference=HarnessLegacySessionReference(
-                    session_id=export.reference.session_id, cwd=export.reference.cwd
-                ),
-                store_revision=export.store_revision,
-                history=export.history,
-                active_model=export.active_model,
-            )
+        load_legacy_source, resolve_legacy_source = _legacy_source_callables(
+            config_orchestrator
+        )
 
         # Discover the user's hooks once. The raw parse -- including any parse/duplicate
         # diagnostics on result.issues -- is settings-independent, so load it before the
@@ -1322,8 +1517,11 @@ class HarnessProcess:
                 title_model_config = active_model
                 title_provider_cfg = provider
                 title_model_is_fast = False
-            title_model = LocalModelRoute(
-                model=title_model_config.name, temperature=0.0, thinking="off"
+            title_model = local_model_route(
+                model=title_model_config.name,
+                temperature=0.0,
+                thinking="off",
+                supports_images=title_model_config.supports_images,
             )
             # Match the legacy policy: only interactive terminal/desktop clients
             # get background titles; other clients keep the message preview.
@@ -1376,14 +1574,19 @@ class HarnessProcess:
                     hooks_count=len(hook_result.hooks),
                     auto_approve=options.auto_approve,
                 ),
+                skill_payloads=skills.payloads,
                 core_config=RustHarnessConfig(
                     task_id="runtime-template",
                     system_instructions=_build_unified_system_instructions(
-                        config, harness_files
+                        config, harness_files, cwd=cwd
                     ),
                     settings=RustHarnessSettings(
                         turn=RustTurnSettings(max_iterations=max_iterations),
-                        context=RustContextSettings(compaction=compaction_policy),
+                        context=core_context_settings(
+                            compaction=compaction_policy,
+                            agent_supports_images=active_model.supports_images,
+                            compaction_supports_images=compaction_model.supports_images,
+                        ),
                         tools=RustToolSettings(
                             programmatic=RustProgrammaticToolSettings(
                                 max_effects=128, max_operations=1024
@@ -1395,28 +1598,35 @@ class HarnessProcess:
                         ),
                     ),
                     capabilities=RustHarnessCapabilitySet(
-                        tool_groups=(
-                            [
-                                RustToolGroupDefinition(
-                                    name="ui",
-                                    description="Interactive user interface tools",
-                                    tools=[
-                                        RustProvidedToolDefinition(
-                                            name="ask_user_question",
-                                            description=(
-                                                "Ask the user one or more questions and wait "
-                                                "for their answers."
-                                            ),
-                                            input_schema=UserQuestionRequest.model_json_schema(),
-                                            output_schema=UserQuestionResult.model_json_schema(),
-                                            exposure="direct",
-                                        )
-                                    ],
-                                )
-                            ]
-                            if "ask_user_question" in available_tools
-                            else []
-                        ),
+                        tool_groups=[
+                            *(
+                                [
+                                    RustToolGroupDefinition(
+                                        name="ui",
+                                        description="Interactive user interface tools",
+                                        tools=[
+                                            RustProvidedToolDefinition(
+                                                name="ask_user_question",
+                                                description=(
+                                                    "Ask the user one or more questions and "
+                                                    "wait for their answers."
+                                                ),
+                                                input_schema=UserQuestionRequest.model_json_schema(),
+                                                output_schema=UserQuestionResult.model_json_schema(),
+                                                exposure="direct",
+                                            )
+                                        ],
+                                    )
+                                ]
+                                if "ask_user_question" in available_tools
+                                else []
+                            ),
+                            *vibe_tool_groups(
+                                available_tools,
+                                enabled_tools=config.enabled_tools,
+                                disabled_tools=config.disabled_tools,
+                            ),
+                        ],
                         skills=list(skills.definitions),
                     ),
                     # No plugins: once a provider is configured its `bind` is
@@ -1433,15 +1643,17 @@ class HarnessProcess:
                     # ``/config`` provider switch has no derivation to ride in
                     # on. Resolution happens at the model call instead.
                     credentials=credentials,
-                    active_model=LocalModelRoute(
+                    active_model=local_model_route(
                         model=active_model.name,
                         temperature=active_model.temperature,
                         thinking=active_model.thinking,
+                        supports_images=active_model.supports_images,
                     ),
-                    compaction_model=LocalModelRoute(
+                    compaction_model=local_model_route(
                         model=compaction_model.name,
                         temperature=compaction_model.temperature,
                         thinking=compaction_model.thinking,
+                        supports_images=compaction_model.supports_images,
                     ),
                     title_model=title_model if auto_title_enabled else None,
                     title_provider=_utility_provider_route(
@@ -1498,7 +1710,7 @@ class HarnessProcess:
                     ),
                     provided_tool_mode=_rust_provided_tool_mode(gate),
                     permission_resolver=permission_resolver.resolve,
-                    skills=skills.payloads,
+                    skills=skills.model_payloads,
                     correlation_id_sink=correlation.record,
                     request_sent_sink=request_sent.record,
                 ),
@@ -1536,7 +1748,8 @@ class HarnessProcess:
             tool_catalog=lambda: tool_catalog_for_config(core_config_json),
         )
         return UnifiedSessionContext(
-            storage_root=config.session_logging.save_dir,
+            storage_root=self._unified_storage_root(config.session_logging),
+            session_logging_enabled=config.session_logging.enabled,
             legacy_source_loader=load_legacy_source,
             legacy_source_resolver=resolve_legacy_source,
             plugins=plugins,
@@ -1548,6 +1761,7 @@ class HarnessProcess:
             agents=agents,
             derive=derive,
             permissions=permission_resolver,
+            provided_names=provided_names,
             hooks=hooks,
             mcp_catalog=mcp_catalog,
             mcp_authorization_provider=self.mcp_authentication,
@@ -1593,6 +1807,11 @@ class HarnessProcess:
             overrides, harness_files=harness_files
         )
         await _apply_cached_experiment_variants(config_orchestrator)
+        # Every session crosses this config build, and the unified harness
+        # never constructs the legacy agent loop, so the sweep starts here.
+        start_restrict_session_log_permissions(
+            config_orchestrator.config.session_logging
+        )
         return _SessionConfig(
             config_orchestrator=config_orchestrator, harness_files=harness_files
         )
@@ -1863,6 +2082,49 @@ class HarnessProcess:
             warm_session_index(config.session_logging)
             set_config_log_level(config.log_level)
             self._configured = True
+
+
+def _legacy_source_callables(
+    config_orchestrator: ConfigOrchestrator[VibeConfigSchema],
+) -> tuple[LegacySourceLoader, LegacySourceResolver]:
+    """Shared by both contexts: a read that resolved legacy sessions differently
+    from a resume would make one session id mean two things.
+    """
+    from mistralai_vibe_local_harness.vibe import (
+        LegacyImportSource,
+        LegacySessionReference as HarnessLegacySessionReference,
+    )
+
+    def resolve_legacy_source(session_id: str) -> HarnessLegacySessionReference | None:
+        reference = resolve_legacy_session_reference(
+            session_id, config_orchestrator.config.session_logging
+        )
+        if reference is None:
+            return None
+        return HarnessLegacySessionReference(
+            session_id=reference.session_id, cwd=reference.cwd
+        )
+
+    def load_legacy_source(session_id: str) -> LegacyImportSource:
+        try:
+            export = export_legacy_committed_history(
+                session_id, config_orchestrator.config.session_logging
+            )
+        except InvalidLegacyInteropSourceError as exc:
+            return LegacyImportSource(state="invalid", error=str(exc))
+        if export is None:
+            return LegacyImportSource(state="absent")
+        return LegacyImportSource(
+            state="quiescent",
+            reference=HarnessLegacySessionReference(
+                session_id=export.reference.session_id, cwd=export.reference.cwd
+            ),
+            store_revision=export.store_revision,
+            history=export.history,
+            active_model=export.active_model,
+        )
+
+    return load_legacy_source, resolve_legacy_source
 
 
 def _load_rollout_cache() -> EvalResponse | None:
@@ -2187,12 +2449,14 @@ def _rust_tool_modes(
 def _rust_provided_tool_mode(
     gate: ToolGate,
 ) -> Literal["allow", "ask", "deny", "classify"]:
-    """Mode gating provided/MCP tools, which have no per-name entry in tool_modes.
-
-    Smart approve classifies them per call; every other gate leaves them at their
-    pre-smart-approve behaviour of running unconditionally (``allow``).
-    """
-    return "classify" if gate is ToolGate.CLASSIFIER else "allow"
+    """Mode gating provided/MCP tools, which have no per-name entry in tool_modes."""
+    match gate:
+        case ToolGate.PROMPT:
+            return "ask"
+        case ToolGate.CLASSIFIER:
+            return "classify"
+        case ToolGate.BYPASS:
+            return "allow"
 
 
 def rust_agent_tool_ceiling(
@@ -2226,11 +2490,30 @@ def rust_agent_tool_ceiling(
         except ValueError:
             return permission_of(name)
 
-    # Never bypasses: a profile is not a place to retire the resolver, and PROMPT
-    # is what turns a declared `always` into `ask`. A ceiling never classifies, so
-    # narrow the PROMPT result (only allow/ask/deny) to the profile's 3-value type.
-    modes = _rust_tool_modes(narrowed, permission, gate=ToolGate.PROMPT)
-    return {name: mode for name, mode in modes.items() if mode != "classify"}
+    # The ceiling encodes what the profile *permits* (allow/ask/deny), not what
+    # the session's approval mode would do. The Runtime takes the stricter of
+    # this and the parent's mode, so ``allow`` here is safe: under PROMPT the
+    # parent's ``ask`` is stricter and the resolver still runs; under BYPASS the
+    # parent's ``allow`` lets the child bypass — the user's explicit choice, not
+    # something a plugin profile can grant on its own. A ceiling never classifies.
+    from vibe.app_server._unified_permissions import RUST_BUILTIN_TOOL_SOURCES
+
+    ceiling: dict[RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny"]] = {}
+    for builtin, sources in RUST_BUILTIN_TOOL_SOURCES.items():
+        present = sources & narrowed
+        if not present:
+            ceiling[builtin] = "deny"
+        else:
+            permissions = {permission(name) for name in present}
+            strictest = next(
+                perm for perm in _PERMISSION_STRICTNESS if perm in permissions
+            )
+            ceiling[builtin] = _RUST_MODE_BY_PERMISSION[strictest]
+
+    ceiling["process.start"] = ceiling["file_system.bash"]
+    for builtin in ("process.output", "process.write", "process.list", "process.stop"):
+        ceiling[builtin] = "allow"
+    return ceiling
 
 
 def _glob_patterns(value: Any) -> list[str]:

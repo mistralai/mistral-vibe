@@ -12,7 +12,6 @@ import inspect
 import json
 import os
 from pathlib import Path
-import shutil
 import threading
 from threading import Thread
 import time
@@ -114,13 +113,12 @@ from vibe.core.telemetry.types import (
     TelemetryRequestMetadata,
 )
 from vibe.core.teleport.errors import ServiceTeleportError
+from vibe.core.teleport.orchestrator import TeleportOrchestrator
 from vibe.core.teleport.telemetry import TeleportTelemetryTracker
 from vibe.core.teleport.types import (
     TELEPORT_MESSAGE_CONTEXT_MAX_LENGTH,
-    TeleportCompleteEvent,
     TeleportMessageContext,
     TeleportMessageContextSource,
-    TeleportSummarizingContextEvent,
 )
 from vibe.core.tools.base import (
     BaseTool,
@@ -211,17 +209,11 @@ from vibe.utils import VIBE_WARNING_TAG
 from vibe.utils.api_keys import resolve_api_key
 from vibe.utils.cache_store import CacheStore, InMemoryCacheStore
 from vibe.utils.http import get_server_url_from_api_base, get_user_agent
+from vibe.utils.platform import configure_git_python_executable
 
 
 def _is_git_executable_available() -> bool:
-    executable = os.environ.get("GIT_PYTHON_GIT_EXECUTABLE")
-    if not executable:
-        return shutil.which("git") is not None
-
-    path = Path(executable).expanduser()
-    if path.is_absolute() or os.sep in executable:
-        return path.is_file() and os.access(path, os.X_OK)
-    return shutil.which(executable) is not None
+    return configure_git_python_executable() is not None
 
 
 _TELEPORT_AVAILABLE = _is_git_executable_available()
@@ -253,10 +245,24 @@ class ToolExecutionResponse(StrEnum):
     EXECUTE = auto()
 
 
+class ApprovalSource(StrEnum):
+    CONFIG = auto()
+    SMART = auto()
+    USER = auto()
+    BYPASS = auto()
+    NEVER = auto()
+
+
+type ToolDecisionValue = Literal["execute", "skip"]
+type ToolApprovalTypeValue = Literal["always", "never", "ask"]
+type ToolApprovalSourceValue = Literal["config", "smart", "user", "bypass", "never"]
+
+
 class ToolDecision(BaseModel):
     verdict: ToolExecutionResponse
     approval_type: ToolPermission
     feedback: str | None = None
+    approval_source: ApprovalSource | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +395,32 @@ class ImagesNotSupportedError(AgentLoopError):
 
 class TeleportError(AgentLoopError):
     """Raised when teleport to Vibe Code fails."""
+
+
+class _LegacyTeleportSummarizer:
+    """TeleportContextSummarizer backed by a live AgentLoop.
+
+    Delegates prompt resolution, context-message selection, and the
+    compaction-model completion to the AgentLoop's existing methods so the
+    shared orchestrator can run the legacy teleport path unchanged.
+    """
+
+    def __init__(self, loop: AgentLoop) -> None:
+        self._loop = loop
+
+    def resolve_prompt(self, prompt: str | None) -> str:
+        return self._loop._resolve_teleport_prompt(prompt)
+
+    def should_summarize(self, prompt: str | None) -> bool:
+        return self._loop._should_summarize_teleport_context(prompt)
+
+    def context_messages(self, prompt: str | None) -> list[LLMMessage]:
+        return self._loop._teleport_context_messages(prompt)
+
+    async def summarize(self, messages: list[LLMMessage], prompt: str | None) -> str:
+        return await self._loop._summarize_teleport_context(
+            prompt=prompt, resolved_prompt=self._loop._resolve_teleport_prompt(prompt)
+        )
 
 
 def _refusal_error(provider: str, model: str, chunk: LLMChunk) -> RefusalError:
@@ -1634,7 +1666,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         if self._teleport_service is None:
             self._teleport_service = _load_teleport_service()(
-                session_logger=self.session_logger,
                 vibe_code_sessions_base_url=self.config.vibe_code_sessions_base_url,
                 vibe_code_api_key=self.config.vibe_code_api_key,
                 vibe_config=self.config,
@@ -1650,69 +1681,34 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         project_id: str | None = None,
         project_picker: ProjectPickerTelemetryPayload | None = None,
     ) -> AsyncGenerator[TeleportYieldEvent, TeleportPushResponseEvent | None]:
-        nb_session_messages = max(len(self.messages) - 1, 0)
-        resolved_prompt = self._resolve_teleport_prompt(prompt)
-        telemetry_tracker = TeleportTelemetryTracker(
+        summarizer = _LegacyTeleportSummarizer(self)
+        orchestrator = TeleportOrchestrator(
+            summarizer=summarizer,
+            teleport_service=self.teleport_service,
             telemetry_client=self.telemetry_client,
-            nb_session_messages=nb_session_messages,
-            stage="no_history" if not resolved_prompt else "git_check",
+            session_id=self.session_id,
+            nb_session_messages=max(len(self.messages) - 1, 0),
             project_picker=project_picker,
+            launch_context=self.launch_context,
         )
         # This reads the repository at the session's directory and pushes its
         # branch, so a move landing mid-run would ship the checkout the session
         # had already left.
         self._take_session("teleport")
+        gen = orchestrator.execute(prompt, project_id=project_id)
         try:
-            teleport_message_context: TeleportMessageContext | None = None
-            if resolved_prompt and self._should_summarize_teleport_context(prompt):
-                summary_event = TeleportSummarizingContextEvent()
-                telemetry_tracker.record_event(summary_event)
-                yield summary_event
+            response: TeleportPushResponseEvent | None = None
+            while True:
                 try:
-                    message_context = await self._summarize_teleport_context(
-                        prompt=prompt, resolved_prompt=resolved_prompt
-                    )
-                except ServiceTeleportError:
-                    telemetry_tracker.record_context_summary_failed()
-                    raise
-                except Exception as e:
-                    telemetry_tracker.record_context_summary_failed()
-                    raise ServiceTeleportError(
-                        "Failed to summarize context for teleport.",
-                        telemetry_details={"failure_kind": "context_summary_failed"},
-                    ) from e
-
-                teleport_message_context = self._build_teleport_message_context(
-                    message_context, telemetry_tracker
-                )
-            async with self.teleport_service:
-                gen = self.teleport_service.execute(
-                    prompt=resolved_prompt,
-                    project_id=project_id,
-                    message_context=teleport_message_context,
-                    conversation_id=self.session_id,
-                )
-                response: TeleportPushResponseEvent | None = None
-                while True:
-                    try:
-                        event = await gen.asend(response)
-                        telemetry_tracker.record_event(event)
-                        if isinstance(event, TeleportCompleteEvent):
-                            telemetry_tracker.send_success()
-                        response = yield event
-                    except StopAsyncIteration:
-                        break
+                    event = await gen.asend(response)
+                except StopAsyncIteration:
+                    break
+                response = yield event
         except ServiceTeleportError as e:
-            telemetry_tracker.record_service_error(e)
             raise TeleportError(str(e)) from e
-        except (asyncio.CancelledError, GeneratorExit):
-            telemetry_tracker.record_cancelled()
-            raise
-        except Exception as e:
-            telemetry_tracker.record_unexpected_error(e)
-            raise
         finally:
-            telemetry_tracker.send_failure_if_needed()
+            with contextlib.suppress(GeneratorExit, asyncio.CancelledError):
+                await gen.aclose()
             self._teleport_service = None
             self._release_session("teleport")
 
@@ -2750,6 +2746,20 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 error=cancel,
                 cancelled=True,
                 tool_call_id=tool_call.call_id,
+                decision=cast(
+                    ToolDecisionValue,
+                    decision.verdict.value
+                    if decision
+                    else ToolExecutionResponse.SKIP.value,
+                ),
+                approval_type=cast(ToolApprovalTypeValue, decision.approval_type.value)
+                if decision
+                else None,
+                approval_source=cast(
+                    ToolApprovalSourceValue, decision.approval_source.value
+                )
+                if decision and decision.approval_source
+                else None,
             )
             async for ev in self._finalize_cancelled_tool(
                 tool_call,
@@ -2790,6 +2800,17 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     f"{failure}{exc.display}" if isinstance(exc, ToolError) else None
                 ),
                 tool_call_id=tool_call.call_id,
+                decision=cast(ToolDecisionValue, decision.verdict.value)
+                if decision
+                else None,
+                approval_type=cast(ToolApprovalTypeValue, decision.approval_type.value)
+                if decision
+                else None,
+                approval_source=cast(
+                    ToolApprovalSourceValue, decision.approval_source.value
+                )
+                if decision and decision.approval_source
+                else None,
             )
             async for ev in self._run_post_tool_and_finalize(
                 tool_call,
@@ -2877,6 +2898,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             cancelled=result_cancelled,
             duration=duration,
             tool_call_id=tool_call.call_id,
+            decision=cast(ToolDecisionValue, decision.verdict.value),
+            approval_type=cast(ToolApprovalTypeValue, decision.approval_type.value),
+            approval_source=cast(
+                ToolApprovalSourceValue, decision.approval_source.value
+            )
+            if decision.approval_source
+            else None,
         )
         result_event = result_event.model_copy(
             update={
@@ -2917,6 +2945,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             return ToolDecision(
                 verdict=ToolExecutionResponse.EXECUTE,
                 approval_type=ToolPermission.ALWAYS,
+                approval_source=ApprovalSource.BYPASS,
             )
 
         async with self._permission_store.lock:
@@ -2932,6 +2961,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     return ToolDecision(
                         verdict=ToolExecutionResponse.EXECUTE,
                         approval_type=ToolPermission.ALWAYS,
+                        approval_source=ApprovalSource.CONFIG,
                     )
                 case ToolPermission.NEVER:
                     return ToolDecision(
@@ -2939,6 +2969,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                         approval_type=ToolPermission.NEVER,
                         feedback=ctx.reason
                         or f"Tool '{tool_name}' is permanently disabled",
+                        approval_source=ApprovalSource.NEVER,
                     )
                 case _:
                     uncovered = [
@@ -2950,6 +2981,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                         return ToolDecision(
                             verdict=ToolExecutionResponse.EXECUTE,
                             approval_type=ToolPermission.ALWAYS,
+                            approval_source=ApprovalSource.SMART,
                         )
                     return await self._ask_approval(
                         tool_name, args, tool_call_id, uncovered
@@ -2973,7 +3005,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 verdict = ToolExecutionResponse.SKIP
 
         return ToolDecision(
-            verdict=verdict, approval_type=ToolPermission.ASK, feedback=feedback
+            verdict=verdict,
+            approval_type=ToolPermission.ASK,
+            feedback=feedback,
+            approval_source=ApprovalSource.USER,
         )
 
     def _handle_tool_response(
@@ -3023,6 +3058,17 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             error=error_msg,
             cancelled=cancelled,
             tool_call_id=tool_call.call_id,
+            decision=cast(ToolDecisionValue, decision.verdict.value)
+            if decision
+            else None,
+            approval_type=cast(ToolApprovalTypeValue, decision.approval_type.value)
+            if decision
+            else None,
+            approval_source=cast(
+                ToolApprovalSourceValue, decision.approval_source.value
+            )
+            if decision and decision.approval_source
+            else None,
         )
 
     def _messages_for_backend(

@@ -117,7 +117,7 @@ class SessionWorktrees:
         move: MoveSession,
         requested: SessionOptions,
         started_in: SessionOptions,
-    ) -> None:
+    ) -> WorktreeResolution:
         """Raise the worktree the session asked for and move it in.
 
         Raises rather than logging: the caller holds the session's turns behind
@@ -141,6 +141,7 @@ class SessionWorktrees:
         # was is bookkeeping, and must not be the reason its turns are refused.
         with suppress(Exception):
             self.release(previous, session_id)
+        return resolution
 
     async def cleanup(self, resolution: WorktreeResolution) -> None:
         """Undo what this start did, and only that."""

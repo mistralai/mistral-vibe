@@ -93,6 +93,9 @@ class ProviderCredentialService:
         except ValueError as exc:
             return ProviderAuthRequired(reason="missing", provider="", message=str(exc))
 
+        if not provider.api_key_env_var and not _uses_vertex(provider):
+            return _snapshot(provider, None, {}, api_key_source=None)
+
         snapshot = await asyncio.to_thread(_resolve_snapshot, provider)
         if snapshot is None:
             env_var = provider.api_key_env_var or "MISTRAL_API_KEY"
@@ -218,7 +221,7 @@ def _headers(provider: ProviderConfig, token: str) -> Mapping[str, str]:
 
 def _snapshot(
     provider: ProviderConfig,
-    token: str,
+    token: str | None,
     headers: Mapping[str, str],
     *,
     api_key_source: str | None,
@@ -231,13 +234,14 @@ def _snapshot(
     )
 
 
-def _revision(provider_name: str, token: str) -> str:
+def _revision(provider_name: str, token: str | None) -> str:
     """An opaque identifier that changes when the material does.
 
     A truncated digest: stable while the credential is, and carrying nothing
     from which the credential could be recovered.
     """
-    return f"{provider_name}:{sha256(token.encode()).hexdigest()[:16]}"
+    material = token or ""
+    return f"{provider_name}:{sha256(material.encode()).hexdigest()[:16]}"
 
 
 def _vertex_access_token() -> str:

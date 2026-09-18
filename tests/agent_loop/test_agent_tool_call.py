@@ -399,11 +399,14 @@ async def test_tool_call_with_invalid_action() -> None:
 
     events = await act_and_collect_events(agent_loop, "What's my todo list?")
 
+    # `action` is a Literal, so an unknown one is rejected while parsing the
+    # arguments -- the call never reaches the tool and no ToolCallEvent is emitted.
     assert isinstance(events[0], UserMessageEvent)
-    assert isinstance(events[3], ToolResultEvent)
-    assert events[3].error is not None
-    assert events[3].result is None
-    assert "tool_error" in events[3].error.lower()
+    assert isinstance(events[2], ToolResultEvent)
+    assert events[2].error is not None
+    assert events[2].result is None
+    assert "tool_error" in events[2].error.lower()
+    assert "'read' or 'write'" in events[2].error
     assert agent_loop.stats.tool_calls_failed == 1
 
 

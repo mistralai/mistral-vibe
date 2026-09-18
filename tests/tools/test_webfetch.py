@@ -151,6 +151,149 @@ async def test_cloudflare_retry_on_challenge(webfetch):
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_same_origin_redirect_is_followed_and_reports_final_url(webfetch):
+    source = respx.get("https://example.com/start").mock(
+        return_value=httpx.Response(302, headers={"Location": "/final"})
+    )
+    destination = respx.get("https://example.com/final").mock(
+        return_value=httpx.Response(
+            200, text="ok", headers={"Content-Type": "text/plain"}
+        )
+    )
+
+    result = await collect_result(
+        webfetch.run(WebFetchArgs(url="https://example.com/start"))
+    )
+
+    assert result.url == "https://example.com/final"
+    assert result.content == "ok"
+    assert source.called
+    assert destination.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cross_origin_redirect_requires_separate_approval(webfetch):
+    respx.get("https://example.com/start").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "https://other.example/final"}
+        )
+    )
+    destination = respx.get("https://other.example/final").mock(
+        return_value=httpx.Response(200, text="must not be fetched")
+    )
+
+    with pytest.raises(
+        ToolError,
+        match=(
+            "Redirect target requires a separate web_fetch approval: "
+            "https://other.example/final"
+        ),
+    ):
+        await collect_result(
+            webfetch.run(WebFetchArgs(url="https://example.com/start"))
+        )
+
+    assert not destination.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_redirect_to_different_scheme_requires_separate_approval(webfetch):
+    respx.get("https://example.com/start").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "http://example.com/final"}
+        )
+    )
+    destination = respx.get("http://example.com/final").mock(
+        return_value=httpx.Response(200, text="must not be fetched")
+    )
+
+    with pytest.raises(ToolError, match="requires a separate web_fetch approval"):
+        await collect_result(
+            webfetch.run(WebFetchArgs(url="https://example.com/start"))
+        )
+
+    assert not destination.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_redirect_to_different_port_requires_separate_approval(webfetch):
+    respx.get("https://example.com/start").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "https://example.com:8443/final"}
+        )
+    )
+    destination = respx.get("https://example.com:8443/final").mock(
+        return_value=httpx.Response(200, text="must not be fetched")
+    )
+
+    with pytest.raises(ToolError, match="requires a separate web_fetch approval"):
+        await collect_result(
+            webfetch.run(WebFetchArgs(url="https://example.com/start"))
+        )
+
+    assert not destination.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_unicode_host_redirect_to_equivalent_punycode_is_followed(webfetch):
+    respx.get("https://xn--fa-hia.example/start").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "https://xn--fa-hia.example/final"}
+        )
+    )
+    destination = respx.get("https://xn--fa-hia.example/final").mock(
+        return_value=httpx.Response(
+            200, text="ok", headers={"Content-Type": "text/plain"}
+        )
+    )
+
+    result = await collect_result(
+        webfetch.run(WebFetchArgs(url="https://faß.example/start"))
+    )
+
+    assert result.url == "https://xn--fa-hia.example/final"
+    assert destination.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_unicode_host_redirect_to_distinct_ascii_host_is_blocked(webfetch):
+    respx.get("https://xn--fa-hia.example/start").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "https://fass.example/final"}
+        )
+    )
+    destination = respx.get("https://fass.example/final").mock(
+        return_value=httpx.Response(200, text="must not be fetched")
+    )
+
+    with pytest.raises(ToolError, match="requires a separate web_fetch approval"):
+        await collect_result(
+            webfetch.run(WebFetchArgs(url="https://faß.example/start"))
+        )
+
+    assert not destination.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_redirect_loop_is_bounded(webfetch):
+    route = respx.get("https://example.com/loop").mock(
+        return_value=httpx.Response(302, headers={"Location": "/loop"})
+    )
+
+    with pytest.raises(ToolError, match="Too many redirects"):
+        await collect_result(webfetch.run(WebFetchArgs(url="https://example.com/loop")))
+
+    assert route.call_count == 21
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_regular_403_not_retried(webfetch):
     route = respx.get("https://example.com").mock(
         return_value=httpx.Response(403, headers={"Content-Type": "text/plain"})

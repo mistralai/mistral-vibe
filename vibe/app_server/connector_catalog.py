@@ -15,6 +15,7 @@ import re
 import tempfile
 import time
 from typing import Any, BinaryIO, Literal, Protocol, cast, runtime_checkable
+from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
@@ -72,6 +73,7 @@ from vibe.app_server.protocol import (
 from vibe.core.config import VibeConfigSchema, resolve_api_key
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.types import ConcurrencyConflictError
+from vibe.core.identity_cache import IdentityCache
 from vibe.core.paths import CONNECTOR_BOOTSTRAP_CACHE_FILE
 from vibe.core.tools.mcp_settings import persist_mcp_toggle
 from vibe.core.utils.matching import name_matches
@@ -90,6 +92,8 @@ type SessionlessCatalogFactory = Callable[
 ]
 
 _DEFAULT_BASE_URL = "https://api.mistral.ai"
+# Resolves the caller's org/workspace once per (base_url, api_key) for the console link.
+_IDENTITY_CACHE = IdentityCache()
 _BOOTSTRAP_CACHE_FORMAT = 2
 _BOOTSTRAP_CACHE_TTL_SECONDS = 10 * 60
 _BOOTSTRAP_TIMEOUT_SECONDS = 30.0
@@ -159,6 +163,9 @@ class _BootstrapConnector(BaseModel):
 
     id: str | None = None
     name: str | None = None
+    # display_name was added later on the wire; absent on older backends, so it
+    # stays optional per ADR 0014.
+    display_name: str | None = None
     protocol: str | None = None
     status: _BootstrapStatus = Field(default_factory=_BootstrapStatus)
     # Tools stay raw so a single malformed tool never fails the whole connector;
@@ -599,6 +606,7 @@ class ConnectorCatalogService:
             catalog=_project_catalog(result),
             selections=_project_selections(context.orchestrator.config, result.catalog),
             session=_project_session(session) if session is not None else None,
+            manage_url=await _manage_connectors_url(context.orchestrator.config),
         )
 
     async def _refresh_request(
@@ -1496,6 +1504,41 @@ def _resolve_provider(config: VibeConfigSchema) -> _ConnectorProvider | None:
     )
 
 
+async def _manage_connectors_url(config: VibeConfigSchema) -> str | None:
+    """Build the console "manage connectors" link for the caller's tenant.
+
+    Resolves the org/workspace from the Mistral provider identity, independent of
+    the active model, and combines it with ``console_base_url``. Returns ``None``
+    when connectors are disabled, no Mistral provider/key is configured, or
+    identity cannot be resolved, so the UI can hide the link.
+    """
+    provider = _resolve_provider(config)
+    if provider is None:
+        return None
+    mistral_provider = config.get_mistral_provider()
+    if mistral_provider is None:
+        return None
+    # Identity lives under the versioned API base (/v1/users/me), not the bare
+    # server root that provider.base_url uses for the connectors bootstrap path.
+    identity = await _IDENTITY_CACHE.resolve(
+        base_url=mistral_provider.api_base, api_key=provider.api_key
+    )
+    if identity is None or identity.organization is None or identity.workspace is None:
+        return None
+    share_context = json.dumps(
+        {
+            "organizationId": identity.organization.id,
+            "workspaceId": identity.workspace.id,
+        },
+        separators=(",", ":"),
+    )
+    console_base_url = config.console_base_url.rstrip("/")
+    return (
+        f"{console_base_url}/build/connectors"
+        f"?shareContext={quote(share_context, safe='')}"
+    )
+
+
 def _resolve_catalog(
     payload: object, provider_fingerprint: str
 ) -> ResolvedConnectorCatalog:
@@ -1506,10 +1549,12 @@ def _resolve_catalog(
     aliases: set[str] = set()
     connectors: list[ResolvedConnector] = []
     truncated = False
-    for raw_id, display_name, raw_connector in ordered_connectors:
+    for raw_id, alias_source, display_name, raw_connector in ordered_connectors:
         # Reserve the alias for every structurally valid connector in id order so
         # dropping one below (bad tools, over cap) never shifts a sibling's alias.
-        alias = _unique_alias(normalize_connector_alias(display_name), aliases)
+        # Alias stays derived from name (not display_name) so connector
+        # ids/config/tool names stay stable when the backend sends a display_name.
+        alias = _unique_alias(normalize_connector_alias(alias_source), aliases)
         # Count only kept connectors against the cap so invalid rows never crowd
         # out a healthy tail; excess healthy connectors are truncated, not the
         # ones that happen to sort first.
@@ -1567,13 +1612,14 @@ def _resolve_catalog(
 
 def _prepare_bootstrap_connectors(
     payload: object,
-) -> list[tuple[str, str, _BootstrapConnector]]:
+) -> list[tuple[str, str, str, _BootstrapConnector]]:
     """Parse each connector individually and drop the ones we cannot trust.
 
     Only a structurally broken envelope (not a mapping, or ``connectors`` not a
     list) is fatal. Malformed connector items are dropped, and every copy of a
     duplicated id is dropped since its identity is ambiguous. Returns id-sorted
-    ``(raw_id, display_name, connector)`` triples for the structurally valid rows.
+    ``(raw_id, alias_source, display_name, connector)`` tuples for the
+    structurally valid rows.
     """
     if not isinstance(payload, Mapping):
         raise ConnectorCatalogValidationError(
@@ -1616,13 +1662,19 @@ def _prepare_bootstrap_connectors(
             },
         )
 
-    prepared: list[tuple[str, str, _BootstrapConnector]] = []
+    prepared: list[tuple[str, str, str, _BootstrapConnector]] = []
     for connector in parsed:
         raw_id = (connector.id or "").strip()
         if not raw_id or raw_id in duplicate_ids:
             continue
-        display_name = (connector.name or raw_id).strip() or raw_id
-        prepared.append((raw_id, display_name, connector))
+        # Alias stays derived from name so ids/config/tool names stay stable even
+        # when the backend sends a differing display_name; display_name falls back
+        # to name then id when absent on older backends.
+        alias_source = (connector.name or raw_id).strip() or raw_id
+        display_name = (
+            connector.display_name or connector.name or raw_id
+        ).strip() or raw_id
+        prepared.append((raw_id, alias_source, display_name, connector))
     prepared.sort(key=lambda item: item[0])
     return prepared
 
@@ -1751,7 +1803,11 @@ def _cache_entry(
 def _connector_cache_payload(connector: ResolvedConnector) -> dict[str, object]:
     payload: dict[str, object] = {
         "id": connector.raw_id,
-        "name": connector.display_name,
+        # Persist the alias in the name slot so the round-trip re-derives the
+        # same (already-normalized, idempotent) alias; display_name is stored
+        # separately to preserve the backend title across cache hits.
+        "name": connector.alias,
+        "display_name": connector.display_name,
         "protocol": "mcp",
         "status": {"is_ready": connector.ready},
         "tools": [
@@ -1861,8 +1917,8 @@ def _canonical_json(value: object) -> bytes:
 
 def _redacted_bootstrap_error(exc: Exception) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
-        return f"Failed to load workspace connectors (HTTP {exc.response.status_code})."
-    return f"Failed to load workspace connectors: {type(exc).__name__}"
+        return f"Failed to load connectors (HTTP {exc.response.status_code})."
+    return f"Failed to load connectors: {type(exc).__name__}"
 
 
 __all__ = [

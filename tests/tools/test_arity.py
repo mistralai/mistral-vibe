@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibe.core.tools.arity import build_session_pattern
+from vibe.core.tools.arity import build_session_pattern, known_session_pattern_arity
 
 
 class TestBuildSessionPattern:
@@ -52,3 +52,25 @@ class TestBuildSessionPattern:
 
     def test_gh_pr_list(self):
         assert build_session_pattern(["gh", "pr", "list"]) == "gh pr list *"
+
+
+class TestKnownSessionPatternArity:
+    """The index from which a pattern's trailing ``*`` takes over."""
+
+    def test_it_counts_the_tokens_the_pattern_keeps(self):
+        tokens = ["git", "stash", "pop"]
+
+        assert known_session_pattern_arity(tokens) == 3
+        assert build_session_pattern(tokens) == " ".join(tokens) + " *"
+
+    def test_an_unknown_command_reports_no_boundary(self):
+        """``build_session_pattern`` guesses 1 here; a caller must not inherit it.
+
+        The guess reads ``sudo $CMD`` as an argument the trailing ``*`` covers
+        when the argument is the program that ``sudo *`` would then run.
+        """
+        assert known_session_pattern_arity(["mycommand", "arg1"]) is None
+        assert build_session_pattern(["mycommand", "arg1"]) == "mycommand *"
+
+    def test_no_tokens_name_nothing(self):
+        assert known_session_pattern_arity([]) is None

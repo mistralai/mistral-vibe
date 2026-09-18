@@ -15,6 +15,8 @@ import asyncio
 from collections.abc import Callable
 import json
 from pathlib import Path
+import subprocess
+from typing import cast
 
 from git import Repo
 import httpx
@@ -22,15 +24,26 @@ import pytest
 import respx
 
 from tests.app_server.backend_contract.conftest import connect_backend_contract_host
+from vibe.app_server._model import validate_wire
+from vibe.app_server._worktree_session import SessionWorktrees, WorktreeResolution
 from vibe.app_server.events import CallbackRequested
+from vibe.app_server.models import (
+    CompletedEffectState,
+    PublicEffectEntry,
+    PublicMessageEntry,
+    TextContentBlock,
+    WorktreeEffectDetail,
+    WorktreeEffectInput,
+)
 from vibe.app_server.protocol import (
-    AppServerResponseError,
     AutoWorktreeInput,
     ClientCapabilities,
     NewWorktreeInput,
     SessionOptions,
+    TurnStartParams,
+    TurnStartResponse,
 )
-from vibe.app_server.session import AppServerSession
+from vibe.app_server.session import AppServerSession, AppServerTurnError
 from vibe.core.git.worktree import ManagedWorktree
 
 
@@ -85,6 +98,60 @@ async def test_a_session_starts_in_the_worktree_it_asked_for(
         await connection.host.close()
 
 
+def _write_post_checkout_hook(repo: Repo, marker: Path) -> None:
+    # The marker has to be absolute: the hook runs with the new worktree as
+    # its cwd, so a relative marker would be written inside the worktree and
+    # the test would pass even when the hook runs.
+    hooks = Path(repo.git_dir) / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    hook = hooks / "post-checkout"
+    hook.write_text(f'#!/bin/sh\necho ran > "{marker}"\n')
+    hook.chmod(0o755)
+
+
+@pytest.mark.asyncio
+async def test_a_session_starting_a_worktree_does_not_run_repository_hooks(
+    tmp_path: Path, experimental_harness: bool
+) -> None:
+    # Worktree creation happens before any trust prompt, so a hostile
+    # post-checkout hook would run with the user's full privileges. Both
+    # backends create worktrees through the same GitRepo.add_worktree, so this
+    # holds for either harness the suite is pointed at.
+    repo = _init_repo(tmp_path)
+    marker = tmp_path / "hook-ran"
+    _write_post_checkout_hook(repo, marker)
+    # Control: `git worktree add` is what runs post-checkout, so confirm this
+    # environment executes the hook at all. Without it the assertion below
+    # could pass on a machine that never runs hooks.
+    subprocess.run(
+        ["git", "worktree", "add", str(tmp_path / "control"), "-b", "control"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    if not marker.exists():
+        pytest.skip("git hooks do not execute in this environment")
+    marker.unlink()
+
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            worktree=NewWorktreeInput(branch="jun/hooked", name="hooked"),
+        ),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        session = await connection.host.start_session()
+        cwd = await _settled_cwd(session, tmp_path)
+
+        assert cwd != tmp_path
+        assert not marker.exists()
+    finally:
+        await connection.host.close()
+
+
 @pytest.mark.asyncio
 async def test_an_auto_worktree_is_still_a_worktree(
     tmp_path: Path, experimental_harness: bool
@@ -108,6 +175,63 @@ async def test_an_auto_worktree_is_still_a_worktree(
         assert cwd != tmp_path
         assert cwd.is_dir()
     finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_first_turn_response_does_not_wait_for_worktree_creation(
+    tmp_path: Path, experimental_harness: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not experimental_harness:
+        pytest.skip("legacy creates the worktree before session/start")
+
+    _init_repo(tmp_path)
+    setup_started = asyncio.Event()
+    release_setup = asyncio.Event()
+    original = SessionWorktrees.resolve_for_start
+
+    async def blocked_resolve(
+        worktrees: SessionWorktrees, options: SessionOptions
+    ) -> WorktreeResolution:
+        if options.worktree is None:
+            return await original(worktrees, options)
+        setup_started.set()
+        await release_setup.wait()
+        return await original(worktrees, options)
+
+    monkeypatch.setattr(SessionWorktrees, "resolve_for_start", blocked_resolve)
+    connection = await connect_backend_contract_host(
+        experimental_harness,
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            worktree=NewWorktreeInput(branch="jun/deferred", name="deferred"),
+        ),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        session = await connection.host.start_session()
+        await setup_started.wait()
+
+        response = validate_wire(
+            TurnStartResponse,
+            await asyncio.wait_for(
+                connection.client.request(
+                    "turn/start",
+                    TurnStartParams(
+                        session_id=session.session_id,
+                        message=[TextContentBlock(text="start now")],
+                        client_user_message_id="message-1",
+                    ),
+                ),
+                timeout=1,
+            ),
+        )
+
+        assert response.turn.status.value == "in_progress"
+        assert not release_setup.is_set()
+    finally:
+        release_setup.set()
         await connection.host.close()
 
 
@@ -285,9 +409,34 @@ async def test_the_first_tool_call_runs_inside_the_worktree(
         _ = [event async for event in session.act("leave a marker")]
 
         cwd = _cwd(session)
+        history = session.state.history or []
+        worktree = next(
+            entry
+            for entry in history
+            if isinstance(entry, PublicEffectEntry)
+            and isinstance(entry.detail, WorktreeEffectDetail)
+        )
+        user_messages = [
+            entry
+            for entry in history
+            if isinstance(entry, PublicMessageEntry) and entry.role == "user"
+        ]
         assert cwd != tmp_path
         assert (cwd / "marker").exists()
         assert not (tmp_path / "marker").exists()
+        assert isinstance(worktree.state, CompletedEffectState)
+        assert worktree.detail.input is not None
+        worktree_input = cast(WorktreeEffectInput, worktree.detail.input)
+        assert worktree_input.path == str(cwd)
+        assert len(user_messages) == 1
+        payload = json.loads(backend_contract_mistral_api.calls[0].request.content)
+        system_message = next(
+            message["content"]
+            for message in payload["messages"]
+            if message["role"] == "system"
+        )
+        assert f"Absolute path: {cwd}" in system_message
+        assert f"Absolute path: {tmp_path}" not in system_message
     finally:
         await connection.host.close()
 
@@ -318,7 +467,9 @@ async def test_a_worktree_that_cannot_be_raised_refuses_the_turn(
         session = await connection.host.start_session()
 
         assert _cwd(session) == tmp_path
-        with pytest.raises(AppServerResponseError):
+        # The turn is accepted before deferred setup finishes, then fails as a
+        # visible turn instead of making session creation wait for the checkout.
+        with pytest.raises(AppServerTurnError):
             _ = [event async for event in session.act("write something")]
     finally:
         await connection.host.close()

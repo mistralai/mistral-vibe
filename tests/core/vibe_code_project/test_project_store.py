@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import stat
 import tomllib
 
+import pytest
 import tomli_w
 
 from vibe.core.vibe_code_project import (
@@ -63,6 +66,33 @@ def test_projects_store_upserts_and_reads_remote_project(tmp_path: Path) -> None
             }
         ],
     }
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_projects_store_creates_owner_only_registry(tmp_path: Path) -> None:
+    """The project registry names every local project, so it lands owner-only."""
+    path = tmp_path / "projects.toml"
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    store = VibeProjectsStore(path)
+
+    store.upsert_remote_project(_link(repo_root=repo_root))
+
+    assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_projects_store_keeps_existing_file_mode(tmp_path: Path) -> None:
+    path = tmp_path / "projects.toml"
+    path.write_text("version = 1\nprojects = []\n", encoding="utf-8")
+    path.chmod(0o644)
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    store = VibeProjectsStore(path)
+
+    store.upsert_remote_project(_link(repo_root=repo_root))
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
 
 def test_projects_store_upserts_and_reads_local_project(tmp_path: Path) -> None:

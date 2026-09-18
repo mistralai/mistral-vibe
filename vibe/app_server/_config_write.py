@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from vibe.app_server._session_model import ACTIVE_MODEL_PATH
 from vibe.app_server.protocol import ConfigWriteOpWire
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.layers.project import ProjectConfigLayer
@@ -20,6 +21,50 @@ from vibe.core.config.vibe_schema import VibeConfigSchema
 # field avoids baking in values from higher-priority layers (admin/GrowthBook)
 # into the user's writable config.
 _REQUIRED_MODEL_FIELDS = {"name", "provider", "alias"}
+
+
+def _model_after_write(config: VibeConfigSchema, model_alias: str | None) -> str:
+    """The model this write leaves active, which is where thinking belongs."""
+    if model_alias:
+        return model_alias
+    if model_alias == "":
+        return config.resolve_default_model_alias()
+    return config.get_active_model().alias
+
+
+def model_config_write_ops(
+    config: VibeConfigSchema, *, model_alias: str | None, reasoning_effort: str | None
+) -> list[ConfigWriteOpWire]:
+    """The writes a model pick makes, from the pick itself.
+
+    Thinking is stored under whichever model is active after this write -- the
+    one being picked, or the current one when only thinking changes -- so the
+    two travel together and only this function needs to know the paths.
+
+    An empty alias is how this configuration says "follow the default", and
+    writing it is the only way to unpin a session, so it is passed through
+    rather than looked up.
+
+    Raises ``ValueError`` for a model this configuration does not offer.
+    """
+    if model_alias and model_alias not in config.models:
+        available = ", ".join(sorted(config.models))
+        raise ValueError(f"Unknown model: {model_alias}. Available: {available}")
+    ops: list[ConfigWriteOpWire] = []
+    if model_alias is not None:
+        ops.append(
+            ConfigWriteOpWire(op="set", path=ACTIVE_MODEL_PATH, value=model_alias)
+        )
+    if reasoning_effort is not None:
+        target = _model_after_write(config, model_alias)
+        ops.append(
+            ConfigWriteOpWire(
+                op="set",
+                path=f"/models/{escape_json_pointer_token(target)}/thinking",
+                value=reasoning_effort,
+            )
+        )
+    return ops
 
 
 def config_write_targets(

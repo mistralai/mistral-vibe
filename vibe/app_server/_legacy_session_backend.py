@@ -66,6 +66,7 @@ from vibe.app_server.protocol import (
     EmptyResponse,
     EventNotificationParams,
     MCPAuthRequiredParams,
+    ModelConfigWriteParams,
     Notification,
     ProtocolErrorCode,
     RuntimeMutationResponse,
@@ -712,6 +713,13 @@ class LegacySessionBackend:
         self, params: ConfigWriteParams
     ) -> SessionBackendResult[ConfigWriteResponse]:
         return await self._resource_request("config/write", params, ConfigWriteResponse)
+
+    async def write_model_config(
+        self, params: ModelConfigWriteParams
+    ) -> SessionBackendResult[ConfigWriteResponse]:
+        return await self._resource_request(
+            "config/model/write", params, ConfigWriteResponse
+        )
 
     async def reload_config(
         self, params: ConfigReloadParams

@@ -26,7 +26,7 @@ from vibe.core.config import MissingAPIKeyError, VibeConfigSchema, load_dotenv_v
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.layer import ConfigStorageError
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.paths import HISTORY_FILE
+from vibe.core.paths import HISTORY_FILE, bootstrap_vibe_home
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.telemetry.types import LaunchContext
 from vibe.observability.logging import logger
@@ -114,16 +114,6 @@ def require_api_key_or_onboard(
         return run_onboarding(
             launch_context=_build_cli_launch_context(), orchestrator=orchestrator
         )
-
-
-def bootstrap_config_files() -> None:
-    history_file = HISTORY_FILE.path
-    if not history_file.exists():
-        try:
-            history_file.parent.mkdir(parents=True, exist_ok=True)
-            history_file.write_text("Hello Vibe!\n", "utf-8")
-        except Exception as e:
-            rprint(f"[yellow]Could not create history file: {e}[/]")
 
 
 def _agent_selection(args: argparse.Namespace) -> tuple[str | None, bool]:
@@ -426,7 +416,7 @@ def run_cli(args: argparse.Namespace) -> None:
     sentry_enabled = False
 
     load_dotenv_values()
-    bootstrap_config_files()
+    bootstrap_vibe_home()
 
     if args.setup:
         from vibe.setup.onboarding import run_onboarding

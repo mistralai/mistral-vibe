@@ -339,7 +339,30 @@ class SessionDeleteRequest(BaseModel):
     session_id: str = Field(alias="sessionId", min_length=1)
 
 
+class LoopsListRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+    session_id: str = Field(alias="sessionId", min_length=1)
+
+
 class SessionIdRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+    session_id: str = Field(alias="sessionId", min_length=1)
+
+
+class LoopsCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+    session_id: str = Field(alias="sessionId", min_length=1)
+    interval: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+
+
+class LoopsDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+    session_id: str = Field(alias="sessionId", min_length=1)
+    loop_id: str = Field(alias="loopId", min_length=1)
+
+
+class LoopsClearRequest(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
     session_id: str = Field(alias="sessionId", min_length=1)
 
@@ -754,7 +777,13 @@ class VibeAcpAgent(AcpAgent):
         content = project_prompt(prompt)
         text = content.text
         message_id = str(uuid4())
-        match await self._command_controller.execute(session, text, message_id):
+        try:
+            command_result = await self._command_controller.execute(
+                session, text, message_id
+            )
+        except AppServerResponseError as exc:
+            raise InvalidRequestError(exc.error.message) from exc
+        match command_result:
             case PromptResponse() as response:
                 return response
             case InjectedPrompt(text=injected_text):
@@ -1118,6 +1147,8 @@ class VibeAcpAgent(AcpAgent):
                     ),
                 )
                 result = {}
+            case _ if method.startswith("loops/"):
+                result = await self._loops_extension(method, params)
             case "session/delete":
                 try:
                     request = SessionDeleteRequest.model_validate(params)
@@ -1371,29 +1402,30 @@ class VibeAcpAgent(AcpAgent):
             if isinstance(requested_session, str)
             else None
         )
-        if session is not None:
-            if method == "trust/status":
+        if method == "trust/status":
+            if session is not None:
                 response = await session.app_server.resources.workspace.trust_status(
                     params.get("cwd")
                 )
             else:
-                decision = params.get("decision")
-                if decision not in {"trust_repo", "trust_cwd", "decline"}:
-                    raise InvalidRequestError(f"Unknown trust decision: {decision}")
-                response = await session.app_server.resources.workspace.decide_trust(
-                    cast(Any, decision), cwd=params.get("cwd")
-                )
-        else:
-            host = await self._host_resources()
-            if method == "trust/status":
+                host = await self._host_resources()
                 response = await host.trust_status(params.get("cwd"))
-            else:
-                decision = params.get("decision")
-                if decision not in {"trust_repo", "trust_cwd", "decline"}:
-                    raise InvalidRequestError(f"Unknown trust decision: {decision}")
-                response = await host.decide_trust(
-                    cast(Any, decision), cwd=params.get("cwd")
+        else:
+            # A trust decision is a persistent write to the trust store, so an
+            # untrusted ACP peer's claim must be anchored to a session Vibe
+            # itself created: a session-less claim is rejected outright, and
+            # the session-scoped backend route pins the decision to the
+            # session's own working directory.
+            if session is None:
+                raise InvalidRequestError("Trust decisions require a valid sessionId")
+            try:
+                response = await session.app_server.resources.workspace.decide_trust(
+                    cast(Any, params.get("decision")), cwd=params.get("cwd")
                 )
+            except ValidationError as exc:
+                raise InvalidRequestError(str(exc)) from exc
+            except AppServerResponseError as exc:
+                raise InvalidRequestError(exc.error.message) from exc
         return {
             "trust_status": response.status,
             "details": (
@@ -1402,6 +1434,47 @@ class VibeAcpAgent(AcpAgent):
                 else None
             ),
         }
+
+    async def _loops_extension(self, method: str, params: dict[str, Any]) -> dict:
+        try:
+            if method == "loops/list":
+                request: (
+                    LoopsListRequest
+                    | LoopsCreateRequest
+                    | LoopsDeleteRequest
+                    | LoopsClearRequest
+                ) = LoopsListRequest.model_validate(params)
+            elif method == "loops/create":
+                request = LoopsCreateRequest.model_validate(params)
+            elif method == "loops/delete":
+                request = LoopsDeleteRequest.model_validate(params)
+            else:
+                request = LoopsClearRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(f"Invalid ACP loops request: {exc}") from exc
+
+        session = self._find_live_session(request.session_id)
+        if session is None or session.app_server is None:
+            raise SessionNotFoundError(request.session_id)
+
+        loops = session.app_server.resources.loops
+        try:
+            if method == "loops/list":
+                result = await loops.list()
+                return {"loops": [loop.model_dump(mode="json") for loop in result]}
+            elif method == "loops/create":
+                assert isinstance(request, LoopsCreateRequest)
+                loop = await loops.create(request.interval, request.prompt)
+                return {"loop": loop.model_dump(mode="json")}
+            elif method == "loops/delete":
+                assert isinstance(request, LoopsDeleteRequest)
+                loop = await loops.delete(request.loop_id)
+                return {"loop": loop.model_dump(mode="json")}
+            else:
+                count = await loops.clear()
+                return {"count": count}
+        except AppServerResponseError as exc:
+            raise InvalidRequestError(exc.error.message) from exc
 
     async def _rewind_extension(self, method: str, params: dict[str, Any]) -> dict:
         session_id = params.get("sessionId") or params.get("session_id")

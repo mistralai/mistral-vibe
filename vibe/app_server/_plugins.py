@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 from pydantic import ValidationError
 
 from vibe.agents import AgentType
+from vibe.app_server._skills import project_model_invocable_plugin_contexts
 from vibe.app_server.models import (
     ConfigIssue,
     PluginComponent,
@@ -444,7 +445,9 @@ class UnifiedPluginProvider:
         # profile is a name the model can call and the Runtime cannot spawn.
         from mistralai_vibe_local_harness.vibe.plugins import SessionPluginProjection
 
-        definitions = tuple(core_plugins(bound))
+        definitions = project_model_invocable_plugin_contexts(
+            core_plugins(bound), bound.materialized.resolution.skills
+        )
         agents = list(bound.materialized.resolution.agents)
         if not agents:
             return SessionPluginProjection(definitions=definitions)

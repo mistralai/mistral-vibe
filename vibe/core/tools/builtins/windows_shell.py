@@ -805,9 +805,8 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         ):
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
-        required = self._build_required_permissions(
-            command_parts, outside_dirs, context_required
-        )
+        required = self._build_required_permissions(command_parts, outside_dirs)
+        required.extend(context_required)
         required.extend(
             self._build_command_required_permission(
                 invocation_pattern=f"dynamic path: {path}",

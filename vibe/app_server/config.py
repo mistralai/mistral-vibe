@@ -70,6 +70,7 @@ class ConfigView(ProtocolModel):
     voice_mode_enabled: bool
     narrator_enabled: bool
     show_thinking_nodes: bool
+    show_subagent_status_list: bool
     worktree_limit: int
     enable_update_checks: bool
     enable_notifications: bool

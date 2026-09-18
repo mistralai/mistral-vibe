@@ -11,6 +11,12 @@ import pytest
 
 from tests.mock.utils import collect_result
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError, ToolPermission
+from vibe.core.tools.builtins._shell_command_policy import (
+    _COMMAND_POLICIES,
+    analyze_shell_command_policy,
+    has_option_guardrails,
+)
+from vibe.core.tools.builtins._shell_permission_analysis import analyze_shell_command
 import vibe.core.tools.builtins.bash as bash_module
 from vibe.core.tools.builtins.bash import (
     Bash,
@@ -54,7 +60,12 @@ from vibe.core.tools.builtins.managed_shell.backend import (
     ManagedShellBackend,
     ManagedShellBackendError,
 )
-from vibe.core.tools.permissions import PermissionContext
+from vibe.core.tools.models import ApprovedRule, PermissionScope
+from vibe.core.tools.permissions import (
+    PermissionContext,
+    PermissionStore,
+    RequiredPermission,
+)
 from vibe.core.tools.terminal_runtime import TerminalRuntime
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
@@ -1738,6 +1749,8 @@ def _resolve_default_shell_permission(
         "sort --out=sorted.txt input.txt",
         "sort --temporary-directory=. input.txt",
         "sort --compress-program=gzip input.txt",
+        "sort --files0-from=input-files.txt",
+        "sort --files0-f=input-files.txt",
         "find . -delete",
         "find . -fprint matches.txt",
         r"find . -exec echo {} \;",
@@ -2267,6 +2280,7 @@ def test_new_read_only_commands_are_allowlisted():
         "{ echo harmless; }",
         "harmless() { echo harmless; }",
         "echo harmless &",
+        "echo harmless\\\n#;echo hidden",
     ],
     ids=[
         "ansi-c-string",
@@ -2305,6 +2319,7 @@ def test_new_read_only_commands_are_allowlisted():
         "group",
         "function-definition",
         "background",
+        "line-continuation",
     ],
 )
 def test_shell_permission_analysis_fails_closed(shell_kind, command):
@@ -2329,7 +2344,6 @@ def test_shell_permission_analysis_fails_closed(shell_kind, command):
         "echo harmless > output.txt",
         "echo harmless >> output.txt",
         "cat < input.txt",
-        "echo harmless 2>&1",
         "echo harmless &> output.txt",
         "cat <<'EOF'\nharmless\nEOF",
         "cat <<< harmless",
@@ -2343,7 +2357,6 @@ def test_shell_permission_analysis_fails_closed(shell_kind, command):
         "output",
         "append",
         "input",
-        "fd-duplication",
         "combined-output",
         "heredoc",
         "here-string",
@@ -2364,6 +2377,61 @@ def test_shell_redirections_require_approval(shell_kind, command):
             config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
         )
         result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo harmless 2>&1",
+        "echo harmless >/dev/null",
+        "echo harmless 2>/dev/null",
+        "echo harmless &>/dev/null",
+        "echo harmless >/dev/null 2>&1",
+        "ls -la ./x.md 2>&1 | head -1",
+    ],
+    ids=[
+        "fd-duplication",
+        "discard-stdout",
+        "discard-stderr",
+        "discard-both",
+        "discard-and-duplicate",
+        "pipeline-with-duplication",
+    ],
+)
+def test_redirections_that_cannot_reach_a_file_are_auto_approved(shell_kind, command):
+    """A descriptor duplication or a write to /dev/null creates nothing.
+
+    Approval exists to gate a command writing or reading a path the user did not
+    authorise. ``2>&1`` renumbers a descriptor and ``/dev/null`` is discarded by the
+    kernel, so charging a prompt to the ordinary "run it and drop the noise" shape
+    buys no safety and trains the user to click through prompts.
+    """
+    result = _resolve_default_shell_permission(shell_kind, command)
+
+    assert result is None or result.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A benign redirect beside a real one must not launder it.
+        "echo harmless > output.txt 2>&1",
+        "echo harmless >/dev/null 2>err.txt",
+        # ``>&word`` is "both streams into that file", not a duplication.
+        "echo harmless >&output.txt",
+        # Only the exact device is discarded.
+        "echo harmless >/dev/nullx",
+        "echo harmless >/dev/stdout",
+    ],
+)
+def test_a_benign_redirect_does_not_clear_the_rest_of_the_command(shell_kind, command):
+    """Each redirect is judged on its own, so one discard cannot cover a write."""
+    result = _resolve_default_shell_permission(shell_kind, command)
 
     assert isinstance(result, PermissionContext)
     assert result.permission is ToolPermission.ASK
@@ -2409,26 +2477,21 @@ def test_shell_permission_analysis_preserves_simple_allowlisted_commands(shell_k
 @pytest.mark.parametrize(
     ("command", "expected_reason"),
     [
-        ("echo $(id)", "command substitution"),
-        ("echo $HOME", "variable expansion"),
         ("cat < input.txt", "redirection"),
         ("(PATH=/tmp; git status)", "environment assignments, subshell"),
         ("&&", "a syntax error"),
     ],
-    ids=["substitution", "expansion", "redirection", "multiple", "parse-error"],
+    ids=["redirection", "multiple", "parse-error"],
 )
 def test_shell_approval_prompt_names_the_offending_syntax(
     shell_kind, command, expected_reason
 ):
-    """The prompt must say which construct blocked auto-approval, not just that one did."""
-    if shell_kind == "legacy":
-        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
-        result = tool.resolve_permission(BashArgs(command=command))
-    else:
-        tool = ExperimentalBash(
-            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
-        )
-        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+    """The prompt must say which construct blocked auto-approval, not just that one did.
+
+    Only reachable where no command pattern survived; where one does it is named
+    instead, because it is what the answer grants.
+    """
+    result = _resolve_default_shell_permission(shell_kind, command)
 
     assert isinstance(result, PermissionContext)
     assert result.permission is ToolPermission.ASK
@@ -2436,6 +2499,348 @@ def test_shell_approval_prompt_names_the_offending_syntax(
         required.label == f"shell syntax requiring approval: {expected_reason}"
         for required in result.required_permissions
     )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("command", "expected_pattern"),
+    [
+        # Allowlisted, so the pattern only exists to carry the answer.
+        ("cat -n $FILE", "cat *"),
+        ("echo $HOME", "echo *"),
+        ("echo ===", "echo *"),
+        # Not allowlisted, so the pattern is the grant.
+        ("echo $(npm test)", "npm test *"),
+        ("uv run pytest $FILE", "uv run pytest *"),
+    ],
+    ids=[
+        "trailing-expansion",
+        "allowlisted-expansion",
+        "zsh-word",
+        "substituted-command",
+        "arity-prefix",
+    ],
+)
+def test_a_readable_command_is_scoped_by_its_pattern_not_the_whole_string(
+    shell_kind, command, expected_pattern
+):
+    """Syntax the analysis reads around varies arguments, and arguments wildcard away.
+
+    Scoping these to the literal string made every session grant a single-use
+    allow: the next call differed by a character and asked again.
+    """
+    result = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    patterns = {rp.session_pattern for rp in result.required_permissions}
+    assert expected_pattern in patterns
+    assert command not in patterns
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git $SUB",
+        "uv run $CMD",
+        "$RUNNER pytest",
+        "PATH=/tmp pytest tests",
+        "LD_PRELOAD=/tmp/x.so ls",
+        "npm test > $LOGFILE",
+        # The argument is the program, so the boundary the arity table reports
+        # for the wrapper is not where this command's identity stops.
+        "xargs $CMD",
+        "timeout 5 $CMD",
+        "env $CMD",
+        "source $SCRIPT",
+        # An environment is not an argument, so no pattern can express it and
+        # ``git status *`` would cover every one -- including a HOME whose
+        # gitconfig names a pager to run.
+        "HOME=/tmp/evil git status",
+        "GIT_CONFIG_GLOBAL=/tmp/e git status",
+        # The extractor drops the quotes, so the token the pattern is cut from
+        # is not the token the shell will run.
+        '"git" $SUB',
+        'git "status" $X',
+        # An -exec payload the extractor cannot read is erased from the very
+        # command text the guardrail inspects.
+        "find . -exec $CMD {} ;",
+    ],
+    ids=[
+        "subcommand",
+        "inside-arity-prefix",
+        "program-name",
+        "search-path",
+        "loader-preload",
+        "redirect-target",
+        "xargs-wrapper",
+        "timeout-wrapper",
+        "env-wrapper",
+        "sourced-script",
+        "home-override",
+        "git-config-override",
+        "quoted-program",
+        "quoted-subcommand",
+        "guardrail-exec-payload",
+    ],
+)
+def test_syntax_reaching_the_commands_identity_is_scoped_to_the_exact_string(
+    shell_kind, command
+):
+    """A pattern is only honest while the extract still says what will run.
+
+    ``git $SUB`` extracts to ``git``, whose pattern ``git *`` is every subcommand
+    from a call to one of them. Offering it beside the exact string would hand it
+    over anyway, so it must not be offered at all.
+    """
+    result = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    patterns = [rp.session_pattern for rp in result.required_permissions]
+    assert command in patterns
+    # Guardrails add exact-text entries of their own, which release only the call
+    # they name; a trailing ``*`` is the widening being avoided.
+    assert not [pattern for pattern in patterns if pattern.endswith(" *")]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_an_unreadable_token_is_recorded_even_when_the_call_needs_other_scopes(
+    shell_kind,
+):
+    """The command's own pattern is never left to ride on an unrelated permission.
+
+    ``grep`` is allowlisted, so the outside-workdir glob is all the call would
+    otherwise ask for, and granting "read /etc" would release every future
+    ``grep $ANYTHING /etc/hosts``.
+    """
+    result = _resolve_default_shell_permission(shell_kind, "grep $PATTERN /etc/hosts")
+
+    assert isinstance(result, PermissionContext)
+    scopes = {rp.scope for rp in result.required_permissions}
+    assert scopes == {
+        PermissionScope.COMMAND_PATTERN,
+        PermissionScope.OUTSIDE_DIRECTORY,
+    }
+    assert "grep *" in {rp.session_pattern for rp in result.required_permissions}
+
+
+def _store_after_granting(shell_kind: str, command: str) -> PermissionStore:
+    store = PermissionStore()
+    result = _resolve_default_shell_permission(shell_kind, command)
+    assert isinstance(result, PermissionContext)
+    for rp in result.required_permissions:
+        store.add_rule(
+            ApprovedRule(
+                tool_name="bash", scope=rp.scope, session_pattern=rp.session_pattern
+            )
+        )
+    return store
+
+
+def _uncovered(
+    store: PermissionStore, shell_kind: str, command: str
+) -> list[RequiredPermission]:
+    result = _resolve_default_shell_permission(shell_kind, command)
+    assert isinstance(result, PermissionContext)
+    return [rp for rp in result.required_permissions if not store.covers("bash", rp)]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("granted", "guardrailed"),
+    [
+        ("git log $REF", "git log --ext-diff"),
+        ("git log $REF", "git log --output=/tmp/stolen"),
+        ("git diff $REF", "git diff --textconv"),
+        ("git log $REF *", "git log --ext-diff"),
+        ("git diff $REF *", "git diff --textconv"),
+    ],
+    ids=["ext-diff", "output", "textconv", "glob-ext-diff", "glob-textconv"],
+)
+def test_a_grant_on_a_guardrailed_command_does_not_cover_its_guarded_options(
+    shell_kind, granted, guardrailed
+):
+    """``git log *`` would cover the very options the guardrail exists to catch.
+
+    ``--ext-diff`` and ``--textconv`` run a driver named in the repository's own
+    config and ``--output`` writes wherever it is pointed, so a grant earned by
+    an innocuous expansion has to stop short of them. The ``*`` rows are the same
+    grant written with a glob of its own, which must stay an argument.
+    """
+    store = _store_after_granting(shell_kind, granted)
+
+    assert not _uncovered(store, shell_kind, granted)
+    assert _uncovered(store, shell_kind, guardrailed)
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("granted", "next_call"),
+    [
+        ("git log --output $FILE", "git log --output $OTHER"),
+        ("git log $REF", "git log $OTHER"),
+        ("git submodule foreach $CMD", "git submodule foreach $OTHER"),
+    ],
+    ids=["guarded-option-value", "positional", "foreach-payload"],
+)
+def test_an_unreadable_token_keeps_a_guardrailed_command_scoped_to_its_own_text(
+    shell_kind, granted, next_call
+):
+    """The extract drops the token, and a literal grant has no ``*`` to lose it in.
+
+    Both calls extract to ``git log --output``, which says nothing about where
+    either one writes. A positional is no safer -- ``$REF`` is ``--ext-diff`` if
+    the variable says so -- so for a command whose options are guarded, an
+    unreadable token anywhere leaves the command as written the only honest scope.
+    """
+    store = _store_after_granting(shell_kind, granted)
+
+    assert not _uncovered(store, shell_kind, granted)
+    assert _uncovered(store, shell_kind, next_call)
+
+
+def test_a_shell_override_is_not_evidence_that_the_command_itself_got_scoped():
+    """A context permission is COMMAND_PATTERN-scoped and says nothing about the command.
+
+    ``[[ ... ]]`` extracts no command at all, so the override was the only thing
+    left in the list and the call recorded nothing about what it would test.
+    """
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+    store = PermissionStore()
+
+    granted = tool.resolve_permission(
+        ExperimentalBashArgs(command="[[ -n $FOO ]]", shell="/bin/zsh")
+    )
+    assert isinstance(granted, PermissionContext)
+    assert "[[ -n $FOO ]]" in {
+        rp.session_pattern for rp in granted.required_permissions
+    }
+    for rp in granted.required_permissions:
+        store.add_rule(
+            ApprovedRule(
+                tool_name="bash", scope=rp.scope, session_pattern=rp.session_pattern
+            )
+        )
+
+    other = tool.resolve_permission(
+        ExperimentalBashArgs(command="[[ -f $HOME/.ssh/id_rsa ]]", shell="/bin/zsh")
+    )
+    assert isinstance(other, PermissionContext)
+    assert [rp for rp in other.required_permissions if not store.covers("bash", rp)]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("granted", "escalated"),
+    [
+        ("cat $FILE", "cat notes.txt > /etc/cron.d/pwn"),
+        ("echo $MSG", "echo key >> ~/.ssh/authorized_keys"),
+        ("ls $DIR", "ls > /tmp/listing"),
+    ],
+    ids=["cat-redirect", "echo-append", "ls-redirect"],
+)
+def test_a_pattern_grant_does_not_cover_what_only_the_command_text_can_scope(
+    shell_kind, granted, escalated
+):
+    """``cat *`` is a fair grant, and ``fnmatch`` would let it swallow a redirect.
+
+    A redirect target never reaches ``command_parts``, so it earns no
+    outside-workdir scope of its own and the exact command is the only permission
+    between an innocuous grant and an arbitrary write.
+    """
+    store = _store_after_granting(shell_kind, granted)
+
+    assert _uncovered(store, shell_kind, escalated)
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("command", ["python", "cat"])
+def test_a_heredoc_grant_covers_only_the_body_it_was_shown(shell_kind, command):
+    """The body is what the command runs, and none of it reaches the extract."""
+    store = _store_after_granting(shell_kind, f"{command} <<EOF\nfirst\nEOF")
+
+    assert _uncovered(store, shell_kind, f"{command} <<EOF\nsecond\nEOF")
+
+
+_WITHHOLDS_APPROVAL = {
+    "date": ["date", "--set", "2020-01-01"],
+    "find": ["find", ".", "-delete"],
+    "git": ["git", "log", "--ext-diff"],
+    "less": ["less", "--log-file=/tmp/x", "f"],
+    "sort": ["sort", "--output=/tmp/x", "f"],
+    "tree": ["tree", "--output=/tmp/x"],
+}
+_ONLY_NAMES_PATHS = {
+    "diff": ["diff", "--from-file=/etc/hosts", "b"],
+    "du": ["du", "--files0-from=/etc/hosts"],
+    "file": ["file", "--magic-file=/etc/magic", "x"],
+    "grep": ["grep", "--file=/etc/hosts", "x"],
+    "wc": ["wc", "--files0-from=/etc/hosts"],
+}
+
+
+def test_option_guardrails_track_the_policies_that_can_withhold_approval():
+    """``has_option_guardrails`` is what stops a command's grant generalising.
+
+    A policy that only nominates paths has nothing to protect there: those paths
+    become OUTSIDE_DIRECTORY permissions, a scope no command pattern is matched
+    against, so keeping such a command exact costs prompts and buys nothing.
+    """
+    assert set(_WITHHOLDS_APPROVAL) | set(_ONLY_NAMES_PATHS) == set(_COMMAND_POLICIES)
+
+    for tokens in _WITHHOLDS_APPROVAL.values():
+        assert analyze_shell_command_policy(tokens).requires_approval
+        assert has_option_guardrails(tokens)
+
+    for tokens in _ONLY_NAMES_PATHS.values():
+        policy = analyze_shell_command_policy(tokens)
+        assert not policy.requires_approval
+        assert policy.option_path_values
+        assert not has_option_guardrails(tokens)
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_a_policy_that_only_names_paths_leaves_the_command_generalising(shell_kind):
+    """``grep``'s guarded options resolve to paths, not to a withheld approval.
+
+    Those land in OUTSIDE_DIRECTORY, a scope no command pattern is matched
+    against, so keeping ``grep`` exact would cost prompts and buy nothing.
+    """
+    store = _store_after_granting(shell_kind, "grep -rn $PATTERN src")
+
+    assert not _uncovered(store, shell_kind, "grep -rn $OTHER src")
+    assert _uncovered(store, shell_kind, "grep --file=/etc/shadow src")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git $SUB",
+        "$RUNNER pytest",
+        "PATH=/tmp pytest",
+        "FOO=bar ls",
+        "xargs $CMD",
+        '"git" $SUB',
+        "echo hi > out.txt",
+        "echo hi > $OUT",
+        "f() { git $X; }",
+        "foo \\\nbar",
+        "&&",
+    ],
+)
+def test_an_invalidated_scope_always_carries_a_reason(command):
+    """The shells label the exact-string grant with the analysis reason, so every
+    route to ``invalidates_scope`` has to leave one behind or the prompt names
+    nothing as the syntax that blocked auto-approval.
+    """
+    analysis = analyze_shell_command(command)
+
+    assert analysis.invalidates_scope
+    assert analysis.approval_reasons
 
 
 def _force_windows_bash(monkeypatch: pytest.MonkeyPatch) -> None:

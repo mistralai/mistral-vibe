@@ -284,6 +284,37 @@ async def test_add_oauth_mcp_server_persists_http_transport(
 
 
 @pytest.mark.asyncio
+async def test_persist_remote_mcp_server_rejects_lan_http_by_default(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
+    server = MCPStreamableHttp(
+        name="lan", transport="streamable-http", url="http://192.168.0.8:3002/"
+    )
+
+    with pytest.raises(MCPServerAddError, match="unless it points to localhost"):
+        await persist_remote_mcp_server(load_orchestrator(build_config()), server)
+
+
+@pytest.mark.asyncio
+async def test_persist_remote_mcp_server_allows_lan_http_with_flag(
+    config_dir: Path,
+    build_config: ConfigBuilder,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+) -> None:
+    server = MCPStreamableHttp(
+        name="lan", transport="streamable-http", url="http://192.168.0.8:3002/"
+    )
+
+    result = await persist_remote_mcp_server(
+        load_orchestrator(build_config()), server, allow_insecure_http=True
+    )
+
+    assert result.created is True
+    assert result.server.url == "http://192.168.0.8:3002/"
+    assert _persisted_servers(config_dir)[0]["url"] == "http://192.168.0.8:3002/"
+
+
+@pytest.mark.asyncio
 async def test_persist_remote_mcp_server_writes_only_persistence_layer(
     config_dir: Path,
 ) -> None:

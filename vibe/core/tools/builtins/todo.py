@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from enum import StrEnum, auto
+from typing import Literal
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -47,7 +48,7 @@ class TodoItem(BaseModel):
 
 
 class TodoArgs(BaseModel):
-    action: str = Field(
+    action: Literal["read", "write"] = Field(
         description="Required on every call: 'read' to view the current list, or 'write' to replace it"
     )
     todos: list[TodoItem] | None = Field(
@@ -65,6 +66,25 @@ class TodoResult(BaseModel):
     @property
     def message(self) -> str:
         return f"{self.verb} {self.total_count} todos"
+
+
+class TodoValidationError(ValueError):
+    pass
+
+
+def read_todos(todos: list[TodoItem]) -> TodoResult:
+    return TodoResult(verb="Retrieved", todos=todos, total_count=len(todos))
+
+
+def write_todos(todos: list[TodoItem], *, max_todos: int) -> TodoResult:
+    if len(todos) > max_todos:
+        raise TodoValidationError(f"Cannot store more than {max_todos} todos")
+
+    ids = [todo.id for todo in todos]
+    if len(ids) != len(set(ids)):
+        raise TodoValidationError("Todo IDs must be unique")
+
+    return TodoResult(verb="Updated", todos=todos, total_count=len(todos))
 
 
 class TodoConfig(BaseToolConfig):
@@ -102,14 +122,6 @@ class Todo(
                     settled_verb="Updated",
                     settled_message=f"{count} todos",
                 )
-            case _:
-                return ToolCallDisplay(
-                    summary=f"Unknown action: {args.action}",
-                    verb="Running",
-                    message=f"unknown todo action: {args.action}",
-                    settled_verb="Ran",
-                    settled_message=f"unknown todo action: {args.action}",
-                )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -133,26 +145,16 @@ class Todo(
                 yield self._read_todos()
             case "write":
                 yield self._write_todos(args.todos or [])
-            case _:
-                raise ToolError(
-                    f"Invalid action '{args.action}'. Use 'read' or 'write'."
-                )
 
     def _read_todos(self) -> TodoResult:
-        return TodoResult(
-            verb="Retrieved", todos=self.state.todos, total_count=len(self.state.todos)
-        )
+        return read_todos(self.state.todos)
 
     def _write_todos(self, todos: list[TodoItem]) -> TodoResult:
-        if len(todos) > self.config.max_todos:
-            raise ToolError(f"Cannot store more than {self.config.max_todos} todos")
+        try:
+            result = write_todos(todos, max_todos=self.config.max_todos)
+        except TodoValidationError as error:
+            raise ToolError(str(error)) from error
 
-        ids = [todo.id for todo in todos]
-        if len(ids) != len(set(ids)):
-            raise ToolError("Todo IDs must be unique")
+        self.state.todos = result.todos
 
-        self.state.todos = todos
-
-        return TodoResult(
-            verb="Updated", todos=self.state.todos, total_count=len(self.state.todos)
-        )
+        return result

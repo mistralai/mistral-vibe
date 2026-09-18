@@ -23,6 +23,7 @@ from vibe.core.utils import (
     resolve_windows_shell,
 )
 from vibe.utils.paths import is_dangerous_directory
+from vibe.utils.platform import resolve_git_executable
 
 if TYPE_CHECKING:
     from vibe.core.agents import AgentManager
@@ -51,6 +52,9 @@ class ProjectContextProvider:
     def _run_git(
         self, args: list[str], timeout: float
     ) -> subprocess.CompletedProcess[str]:
+        git = resolve_git_executable(cwd=self.root_path)
+        if git is None:
+            raise FileNotFoundError("No trusted Git executable is available")
         return subprocess.run(
             # -c core.fsmonitor= overrides (and disables) any fsmonitor hook a
             # repo's own .git/config declares, for this invocation only. This
@@ -61,7 +65,7 @@ class ProjectContextProvider:
             # privileges. -c on the command line takes precedence over the
             # repo's own config, so this can't be overridden by the repo being
             # inspected.
-            ["git", "-c", "core.fsmonitor=", "--no-optional-locks", *args],
+            [git, "-c", "core.fsmonitor=", "--no-optional-locks", *args],
             capture_output=True,
             check=True,
             cwd=self.root_path,
@@ -260,36 +264,44 @@ def _add_commit_signature() -> str:
 
 
 def _get_available_skills_section(skill_manager: SkillManager) -> str:
-    skills = skill_manager.available_skills
-    if not skills:
+    available_skills = skill_manager.available_skills
+    model_invocable_skills = {
+        name: skill for name, skill in available_skills.items() if skill.model_invocable
+    }
+    has_user_invocable_skill = any(
+        skill.user_invocable for skill in available_skills.values()
+    )
+    if not model_invocable_skills and not has_user_invocable_skill:
         return ""
 
-    lines = [
-        "# Available Skills",
-        "",
-        "You have access to the following skills. When a task matches a skill's description,",
-        "use the `skill` tool if available to load the full skill instructions, if it is not available, read the files manually if they exist.",
-        "",
-        "When a user message is exactly `/skill-name` (optionally followed by extra",
-        "instructions), the user has explicitly invoked that skill. Its instructions are",
-        "loaded for you automatically: you will see a `skill` tool call and result",
-        "immediately after that message. Treat the loaded content as the active",
-        "instructions and act on it — you do not need to call the `skill` tool yourself.",
-        "",
-        "<available_skills>",
-    ]
-
-    for name, info in sorted(skills.items()):
-        lines.append("  <skill>")
-        lines.append(f"    <name>{html.escape(str(name))}</name>")
-        lines.append(
-            f"    <description>{html.escape(str(info.description))}</description>"
-        )
-        if info.skill_path is not None:
-            lines.append(f"    <path>{html.escape(str(info.skill_path))}</path>")
-        lines.append("  </skill>")
-
-    lines.append("</available_skills>")
+    lines = ["# Available Skills", ""]
+    if model_invocable_skills:
+        lines.extend([
+            "You have access to the following skills. When a task matches a skill's description,",
+            "use the `skill` tool if available to load the full skill instructions, if it is not available, read the files manually if they exist.",
+            "",
+        ])
+    if has_user_invocable_skill:
+        lines.extend([
+            "When a user message is exactly `/skill-name` (optionally followed by extra",
+            "instructions), the user has explicitly invoked that skill. Its instructions are",
+            "loaded for you automatically: you will see a `skill` tool call and result",
+            "immediately after that message. Treat the loaded content as the active",
+            "instructions and act on it — you do not need to call the `skill` tool yourself.",
+            "",
+        ])
+    if model_invocable_skills:
+        lines.append("<available_skills>")
+        for name, info in sorted(model_invocable_skills.items()):
+            lines.append("  <skill>")
+            lines.append(f"    <name>{html.escape(str(name))}</name>")
+            lines.append(
+                f"    <description>{html.escape(str(info.description))}</description>"
+            )
+            if info.skill_path is not None:
+                lines.append(f"    <path>{html.escape(str(info.skill_path))}</path>")
+            lines.append("  </skill>")
+        lines.append("</available_skills>")
 
     return "\n".join(lines)
 

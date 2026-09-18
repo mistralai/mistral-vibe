@@ -11,7 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from vibe.core.git.errors import GitError
-from vibe.core.git.repo import GitRepo, GitStatus, RepoPaths, _git_python
+from vibe.core.git.repo import GitRepo, GitStatus, RepoPaths, _git_python, sanitized_git
 from vibe.core.git.worktree.naming import (
     worktree_name_from_text,
     worktree_name_with_suffix,
@@ -141,7 +141,7 @@ class PreparedWorktree:
                     "-m",
                     f"vibe: state of worktree {self.name} before it was removed",
                 ).strip()
-            repo.git.update_ref(ref, commit)
+            _unhooked(repo).update_ref(ref, commit)
         except (git.invalid_git_repository_error, git.git_command_error) as e:
             raise WorktreeError(
                 f"Failed to snapshot worktree {self.name!r}: {e}"
@@ -154,7 +154,7 @@ class PreparedWorktree:
             repo = git.repo(self.repo_root)
             repo.git.worktree("remove", "--force", str(self.root))
             if delete_branch:
-                repo.git.branch("-D", self.branch)
+                _unhooked(repo).branch("-D", self.branch)
         except (git.invalid_git_repository_error, git.git_command_error) as e:
             raise WorktreeError(f"Failed to remove worktree {self.name!r}: {e}") from e
 
@@ -888,7 +888,7 @@ class ManagedWorktree:
         git = _git_python()
         try:
             with git.repo(recovery.repo_root) as repository:
-                repository.git.update_ref("-d", recovery.snapshot_ref)
+                _unhooked(repository).update_ref("-d", recovery.snapshot_ref)
         except (
             git.invalid_git_repository_error,
             git.no_such_path_error,
@@ -1123,7 +1123,8 @@ def _auto_worktree_candidates(base_name: str) -> Iterator[str]:
 
 
 def _unhooked(repo: Any) -> Any:
-    """This repository's git, with any fsmonitor hook disabled.
+    """This repository's git, with the repository-configured commands and
+    hooks disabled.
 
     `core.fsmonitor` is a command git runs to ask what changed, and a
     repository can name any command it likes. Every read of a working tree
@@ -1132,10 +1133,17 @@ def _unhooked(repo: Any) -> Any:
     `vibe.core.system_prompt` passes `-c core.fsmonitor=` to every git it
     spawns.
 
+    `core.hooksPath` is disabled on every call; it is the ref updates that
+    make it load-bearing: snapshot(), remove(), and snapshot discard all
+    run during cleanup or automatic retention, which no trust prompt gates.
+
     It matters more here than it did: automatic retention inspects worktrees
     without an explicit user action.
+
+    Delegates to sanitized_git so the overridden keys have one
+    definition.
     """
-    return repo.git(c="core.fsmonitor=")
+    return sanitized_git(repo)
 
 
 def _validate_worktree_name(name: str) -> None:

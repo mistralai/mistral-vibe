@@ -24,14 +24,30 @@ from vibe.core.plugins._compatibility import (
     resolve_declared_path,
     typescript_identifier,
 )
-from vibe.core.skills.models import SkillMetadata, SkillScope
-from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
+from vibe.core.skills.models import (
+    DISABLE_MODEL_INVOCATION_FIELD,
+    SkillMetadata,
+    SkillScope,
+)
+from vibe.core.skills.parser import (
+    SkillParseError,
+    load_openai_skill_metadata,
+    openai_skill_metadata_path,
+    parse_skill_markdown,
+)
 from vibe.utils.io import read_safe
 
 _ARGUMENT_PATTERN = re.compile(r"(?<!\\)\$(?:ARGUMENTS(?:\[\d+\])?|\d+)\b")
 _DYNAMIC_COMMAND_PATTERN = re.compile(r"(?:^|\s)!`[^`]+`", re.MULTILINE)
 _OPENCODE_CODE_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
 _OPENCODE_ENV_REFERENCE = re.compile(r"\{env:[A-Za-z_][A-Za-z0-9_]*\}")
+# Kimi accepts all three aliases for the same explicit-only policy:
+# https://www.kimi.com/code/docs/en/kimi-code-cli/customization/skills.html#frontmatter-fields
+_KIMI_MODEL_INVOCATION_FIELDS = (
+    "disableModelInvocation",
+    DISABLE_MODEL_INVOCATION_FIELD,
+    "disable_model_invocation",
+)
 
 
 class OpenCodePluginAdapter:
@@ -373,6 +389,7 @@ def _opencode_skills(
     for path in sorted(files):
         skill = adapt_skill_file(
             path=path,
+            root=root,
             source_format="opencode",
             diagnostics=diagnostics,
             normalize_vendor_fields=False,
@@ -853,6 +870,7 @@ def skill_files_for_declared_path(root: Path, value: str) -> tuple[Path, ...]:
 def adapt_skill_file(
     *,
     path: Path,
+    root: Path,
     source_format: str,
     diagnostics: list[PluginAdapterDiagnostic],
     normalize_vendor_fields: bool,
@@ -895,6 +913,28 @@ def adapt_skill_file(
         )
         return None
 
+    try:
+        openai_metadata = load_openai_skill_metadata(path, root=root)
+    except SkillParseError as error:
+        diagnostics.append(
+            _diagnostic(
+                source_format,
+                "skill_openai_metadata_invalid",
+                openai_skill_metadata_path(path),
+                (
+                    "Invalid OpenAI skill metadata; model invocation disabled: "
+                    f"{_safe_error(error)}"
+                ),
+                component="skill",
+                severity="warning",
+            )
+        )
+        openai_allows_implicit_invocation = False
+    else:
+        openai_allows_implicit_invocation = (
+            openai_metadata is None or openai_metadata.allows_implicit_invocation
+        )
+
     prompt = _with_tool_guidance(body.strip(), metadata.allowed_tools)
     return AdaptedSkill(
         source_name=metadata.name,
@@ -903,6 +943,9 @@ def adapt_skill_file(
         source_path=path,
         allowed_tools=tuple(metadata.allowed_tools),
         user_invocable=metadata.user_invocable,
+        model_invocable=(
+            not metadata.disable_model_invocation and openai_allows_implicit_invocation
+        ),
         license=metadata.license,
         compatibility=metadata.compatibility,
         metadata=MappingProxyType(dict(metadata.metadata)),
@@ -1148,18 +1191,12 @@ def _normalize_vendor_skill_frontmatter(
     skill_type = raw.get("type")
     if skill_type not in {None, "prompt"}:
         raise ValueError(f"unsupported vendor skill type {skill_type!r}")
-    if raw.get("disableModelInvocation") is True:
-        diagnostics.append(
-            _diagnostic(
-                source_format,
-                "skill_model_invocation_constraint_unsupported",
-                path,
-                "The source skill disables model invocation, which the current Core skill catalog cannot represent; the skill was not imported.",
-                component="skill",
-                severity="warning",
-            )
-        )
-        raise ValueError("disableModelInvocation=true is not portable")
+
+    model_invocation_values = [
+        raw[field] for field in _KIMI_MODEL_INVOCATION_FIELDS if field in raw
+    ]
+    if any(not isinstance(value, bool) for value in model_invocation_values):
+        raise ValueError("disableModelInvocation must be a boolean")
 
     normalized = {
         key: value
@@ -1175,12 +1212,16 @@ def _normalize_vendor_skill_frontmatter(
             "user-invocable",
         }
     }
+    if model_invocation_values:
+        # Kimi accepts three aliases. Multiple declarations combine restrictively
+        # so one explicit opt-out cannot be cancelled by another spelling.
+        normalized[DISABLE_MODEL_INVOCATION_FIELD] = any(model_invocation_values)
     if "allowed-tools" not in normalized and "tools" in raw:
         normalized["allowed-tools"] = raw["tools"]
     vendor_metadata = {
         key: value
         for key, value in raw.items()
-        if key in {"type", "whenToUse", "disableModelInvocation"}
+        if key in {"type", "whenToUse", *_KIMI_MODEL_INVOCATION_FIELDS}
     }
     if vendor_metadata:
         existing_metadata = normalized.get("metadata")

@@ -10,7 +10,10 @@ import tomllib
 
 import tomli_w
 
-from vibe.core.config.fingerprint import capture_stable_file, create_file_fingerprint
+from vibe.core.config.fingerprint import (
+    create_file_fingerprint,
+    open_fingerprinted_file,
+)
 from vibe.core.config.layer import ConfigLayer, ConfigStorageError, RawConfig
 from vibe.core.config.models import (
     ModelConfig,
@@ -49,12 +52,17 @@ class BaseTomlConfigLayer(ConfigLayer[RawConfig]):
 
 
 def _read_toml_snapshot(path: Path) -> LayerConfigSnapshot:
+    """Load the file into a snapshot paired with the fingerprint of its bytes.
+
+    A concurrent save cannot spoil this. The save lands as an atomic rename, so
+    the descriptor opened here keeps serving the version it opened, and the
+    fingerprint is taken from that same descriptor. Data and token therefore
+    always describe one another, however busy the path is.
+    """
     if not path.exists():
         return EMPTY_CONFIG_SNAPSHOT
-
-    with capture_stable_file(path) as (file, fingerprint):
+    with open_fingerprinted_file(path) as (file, fingerprint):
         data = tomllib.load(file)
-
     return LayerConfigSnapshot(
         data=_internal_toml_document(data), fingerprint=fingerprint
     )

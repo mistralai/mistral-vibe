@@ -45,6 +45,7 @@ from vibe.app_server.protocol import (
     SkillsListResponse,
     SkillsRemoveParams,
     SkillsSetAliasParams,
+    SkillsSetEnabledParams,
     SkillsSetLatestParams,
     SkillsSetVersionParams,
     SkillsUpdatesParams,
@@ -53,6 +54,7 @@ from vibe.app_server.protocol import (
     SkillsVersionsResponse,
 )
 from vibe.core.config import VibeConfigSchema
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.skills.models import SkillScope
 from vibe.core.skills.registry import (
     RegistrySkillsError,
@@ -87,6 +89,11 @@ class SkillsHost(Protocol):
     @property
     def config(self) -> VibeConfigSchema:
         """The layered config the registry calls read."""
+        ...
+
+    @property
+    def config_orchestrator(self) -> ConfigOrchestrator[VibeConfigSchema]:
+        """The orchestrator a skill toggle persists ``disabled_skills`` through."""
         ...
 
     @property
@@ -179,6 +186,11 @@ class SkillsController:
             case "skills/convertLocal":
                 response = await self._convert_local(
                     validate_wire(SkillsConvertLocalParams, raw_params)
+                )
+                runtime_updated = True
+            case "skills/setEnabled":
+                response = await self._set_enabled(
+                    validate_wire(SkillsSetEnabledParams, raw_params)
                 )
                 runtime_updated = True
             case _:
@@ -345,6 +357,31 @@ class SkillsController:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
         return await self._refreshed()
 
+    async def _set_enabled(
+        self, params: SkillsSetEnabledParams
+    ) -> RuntimeMutationResponse:
+        self._begin_mutation(params.session_id)
+        self._require_toggleable(params.name)
+
+        def toggle(current: Any) -> list[str]:
+            names = [str(name) for name in current or []]
+            if params.enabled:
+                return [name for name in names if name != params.name]
+            return names if params.name in names else [*names, params.name]
+
+        failures = await self._host.config_orchestrator.mutate_field(
+            "/disabled_skills",
+            toggle,
+            reason="toggle a skill from the skills browser",
+            default=[],
+        )
+        if failures:
+            raise RequestFailure(
+                ProtocolErrorCode.INTERNAL_ERROR,
+                f"Failed to update configuration: {failures[0]}",
+            ) from failures[0]
+        return await self._refreshed()
+
     async def _convert_local(
         self, params: SkillsConvertLocalParams
     ) -> SkillsConvertResponse:
@@ -361,6 +398,25 @@ class SkillsController:
         return SkillsConvertResponse(
             converted=target is not None, runtime=await self._host.refresh()
         )
+
+    def _require_toggleable(self, name: str) -> None:
+        """Refuse a name the browser itself would not offer a toggle for.
+
+        Without this an SDK or extension client can misspell a skill and get a
+        success back while the typo is written into the user's config, where
+        only hand-editing removes it. The browser already enforces this; the
+        server has to as well, since it is the shared entry point.
+        """
+        row = next((s for s in self._host.installed_skills() if s.name == name), None)
+        if row is None:
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS, f"no installed skill named {name!r}"
+            )
+        if row.locked:
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS,
+                f"{name!r} is fixed by configuration and cannot be toggled here",
+            )
 
     def _begin_mutation(self, session_id: str) -> None:
         self._host.require_idle()

@@ -61,6 +61,7 @@ from vibe.core.config.schema import (
     WithConcatMerge,
     WithDeepMerge,
     WithReplaceMerge,
+    WithShallowMerge,
     WithUnionMerge,
 )
 from vibe.core.paths import GLOBAL_ENV_FILE
@@ -342,7 +343,7 @@ class VibeConfigSchema(ConfigSchema):
             " Supports glob patterns (e.g., 'mistral-*') and regex with 're:' prefix."
         ),
     )
-    compaction_model: Annotated[ModelConfig | None, WithReplaceMerge()] = None
+    compaction_model: Annotated[ModelConfig | None, WithShallowMerge()] = None
     auto_compact_threshold: Annotated[int, WithReplaceMerge()] = Field(
         default=DEFAULT_AUTO_COMPACT_THRESHOLD,
         description=(
@@ -560,6 +561,13 @@ class VibeConfigSchema(ConfigSchema):
     voice_mode_enabled: Annotated[bool, WithReplaceMerge()] = False
     narrator_enabled: Annotated[bool, WithReplaceMerge()] = False
     show_thinking_nodes: Annotated[bool, WithReplaceMerge()] = False
+    show_subagent_status_list: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        description=(
+            "Show the subagent status list and read-only transcript views in the "
+            "interactive prompt."
+        ),
+    )
     worktree_limit: Annotated[int, WithReplaceMerge()] = Field(
         default=15,
         ge=0,
@@ -598,14 +606,18 @@ class VibeConfigSchema(ConfigSchema):
         str | None, WithReplaceMerge(), BeforeValidator(_normalize_log_level)
     ] = None
 
-    # Nested configs (REPLACE — simple nested models, no merge semantics)
-    project_context: Annotated[ProjectContextConfig, WithReplaceMerge()] = Field(
+    # Nested configs: a bag of independent settings, so a layer overrides only
+    # the keys it names. Shallow rather than deep on purpose -- these are flat
+    # scalars today, and deep merging would silently extend per-key merging to
+    # the first dict-valued setting anyone adds, where a user could then shadow
+    # an inherited key but never remove it.
+    project_context: Annotated[ProjectContextConfig, WithShallowMerge()] = Field(
         default_factory=ProjectContextConfig
     )
-    session_logging: Annotated[SessionLoggingConfig, WithReplaceMerge()] = Field(
+    session_logging: Annotated[SessionLoggingConfig, WithShallowMerge()] = Field(
         default_factory=SessionLoggingConfig
     )
-    experiments: Annotated[ExperimentsConfig, WithReplaceMerge()] = Field(
+    experiments: Annotated[ExperimentsConfig, WithShallowMerge()] = Field(
         default_factory=ExperimentsConfig
     )
 

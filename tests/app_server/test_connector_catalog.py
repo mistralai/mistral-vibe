@@ -39,12 +39,81 @@ from vibe.app_server.connector_catalog import (
 )
 from vibe.app_server.protocol import ProtocolErrorCode
 from vibe.core.config import ConnectorConfig, VibeConfigSchema
+from vibe.core.identity import IdentityResult
+
+
+@pytest.mark.asyncio
+async def test_manage_connectors_url_builds_console_share_link(monkeypatch) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    provider = connector_catalog._ConnectorProvider(
+        fingerprint="fp", base_url="https://api.mistral.ai", api_key="k"
+    )
+    identity = IdentityResult.model_validate({
+        "id": "user-1",
+        "organization": {"id": "org-1", "name": "Org"},
+        "workspace": {"id": "ws-1", "name": "Workspace"},
+    })
+    monkeypatch.setattr(
+        connector_catalog, "_resolve_provider", lambda _config: provider
+    )
+    resolve = AsyncMock(return_value=identity)
+    monkeypatch.setattr(connector_catalog._IDENTITY_CACHE, "resolve", resolve)
+
+    url = await connector_catalog._manage_connectors_url(config)
+
+    # Identity must be fetched from the versioned API base (.../v1/users/me),
+    # not the bare connectors bootstrap server root.
+    assert resolve.await_args is not None
+    mistral_provider = config.get_mistral_provider()
+    assert mistral_provider is not None
+    identity_base = resolve.await_args.kwargs["base_url"]
+    assert identity_base == mistral_provider.api_base
+    assert identity_base.rstrip("/").endswith("/v1")
+
+    assert url is not None
+    assert url.startswith(f"{config.console_base_url}/build/connectors?shareContext=")
+    from urllib.parse import parse_qs, urlsplit
+
+    share_context = parse_qs(urlsplit(url).query)["shareContext"][0]
+    assert json.loads(share_context) == {
+        "organizationId": "org-1",
+        "workspaceId": "ws-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_manage_connectors_url_none_without_mistral_provider(monkeypatch) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    monkeypatch.setattr(connector_catalog, "_resolve_provider", lambda _config: None)
+
+    assert await connector_catalog._manage_connectors_url(config) is None
+
+
+@pytest.mark.asyncio
+async def test_manage_connectors_url_none_when_identity_incomplete(monkeypatch) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    provider = connector_catalog._ConnectorProvider(
+        fingerprint="fp", base_url="https://api.mistral.ai", api_key="k"
+    )
+    identity = IdentityResult.model_validate({
+        "id": "user-1",
+        "organization": {"id": "org-1", "name": "Org"},
+    })
+    monkeypatch.setattr(
+        connector_catalog, "_resolve_provider", lambda _config: provider
+    )
+    monkeypatch.setattr(
+        connector_catalog._IDENTITY_CACHE, "resolve", AsyncMock(return_value=identity)
+    )
+
+    assert await connector_catalog._manage_connectors_url(config) is None
 
 
 def _connector(
     *,
     connector_id: str = "connector-1",
     name: str = "wiki",
+    display_name: str | None = None,
     ready: bool = True,
     protocol: str | None = "mcp",
     tool_name: str = "search",
@@ -66,9 +135,50 @@ def _connector(
         ],
         "bootstrap_errors": bootstrap_errors,
     }
+    if display_name is not None:
+        connector["display_name"] = display_name
     if protocol is not None:
         connector["protocol"] = protocol
     return connector
+
+
+def test_resolve_uses_backend_display_name_but_stable_alias() -> None:
+    catalog = connector_catalog._resolve_catalog(
+        {"connectors": [_connector(name="wiki", display_name="Company Wiki")]},
+        "fingerprint",
+    )
+
+    connector = catalog.connectors[0]
+    assert connector.display_name == "Company Wiki"
+    # Alias stays derived from name, not the (possibly localized) display_name,
+    # so connector ids/config/tool names don't churn.
+    assert connector.alias == "wiki"
+
+
+def test_resolve_falls_back_when_display_name_absent() -> None:
+    """Older backends omit display_name; parsing tolerates it."""
+    catalog = connector_catalog._resolve_catalog(
+        {"connectors": [_connector(name="wiki")]}, "fingerprint"
+    )
+
+    connector = catalog.connectors[0]
+    assert connector.display_name == "wiki"
+    assert connector.alias == "wiki"
+
+
+def test_connector_cache_round_trip_preserves_display_name() -> None:
+    live = connector_catalog._resolve_catalog(
+        {"connectors": [_connector(name="wiki", display_name="Company Wiki")]},
+        "fingerprint",
+    )
+    entry = connector_catalog._cache_entry(live, stored_at=1_000)
+    hit = connector_catalog._parse_cache_entry("fingerprint", entry, now=1_000)
+
+    assert hit is not None
+    cached = hit.catalog.connectors[0]
+    assert cached.alias == "wiki"
+    assert cached.display_name == "Company Wiki"
+    assert hit.catalog.revision == live.revision
 
 
 @pytest.mark.asyncio
@@ -628,6 +738,7 @@ async def test_successful_bootstrap_writes_redacted_bounded_v2(
     assert set(connector) == {
         "auth_action",
         "diagnostics",
+        "display_name",
         "id",
         "name",
         "protocol",
@@ -680,9 +791,9 @@ async def test_failed_forced_refresh_preserves_last_catalog(
 def test_connector_aliases_are_collision_safe_and_missing_ids_are_ignored(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """*Prepare*: A legacy cache with colliding display names and one connector without an ID.
+    """*Prepare*: A cache with colliding display names and one connector without an ID.
     *Do*: Resolve it into the immutable host catalog.
-    *Assert*: Aliases are deterministic and only service identities enter the catalog.
+    *Assert*: Aliases are deterministic and only connectors with IDs enter the catalog.
     """
     # Prepare
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")

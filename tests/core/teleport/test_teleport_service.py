@@ -65,7 +65,6 @@ def _reimport_agent_loop() -> Any:
 
 def _make_service(tmp_path: Path, **kwargs: Any) -> TeleportService:
     return TeleportService(
-        session_logger=MagicMock(),
         vibe_code_sessions_base_url=kwargs.pop(
             "vibe_code_sessions_base_url", "https://api.example.com"
         ),

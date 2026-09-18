@@ -59,8 +59,19 @@ from vibe.core.plugins._content import digest_plugin_tree
 from vibe.core.plugins._diagnostics import PluginDiagnosticCode
 from vibe.core.plugins._foreign import OpenCodePluginAdapter
 from vibe.core.plugins._kimi import KimiPluginAdapter
-from vibe.core.skills.models import SkillInfo, SkillMetadata, SkillScope, SkillSource
-from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
+from vibe.core.skills.models import (
+    DISABLE_MODEL_INVOCATION_FIELD,
+    SkillInfo,
+    SkillMetadata,
+    SkillScope,
+    SkillSource,
+)
+from vibe.core.skills.parser import (
+    SkillParseError,
+    load_openai_skill_metadata,
+    openai_skill_metadata_path,
+    parse_skill_markdown,
+)
 from vibe.utils.io import read_safe
 from vibe.utils.platform import is_windows
 
@@ -1019,6 +1030,7 @@ class PluginResolver:
                 definition.source_path,
                 definition.prompt,
                 scope=plugin.scope,
+                model_invocable=definition.model_invocable,
             )
             skills[alias] = skill.model_copy(
                 update={"name": alias, "source": SkillSource.PLUGIN}
@@ -1825,15 +1837,41 @@ class PluginResolver:
                 )
         return skills
 
-    @staticmethod
-    def _parse_skill(path: Path, plugin: PluginDescriptor) -> SkillInfo:
+    def _parse_skill(self, path: Path, plugin: PluginDescriptor) -> SkillInfo:
         try:
             content = read_safe(path, raise_on_error=True).text
         except OSError as error:
             raise SkillParseError(f"Cannot read file: {error}") from error
         frontmatter, body = parse_skill_markdown(content)
         metadata = SkillMetadata.model_validate(frontmatter)
-        return SkillInfo.from_metadata(metadata, path, body.strip(), scope=plugin.scope)
+        try:
+            openai_metadata = load_openai_skill_metadata(path, root=plugin.root)
+        except SkillParseError as error:
+            self._issues.append(
+                PluginConfigIssue(
+                    file=openai_skill_metadata_path(path),
+                    message=(
+                        "Invalid OpenAI skill metadata; model invocation disabled: "
+                        f"{error}"
+                    ),
+                    code="plugin.skill.openai_metadata_invalid",
+                    fatal=False,
+                    source_format=plugin.source_format,
+                    component="skill",
+                )
+            )
+            model_invocable = False
+        else:
+            model_invocable = (
+                openai_metadata is None or openai_metadata.allows_implicit_invocation
+            )
+        return SkillInfo.from_metadata(
+            metadata,
+            path,
+            body.strip(),
+            scope=plugin.scope,
+            model_invocable=model_invocable,
+        )
 
     def _remove_same_scope_duplicates(
         self, candidates: Sequence[_PluginCandidate]
@@ -1945,6 +1983,8 @@ def _render_generated_skill(definition: AdaptedSkill) -> str:
     ]
     if definition.allowed_tools:
         lines.append("allowed-tools: " + json.dumps(list(definition.allowed_tools)))
+    if not definition.model_invocable:
+        lines.append(f"{DISABLE_MODEL_INVOCATION_FIELD}: true")
     lines.extend(["---", "", definition.prompt, ""])
     return "\n".join(lines)
 

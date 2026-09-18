@@ -598,6 +598,8 @@ class SkillSummary(ProtocolModel):
     source: Literal["builtin", "local", "registry", "plugin"] = "local"
     scope: Literal["builtin", "global", "project"] = "global"
     registry: RegistryRefView | None = None
+    enabled: bool = True
+    locked: bool = False
 
 
 class SkillCatalogEntry(ProtocolModel):
@@ -746,8 +748,19 @@ class MCPToolSummary(ProtocolModel):
 
 class MCPSourceSummary(ProtocolModel):
     name: str
+    # Human label to render; `name` stays the stable id used for keying, toggles,
+    # and option ids. Connectors set this to their bootstrap display_name (already
+    # title-or-name); it defaults to `name` when a producer omits it (servers).
+    display_name: str = ""
     kind: MCPSourceKind
     transport: str
+
+    @model_validator(mode="after")
+    def _default_display_name(self) -> Self:
+        if not self.display_name:
+            self.display_name = self.name
+        return self
+
     status: MCPSourceStatus
     tools: list[MCPToolSummary] = Field(default_factory=list)
     error: str | None = None
@@ -758,6 +771,7 @@ class MCPState(ProtocolModel):
     sources: list[MCPSourceSummary] = Field(default_factory=list)
     discovery_errors: dict[str, str] = Field(default_factory=dict)
     connector_error: str | None = None
+    manage_connectors_url: str | None = None
 
     @property
     def needs_auth(self) -> list[str]:
@@ -824,6 +838,9 @@ class CompletedEffectState(ProtocolModel):
     output_text: str = ""
     duration_ms: float = 0.0
     display: EffectResultDisplay
+    decision: Literal["execute", "skip"] | None = None
+    approval_type: Literal["always", "never", "ask"] | None = None
+    approval_source: Literal["config", "smart", "user", "bypass", "never"] | None = None
 
 
 class FailedEffectState(ProtocolModel):
@@ -833,6 +850,9 @@ class FailedEffectState(ProtocolModel):
     output_text: str = ""
     duration_ms: float = 0.0
     display: EffectResultDisplay
+    decision: Literal["execute", "skip"] | None = None
+    approval_type: Literal["always", "never", "ask"] | None = None
+    approval_source: Literal["config", "smart", "user", "bypass", "never"] | None = None
 
 
 class CancelledEffectState(ProtocolModel):
@@ -841,12 +861,18 @@ class CancelledEffectState(ProtocolModel):
     output_text: str = ""
     duration_ms: float = 0.0
     display: EffectResultDisplay | None = None
+    decision: Literal["execute", "skip"] | None = None
+    approval_type: Literal["always", "never", "ask"] | None = None
+    approval_source: Literal["config", "smart", "user", "bypass", "never"] | None = None
 
 
 class SkippedEffectState(ProtocolModel):
     status: Literal["skipped"] = "skipped"
     reason: str
     display: EffectResultDisplay
+    decision: Literal["execute", "skip"] | None = None
+    approval_type: Literal["always", "never", "ask"] | None = None
+    approval_source: Literal["config", "smart", "user", "bypass", "never"] | None = None
 
 
 EffectState = Annotated[
@@ -1086,11 +1112,16 @@ class FailedSessionStatus(ProtocolModel):
     message: str
 
 
+class ArchivedSessionStatus(ProtocolModel):
+    type: Literal["archived"] = "archived"
+
+
 PublicSessionStatus = Annotated[
     IdleSessionStatus
     | RunningSessionStatus
     | BlockedSessionStatus
-    | FailedSessionStatus,
+    | FailedSessionStatus
+    | ArchivedSessionStatus,
     Field(discriminator="type"),
 ]
 
@@ -1104,6 +1135,8 @@ class PublicSession(ProtocolModel):
     status: PublicSessionStatus
     created_at: int
     updated_at: int
+    bumped_at: int | None = None
+    pinned_at: int | None = None
     cwd: str | None = None
     workspace_roots: list[str] = Field(default_factory=list)
     model: str | None = None
@@ -1111,6 +1144,17 @@ class PublicSession(ProtocolModel):
     token_usage: TokenUsage | None = None
     context_usage: TokenUsage | None = None
     harness: Literal["legacy", "unified"] | None = None
+
+
+class PublicChildSession(ProtocolModel):
+    id: str
+    name: str
+    agent_type: str
+    status: PublicSessionStatus
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
+    context_usage: TokenUsage | None = None
+    created_at: int
+    updated_at: int
 
 
 class PublicQueuedTurn(ProtocolModel):
@@ -1153,6 +1197,7 @@ class PublicSessionState(ProtocolModel):
     history_before_cursor: str | None = None
     turns: list[PublicTurn] | None = None
     active_callbacks: list[PublicCallbackEntry] = Field(default_factory=list)
+    child_sessions: list[PublicChildSession] = Field(default_factory=list)
     turn_queue: PublicTurnQueue = Field(default_factory=PublicTurnQueue)
     retrying: PublicRetryState | None = None
 

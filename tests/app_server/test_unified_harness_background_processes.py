@@ -66,6 +66,9 @@ class _ScriptedCompletion:
         messages: list[Any],
         _tools: object,
         _config: object,
+        *,
+        retry_sink: object | None = None,
+        delta_sink: object | None = None,
     ) -> RustCompletionSucceededEvent:
         program = self.next_program
         self.next_program = None

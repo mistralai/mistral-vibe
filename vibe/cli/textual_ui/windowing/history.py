@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from weakref import WeakKeyDictionary
 
 from textual.widget import Widget
@@ -23,6 +23,10 @@ from vibe.cli.textual_ui.widgets.messages import (
     ReasoningMessage,
     UserMessage,
 )
+from vibe.cli.textual_ui.widgets.model_change import (
+    ModelChangeMessage,
+    model_change_model,
+)
 from vibe.cli.textual_ui.widgets.tools import (
     ToolCallMessage,
     ToolGroup,
@@ -43,6 +47,8 @@ def history_entry_renders_widget(entry: PublicHistoryEntry) -> bool:
             return True
         case PublicCheckpointEntry(kind="compaction"):
             return True
+        case PublicCheckpointEntry(kind="model_change"):
+            return model_change_model(entry) is not None
         case _:
             return False
 
@@ -54,6 +60,7 @@ def build_history_widgets(
     history_widget_indices: WeakKeyDictionary[Widget, int],
     tools_collapsed: bool,
     show_thinking: bool = True,
+    todo_deltas: Mapping[str, str] | None = None,
 ) -> list[Widget]:
     widgets: list[Widget] = []
     current_group: ToolGroup | None = None
@@ -79,7 +86,11 @@ def build_history_widgets(
 
         if entry_keeps_tool_group(entry):
             entry_widgets = _entry_widgets(
-                entry, history_index, tools_collapsed, show_thinking=show_thinking
+                entry,
+                history_index,
+                tools_collapsed,
+                show_thinking=show_thinking,
+                todo_deltas=todo_deltas,
             )
             if current_group is None:
                 current_group = ToolGroup()
@@ -101,7 +112,11 @@ def build_history_widgets(
                 group.mark_reasoning()
         else:
             entry_widgets = _entry_widgets(
-                entry, history_index, tools_collapsed, show_thinking=show_thinking
+                entry,
+                history_index,
+                tools_collapsed,
+                show_thinking=show_thinking,
+                todo_deltas=todo_deltas,
             )
             widgets.extend(entry_widgets)
             for widget in entry_widgets:
@@ -157,6 +172,7 @@ def _entry_widgets(  # noqa: PLR0911
     tools_collapsed: bool,
     *,
     show_thinking: bool = True,
+    todo_deltas: Mapping[str, str] | None = None,
 ) -> list[Widget]:
     match entry:
         case PublicMessageEntry(role="user"):
@@ -181,11 +197,15 @@ def _entry_widgets(  # noqa: PLR0911
             ]
         case PublicEffectEntry():
             call = ToolCallMessage(entry)
-            return [call, ToolResultMessage(entry, call)]
+            delta = todo_deltas.get(entry.id) if todo_deltas is not None else None
+            return [call, ToolResultMessage(entry, call, todo_delta=delta)]
         case PublicCheckpointEntry(kind="compaction"):
             message = CompactMessage()
             message.set_complete()
             return [message]
+        case PublicCheckpointEntry(kind="model_change"):
+            model = model_change_model(entry)
+            return [] if model is None else [ModelChangeMessage(model)]
         case _:
             return []
 
@@ -213,10 +233,13 @@ def visible_history_indices(
 
 
 def visible_history_widgets_count(children: list[Widget]) -> int:
+    # Every widget `build_history_widgets` reconstructs, and nothing the app
+    # mounts beside them: the count answers "is the transcript on screen".
     history_widget_types = (
         UserMessage,
         AssistantMessage,
         CompactMessage,
+        ModelChangeMessage,
         ReasoningMessage,
         ToolCallMessage,
         ToolResultMessage,

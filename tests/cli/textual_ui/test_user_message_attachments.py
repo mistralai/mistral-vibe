@@ -18,7 +18,7 @@ from vibe.app_server.models import (
     PublicMessageEntry,
     TextContentBlock,
 )
-from vibe.cli.textual_ui.widgets.messages import UserMessage
+from vibe.cli.textual_ui.widgets.messages import UserMessage, UserMessageSeverity
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.windowing.history import build_history_widgets
 
@@ -69,6 +69,31 @@ class _UserMessageApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield self._message
+
+
+@pytest.mark.parametrize("severity", list(UserMessageSeverity))
+@pytest.mark.asyncio
+async def test_severity_adds_a_typed_user_message_border(
+    severity: UserMessageSeverity,
+) -> None:
+    message = UserMessage("Local only", severity=severity)
+    app = _UserMessageApp(message)
+
+    async with app.run_test():
+        assert message.has_class(f"user-message-{severity.value}")
+        assert len(message.query(".user-message-prompt")) == 0
+        assert len(message.query(".user-message-separator")) == 0
+
+
+@pytest.mark.asyncio
+async def test_default_user_message_has_no_severity_border() -> None:
+    message = UserMessage("Normal")
+    app = _UserMessageApp(message)
+
+    async with app.run_test():
+        assert message.severity is None
+        assert len(message.query(".user-message-prompt")) == 1
+        assert len(message.query(".user-message-separator")) == 1
 
 
 @pytest.mark.asyncio

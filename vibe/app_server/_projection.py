@@ -73,6 +73,7 @@ from vibe.core.config import (
     TTSProviderConfig,
     VibeConfigSchema,
 )
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.log_reader import PaginatedLogs
 from vibe.core.skills.models import SkillInfo, SkillSource
 from vibe.core.tools.connectors.connector_registry import ConnectorAuthAction
@@ -85,7 +86,7 @@ from vibe.core.types import (
     SessionMetadata,
     WorktreeContext,
 )
-from vibe.core.utils import CANCELLATION_TAG, TOOL_ERROR_TAG, TaggedText
+from vibe.core.utils import CANCELLATION_TAG, TOOL_ERROR_TAG, TaggedText, name_matches
 from vibe.user_content import UserResource
 from vibe.utils.mcp import format_tool_display_description
 from vibe.utils.tool_presentation import ToolCallPresentation
@@ -125,6 +126,7 @@ def project_config_view(
         voice_mode_enabled=config.voice_mode_enabled,
         narrator_enabled=config.narrator_enabled,
         show_thinking_nodes=config.show_thinking_nodes,
+        show_subagent_status_list=config.show_subagent_status_list,
         worktree_limit=config.worktree_limit,
         enable_update_checks=config.enable_update_checks,
         enable_notifications=config.enable_notifications,
@@ -267,37 +269,108 @@ def project_agents(agent_loop: AgentLoop) -> tuple[AgentSummary, list[AgentSumma
 
 
 def project_skill_summaries(skills: Iterable[SkillInfo]) -> list[SkillSummary]:
-    return [
-        SkillSummary.model_validate({
-            "name": skill.name,
-            "description": skill.description,
-            "prompt": skill.prompt,
-            "user_invocable": skill.user_invocable,
-            "source": skill.source.value,
-            "scope": skill.scope.value,
-            "registry": skill.registry.model_dump() if skill.registry else None,
-        })
-        for skill in skills
-    ]
+    return [_skill_summary(skill) for skill in skills]
+
+
+def _skill_summary(
+    skill: SkillInfo, enabled: bool = True, locked: bool = False
+) -> SkillSummary:
+    return SkillSummary.model_validate({
+        "name": skill.name,
+        "description": skill.description,
+        "prompt": skill.prompt,
+        "user_invocable": skill.user_invocable,
+        "source": skill.source.value,
+        "scope": skill.scope.value,
+        "registry": skill.registry.model_dump() if skill.registry else None,
+        "enabled": enabled,
+        "locked": locked,
+    })
 
 
 def project_skills(agent_loop: AgentLoop) -> list[SkillSummary]:
     return project_skill_summaries(agent_loop.skill_manager.available_skills.values())
 
 
-def project_installed_skills(agent_loop: AgentLoop) -> list[SkillSummary]:
-    """Registry pins (one per name+scope) plus local skills, for the browser.
+def writable_disabled_skills(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+) -> Sequence[str] | None:
+    """The writable layer's own ``disabled_skills``, or None when unavailable.
 
-    Unlike ``project_skills`` (de-duped, project-wins) this keeps a global and a
-    project pin of the same skill as separate rows so the browser can manage each.
+    ``disabled_skills`` concat-merges, so the effective list is every layer at
+    once while a toggle can only add to or remove from the writable one. Reads
+    the cached layer rather than loading, to stay usable from sync projection.
     """
-    mgr = agent_loop.skill_manager
-    local = [
-        info
-        for info in mgr.available_skills.values()
-        if info.source is SkillSource.LOCAL
-    ]
-    return project_skill_summaries([*mgr.registry_pins(), *local])
+    try:
+        layer = orchestrator.get_layer(orchestrator.writable_layer_name)
+    except KeyError:
+        return None
+    data = layer.cached_data
+    if data is None:
+        return None
+    names = getattr(data, "disabled_skills", None)
+    return list(names) if names else []
+
+
+def project_installed_skill_summaries(
+    skills: Iterable[SkillInfo],
+    config: VibeConfigSchema,
+    user_disabled: Sequence[str] | None = None,
+) -> list[SkillSummary]:
+    """Browser rows for *skills*, marked against the config's skill filters.
+
+    ``enabled`` is whether the agent loads the skill. ``locked`` is whether the
+    browser can change that, and the two are independent: a skill can be
+    enabled and locked, or disabled and locked.
+
+    ``user_disabled`` is the writable layer's own ``disabled_skills``.
+    ``disabled_skills`` concatenates across layers, so a name a project or admin
+    layer disabled cannot be re-enabled by rewriting the writable one; without
+    it a row offers a toggle that silently does nothing. Omitting the argument
+    assumes a single layer.
+
+    Plugin skills are locked: they come from an installed plugin and are managed
+    through ``/plugins``, not by this config.
+    """
+    allowed = config.enabled_skills
+    disabled = config.disabled_skills
+    own = list(disabled if user_disabled is None else user_disabled)
+
+    def _enabled(info: SkillInfo) -> bool:
+        if info.source is SkillSource.PLUGIN:
+            return True
+        if allowed:
+            return name_matches(info.name, allowed)
+        return not (disabled and name_matches(info.name, disabled))
+
+    def _locked(info: SkillInfo) -> bool:
+        if info.source is SkillSource.PLUGIN:
+            return True
+        if allowed:
+            return True
+        if not disabled:
+            return False
+        patterns = [pattern for pattern in disabled if pattern != info.name]
+        if name_matches(info.name, patterns):
+            return True
+        return name_matches(info.name, disabled) and info.name not in own
+
+    return [_skill_summary(info, _enabled(info), _locked(info)) for info in skills]
+
+
+def project_installed_skills(agent_loop: AgentLoop) -> list[SkillSummary]:
+    """One row per installed skill, mirroring the agent's resolved state.
+
+    ``installed_skills`` is the deduped, project/source-wins set the agent loads
+    (builtins excluded) *including* disabled skills, so a skill turned off stays
+    in the list marked not-enabled and can be turned back on; enabled rows are
+    exactly what the agent uses.
+    """
+    return project_installed_skill_summaries(
+        agent_loop.skill_manager.installed_skills(),
+        agent_loop.config,
+        writable_disabled_skills(agent_loop.config_orchestrator),
+    )
 
 
 def project_tools(agent_loop: AgentLoop) -> list[ToolSummary]:

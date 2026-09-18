@@ -370,14 +370,14 @@ wheels = [
 
 [[package]]
 name = "gitpython"
-version = "3.1.58"
+version = "3.1.62"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "gitdb" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/26/d6/5f358ff283325580c2003a6d953aea18cfe10ae87b46f5ebc80fa3a386dc/gitpython-3.1.58.tar.gz", hash = "sha256:621416df10ef3fd0e19fabf9172ddeed0fa704d353d04f194eec56a625a95b22", size = 228498, upload-time = "2026-08-04T15:05:49.47Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e0/db/3ca813cbacb23ab6fe46ff38a9b5ef8e73e970c8051f2ce903aacafe0446/gitpython-3.1.62.tar.gz", hash = "sha256:1791de66309bc0c7cfca40bf8d2e3de7ca091cbf94e6051be1ad0722c61062af", size = 231728, upload-time = "2026-09-07T02:57:21.155Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/0c/9d8752098bc442f0726e64aa6135940b3a96809915d1aa4206c1bb97881d/gitpython-3.1.58-py3-none-any.whl", hash = "sha256:d331e722577f0fd7fc1f857419b3ecc07af66282b933d2a4d95f84a042fdd50f", size = 220183, upload-time = "2026-08-04T15:05:48.025Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/0b/29d7965215f8ef830a7ca1f42997fe13e5693d85e9edb18f938d063ef5f2/gitpython-3.1.62-py3-none-any.whl", hash = "sha256:7002251225e10e29d2e1f49e6532613fe5d5d9f0b6f1f02997a52b38fe56899e", size = 222753, upload-time = "2026-09-07T02:57:19.762Z" },
 ]
 
 [[package]]
@@ -812,8 +812,37 @@ wheels = [
 ]
 
 [[package]]
+name = "miniaudio"
+version = "1.71"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cffi" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d8/d5/e5439dc08561f73656bfeb3340fc64ab63163e101426593d8fb9a025ff1e/miniaudio-1.71.tar.gz", hash = "sha256:ff51e2887bb673e2e757752b586b3dc924d59aa5fbcae9bbc45f4a111bd3262b", size = 1116480, upload-time = "2026-04-29T21:20:38.182Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/39/d3/71124f5abbcdcae62e040f58d3dca3bd3d90fd01faa7bb276b112387b47a/miniaudio-1.71-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:62db602651bc20a2698f36a0d356d7217ed6f4f917550c7ffb3705c8e8be90cf", size = 377186, upload-time = "2026-04-29T21:20:16.713Z" },
+    { url = "https://files.pythonhosted.org/packages/f7/ac/30a324f758bed1b193e017ec25183cfb10a79e549656331f5d068a2d343a/miniaudio-1.71-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:8fc1a4f084cc1b4b25c567d22f54d1e46bfa505c17ed777c8b198e5c53d0f785", size = 351485, upload-time = "2026-04-29T21:20:17.761Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/62/ae884a9d3b2ebec9c2ed1db857593e74bff45b70c4ab17fccc11db31cbeb/miniaudio-1.71-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:19be6f0a1e601c2237433e579734cfaf6469191b224c20c9e5f73c32ef9ee2b9", size = 643556, upload-time = "2026-04-29T21:20:18.87Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/39/84fc665e2ea8f9f1301b6370226e3a24f08d5ad5d97143b69b4ae7ac260a/miniaudio-1.71-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:e6287f15caa808a88aad0700a182bec1ff6d98769717425adf9ebf41259d1936", size = 645176, upload-time = "2026-04-29T21:20:20.194Z" },
+    { url = "https://files.pythonhosted.org/packages/81/b8/37d9f67d4511da29bdb82b6c73a3ef6f4ebf2fbd30f9524f1e4a84d6f033/miniaudio-1.71-cp312-cp312-win32.whl", hash = "sha256:ab100e5240b104b5326e4ec1be07b6ae461f7d3d4d7a694857fd2f0493d210f9", size = 235095, upload-time = "2026-04-29T21:20:21.653Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/cf/c1a19e6800e725b6e2b4576407620a798d69e3528ebdea9aea84d69d7088/miniaudio-1.71-cp312-cp312-win_amd64.whl", hash = "sha256:f4a44b70b66628b0c307e40ae0ae857695978cae18462179b806d8edc807d416", size = 274252, upload-time = "2026-04-29T21:20:22.824Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/85/44545f767ec21142ffed5f9108406d11dc8a19aafed9bd57621a0892bb60/miniaudio-1.71-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:61b86f26d653040db32d9d15b05446321dd10e45beba25b44f841e26935213d5", size = 377184, upload-time = "2026-04-29T21:20:24.109Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/d1/071a560000c8ce903dc919968ecce40fbe7a73213ac399051b887184f8a3/miniaudio-1.71-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:d9dc15eff711bcfc62a9d05e0c78e4bc34821a455595e049629f2fea7491a523", size = 351488, upload-time = "2026-04-29T21:20:25.183Z" },
+    { url = "https://files.pythonhosted.org/packages/46/24/5873a569451cae5686fb656ebd78ffe0b5eebe48ca21ef61e227d237d20a/miniaudio-1.71-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:12bc33e7e61072b4b541c14e10ef76119d5643e6bbb98e2dec0c0738889438fb", size = 643552, upload-time = "2026-04-29T21:20:26.211Z" },
+    { url = "https://files.pythonhosted.org/packages/90/9b/25785525e6b5ff9afd7f4c4279215dc09c3317ea4d837275b1ae17912b36/miniaudio-1.71-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:70fa2ea5353e6919aca59b8c5768144af009d18c3bca251749d66fb497424563", size = 645171, upload-time = "2026-04-29T21:20:27.494Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/6d/cbfd55fdc40256231f7b0c861e2bf79cc289bfbbe5e15869317944e6d673/miniaudio-1.71-cp313-cp313-win32.whl", hash = "sha256:1bf93aeede652926f27f430f0fd69ef0cf8a949c07b537d6a2f295602c747037", size = 235088, upload-time = "2026-04-29T21:20:29.031Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/8d/d5059c04b247b1079c0e48914a9ec20352910a3b9373060fb258dfd194ab/miniaudio-1.71-cp313-cp313-win_amd64.whl", hash = "sha256:4c849ccb1349f7b3553a77a66fe7e972315185f5c4c44a0bbda7ebcdd224db37", size = 274247, upload-time = "2026-04-29T21:20:29.96Z" },
+    { url = "https://files.pythonhosted.org/packages/16/e7/b3e0df641d2d5283446d7960fc407195ba722b9a0789bb0a1429bf9ee855/miniaudio-1.71-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:3ef441d139264f8a5dcb9aa6fcd0b1e1e69f58715baae416ff33f045ffba6ad5", size = 378418, upload-time = "2026-04-29T21:20:31.341Z" },
+    { url = "https://files.pythonhosted.org/packages/66/ea/f5940232d0c83777562e802f376a841046d78e94753450fb9a6685a44190/miniaudio-1.71-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:84139a10ef172acd762ccf120142877b037a1aaf71def99d2c75f66329f89d8b", size = 351473, upload-time = "2026-04-29T21:20:32.464Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/a6/6b5ae21b74fe70da935de389e01b3cce86c790ca4083f6a63c3ee922673e/miniaudio-1.71-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8a28ff4ad23e55bbde8808ce525d3bb7d249d7612f77646b30e06fc6b7a778ac", size = 643683, upload-time = "2026-04-29T21:20:33.598Z" },
+    { url = "https://files.pythonhosted.org/packages/4b/43/ef851e2e1d9dfde2b97cc053f0d79c6612088b27044698ed5d8c687f05de/miniaudio-1.71-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:33986d5d725ebcbc253551e7358689bc81b19b6950b33cec8e8c1142ca4fc0a9", size = 645203, upload-time = "2026-04-29T21:20:34.713Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/4a/0da61fea8b8469d51b77d43846572ef9255d54c9b6b65a552446bbd55f90/miniaudio-1.71-cp314-cp314-win32.whl", hash = "sha256:3bbeb1e068fe42475e017e8150e9e345182b583d0dd4d9e77ffa20c39935d9ec", size = 241126, upload-time = "2026-04-29T21:20:35.975Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/d0/ad7bfa63e1baacd2d4803ee04862bb06fcfbbb34a340bf2bf3979e0068dc/miniaudio-1.71-cp314-cp314-win_amd64.whl", hash = "sha256:154b085dd914a0e79e3d93160e1a07aacb27d66c65f9ef6a0d87c1a194f32c04", size = 281740, upload-time = "2026-04-29T21:20:37.07Z" },
+]
+
+[[package]]
 name = "mistral-vibe"
-version = "2.25.4"
+version = "2.25.5"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -857,6 +886,7 @@ dependencies = [
     { name = "mcp" },
     { name = "mdit-py-plugins" },
     { name = "mdurl" },
+    { name = "miniaudio" },
     { name = "mistralai" },
     { name = "mistralai-vibe-local-harness" },
     { name = "more-itertools" },
@@ -897,7 +927,6 @@ dependencies = [
     { name = "setproctitle" },
     { name = "six" },
     { name = "smmap" },
-    { name = "sounddevice" },
     { name = "soupsieve" },
     { name = "sse-starlette" },
     { name = "starlette" },
@@ -964,7 +993,7 @@ requires-dist = [
     { name = "cryptography", specifier = "==50.0.0" },
     { name = "eval-type-backport", specifier = "==0.3.1" },
     { name = "gitdb", specifier = "==4.0.12" },
-    { name = "gitpython", specifier = "==3.1.58" },
+    { name = "gitpython", specifier = "==3.1.62" },
     { name = "giturlparse", specifier = "==0.15.0" },
     { name = "google-auth", specifier = "==2.49.2" },
     { name = "googleapis-common-protos", specifier = "==1.74.0" },
@@ -991,8 +1020,9 @@ requires-dist = [
     { name = "mcp", specifier = "==1.28.1" },
     { name = "mdit-py-plugins", specifier = "==0.5.0" },
     { name = "mdurl", specifier = "==0.1.2" },
+    { name = "miniaudio", specifier = "==1.71" },
     { name = "mistralai", specifier = "==2.6.0" },
-    { name = "mistralai-vibe-local-harness", specifier = "==0.4.5" },
+    { name = "mistralai-vibe-local-harness", specifier = "==0.5.1" },
     { name = "more-itertools", specifier = "==11.0.2" },
     { name = "opentelemetry-api", specifier = "==1.39.1" },
     { name = "opentelemetry-exporter-otlp-proto-common", specifier = "==1.39.1" },
@@ -1031,7 +1061,6 @@ requires-dist = [
     { name = "setproctitle", specifier = "==1.3.7" },
     { name = "six", specifier = "==1.17.0" },
     { name = "smmap", specifier = "==5.0.3" },
-    { name = "sounddevice", specifier = "==0.5.5" },
     { name = "soupsieve", specifier = "==2.8.4" },
     { name = "sse-starlette", specifier = "==3.4.1" },
     { name = "starlette", specifier = "==1.3.1" },
@@ -1103,7 +1132,7 @@ wheels = [
 
 [[package]]
 name = "mistralai-vibe-local-harness"
-version = "0.4.5"
+version = "0.5.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1118,11 +1147,11 @@ dependencies = [
     { name = "truststore" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/61/40/11c3efb6b747f84c3795658cd8228758f60dff8bae54262bc8c82bbdc6d8/mistralai_vibe_local_harness-0.4.5-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:6008687fd6e94aee2434cf91305da640b3181652281130909c0367fa669b20b5", size = 25571151, upload-time = "2026-09-10T19:11:50.601Z" },
-    { url = "https://files.pythonhosted.org/packages/8c/b7/cc9debc3bd530852d146e599c273d045c3a6de68e7d3f326634b93616c31/mistralai_vibe_local_harness-0.4.5-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:9d8c36cd317f7bfbe1be59ee6ac88c07066bf8da2f06b5ba73873ed0f1fbf26c", size = 24535036, upload-time = "2026-09-10T19:11:53.89Z" },
-    { url = "https://files.pythonhosted.org/packages/5d/a5/7f4419c402ee0951420c7b7345153814bc94992af269ee9924f9b04b7dec/mistralai_vibe_local_harness-0.4.5-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:ae9cdd9a2ff35b18834ab9c4512eecdd37cbe8063a54e68d30041d9d1ef9a2d3", size = 23766186, upload-time = "2026-09-10T19:11:56.761Z" },
-    { url = "https://files.pythonhosted.org/packages/f5/19/c5097ce107367a6011808eb237422c0420035434d7059b426ee3747b381e/mistralai_vibe_local_harness-0.4.5-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:4eafb4b13f8b038c5736665f6f51ecf5861d5a648e26405b8076cbf9cbcc8b5a", size = 24807784, upload-time = "2026-09-10T19:11:59.428Z" },
-    { url = "https://files.pythonhosted.org/packages/27/30/e27d0f07d008c358c56fb78d6435bc5f7304eced4aaf49fc4b97e96d1f52/mistralai_vibe_local_harness-0.4.5-cp312-abi3-win_amd64.whl", hash = "sha256:dde470ff81ae37387502655eb3762a5030e447ee510897e1962b887a1e6ab940", size = 24265245, upload-time = "2026-09-10T19:12:02.041Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/c8/0d62bb843e805f8b52494689e03e0ed23859bbd58e3c37ca42371633be62/mistralai_vibe_local_harness-0.5.1-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:0123e73b4d03b1dccda467c7bc12d818a8c30db9196eb7ec4f41a59878db2b2d", size = 25540215, upload-time = "2026-09-18T09:38:01.119Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/e7/033e5a568b261603734d2ac183a95ffd6aedde2907dab30467e23c9736bd/mistralai_vibe_local_harness-0.5.1-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:f97887e5cdf33b8fbe9dfa018de0eccb3a61d47358c075f832c5a0238f2f27f2", size = 24495059, upload-time = "2026-09-18T09:38:04.8Z" },
+    { url = "https://files.pythonhosted.org/packages/99/60/5cdb29ab09af2758d7c3f0d7f8ab89250ab47f5cdbf9e3f02016151fada3/mistralai_vibe_local_harness-0.5.1-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:0b735d8bbd0b81b5e861ae8daa1b194a644afed3e882ebc4803ed0adb48529cc", size = 23762283, upload-time = "2026-09-18T09:38:07.757Z" },
+    { url = "https://files.pythonhosted.org/packages/69/c0/614599e44ab69ef127351eb0c83313c39f21c48fd38fa26d18cf236a791f/mistralai_vibe_local_harness-0.5.1-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:601ddeb1b75310618116d3f5c6305ff720d4f4317b8c0470c8e2bc552bbf1c45", size = 24780499, upload-time = "2026-09-18T09:38:11.118Z" },
+    { url = "https://files.pythonhosted.org/packages/07/08/3d5c46567b458243012ffdb400393353e72b387d9251cf3c6e06bf7b615f/mistralai_vibe_local_harness-0.5.1-cp312-abi3-win_amd64.whl", hash = "sha256:583b7e16e25207baa9c636a4f60ed446e1372fd937953498c0e505de17cbd753", size = 24235566, upload-time = "2026-09-18T09:38:14.73Z" },
 ]
 
 [[package]]
@@ -2135,22 +2164,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/1f/ea/49c993d6dfdd7338c9b1000a0f36817ed7ec84577ae2e52f890d1a4ff909/smmap-5.0.3.tar.gz", hash = "sha256:4d9debb8b99007ae47165abc08670bd74cb74b5227dda7f643eccc4e9eb5642c", size = 22506, upload-time = "2026-03-09T03:43:26.1Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c1/d4/59e74daffcb57a07668852eeeb6035af9f32cbfd7a1d2511f17d2fe6a738/smmap-5.0.3-py3-none-any.whl", hash = "sha256:c106e05d5a61449cf6ba9a1e650227ecfb141590d2a98412103ff35d89fc7b2f", size = 24390, upload-time = "2026-03-09T03:43:24.361Z" },
-]
-
-[[package]]
-name = "sounddevice"
-version = "0.5.5"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "cffi" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/2a/f9/2592608737553638fca98e21e54bfec40bf577bb98a61b2770c912aab25e/sounddevice-0.5.5.tar.gz", hash = "sha256:22487b65198cb5bf2208755105b524f78ad173e5ab6b445bdab1c989f6698df3", size = 143191, upload-time = "2026-01-23T18:36:43.529Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1e/0a/478e441fd049002cf308520c0d62dd8333e7c6cc8d997f0dda07b9fbcc46/sounddevice-0.5.5-py3-none-any.whl", hash = "sha256:30ff99f6c107f49d25ad16a45cacd8d91c25a1bcdd3e81a206b921a3a6405b1f", size = 32807, upload-time = "2026-01-23T18:36:35.649Z" },
-    { url = "https://files.pythonhosted.org/packages/56/f9/c037c35f6d0b6bc3bc7bfb314f1d6f1f9a341328ef47cd63fc4f850a7b27/sounddevice-0.5.5-py3-none-macosx_10_6_x86_64.macosx_10_6_universal2.whl", hash = "sha256:05eb9fd6c54c38d67741441c19164c0dae8ce80453af2d8c4ad2e7823d15b722", size = 108557, upload-time = "2026-01-23T18:36:37.41Z" },
-    { url = "https://files.pythonhosted.org/packages/88/a1/d19dd9889cd4bce2e233c4fac007cd8daaf5b9fe6e6a5d432cf17be0b807/sounddevice-0.5.5-py3-none-win32.whl", hash = "sha256:1234cc9b4c9df97b6cbe748146ae0ec64dd7d6e44739e8e42eaa5b595313a103", size = 317765, upload-time = "2026-01-23T18:36:39.047Z" },
-    { url = "https://files.pythonhosted.org/packages/c3/0e/002ed7c4c1c2ab69031f78989d3b789fee3a7fba9e586eb2b81688bf4961/sounddevice-0.5.5-py3-none-win_amd64.whl", hash = "sha256:cfc6b2c49fb7f555591c78cb8ecf48d6a637fd5b6e1db5fec6ed9365d64b3519", size = 365324, upload-time = "2026-01-23T18:36:40.496Z" },
-    { url = "https://files.pythonhosted.org/packages/4e/39/a61d4b83a7746b70d23d9173be688c0c6bfc7173772344b7442c2c155497/sounddevice-0.5.5-py3-none-win_arm64.whl", hash = "sha256:3861901ddd8230d2e0e8ae62ac320cdd4c688d81df89da036dcb812f757bb3e6", size = 317115, upload-time = "2026-01-23T18:36:42.235Z" },
 ]
 
 [[package]]

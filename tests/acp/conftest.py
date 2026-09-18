@@ -61,7 +61,15 @@ def _create_acp_agent(
 def acp_agent_loop(backend: FakeBackend, experimental_harness: bool) -> VibeAcpAgent:
     async def start_session(options: LocalHarnessOptions) -> AppServerSession:
         assert options.experimental_harness is experimental_harness
-        loop = build_test_agent_loop(backend=backend, enable_streaming=True)
+        # Production session starters build the loop from the session cwd;
+        # the loop must not silently fall back to the process cwd.
+        loop = build_test_agent_loop(
+            backend=backend,
+            enable_streaming=True,
+            cwd=Path(options.session_options.cwd)
+            if options.session_options.cwd
+            else None,
+        )
         return await AppServerSession.start(
             start_test_app_server(loop),
             client_info=options.client.info,
@@ -95,7 +103,12 @@ def acp_agent_with_session_config(
     async def start_session(options: LocalHarnessOptions) -> AppServerSession:
         assert options.experimental_harness is experimental_harness
         loop = build_test_agent_loop(
-            config=config, backend=backend, enable_streaming=True
+            config=config,
+            backend=backend,
+            enable_streaming=True,
+            cwd=Path(options.session_options.cwd)
+            if options.session_options.cwd
+            else None,
         )
         return await AppServerSession.start(
             start_test_app_server(loop),

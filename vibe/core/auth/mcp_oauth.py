@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 import errno
+import functools
 import time
 from typing import Final
 import urllib.parse
@@ -148,7 +149,13 @@ def _kr_username(alias: str, kind: str) -> str:
 
 
 async def _kr_get(username: str) -> str | None:
-    return await anyio.to_thread.run_sync(get_api_key_from_keyring, username)
+    # OAuth material has only ever been filed under the current service name, so
+    # the legacy fallback can only ever miss -- and on macOS each service tried
+    # is its own `security` subprocess, ~17ms, on the session startup path.
+    return await anyio.to_thread.run_sync(
+        functools.partial(get_api_key_from_keyring, search_legacy_services=False),
+        username,
+    )
 
 
 async def _kr_set(username: str, value: str) -> None:
@@ -709,16 +716,19 @@ async def perform_oauth_login(
             "perform_oauth_login requires an OAuth-configured MCP server; "
             f"server {server.name!r} uses auth.type={type(auth).__name__}"
         )
-    handler = LoopbackCallbackHandler(port=auth.redirect_port, server_alias=server.name)
-    provider = build_oauth_provider(
-        server, redirect_handler=on_url, callback_handler=handler.serve_once
-    )
     declared = dict(headers or {})
     try:
         try:
-            await _request_oauth_login(server, provider, declared)
+            await _attempt_oauth_login(server, auth, on_url, declared)
         except MCPOAuthInvalidGrant:
-            await _request_oauth_login(server, provider, declared)
+            # invalid_grant already cleared the stored creds; retry runs fresh.
+            await _attempt_oauth_login(server, auth, on_url, declared)
+        except MCPOAuthTransientRefreshError:
+            # A non-invalid_grant refresh failure (e.g. pruned DCR client -> 5xx)
+            # keeps the creds, so a plain retry just re-refreshes and fails the
+            # same way. Drop them and retry once as a fresh authorization.
+            await delete_oauth_credentials(server.name)
+            await _attempt_oauth_login(server, auth, on_url, declared)
     except MCPOAuthTransientRefreshError as exc:
         raise MCPOAuthLoginFailed(
             server_alias=server.name, reason=f"Transient error: {exc.reason}"
@@ -726,6 +736,21 @@ async def perform_oauth_login(
     except (OAuthTokenError, OAuthFlowError, httpx.HTTPError, OSError) as exc:
         raise MCPOAuthLoginFailed(server_alias=server.name, reason=str(exc)) from exc
     await Fingerprint.compute(server).save(server.name)
+
+
+async def _attempt_oauth_login(
+    server: MCPHttp | MCPStreamableHttp,
+    auth: MCPOAuth,
+    on_url: Callable[[str], Awaitable[None]],
+    declared_headers: Mapping[str, str],
+) -> None:
+    # Fresh provider per attempt so a retry reads the current keyring state, not
+    # the previous attempt's in-memory tokens.
+    handler = LoopbackCallbackHandler(port=auth.redirect_port, server_alias=server.name)
+    provider = build_oauth_provider(
+        server, redirect_handler=on_url, callback_handler=handler.serve_once
+    )
+    await _request_oauth_login(server, provider, declared_headers)
 
 
 def _initialize_message() -> dict[str, object]:

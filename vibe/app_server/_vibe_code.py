@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import aclosing, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import uuid4
 
 from vibe.app_server._execution import (
-    ActiveSessionExecution,
     SessionExecution,
     SessionExecutionKind,
     cancel_tasks,
@@ -37,12 +37,16 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import TeleportEventParams, TeleportStartParams
 from vibe.core.agent_loop import AgentLoop, TeleportError
+from vibe.core.config import VibeConfigSchema
+from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import (
+    LaunchContext,
     ProjectPickerTelemetryPayload,
     ProjectSelectionSource,
     TeleportFailureStage,
 )
 from vibe.core.teleport.errors import ServiceTeleportError
+from vibe.core.teleport.orchestrator import TeleportContextSummarizer
 from vibe.core.teleport.telemetry import send_teleport_early_failure_telemetry
 from vibe.core.teleport.types import (
     TeleportCheckingGitEvent,
@@ -52,6 +56,7 @@ from vibe.core.teleport.types import (
     TeleportPushResponseEvent,
     TeleportStartingWorkflowEvent,
     TeleportSummarizingContextEvent,
+    TeleportYieldEvent,
 )
 from vibe.core.types import Role
 from vibe.core.vibe_code_project import (
@@ -75,6 +80,35 @@ type Notify = Callable[[str, ProtocolModel], Awaitable[None]]
 type ReadAccount = Callable[[], Awaitable[AccountView]]
 
 
+@runtime_checkable
+class VibeCodeSession(Protocol):
+    @property
+    def config(self) -> VibeConfigSchema: ...
+    @property
+    def cwd(self) -> Path: ...
+    @property
+    def session_id(self) -> str: ...
+    @property
+    def telemetry_client(self) -> TelemetryClient: ...
+    @property
+    def launch_context(self) -> LaunchContext | None: ...
+    @property
+    def summarizer(self) -> TeleportContextSummarizer: ...
+    async def read_account(self) -> AccountView: ...
+    def session_message_count(self) -> int: ...
+    def has_conversation_history(self) -> bool: ...
+    def require_idle(self) -> None: ...
+    def begin_teleport(self, operation_id: str) -> None: ...
+    def finish_teleport(self, operation_id: str) -> None: ...
+    def teleport_events(
+        self,
+        prompt: str | None,
+        *,
+        project_id: str | None = None,
+        project_picker: ProjectPickerTelemetryPayload | None = None,
+    ) -> AsyncGenerator[TeleportYieldEvent, TeleportPushResponseEvent | None]: ...
+
+
 class VibeCodeError(RuntimeError):
     pass
 
@@ -90,21 +124,13 @@ class VibeCodeAccessError(VibeCodeError):
 @dataclass(frozen=True, slots=True)
 class ReservedTeleport:
     project_picker: ProjectPickerTelemetryPayload
-    execution: ActiveSessionExecution
+    operation_id: str
 
 
 class VibeCodeController:
-    def __init__(
-        self,
-        agent_loop: AgentLoop,
-        notify: Notify,
-        execution: SessionExecution,
-        read_account: ReadAccount,
-    ) -> None:
-        self._agent_loop = agent_loop
+    def __init__(self, session: VibeCodeSession, notify: Notify) -> None:
+        self._session = session
         self._notify = notify
-        self._execution = execution
-        self._read_account = read_account
         self._store = VibeProjectsStore()
         self._service: VibeCodeProjectPickerService | None = None
         self._data: VibeCodeProjectPickerInitialData | None = None
@@ -124,7 +150,7 @@ class VibeCodeController:
     async def open(
         self, *, purpose: VibeCodePickerPurpose, prompt: str | None = None
     ) -> tuple[str, VibeCodePickerView, str | None]:
-        self._execution.require_idle()
+        self._session.require_idle()
         if purpose == "teleport":
             await self._require_teleport_available(prompt)
         async with self._picker_lock:
@@ -165,7 +191,7 @@ class VibeCodeController:
             return picker_id, self.view(), resolved_project_id
 
     async def load_more(self, picker_id: str) -> tuple[VibeCodePickerView, str | None]:
-        self._execution.require_idle()
+        self._session.require_idle()
         async with self._picker_lock:
             service, data, _ = self._require_picker(picker_id)
             if not data.state.has_more:
@@ -182,7 +208,7 @@ class VibeCodeController:
     async def create(
         self, *, picker_id: str, name: str, default_branch: str
     ) -> tuple[VibeCodePickerView, VibeCodeProject]:
-        self._execution.require_idle()
+        self._session.require_idle()
         async with self._picker_lock:
             service, data, git = self._require_picker(picker_id)
             try:
@@ -203,7 +229,7 @@ class VibeCodeController:
     async def select(
         self, *, picker_id: str, project_id: str
     ) -> tuple[VibeCodePickerView, VibeCodeProject]:
-        self._execution.require_idle()
+        self._session.require_idle()
         async with self._picker_lock:
             service, data, _ = self._require_picker(picker_id)
             project = next(
@@ -247,7 +273,7 @@ class VibeCodeController:
             if self._picker_purpose == "teleport":
                 self._project_picker = payload
             else:
-                self._agent_loop.telemetry_client.send_remote_project_configured(
+                self._session.telemetry_client.send_remote_project_configured(
                     outcome=(
                         "created" if source == "created_project" else "configured"
                     ),
@@ -256,7 +282,7 @@ class VibeCodeController:
             return self.view(), _project(project)
 
     async def unlink(self, picker_id: str) -> VibeCodePickerView:
-        self._execution.require_idle()
+        self._session.require_idle()
         async with self._picker_lock:
             service, data, _ = self._require_picker(picker_id)
             await asyncio.to_thread(service.clear_project_link, data.context)
@@ -276,20 +302,20 @@ class VibeCodeController:
                 self._send_picker_cancelled(payload)
                 self._project_picker = None
             else:
-                self._agent_loop.telemetry_client.send_remote_project_configured(
+                self._session.telemetry_client.send_remote_project_configured(
                     outcome="unlinked", project_picker=payload
                 )
             return self.view()
 
     async def cancel_picker(self, picker_id: str) -> None:
-        self._execution.require_idle()
+        self._session.require_idle()
         async with self._picker_lock:
             self._require_picker(picker_id)
             payload = self._picker_telemetry(source="cancelled", shown=True)
             if self._picker_purpose == "teleport":
                 self._send_picker_cancelled(payload)
             else:
-                self._agent_loop.telemetry_client.send_remote_project_configured(
+                self._session.telemetry_client.send_remote_project_configured(
                     outcome="cancelled", project_picker=payload
                 )
             self._reset_picker_state()
@@ -297,7 +323,7 @@ class VibeCodeController:
     async def recover_stale_link(
         self, picker_id: str
     ) -> tuple[VibeCodePickerView, bool]:
-        self._execution.require_idle()
+        self._session.require_idle()
         async with self._picker_lock:
             service, data, git = self._require_picker(picker_id)
             await asyncio.to_thread(service.clear_project_link, data.context)
@@ -335,9 +361,7 @@ class VibeCodeController:
                 f"Teleport operation was not reserved: {params.operation_id}"
             )
         task = asyncio.create_task(
-            self._run_teleport(
-                params, reservation.project_picker, reservation.execution
-            )
+            self._run_teleport(params, reservation.project_picker)
         )
         self._tasks[params.operation_id] = task
         task.add_done_callback(
@@ -359,11 +383,9 @@ class VibeCodeController:
                 raise VibeCodeConflictError(
                     "Teleport project selection is not complete"
                 )
-            execution = self._execution.begin(
-                SessionExecutionKind.TELEPORT, params.operation_id
-            )
+            self._session.begin_teleport(params.operation_id)
             self._reserved_operations[params.operation_id] = ReservedTeleport(
-                project_picker=self._project_picker, execution=execution
+                project_picker=self._project_picker, operation_id=params.operation_id
             )
 
     def _teleport_done(self, operation_id: str, task: asyncio.Task[None]) -> None:
@@ -387,7 +409,7 @@ class VibeCodeController:
 
     async def cancel_teleport(self, operation_id: str) -> bool:
         if reservation := self._reserved_operations.pop(operation_id, None):
-            self._execution.finish(reservation.execution)
+            self._session.finish_teleport(reservation.operation_id)
             return True
         task = self._tasks.get(operation_id)
         if task is None:
@@ -402,28 +424,26 @@ class VibeCodeController:
 
     def _fail_early(self, *, stage: TeleportFailureStage, error_class: str) -> None:
         send_teleport_early_failure_telemetry(
-            self._agent_loop.telemetry_client,
+            self._session.telemetry_client,
             stage=stage,
             error_class=error_class,
-            nb_session_messages=max(len(self._agent_loop.messages) - 1, 0),
+            nb_session_messages=self._session.session_message_count(),
         )
 
     async def _require_teleport_available(self, prompt: str | None) -> None:
-        if not self._agent_loop.config.is_active_model_mistral():
+        if not self._session.config.is_active_model_mistral():
             self._fail_early(stage="ineligible", error_class="TeleportIneligibleError")
             raise VibeCodeAccessError(
                 "Teleport requires an active Mistral model. Use /model to switch "
                 "to a Mistral model, then try again."
             )
 
-        account = await self._read_account()
+        account = await self._session.read_account()
         if not account.teleport_eligible:
             self._fail_early(stage="ineligible", error_class="TeleportIneligibleError")
             raise VibeCodeAccessError(self._teleport_access_message(account))
 
-        has_history = any(
-            message.role is not Role.system for message in self._agent_loop.messages
-        )
+        has_history = self._session.has_conversation_history()
         if prompt or has_history:
             return
         self._fail_early(stage="no_history", error_class="TeleportNoHistoryError")
@@ -434,7 +454,7 @@ class VibeCodeController:
         url = (
             action.url
             if action is not None
-            else f"{self._agent_loop.config.vibe_base_url.rstrip('/')}/code/extensions?focus=key"
+            else f"{self._session.config.vibe_base_url.rstrip('/')}/code/extensions?focus=key"
         )
         if action is not None and action.kind is AccountActionKind.SWITCH_API_KEY:
             return (
@@ -455,7 +475,7 @@ class VibeCodeController:
         errors = await cancel_tasks(tasks, label="Vibe Code operation")
         self._tasks.clear()
         for reservation in self._reserved_operations.values():
-            self._execution.finish(reservation.execution)
+            self._session.finish_teleport(reservation.operation_id)
         self._reserved_operations.clear()
         async with self._picker_lock:
             self._reset_picker_state()
@@ -478,15 +498,12 @@ class VibeCodeController:
         )
 
     async def _run_teleport(
-        self,
-        params: TeleportStartParams,
-        project_picker: ProjectPickerTelemetryPayload,
-        execution: ActiveSessionExecution,
+        self, params: TeleportStartParams, project_picker: ProjectPickerTelemetryPayload
     ) -> None:
         response: TeleportPushResponseEvent | None = None
         try:
             async with aclosing(
-                self._agent_loop.teleport_to_vibe_code(
+                self._session.teleport_events(
                     params.prompt,
                     project_id=params.project_id,
                     project_picker=project_picker,
@@ -500,7 +517,7 @@ class VibeCodeController:
                     response = None
                     public = _teleport_event(params.operation_id, event)
                     if isinstance(event, TeleportCompleteEvent):
-                        self._execution.finish(execution)
+                        self._session.finish_teleport(params.operation_id)
                     push_response: asyncio.Future[bool] | None = None
                     if isinstance(event, TeleportPushRequiredEvent):
                         push_response = asyncio.get_running_loop().create_future()
@@ -528,7 +545,7 @@ class VibeCodeController:
                 if is_saved_project_stale_error(str(exc))
                 else "teleport_failed"
             )
-            self._execution.finish(execution)
+            self._session.finish_teleport(params.operation_id)
             await self._notify(
                 "vibeCode/teleport/event",
                 TeleportEventParams(
@@ -542,7 +559,7 @@ class VibeCodeController:
             logger.exception(
                 "Unexpected teleport failure operation_id=%s", params.operation_id
             )
-            self._execution.finish(execution)
+            self._session.finish_teleport(params.operation_id)
             await self._notify(
                 "vibeCode/teleport/event",
                 TeleportEventParams(
@@ -554,17 +571,17 @@ class VibeCodeController:
             )
         finally:
             self._push_responses.pop(params.operation_id, None)
-            self._execution.finish(execution)
+            self._session.finish_teleport(params.operation_id)
 
     def _make_service(self) -> VibeCodeProjectPickerService:
-        config = self._agent_loop.config
+        config = self._session.config
         api_key = config.vibe_code_api_key
         if not api_key:
             raise VibeCodeError(f"{config.vibe_code_api_key_env_var} not set.")
         return VibeCodeProjectPickerService(
             base_url=config.vibe_code_sessions_base_url,
             api_key=api_key,
-            repo_root=self._agent_loop.cwd,
+            repo_root=self._session.cwd,
             project_store=self._store,
             timeout=config.api_timeout,
         )
@@ -615,11 +632,11 @@ class VibeCodeController:
         )
 
     def _send_picker_cancelled(self, payload: ProjectPickerTelemetryPayload) -> None:
-        self._agent_loop.telemetry_client.send_teleport_failed(
+        self._session.telemetry_client.send_teleport_failed(
             stage="cancelled",
             error_class="TeleportProjectPickerCancelledError",
             push_required=False,
-            nb_session_messages=max(len(self._agent_loop.messages) - 1, 0),
+            nb_session_messages=self._session.session_message_count(),
             project_picker=payload,
         )
 
@@ -697,3 +714,100 @@ def _teleport_event(operation_id: str, event: object) -> TeleportEvent:
             return TeleportComplete(operation_id=operation_id, url=url)
         case _:
             raise VibeCodeError(f"Unknown teleport event: {type(event).__name__}")
+
+
+class LegacyVibeCodeSession:
+    """VibeCodeSession backed by a legacy AgentLoop and SessionExecution."""
+
+    def __init__(
+        self,
+        agent_loop: AgentLoop,
+        execution: SessionExecution,
+        read_account: ReadAccount,
+    ) -> None:
+        self._agent_loop = agent_loop
+        self._execution = execution
+        self._read_account = read_account
+        self._summarizer = _LegacyTeleportSummarizer(agent_loop)
+        self._active_teleport: str | None = None
+
+    @property
+    def config(self) -> VibeConfigSchema:
+        return self._agent_loop.config
+
+    @property
+    def cwd(self) -> Path:
+        return self._agent_loop.cwd
+
+    @property
+    def session_id(self) -> str:
+        return self._agent_loop.session_id
+
+    @property
+    def telemetry_client(self) -> TelemetryClient:
+        return self._agent_loop.telemetry_client
+
+    @property
+    def launch_context(self) -> LaunchContext | None:
+        return self._agent_loop.launch_context
+
+    @property
+    def summarizer(self) -> TeleportContextSummarizer:
+        return self._summarizer
+
+    async def read_account(self) -> AccountView:
+        return await self._read_account()
+
+    def session_message_count(self) -> int:
+        return max(len(self._agent_loop.messages) - 1, 0)
+
+    def has_conversation_history(self) -> bool:
+        return any(
+            message.role is not Role.system for message in self._agent_loop.messages
+        )
+
+    def require_idle(self) -> None:
+        self._execution.require_idle()
+
+    def begin_teleport(self, operation_id: str) -> None:
+        self._active_teleport = operation_id
+        self._execution.begin(SessionExecutionKind.TELEPORT, operation_id)
+
+    def finish_teleport(self, operation_id: str) -> None:
+        if self._active_teleport == operation_id:
+            self._active_teleport = None
+        active = self._execution.active
+        if active is not None and active.id == operation_id:
+            self._execution.finish(active)
+
+    def teleport_events(
+        self,
+        prompt: str | None,
+        *,
+        project_id: str | None = None,
+        project_picker: ProjectPickerTelemetryPayload | None = None,
+    ) -> AsyncGenerator[TeleportYieldEvent, TeleportPushResponseEvent | None]:
+        return self._agent_loop.teleport_to_vibe_code(
+            prompt, project_id=project_id, project_picker=project_picker
+        )
+
+
+class _LegacyTeleportSummarizer:
+    """TeleportContextSummarizer backed by a live AgentLoop."""
+
+    def __init__(self, loop: AgentLoop) -> None:
+        self._loop = loop
+
+    def resolve_prompt(self, prompt: str | None) -> str:
+        return self._loop._resolve_teleport_prompt(prompt)
+
+    def should_summarize(self, prompt: str | None) -> bool:
+        return self._loop._should_summarize_teleport_context(prompt)
+
+    def context_messages(self, prompt: str | None) -> list:
+        return self._loop._teleport_context_messages(prompt)
+
+    async def summarize(self, messages: list, prompt: str | None) -> str:
+        return await self._loop._summarize_teleport_context(
+            prompt=prompt, resolved_prompt=self._loop._resolve_teleport_prompt(prompt)
+        )

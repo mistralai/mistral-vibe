@@ -25,7 +25,7 @@ from pydantic import ValidationError
 from vibe.app_server.models import ConfigIssue
 from vibe.core.paths import VIBE_HOME
 from vibe.core.skills.manager import SkillManager
-from vibe.core.skills.models import SkillInfo
+from vibe.core.skills.models import DISABLE_MODEL_INVOCATION_FIELD, SkillInfo
 from vibe.core.tools.builtins.skill import render_skill_result, sample_skill_files
 
 if TYPE_CHECKING:
@@ -45,9 +45,9 @@ class SkillProjection:
     """One derivation's view of the skill catalogue.
 
     ``definitions`` are the root skills Core is configured with; plugin skills
-    reach Core through ``plugin_contexts``. ``payloads`` covers *both*, so every
-    name Core can put in the ``skill`` tool enum has a body the Runtime can
-    serve.
+    reach Core through ``plugin_contexts``. ``payloads`` covers every projected
+    skill, while ``model_payloads`` contains only the subset Core may
+    expose through the ``skill`` tool.
 
     ``catalogue`` is the same set spelled for the client: one entry per name
     that survived projection, plugin aliases included. It is what the runtime
@@ -58,6 +58,7 @@ class SkillProjection:
 
     definitions: tuple[RustSkillDefinition, ...]
     payloads: Mapping[str, str]
+    model_payloads: Mapping[str, str]
     plugin_contexts: tuple[RustPluginContextDefinition, ...]
     catalogue: tuple[SkillInfo, ...]
 
@@ -91,6 +92,7 @@ def discover_session_skills(
         SkillProjection(
             definitions=(),
             payloads=projection.payloads,
+            model_payloads={},
             plugin_contexts=tuple(_without_skills(context) for context in contexts),
             catalogue=projection.catalogue,
         ),
@@ -107,6 +109,32 @@ def _without_skills(
     )
 
 
+def project_model_invocable_plugin_contexts(
+    contexts: Iterable[RustPluginContextDefinition], skills: Mapping[str, SkillInfo]
+) -> tuple[RustPluginContextDefinition, ...]:
+    """Remove explicit-only skills from model-visible plugin contexts."""
+    projected: list[RustPluginContextDefinition] = []
+    for context in contexts:
+        definitions = [
+            definition
+            for definition in context.capabilities.skills
+            if (skill := skills.get(definition.name)) is None or skill.model_invocable
+        ]
+        if len(definitions) == len(context.capabilities.skills):
+            projected.append(context)
+            continue
+        projected.append(
+            context.model_copy(
+                update={
+                    "capabilities": context.capabilities.model_copy(
+                        update={"skills": definitions}
+                    )
+                }
+            )
+        )
+    return tuple(projected)
+
+
 def _payload(skill: SkillInfo) -> str:
     """Render the body the Runtime serves, file sample included."""
     return render_skill_result(skill, sample_skill_files(skill.skill_dir)).content
@@ -120,18 +148,29 @@ def project_core_skills(
 ) -> SkillProjection:
     claimed: set[Path] = set()
     payloads: dict[str, str] = {}
+    model_payloads: dict[str, str] = {}
     definitions: list[RustSkillDefinition] = []
     catalogue: list[SkillInfo] = []
 
-    contexts = tuple(plugin_contexts)
+    contexts = project_model_invocable_plugin_contexts(plugin_contexts, plugin_skills)
     for definition in (
         definition for context in contexts for definition in context.capabilities.skills
     ):
         claimed.add(_resolved(Path(definition.path)))
         skill = plugin_skills.get(definition.name)
         if skill is not None:
-            payloads[definition.name] = _payload(skill)
+            payload = _payload(skill)
+            payloads[definition.name] = payload
+            model_payloads[definition.name] = payload
             catalogue.append(skill.model_copy(update={"name": definition.name}))
+
+    for name, skill in plugin_skills.items():
+        if skill.model_invocable or name in payloads:
+            continue
+        if skill.skill_path is not None:
+            claimed.add(_resolved(skill.skill_path))
+        payloads[name] = _payload(skill)
+        catalogue.append(skill.model_copy(update={"name": name}))
 
     for name, skill in root_skills.items():
         path = skill.skill_path
@@ -151,13 +190,17 @@ def project_core_skills(
         if definition is None:
             continue
         claimed.add(resolved)
-        definitions.append(definition)
-        payloads[name] = _payload(skill)
+        payload = _payload(skill)
+        payloads[name] = payload
+        if skill.model_invocable:
+            definitions.append(definition)
+            model_payloads[name] = payload
         catalogue.append(skill)
 
     return SkillProjection(
         definitions=tuple(definitions),
         payloads=payloads,
+        model_payloads=model_payloads,
         plugin_contexts=contexts,
         catalogue=tuple(catalogue),
     )
@@ -196,6 +239,8 @@ def _render_builtin_skill(skill: SkillInfo) -> str:
         lines.append("allowed-tools: " + json.dumps(list(skill.allowed_tools)))
     if not skill.user_invocable:
         lines.append("user-invocable: false")
+    if not skill.model_invocable:
+        lines.append(f"{DISABLE_MODEL_INVOCATION_FIELD}: true")
     lines.extend(["---", "", skill.prompt, ""])
     return "\n".join(lines)
 
@@ -224,4 +269,5 @@ __all__ = [
     "builtin_skills_dir",
     "discover_session_skills",
     "project_core_skills",
+    "project_model_invocable_plugin_contexts",
 ]

@@ -73,6 +73,7 @@ from vibe.app_server.protocol import (
     SkillsInstalledResponse,
     SkillsRemoveParams,
     SkillsSetAliasParams,
+    SkillsSetEnabledParams,
     SkillsSetLatestParams,
     SkillsSetVersionParams,
     SkillsUpdatesParams,
@@ -123,6 +124,7 @@ def _connector_sources(
     return [
         MCPSourceSummary(
             name=source.alias,
+            display_name=source.display_name,
             kind=MCPSourceKind.CONNECTOR,
             transport="connector",
             status=MCPSourceStatus(source.status),
@@ -283,6 +285,14 @@ class SkillsResource:
             ),
         )
 
+    async def set_enabled(self, name: str, enabled: bool) -> list[SkillSummary]:
+        return await self._mutate(
+            "skills/setEnabled",
+            SkillsSetEnabledParams(
+                session_id=self._state.session_id, name=name, enabled=enabled
+            ),
+        )
+
     async def convert_local(self, name: str, scope: str = "global") -> bool:
         client = await self._connection.connect()
         response = validate_wire(
@@ -333,6 +343,7 @@ class MCPResource:
                 if source.kind is MCPSourceKind.CONNECTOR
             ]
             connector_error = exc.error.message
+            manage_connectors_url = self._state.mcp.manage_connectors_url
         else:
             connectors = _connector_sources(connector_response)
             connector_error = (
@@ -340,6 +351,7 @@ class MCPResource:
                 if connector_response.catalog.disposition in {"memory", "fresh_cache"}
                 else self._state.mcp.connector_error
             )
+            manage_connectors_url = connector_response.manage_url
 
         connector_names = {source.name for source in connectors}
         connector_discovery_errors = {
@@ -361,6 +373,7 @@ class MCPResource:
                 **connector_discovery_errors,
             },
             connector_error=connector_error,
+            manage_connectors_url=manage_connectors_url,
         )
         self._state.mcp = state
         return state
@@ -440,6 +453,7 @@ class MCPResource:
         name: str | None,
         scopes: list[str],
         transport: MCPAddTransport,
+        allow_insecure_http: bool = False,
     ) -> MCPAddResponse:
         client = await self._connection.connect()
         response = validate_wire(
@@ -452,6 +466,7 @@ class MCPResource:
                     name=name,
                     scopes=scopes,
                     transport=transport,
+                    allow_insecure_http=allow_insecure_http,
                 ),
             ),
         )

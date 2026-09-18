@@ -118,7 +118,7 @@ class TestBannerInitialState:
         assert banner._initial_state.experimental_harness is False
         assert "harness" not in banner._initial_state.active_model
 
-    def test_banner_shows_unified_harness_when_experimental(self) -> None:
+    def test_banner_shows_unified_harness_when_unified(self) -> None:
         banner = Banner(
             config=_make_config(), skills_count=0, experimental_harness=True
         )

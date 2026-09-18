@@ -28,6 +28,7 @@ from vibe.app_server.protocol import (
     ContextInjectParams,
     ContextInjectResponse,
     EmptyResponse,
+    ModelConfigWriteParams,
     ProtocolErrorCode,
     RuntimeMutationResponse,
     RuntimeUpdatedParams,
@@ -40,6 +41,8 @@ from vibe.app_server.protocol import (
     SessionHistoryClearParams,
     SessionListParams,
     SessionListResponse,
+    SessionPinParams,
+    SessionPinResponse,
     SessionReadParams,
     SessionReadResponse,
     SessionResumeParams,
@@ -394,6 +397,10 @@ class SessionBackend(Protocol):
         self, params: ConfigWriteParams
     ) -> SessionBackendResult[ConfigWriteResponse]: ...
 
+    async def write_model_config(
+        self, params: ModelConfigWriteParams
+    ) -> SessionBackendResult[ConfigWriteResponse]: ...
+
     async def reload_config(
         self, params: ConfigReloadParams
     ) -> SessionBackendResult[ConfigMutationResponse]: ...
@@ -534,6 +541,13 @@ class SessionBackendHost(Protocol):
     ) -> SessionTitleUpdateResponse: ...
 
     async def shutdown(self) -> None: ...
+
+
+@runtime_checkable
+class SessionBackendHostPin(Protocol):
+    """Optional selected-backend ownership of durable session pinning."""
+
+    async def pin(self, params: SessionPinParams) -> SessionPinResponse: ...
 
 
 @runtime_checkable

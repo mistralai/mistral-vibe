@@ -42,6 +42,13 @@ def test_parse_mcp_add_args_defaults_to_login() -> None:
 
     assert args.transport == "streamable-http"
     assert args.login is True
+    assert args.allow_insecure_http is False
+
+
+def test_parse_mcp_add_args_accepts_allow_insecure_http() -> None:
+    args = parse_mcp_add_args("http://192.168.0.8:3002/mcp --allow-insecure-http")
+
+    assert args.allow_insecure_http is True
 
 
 @pytest.mark.parametrize(
@@ -134,6 +141,41 @@ async def test_mcp_add_saves_http_transport(monkeypatch: pytest.MonkeyPatch) -> 
     assert isinstance(server, MCPHttp)
     assert server.transport == "http"
     assert isinstance(server.auth, MCPOAuth)
+
+
+@pytest.mark.asyncio
+async def test_mcp_add_rejects_lan_http_without_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = build_test_vibe_app(config=build_test_vibe_config())
+    mounted_widgets = _capture_mounted_widgets(app, monkeypatch)
+
+    await app.prepare()
+    await app._mcp_add("http://192.168.0.8:3002/mcp --transport http --no-login")
+
+    assert not (await build_default_orchestrator()).config.mcp_servers
+    assert any(
+        isinstance(widget, ErrorMessage)
+        and "--allow-insecure-http" in str(widget._error)
+        for widget in mounted_widgets
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_add_allows_lan_http_with_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = build_test_vibe_app(config=build_test_vibe_config())
+    _capture_mounted_widgets(app, monkeypatch)
+
+    await app.prepare()
+    await app._mcp_add(
+        "http://192.168.0.8:3002/mcp --transport http --no-login --allow-insecure-http"
+    )
+
+    server = (await build_default_orchestrator()).config.mcp_servers[0]
+    assert isinstance(server, MCPHttp)
+    assert server.url == "http://192.168.0.8:3002/mcp"
 
 
 @pytest.mark.asyncio

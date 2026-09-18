@@ -68,6 +68,7 @@ type UnifiedToolCategory = Literal[
     "file_read",
     "file_search",
     "file_write",
+    "scratchpad",
     "shell",
     "skill",
     "todo",
@@ -201,6 +202,17 @@ class _TodoResult(_SourceModel):
     verb: str = ""
     todos: list[TodoEffectItem] = Field(default_factory=list)
     total_count: int = Field(ge=0)
+
+
+class _ScratchpadArguments(_SourceModel):
+    action: str = Field(min_length=1)
+    path: str | None = None
+
+
+class _ScratchpadResult(_SourceModel):
+    verb: str = Field(min_length=1)
+    path: str | None = None
+    files: list[str] = Field(default_factory=list)
 
 
 class _ToolResultEnvelope(_SourceModel):
@@ -902,6 +914,45 @@ def _project_todo(detail: GenericEffectDetail) -> _ProjectedCall:
     return _ProjectedCall(detail=semantic, project_result=project_result)
 
 
+def _project_scratchpad(detail: GenericEffectDetail) -> _ProjectedCall:
+    arguments = _ScratchpadArguments.model_validate(detail.input)
+    # No semantic detail type: like `_project_labeled`, this rewrites the display
+    # and leaves the generic effect intact.
+    noun = arguments.path or "the scratchpad"
+    if arguments.action == "read":
+        verb, settled_verb = "Reading", "Read"
+    elif arguments.action == "write":
+        verb, settled_verb = "Saving", "Saved"
+    elif arguments.action == "list":
+        verb, settled_verb, noun = "Listing", "Listed", "the scratchpad"
+    else:
+        verb, settled_verb = "Running", "Ran"
+        noun = f"unknown scratchpad action: {arguments.action}"
+    display = EffectCallDisplay(
+        summary=f"{verb} {noun}",
+        verb=verb,
+        message=noun,
+        settled_verb=settled_verb,
+        settled_message=noun,
+        status_text="Using the scratchpad",
+    )
+    semantic = detail.model_copy(update={"display": display})
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        envelope = _ToolResultEnvelope.model_validate(state.output)
+        result = _ScratchpadResult.model_validate(envelope.structured_content)
+        settled = result.path or f"{len(result.files)} files"
+        return state.model_copy(
+            update={
+                "display": state.display.model_copy(
+                    update={"verb": result.verb, "message": settled}
+                )
+            }
+        )
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
 def _search_replace_annotations(
     envelope: _ToolResultEnvelope,
 ) -> _SearchReplaceAnnotations:
@@ -1326,6 +1377,8 @@ _CALL_PROJECTORS: dict[str, Callable[[GenericEffectDetail], _ProjectedCall]] = {
     "web_fetch": _project_web_fetch,
     "grep": _project_grep,
     "todo": _project_todo,
+    "vibe.todo": _project_todo,
+    "vibe.unified_harness_scratchpad": _project_scratchpad,
 }
 
 _TOOL_CATEGORIES: dict[str, UnifiedToolCategory] = {
@@ -1342,6 +1395,8 @@ _TOOL_CATEGORIES: dict[str, UnifiedToolCategory] = {
     "web_fetch": "web_fetch",
     "grep": "file_search",
     "todo": "todo",
+    "vibe.todo": "todo",
+    "vibe.unified_harness_scratchpad": "scratchpad",
 }
 
 

@@ -5,7 +5,6 @@ import base64
 from collections.abc import Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
-from datetime import datetime
 from functools import lru_cache
 import hashlib
 import json
@@ -28,7 +27,7 @@ from vibe.app_server._projection import (
 )
 from vibe.app_server._session_model import active_model_is_pinned
 from vibe.app_server._state import build_stored_public_state, history_page
-from vibe.app_server._utils import now_ms
+from vibe.app_server._utils import now_ms, optional_time_ms, time_ms
 from vibe.app_server._workspace import (
     WorkspaceTrustError,
     decide_workspace_trust,
@@ -625,7 +624,16 @@ def config_schema_response() -> ConfigSchemaReadResponse:
 def project_session_list(
     config: VibeConfigSchema, params: SessionListParams
 ) -> SessionListResponse:
-    sessions = _continue_resume_sessions(config, params.cwd)
+    # `cwds` is the union of what `cwd` matches for each entry, so an explicit
+    # empty list matches nothing and an absent one keeps the single-cwd search.
+    requested = params.cwds if params.cwds is not None else [params.cwd]
+    sessions = list(
+        {
+            session.session_id: session
+            for cwd in requested
+            for session in _continue_resume_sessions(config, cwd)
+        }.values()
+    )
     roots = _session_roots(sessions)
     filtered = [
         session
@@ -655,8 +663,11 @@ def project_session_list(
                     session.session_id, config.session_logging
                 ),
                 status=IdleSessionStatus(),
-                created_at=_time_ms(session.start_time or session.updated_at),
-                updated_at=_time_ms(session.updated_at),
+                created_at=time_ms(
+                    session.start_time or session.updated_at, fallback=now_ms
+                ),
+                updated_at=time_ms(session.updated_at, fallback=now_ms),
+                bumped_at=optional_time_ms(session.bumped_at),
                 cwd=session.cwd or None,
             )
             for session in page
@@ -758,13 +769,6 @@ def _session_cursor_index(sessions: list[ResumeSessionInfo], cursor: str | None)
         ),
         len(sessions),
     )
-
-
-def _time_ms(value: str) -> int:
-    try:
-        return int(datetime.fromisoformat(value).timestamp() * 1000)
-    except ValueError:
-        return now_ms()
 
 
 def worktree_list_response(

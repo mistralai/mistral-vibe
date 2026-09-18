@@ -152,6 +152,18 @@ def test_public_session_harness_field_defaults_to_none() -> None:
     assert session.model_dump(mode="json")["harness"] is None
 
 
+def test_public_session_serializes_nullable_bumped_at() -> None:
+    session = PublicSession(
+        id="session-1",
+        status=IdleSessionStatus(),
+        created_at=1,
+        updated_at=1,
+        bumped_at=42,
+    )
+
+    assert session.model_dump(mode="json")["bumpedAt"] == 42
+
+
 @pytest.mark.parametrize("harness", ["legacy", "unified"])
 def test_public_session_harness_field_accepts_provenance(harness: str) -> None:
     session = PublicSession(

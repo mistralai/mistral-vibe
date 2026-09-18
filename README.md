@@ -157,6 +157,26 @@ The `task` tool allows the agent to delegate work to subagents:
 
 Create custom subagents by adding `agent_type = "subagent"` to your agent configuration. Vibe comes with a built-in subagent called `explore`, a read-only subagent for codebase exploration and skill loading used internally for delegation.
 
+When the Unified Harness is active, the interactive prompt shows each known
+subagent's name, type, live status, and latest measured context size. Opening a
+subagent also shows its active status above the prompt and its context use in the
+bottom-right gauge. With an empty or locally edited prompt, press Down from its
+last line to focus the list;
+unsent text stays in the prompt. Use Up and Down to highlight a row, then press
+Enter to open it; with the mouse, hover to highlight and click to open. Select **Main
+conversation** to return, or press Escape from a subagent view. Ctrl+C adds a
+local-only, error-styled user message explaining that subagents cannot be
+controlled directly; return to Main and ask the main agent to stop one. Press
+Ctrl+C again to quit Vibe. After
+opening Main conversation, press Up from its row to focus the prompt. While a
+subagent view is open, Up stops at the Main row. Idle subagents remain listed as
+**ready** because the main agent can send them more instructions. Explicitly
+stopped subagents leave the list after you return to Main. The first subagent
+update does not add a local information message. When a subagent becomes ready,
+its transcript shows a local information message explaining how to give it a
+new goal or stop it from Main. Set `show_subagent_status_list = false` in
+`config.toml`, or change it through `/config`, to hide this UI.
+
 ### Interactive User Questions
 
 The `ask_user_question` tool allows the agent to ask you clarifying questions during its work. This enables more interactive and collaborative workflows.
@@ -392,6 +412,25 @@ allowed-tools:
 
 This skill helps analyze code quality and suggest improvements.
 ```
+
+By default, both the user and the model can invoke a skill. Invocation controls
+are independent:
+
+- `user-invocable: false` hides the skill from the `/` menu and prevents direct
+  `/skill-name` invocation while still allowing the model to load it.
+- `disable-model-invocation: true` follows the Claude Code convention and makes
+  the skill explicit-only: users can still invoke `/skill-name`, but the model
+  does not see or invoke it automatically.
+- Skills using OpenAI's `agents/openai.yaml` convention can express the same
+  explicit-only behavior. Vibe applies this policy regardless of active model or provider:
+
+  ```yaml
+  policy:
+    allow_implicit_invocation: false
+  ```
+
+  If the policy metadata is malformed or contains an unknown policy field,
+  Vibe reports the issue and keeps the skill explicit-only.
 
 ### Skill Discovery
 
@@ -926,6 +965,12 @@ The app-server never removes a worktree on its own. Closing a session does not c
 Two things are cleaned up without asking, neither of which is a worktree you could have worked in. A session whose very first turn never completed has its worktree rolled back, because such a session is never published and leaves no session file — there is nothing to return to. And a reservation that never became a worktree, an empty directory left by a claim whose `git worktree add` did not land, is discarded the next time a session starts in that repo.
 
 The cost of that conservatism is that a worktree whose app-server was killed outright stays on disk, holding a marker for a session that no longer exists. Removing it is a judgement about whether you are finished with the work, which only you can make.
+
+On Windows, Vibe resolves an absolute Git executable for automatic repository
+inspection and ignores executables inside the current project. Set
+`GIT_PYTHON_GIT_EXECUTABLE` to an absolute path when using a custom or portable
+Git installation. Vibe still starts when no trusted Git executable is available;
+only Git-dependent metadata and features are unavailable.
 
 ### Update Settings
 

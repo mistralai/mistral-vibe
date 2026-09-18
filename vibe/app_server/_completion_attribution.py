@@ -23,6 +23,11 @@ type CompletionAttributionSource = Callable[
     [Literal["agent", "compaction"], int], dict[str, str]
 ]
 
+# Late-binding source of the current user message id, read per completion.
+# The adapter learns the id from history snapshots, so a callable (not a
+# snapshot) keeps the attribution current across turns.
+type MessageIdSource = Callable[[], str | None]
+
 
 def request_call_type(
     purpose: Literal["agent", "compaction"], iteration: int
@@ -42,12 +47,18 @@ def request_call_type(
 
 
 def build_completion_attribution(
-    telemetry: TelemetryClient, launch_context: LaunchContext | None
+    telemetry: TelemetryClient,
+    launch_context: LaunchContext | None,
+    *,
+    message_id_getter: MessageIdSource | None = None,
 ) -> CompletionAttributionSource:
     """One session's Vibe attribution, shaped as a provider request's ``metadata``.
 
     Reads the telemetry client on each call rather than snapshotting it, so a
     request reports the same session the client events for that session do.
+    ``message_id_getter`` is read live so the attribution picks up the current
+    turn's user message id, matching the legacy loop's
+    ``self._current_user_message_id``.
     """
 
     def attribution(
@@ -58,6 +69,7 @@ def build_completion_attribution(
             session_id=telemetry.session_id,
             parent_session_id=telemetry.parent_session_id,
             call_type=request_call_type(purpose, iteration),
+            message_id=(message_id_getter() if message_id_getter is not None else None),
             user_plan=telemetry.user_plan,
         )
         return {

@@ -45,6 +45,9 @@ def set_proxy_var(key: str, value: str) -> None:
         )
 
     GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
+    # Proxy settings can name internal hosts, so the file is created
+    # owner-only; an existing file keeps its current mode.
+    GLOBAL_ENV_FILE.path.touch(mode=0o600, exist_ok=True)
     set_key(GLOBAL_ENV_FILE.path, key, value)
 
 

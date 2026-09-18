@@ -20,7 +20,12 @@ from vibe.core.skills.models import (
     SkillScope,
     SkillSource,
 )
-from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
+from vibe.core.skills.parser import (
+    SkillParseError,
+    load_openai_skill_metadata,
+    openai_skill_metadata_path,
+    parse_skill_markdown,
+)
 from vibe.core.skills.registry import _manifest, _resolved, _store
 from vibe.core.utils import name_matches
 from vibe.observability.logging import logger
@@ -43,8 +48,9 @@ class SkillManager:
         self._include_builtins = include_builtins
         self._search_paths = self._compute_search_paths(self._config)
         self._config_issues: list[SkillConfigIssue] = []
+        self._discovered = self._discover_skills()
         self.available_skills: Mapping[str, SkillInfo] = MappingProxyType(
-            self._apply_filters(self._discover_skills())
+            self._apply_filters(self._discovered)
         )
 
         if self.available_skills:
@@ -205,6 +211,34 @@ class SkillManager:
                     out[(entry.name, scope)] = info
         return list(out.values())
 
+    def installed_skills(self) -> list[SkillInfo]:
+        """Everything installed, one entry per (name, scope, source).
+
+        Not de-duped: a skill pinned both globally and in the project is two
+        pins the user can manage separately, and a registry pin shadowed by a
+        local file of the same name is still a manifest entry they can remove.
+        Collapsing by name here is what made those unreachable. The browser
+        collapses for display and keeps this set for per-scope actions.
+
+        Builtins are excluded, and skills matched by ``disabled_skills`` are
+        kept so one turned off can be turned back on.
+
+        Reads the discovery done at construction rather than re-walking the
+        search paths, so listing does not hit the disk on the event loop.
+        """
+        out: dict[tuple[str, SkillScope, SkillSource], SkillInfo] = {}
+        for info in self._discovered.values():
+            if info.source is SkillSource.LOCAL:
+                out[(info.name, info.scope, info.source)] = info
+        for base, scope in self._search_paths:
+            if not base.is_dir():
+                continue
+            for name, info in self._discover_skills_in_dir(base, scope).items():
+                out.setdefault((name, scope, SkillSource.LOCAL), info)
+        for info in self.registry_pins():
+            out.setdefault((info.name, info.scope, info.source), info)
+        return list(out.values())
+
     def _load_registry_entry(
         self, entry: _manifest.ManifestEntry, scope: SkillScope
     ) -> SkillInfo | None:
@@ -309,7 +343,22 @@ class SkillManager:
             source=source,
             scope=scope,
             registry=registry,
+            model_invocable=self._openai_allows_implicit_invocation(skill_path),
         )
+
+    def _openai_allows_implicit_invocation(self, skill_path: Path) -> bool:
+        metadata_path = openai_skill_metadata_path(skill_path)
+        try:
+            metadata = load_openai_skill_metadata(skill_path)
+        except SkillParseError as e:
+            logger.warning("Failed to parse skill metadata at %s: %s", metadata_path, e)
+            self._config_issues.append(
+                SkillConfigIssue(
+                    file=metadata_path, message=f"Model invocation disabled: {e}"
+                )
+            )
+            return False
+        return metadata is None or metadata.allows_implicit_invocation
 
     @property
     def _reserved_builtins(self) -> Mapping[str, SkillInfo]:
@@ -325,6 +374,12 @@ class SkillManager:
 
     def get_skill(self, name: str) -> SkillInfo | None:
         return self.available_skills.get(name)
+
+    def get_model_invocable_skill(self, name: str) -> SkillInfo | None:
+        skill = self.get_skill(name)
+        if skill is None or not skill.model_invocable:
+            return None
+        return skill
 
     def parse_skill_command(self, text_prompt: str) -> ParsedSkillCommand | None:
         stripped = text_prompt.strip()

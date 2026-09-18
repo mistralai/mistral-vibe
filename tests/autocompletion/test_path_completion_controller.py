@@ -247,6 +247,7 @@ def test_respects_max_entries_to_process_limit(file_tree: Path) -> None:
 
     controller.on_text_changed("@f", cursor_index=2)
 
+    assert view.suggestions, "Expected completion suggestions for @f"
     suggestions, _ = view.suggestions[-1]
     assert len(suggestions) <= 10
 
@@ -259,6 +260,7 @@ def test_respects_target_matches_limit_for_listing(file_tree: Path) -> None:
 
     controller.on_text_changed("@item", cursor_index=5)
 
+    assert view.suggestions, "Expected completion suggestions for @item"
     suggestions, _ = view.suggestions[-1]
     assert len(suggestions) <= 5
 
@@ -271,6 +273,7 @@ def test_respects_target_matches_limit_for_fuzzy_search(file_tree: Path) -> None
 
     controller.on_text_changed("@test", cursor_index=5)
 
+    assert view.suggestions, "Expected completion suggestions for @test"
     suggestions, _ = view.suggestions[-1]
     assert len(suggestions) <= 5
 

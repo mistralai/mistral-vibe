@@ -19,6 +19,7 @@ class TestSkillMetadata:
         assert meta.metadata == {}
         assert meta.allowed_tools == []
         assert meta.user_invocable is True
+        assert meta.disable_model_invocation is False
 
     def test_creates_with_all_fields(self) -> None:
         meta = SkillMetadata(
@@ -29,6 +30,7 @@ class TestSkillMetadata:
             metadata={"author": "Test Author", "version": "1.0"},
             allowed_tools=["bash", "read"],
             user_invocable=False,
+            disable_model_invocation=True,
         )
 
         assert meta.name == "full-skill"
@@ -38,6 +40,7 @@ class TestSkillMetadata:
         assert meta.metadata == {"author": "Test Author", "version": "1.0"}
         assert meta.allowed_tools == ["bash", "read"]
         assert meta.user_invocable is False
+        assert meta.disable_model_invocation is True
 
     def test_raises_error_for_uppercase_name(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
@@ -218,6 +221,23 @@ class TestSkillInfo:
         assert info.metadata == meta.metadata
         assert info.allowed_tools == meta.allowed_tools
         assert info.user_invocable == meta.user_invocable
+
+    def test_disable_model_invocation_maps_to_internal_policy(
+        self, tmp_path: Path
+    ) -> None:
+        skill_path = tmp_path / "explicit-only" / "SKILL.md"
+        skill_path.parent.mkdir()
+        skill_path.touch()
+        meta = SkillMetadata(
+            name="explicit-only",
+            description="Explicit only",
+            disable_model_invocation=True,
+        )
+
+        info = SkillInfo.from_metadata(meta, skill_path, prompt="Do it.")
+
+        assert info.model_invocable is False
+        assert info.user_invocable is True
 
     def test_can_omit_skill_path_for_builtin_inline_prompt(self) -> None:
         info = SkillInfo(

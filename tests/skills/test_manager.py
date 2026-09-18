@@ -438,6 +438,68 @@ class TestSkillUserInvocable:
         assert skills["default-skill"].user_invocable is True
 
 
+class TestSkillModelInvocable:
+    def test_disable_model_invocation_keeps_explicit_slash_invocation(
+        self, skills_dir: Path
+    ) -> None:
+        create_skill(
+            skills_dir,
+            "explicit-only",
+            disable_model_invocation=True,
+            body="Only run explicitly.",
+        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        manager = SkillManager(lambda: config)
+
+        skill = manager.get_skill("explicit-only")
+
+        assert skill is not None
+        assert skill.model_invocable is False
+        assert manager.get_model_invocable_skill("explicit-only") is None
+        assert manager.parse_skill_command("/explicit-only") is not None
+
+    def test_openai_policy_disables_model_invocation(self, skills_dir: Path) -> None:
+        skill_dir = create_skill(skills_dir, "openai-explicit-only")
+        agents_dir = skill_dir / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "openai.yaml").write_text(
+            "policy:\n  allow_implicit_invocation: false\n", encoding="utf-8"
+        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        manager = SkillManager(lambda: config)
+
+        skill = manager.get_skill("openai-explicit-only")
+
+        assert skill is not None
+        assert skill.model_invocable is False
+        assert manager.parse_skill_command("/openai-explicit-only") is not None
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            'policy:\n  allow_implicit_invocation: "false"\n',
+            "policy:\n  allow_implicit_invocaton: false\n",
+        ],
+    )
+    def test_invalid_openai_policy_keeps_skill_explicit_only(
+        self, skills_dir: Path, metadata: str
+    ) -> None:
+        skill_dir = create_skill(skills_dir, "invalid-openai-policy")
+        agents_dir = skill_dir / "agents"
+        agents_dir.mkdir()
+        metadata_path = agents_dir / "openai.yaml"
+        metadata_path.write_text(metadata, encoding="utf-8")
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        manager = SkillManager(lambda: config)
+
+        skill = manager.get_skill("invalid-openai-policy")
+
+        assert skill is not None
+        assert skill.model_invocable is False
+        assert manager.parse_skill_command("/invalid-openai-policy") is not None
+        assert manager.config_issues[0].file == metadata_path
+
+
 class TestParseSkillCommand:
     def test_plain_text_returns_none(self, skill_manager: SkillManager) -> None:
         assert skill_manager.parse_skill_command("hello world") is None

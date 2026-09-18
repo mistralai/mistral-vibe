@@ -113,7 +113,7 @@ async def test_teleport_command_uses_effective_harness_backend() -> None:
         ):
             app._refresh_command_registry()
 
-        assert app.commands.get_command_name("/teleport") is None
+        assert app.commands.get_command_name("/teleport") == "teleport"
 
 
 @pytest.mark.asyncio

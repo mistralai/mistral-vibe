@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pydantic import ValidationError
 from textual.widget import Widget
 
 from vibe.app_server.events import (
@@ -37,8 +38,10 @@ from vibe.app_server.models import (
     ScheduledLoopFiredNoticeDetail,
     SessionTitleUpdatedNoticeDetail,
     SkippedEffectState,
+    TodoEffectOutput,
     WaitingForInputNoticeDetail,
 )
+from vibe.cli.textual_ui.todo_tracker import TodoTracker
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.loading import (
     DEFAULT_LOADING_STATUS,
@@ -54,6 +57,10 @@ from vibe.cli.textual_ui.widgets.messages import (
     SlashCommandMessage,
     UserCommandMessage,
 )
+from vibe.cli.textual_ui.widgets.model_change import (
+    ModelChangeMessage,
+    model_change_model,
+)
 from vibe.cli.textual_ui.widgets.tools import (
     ToolCallMessage,
     ToolGroup,
@@ -63,6 +70,7 @@ from vibe.cli.textual_ui.widgets.tools import (
     entry_keeps_tool_group,
     is_manual_shell_entry,
 )
+from vibe.utils.tool_presentation import ToolEffectKind
 
 if TYPE_CHECKING:
     from vibe.cli.textual_ui.widgets.loading import LoadingWidget
@@ -84,6 +92,8 @@ class EventHandler:
         get_show_thinking: Callable[[], bool] | None = None,
         on_context_cleared: Callable[[Path | None], Awaitable[None]] | None = None,
         on_session_title_changed: Callable[[str], None] | None = None,
+        todo_tracker: TodoTracker | None = None,
+        on_todos_changed: Callable[[], None] | None = None,
     ) -> None:
         self.mount_callback = mount_callback
         self.get_tools_collapsed = get_tools_collapsed
@@ -91,6 +101,8 @@ class EventHandler:
         self.get_show_thinking = get_show_thinking or (lambda: True)
         self.on_context_cleared = on_context_cleared
         self.on_session_title_changed = on_session_title_changed
+        self.todo_tracker = todo_tracker
+        self.on_todos_changed = on_todos_changed
         self.tool_calls: dict[str, ToolCallMessage] = {}
         self.current_compact: CompactMessage | None = None
         self.current_streaming_message: AssistantMessage | None = None
@@ -177,12 +189,10 @@ class EventHandler:
                 if _effect_is_terminal(entry):
                     await self._handle_effect_completed(entry, loading_widget)
                 return tool_call
-            case PublicCheckpointEntry(kind="compaction"):
+            case PublicCheckpointEntry():
                 await self._resolve_retry_presentation(continue_assistant=False)
                 await self.finalize_streaming()
-                await self._handle_compact_start()
-                if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
-                    await self._handle_compact_end()
+                await self._handle_checkpoint_added(entry)
             case PublicNoticeEntry():
                 await self._resolve_retry_presentation(continue_assistant=False)
                 await self._handle_notice(entry, loading_widget)
@@ -194,6 +204,22 @@ class EventHandler:
                     f"Unsupported public history entry: {type(entry).__name__}"
                 )
         return None
+
+    async def _handle_checkpoint_added(self, entry: PublicCheckpointEntry) -> None:
+        """Render a transcript annotation the Harness wrote.
+
+        An unknown kind is skipped rather than raised on: checkpoint kinds are
+        added by the Harness, and a Runtime newer than this CLI must not take
+        the event stream down with it.
+        """
+        match entry.kind:
+            case "compaction":
+                await self._handle_compact_start()
+                if entry.generation_status is PublicEntryGenerationStatus.COMPLETED:
+                    await self._handle_compact_end()
+            case "model_change":
+                if (model := model_change_model(entry)) is not None:
+                    await self.mount_callback(ModelChangeMessage(model))
 
     async def _handle_entry_updated(
         self, update: HistoryEntryUpdated, loading_widget: LoadingWidget | None
@@ -254,12 +280,29 @@ class EventHandler:
             loading_widget.set_status(entry.detail.display.status_text)
         return tool_call
 
+    def _record_todos(self, entry: PublicEffectEntry) -> str | None:
+        # ``None`` means "render this the old way".
+        if self.todo_tracker is None or entry.detail.kind is not ToolEffectKind.TODO:
+            return None
+        if not isinstance(entry.state, CompletedEffectState):
+            return None
+        try:
+            output = TodoEffectOutput.model_validate(entry.state.output)
+        except ValidationError:
+            return None
+        delta = self.todo_tracker.record(output.todos)
+        if self.on_todos_changed is not None:
+            self.on_todos_changed()
+        return delta
+
     async def _handle_effect_completed(
         self, entry: PublicEffectEntry, loading_widget: LoadingWidget | None
     ) -> None:
         call_widget = self.tool_calls.get(entry.id)
         anchor = self._tool_call_anchors.get(entry.id) or call_widget
-        result = ToolResultMessage(entry, call_widget)
+        result = ToolResultMessage(
+            entry, call_widget, todo_delta=self._record_todos(entry)
+        )
         await self.mount_callback(result, after=anchor)
         if _effect_state_is_failure(entry.state):
             self._pending_error_results.append(result)

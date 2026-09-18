@@ -64,7 +64,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--experimental-harness",
         action="store_true",
         default=False,
-        help="Run backend contract tests with the experimental Unified Harness backend.",
+        help="Run backend contract tests with the Unified Harness backend.",
     )
 
 

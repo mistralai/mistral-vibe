@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from git import Repo
@@ -43,6 +44,8 @@ def make_mock_repo(
     mock.head.is_detached = is_detached
     mock.active_branch.name = branch
     mock.git.diff.return_value = diff
+    mock.git.return_value.diff.return_value = diff
+    mock.git.return_value.rev_parse.return_value = ".git/index"
     mock.git.branch.return_value = ""
     mock.git.rev_list.return_value = "0"
     mock.git.rev_parse.return_value = "abc123"
@@ -283,6 +286,42 @@ class TestGitRepositoryGetDiff:
 
         assert "diff --git a/new.txt b/new.txt" in diff
         assert source_repo.git.status("--short") == status_before
+
+    @pytest.mark.parametrize(
+        ("config_section", "config_option", "attributes"),
+        [
+            ("core", "fsmonitor", None),
+            ("diff", "external", None),
+            ('diff "malicious"', "textconv", "tracked.txt diff=malicious\n"),
+        ],
+    )
+    @pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX marker command")
+    @pytest.mark.asyncio
+    async def test_disables_repository_diff_helpers(
+        self,
+        tmp_path: Path,
+        config_section: str,
+        config_option: str,
+        attributes: str | None,
+    ) -> None:
+        source_repo = make_real_repo(tmp_path)
+        if attributes is not None:
+            (tmp_path / ".gitattributes").write_text(attributes)
+            source_repo.index.add([".gitattributes"])
+            source_repo.index.commit("add diff attributes")
+
+        marker = tmp_path / "diff-helper-ran"
+        source_repo.config_writer().set_value(
+            config_section, config_option, f"touch {marker}"
+        ).release()
+        (tmp_path / "tracked.txt").write_text("changed\n")
+        assert not marker.exists()
+
+        async with GitRepository(tmp_path) as git_repo:
+            diff = await git_repo._get_diff(source_repo)
+
+        assert "diff --git a/tracked.txt b/tracked.txt" in diff
+        assert not marker.exists()
 
 
 class TestGitRepositoryIsCommitPushed:

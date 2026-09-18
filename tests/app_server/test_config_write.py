@@ -7,7 +7,7 @@ import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.stubs.app_server import build_test_app_server
-from vibe.app_server._config_write import config_write_targets
+from vibe.app_server._config_write import config_write_targets, model_config_write_ops
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.protocol import (
     ClientInfo,
@@ -175,3 +175,47 @@ async def test_config_write_targets_skip_undiscovered_project(
     orchestrator = await build_default_orchestrator()
 
     assert config_write_targets(orchestrator) == ["user-toml", "overrides"]
+
+
+def test_picking_the_default_model_is_written_as_an_empty_alias() -> None:
+    """*Prepare*: A configuration offering two models, pinned to one.
+    *Do*: Pick the default, which the picker sends as an empty alias.
+    *Assert*: It writes an empty `/active_model` instead of being refused as an
+    unknown model. Empty is how this configuration says "follow the default",
+    and writing it is the only way to unpin a session.
+    """
+    config = build_test_vibe_config(
+        models=[
+            ModelConfig(name="model-a", provider="mistral", alias="alpha"),
+            ModelConfig(name="model-b", provider="mistral", alias="beta"),
+        ],
+        active_model="alpha",
+    )
+
+    ops = model_config_write_ops(config, model_alias="", reasoning_effort=None)
+
+    assert [(op.path, op.value) for op in ops] == [("/active_model", "")]
+
+
+def test_the_default_gets_the_thinking_written_with_it() -> None:
+    """*Prepare*: A configuration pinned to a model that is not the default.
+    *Do*: Unpin and set a thinking level in one write.
+    *Assert*: The level lands on the default -- the model this write leaves
+    active -- and not on the one being unpinned. Nothing sends both today, but
+    this function's promise is that the two travel together.
+    """
+    config = build_test_vibe_config(
+        models=[
+            ModelConfig(name="model-a", provider="mistral", alias="alpha"),
+            ModelConfig(name="model-b", provider="mistral", alias="beta"),
+        ],
+        active_model="beta",
+    )
+    default = config.resolve_default_model_alias()
+
+    ops = model_config_write_ops(config, model_alias="", reasoning_effort="low")
+
+    assert [(op.path, op.value) for op in ops] == [
+        ("/active_model", ""),
+        (f"/models/{default}/thinking", "low"),
+    ]

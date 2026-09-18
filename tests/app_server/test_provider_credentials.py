@@ -186,6 +186,22 @@ async def test_a_missing_key_is_a_state_not_a_failure(
 
 
 @pytest.mark.asyncio
+async def test_a_provider_without_a_key_requirement_resolves_empty_credentials() -> (
+    None
+):
+    """A keyless local provider resolves without asking the client to sign in."""
+    provider = _provider("local", api_key_env_var="")
+    service = ProviderCredentialService(_orchestrator(_config(provider)))
+
+    result = await service.resolve()
+
+    assert isinstance(result, ProviderCredentialSnapshot)
+    assert result.token is None
+    assert dict(result.headers) == {}
+    assert result.api_key_source is None
+
+
+@pytest.mark.asyncio
 async def test_a_rejected_credential_is_not_offered_again() -> None:
     """*Prepare*: A resolved credential the provider then refuses.
     *Do*: Report the rejection and resolve again.

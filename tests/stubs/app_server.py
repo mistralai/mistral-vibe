@@ -92,13 +92,14 @@ class CoreEventProjection:
         return [await consumer(projected) for projected in self.project(event)]
 
 
-def start_test_app_server(
+def start_test_app_server_pair(
     agent_loop: AgentLoop,
     *,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
     connector_catalog_service: ConnectorCatalogService | None = None,
-) -> AppServerClient:
+) -> tuple[AppServerClient, AppServer]:
+    """Use when a test needs to poke the server side directly."""
     client_transport, server_transport = memory_transport_pair()
     server = build_test_app_server(
         agent_loop,
@@ -107,7 +108,24 @@ def start_test_app_server(
         identity_gateway=identity_gateway,
         connector_catalog_service=connector_catalog_service,
     )
-    return AppServerClient(client_transport, run_peer=server.serve)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    return client, server
+
+
+def start_test_app_server(
+    agent_loop: AgentLoop,
+    *,
+    account_gateway: AccountGateway | None = None,
+    identity_gateway: IdentityGateway | None = None,
+    connector_catalog_service: ConnectorCatalogService | None = None,
+) -> AppServerClient:
+    client, _ = start_test_app_server_pair(
+        agent_loop,
+        account_gateway=account_gateway,
+        identity_gateway=identity_gateway,
+        connector_catalog_service=connector_catalog_service,
+    )
+    return client
 
 
 def build_test_app_server(

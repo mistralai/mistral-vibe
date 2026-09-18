@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
+from pathlib import Path
 
+from mistralai_vibe_local_harness.protocol import (
+    JsonObject,
+    RustEvent,
+    RustProvidedToolCall,
+    RustProvidedToolCallAction,
+    RustToolSucceededEvent,
+)
 import pytest
 
-from vibe.app_server._unified_tool_projection import project_unified_history_entry
+from vibe.app_server._provided_tools import VIBE_TOOL_GROUP, VibeProvidedTools
+from vibe.app_server._unified_scratchpad import SCRATCHPAD_TOOL_NAME
+from vibe.app_server._unified_tool_projection import (
+    project_unified_history_entry,
+    unified_tool_category,
+)
 from vibe.app_server.models import (
     ApprovalCallbackDetail,
     CompletedEffectState,
@@ -37,6 +51,7 @@ from vibe.app_server.models import (
     WebSearchEffectOutput,
     validate_history_entry,
 )
+from vibe.core.tools.builtins.todo import TodoConfig
 
 
 def test_projects_unified_read_file_with_nullable_limit() -> None:
@@ -859,6 +874,170 @@ def test_projects_unified_todo_read_action() -> None:
     assert output.todos[0].content == "Task A"
     assert projected.state.display.verb == "Retrieved"
     assert projected.state.display.message == "2 todos"
+
+
+def test_projects_the_provided_todo_tool_under_its_group_name() -> None:
+    entry = _effect(
+        "vibe.todo",
+        {"action": "write", "todos": [{"id": "1", "content": "Task A"}]},
+        result={
+            "structured_content": {
+                "verb": "Updated",
+                "todos": [{"id": "1", "content": "Task A", "status": "pending"}],
+                "total_count": 1,
+                "message": "Updated 1 todos",
+            }
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, TodoEffectDetail)
+    assert unified_tool_category(entry) == "todo"
+    assert isinstance(projected.state, CompletedEffectState)
+    output = TodoEffectOutput.model_validate(projected.state.output)
+    assert output.todos == [TodoEffectItem(id="1", content="Task A")]
+    assert projected.state.display.verb == "Updated"
+    assert projected.state.display.message == "1 todos"
+
+
+def test_a_todo_result_without_a_count_is_left_unprojected() -> None:
+    entry = _effect(
+        "vibe.todo",
+        {"action": "read"},
+        result={"structured_content": {"verb": "Retrieved", "todos": []}},
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    # The whole entry is returned untouched, so a result shape the projector
+    # cannot read never turns into a half-projected effect.
+    assert projected is entry
+
+
+def test_the_provided_todo_executor_result_projects_end_to_end(tmp_path: Path) -> None:
+    arguments: JsonObject = {
+        "action": "write",
+        "todos": [{"id": "1", "content": "Task A"}],
+    }
+    event = _execute(tmp_path, "todo", arguments)
+
+    assert isinstance(event, RustToolSucceededEvent)
+    projected = project_unified_history_entry(
+        _effect(
+            "vibe.todo",
+            arguments,
+            result={"structured_content": event.result.structured_content},
+        )
+    )
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = TodoEffectOutput.model_validate(projected.state.output)
+    assert output.todos == [TodoEffectItem(id="1", content="Task A")]
+    assert projected.state.display.message == "1 todos"
+
+
+@pytest.mark.parametrize(
+    ("arguments", "result", "verb", "message", "settled"),
+    [
+        (
+            {"action": "write", "path": "plan.md", "content": "ship it"},
+            {"verb": "Wrote", "path": "plan.md"},
+            "Saving",
+            "plan.md",
+            ("Wrote", "plan.md"),
+        ),
+        (
+            {"action": "read", "path": "plan.md"},
+            {"verb": "Read", "path": "plan.md", "content": "ship it"},
+            "Reading",
+            "plan.md",
+            ("Read", "plan.md"),
+        ),
+        (
+            {"action": "list"},
+            {"verb": "Listed", "files": ["plan.md", "notes/api.md"]},
+            "Listing",
+            "the scratchpad",
+            ("Listed", "2 files"),
+        ),
+    ],
+)
+def test_projects_the_scratchpad_call(
+    arguments: dict[str, object],
+    result: dict[str, object],
+    verb: str,
+    message: str,
+    settled: tuple[str, str],
+) -> None:
+    entry = _effect(
+        f"vibe.{SCRATCHPAD_TOOL_NAME}", arguments, result={"structured_content": result}
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    # No dedicated widget: the projection rewrites the display and leaves the
+    # generic effect otherwise intact.
+    assert isinstance(projected.detail, GenericEffectDetail)
+    assert unified_tool_category(entry) == "scratchpad"
+    assert projected.detail.display.verb == verb
+    assert projected.detail.display.message == message
+    assert projected.detail.display.summary == f"{verb} {message}"
+    assert isinstance(projected.state, CompletedEffectState)
+    assert (projected.state.display.verb, projected.state.display.message) == settled
+
+
+def test_the_scratchpad_executor_result_projects_end_to_end(tmp_path: Path) -> None:
+    arguments: JsonObject = {"action": "write", "path": "plan.md", "content": "ship it"}
+    event = _execute(tmp_path, SCRATCHPAD_TOOL_NAME, arguments)
+
+    assert isinstance(event, RustToolSucceededEvent)
+    projected = project_unified_history_entry(
+        _effect(
+            f"vibe.{SCRATCHPAD_TOOL_NAME}",
+            arguments,
+            result={"structured_content": event.result.structured_content},
+        )
+    )
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.verb == "Wrote"
+    assert projected.state.display.message == "plan.md"
+
+
+def test_a_scratchpad_result_the_projector_cannot_read_is_left_alone() -> None:
+    entry = _effect(
+        f"vibe.{SCRATCHPAD_TOOL_NAME}",
+        {"action": "list"},
+        result={"structured_content": {"files": []}},
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert projected is entry
+
+
+def _execute(storage_root: Path, tool_name: str, arguments: JsonObject) -> RustEvent:
+    execute = VibeProvidedTools().executor_factory(
+        storage_root, max_todos=lambda: TodoConfig().max_todos
+    )("session-1")
+    action = RustProvidedToolCallAction(
+        action_id="action-1",
+        turn_id="turn-1",
+        call_id="call-1",
+        call=RustProvidedToolCall(
+            group_name=VIBE_TOOL_GROUP, tool_name=tool_name, arguments=arguments
+        ),
+    )
+
+    async def run() -> RustEvent:
+        return await execute(action)
+
+    return asyncio.run(run())
 
 
 def _effect(

@@ -27,6 +27,7 @@ from vibe.core.types import (
 )
 from vibe.core.utils import is_windows, utc_now
 from vibe.utils.io import read_safe, read_safe_async
+from vibe.utils.platform import resolve_git_executable
 from vibe.utils.session_id import shorten_session_id
 
 if TYPE_CHECKING:
@@ -136,9 +137,12 @@ class SessionLogger:  # noqa: PLR0904
 
     def _fetch_git_metadata(self) -> tuple[str | None, str | None]:
         """Fetch git commit and branch in a single subprocess call."""
+        git = resolve_git_executable(cwd=self.cwd)
+        if git is None:
+            return None, None
         try:
             result = subprocess.run(
-                ["git", "rev-parse", "HEAD", "--abbrev-ref", "HEAD"],
+                [git, "rev-parse", "HEAD", "--abbrev-ref", "HEAD"],
                 capture_output=True,
                 stdin=subprocess.DEVNULL if is_windows() else None,
                 text=True,
@@ -615,6 +619,27 @@ class SessionLogger:  # noqa: PLR0904
             session_metadata.config = config
             return True
 
+    async def persist_bumped_at(self, bumped_at: datetime) -> datetime | None:
+        """Persist the latest accepted user interaction time for this session."""
+        if bumped_at.tzinfo is None:
+            bumped_at = bumped_at.astimezone()
+        bumped_at = bumped_at.astimezone(UTC)
+        async with self._save_lock:
+            session_info = self._get_session_info()
+            if session_info is None:
+                return None
+            session_dir, session_metadata = session_info
+            current = _parse_metadata_time(session_metadata.bumped_at)
+            if current is not None and current >= bumped_at:
+                return current
+
+            serialized = bumped_at.isoformat()
+            metadata_path = session_dir / METADATA_FILENAME
+            if metadata_path.exists():
+                await self._persist_metadata_field_locked("bumped_at", serialized)
+            session_metadata.bumped_at = serialized
+            return bumped_at
+
     async def persist_loops(self) -> None:
         session_info = self._get_session_info()
         if session_info is None:
@@ -788,3 +813,15 @@ class SessionLogger:  # noqa: PLR0904
             self._last_tmp_cleanup_at = now
         finally:
             self._tmp_cleanup_lock.release()
+
+
+def _parse_metadata_time(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return parsed.astimezone(UTC)

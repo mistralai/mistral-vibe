@@ -3,23 +3,59 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+from types import MappingProxyType
+from unittest.mock import MagicMock
 
 import pytest
 
 from vibe.core.config import ProjectContextConfig
-from vibe.core.system_prompt import ProjectContextProvider, get_agents_md_section
+from vibe.core.skills.manager import SkillManager
+from vibe.core.skills.models import SkillInfo
+from vibe.core.system_prompt import (
+    ProjectContextProvider,
+    _get_available_skills_section,
+    get_agents_md_section,
+)
+
+
+def test_project_local_git_is_not_executed_automatically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    marker = tmp_path / "executed"
+    git_name = "git.exe" if os.name == "nt" else "git"
+    fake_git = project / git_name
+    fake_git.write_text(f'#!/bin/sh\ntouch "{marker}"\n')
+    fake_git.chmod(0o755)
+    monkeypatch.delenv("GIT_PYTHON_GIT_EXECUTABLE", raising=False)
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setenv("PATH", str(project))
+
+    status = ProjectContextProvider(
+        ProjectContextConfig(), root_path=project
+    ).get_git_status()
+
+    assert not marker.exists()
+    assert "No trusted Git executable" in status
 
 
 @pytest.mark.skipif(os.name == "nt", reason="fake git shell script is POSIX-only")
 def test_run_git_survives_non_utf8_output(tmp_path: Path, monkeypatch) -> None:
     # Fake git that prints bytes 0x80 0x81 (invalid UTF-8, and invalid gbk here)
-    fake_git = tmp_path / "git"
+    project = tmp_path / "project"
+    project.mkdir()
+    fake_git = tmp_path / "trusted-bin" / "git"
+    fake_git.parent.mkdir()
     fake_git.write_text('#!/bin/sh\nprintf "commit \\200\\201 msg\\n"\n')
     fake_git.chmod(0o755)
     # Put the fake first on PATH so _run_git executes it instead of real git
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("PATH", f"{fake_git.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("GIT_PYTHON_GIT_EXECUTABLE", str(fake_git))
 
-    provider = ProjectContextProvider(ProjectContextConfig(), root_path=tmp_path)
+    provider = ProjectContextProvider(ProjectContextConfig(), root_path=project)
 
     # Without encoding="utf-8", errors="replace" this raises UnicodeDecodeError
     result = provider._run_git(["log"], timeout=5.0)
@@ -31,12 +67,16 @@ def test_run_git_survives_non_utf8_output(tmp_path: Path, monkeypatch) -> None:
 @pytest.mark.skipif(os.name == "nt", reason="fake git shell script is POSIX-only")
 def test_run_git_disables_fsmonitor_hook(tmp_path: Path, monkeypatch) -> None:
     # Fake git that records the argv it was invoked with, one arg per line.
-    fake_git = tmp_path / "git"
+    project = tmp_path / "project"
+    project.mkdir()
+    fake_git = tmp_path / "trusted-bin" / "git"
+    fake_git.parent.mkdir()
     fake_git.write_text('#!/bin/sh\nfor a in "$@"; do echo "$a"; done\n')
     fake_git.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("PATH", f"{fake_git.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("GIT_PYTHON_GIT_EXECUTABLE", str(fake_git))
 
-    provider = ProjectContextProvider(ProjectContextConfig(), root_path=tmp_path)
+    provider = ProjectContextProvider(ProjectContextConfig(), root_path=project)
     result = provider._run_git(["status", "--porcelain"], timeout=5.0)
 
     argv = result.stdout.splitlines()
@@ -113,3 +153,46 @@ def test_get_agents_md_section_renders_project_docs_only() -> None:
     assert "## User instructions" not in section
     assert "## Project instructions (checked into the codebase)" in section
     assert "Contents of /repo/AGENTS.md" in section
+
+
+def test_available_skills_excludes_skills_not_invocable_by_model() -> None:
+    manager = MagicMock(spec=SkillManager)
+    manager.available_skills = MappingProxyType({
+        "automatic": SkillInfo(
+            name="automatic", description="Visible description", prompt="Visible body"
+        ),
+        "explicit-only": SkillInfo(
+            name="explicit-only",
+            description="Hidden description",
+            prompt="Hidden body",
+            model_invocable=False,
+        ),
+    })
+
+    section = _get_available_skills_section(manager)
+
+    assert "automatic" in section
+    assert "Visible description" in section
+    assert "explicit-only" not in section
+    assert "Hidden description" not in section
+    assert "When a user message is exactly `/skill-name`" in section
+
+
+def test_available_skills_keeps_slash_instructions_for_explicit_only_skills() -> None:
+    manager = MagicMock(spec=SkillManager)
+    manager.available_skills = MappingProxyType({
+        "explicit-only": SkillInfo(
+            name="explicit-only",
+            description="Hidden description",
+            prompt="Hidden body",
+            model_invocable=False,
+        )
+    })
+
+    section = _get_available_skills_section(manager)
+
+    assert section.startswith("# Available Skills")
+    assert "When a user message is exactly `/skill-name`" in section
+    assert "explicit-only" not in section
+    assert "Hidden description" not in section
+    assert "<available_skills>" not in section

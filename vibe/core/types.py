@@ -200,6 +200,11 @@ class SessionMetadata(BaseModel):
     loops: list[ScheduledLoop] = Field(default_factory=list)
     title: str | None = None
     title_source: Literal["auto", "manual"] = "auto"
+    bumped_at: str | None = None
+    # When the user pinned this session, or ``None`` while it is unpinned. A
+    # timestamp rather than a flag so the pinned shelf can be ordered by when
+    # each pin was made without a second field to keep in step.
+    pinned_at: str | None = None
     # The sticky GrowthBook variant assignment, persisted so a resumed session
     # keeps its buckets. NOTE: plan/org attributes and user_plan are user-scoped,
     # not session-scoped, so they are deliberately NOT persisted here — they are
@@ -560,6 +565,9 @@ class ToolResultEvent(BaseEvent):
     duration: float | None = None
     tool_call_id: str
     presentation: ToolResultPresentation | None = None
+    decision: Literal["execute", "skip"] | None = None
+    approval_type: Literal["always", "never", "ask"] | None = None
+    approval_source: Literal["config", "smart", "user", "bypass", "never"] | None = None
 
 
 class ToolStreamEvent(BaseEvent):

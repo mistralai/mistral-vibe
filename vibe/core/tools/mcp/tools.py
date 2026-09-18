@@ -18,6 +18,7 @@ from mcp import ClientSession
 from mcp.client.auth import OAuthFlowError
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
+from vibe import __version__
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -127,9 +128,12 @@ def _parse_call_result(server: str, tool: str, result_obj: Any) -> MCPToolResult
 def create_vibe_mcp_http_client(
     headers: dict[str, str] | None, *, auth: httpx.Auth | None = None
 ) -> VibeAsyncHTTPClient:
+    effective_headers = dict(headers or {})
+    if not any(k.lower() == "user-agent" for k in effective_headers):
+        effective_headers["User-Agent"] = f"MistralAI-VibeCLI/{__version__}"
     return VibeAsyncHTTPClient(
         follow_redirects=True,
-        headers=headers,
+        headers=effective_headers,
         auth=auth,
         timeout=httpx.Timeout(_MCP_DEFAULT_TIMEOUT, read=_MCP_DEFAULT_SSE_READ_TIMEOUT),
         verify=build_ssl_context(),

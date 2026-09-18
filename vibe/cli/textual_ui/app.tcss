@@ -90,6 +90,22 @@ TextArea > .text-area--cursor {
     }
 }
 
+/* Pinned todo line. `height: 1` is load-bearing: this sits between the input
+   and the bottom bar, so any growth would shove the input box up mid-keystroke. */
+#todo-status-row {
+    height: 1;
+    width: 100%;
+    background: transparent;
+    color: $text-muted;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+
+    &:hover {
+        color: $foreground;
+        text-style: underline;
+    }
+}
+
 #bottom-bar {
     height: auto;
     width: 100%;
@@ -127,9 +143,67 @@ TextArea > .text-area--cursor {
     margin-bottom: 0;
 }
 
+#subagent-transcripts {
+    display: none;
+    layout: stream;
+    width: 100%;
+    height: auto;
+    text-align: left;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+.subagent-transcript {
+    layout: stream;
+    width: 100%;
+    height: auto;
+}
+
 #input-container {
     padding: 0;
     margin: 0;
+}
+
+#subagent-list {
+    display: none;
+    width: 100%;
+    height: auto;
+    max-height: 7;
+    padding: 0 1;
+    color: $foreground;
+    border: none;
+    background: transparent;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    pointer: pointer;
+
+    &.subagent-view {
+        border-top: solid $foreground;
+        border-title-align: right;
+        border-title-color: $foreground;
+    }
+}
+
+#subagent-list > .option-list--option-hover {
+    color: $primary-darken-1;
+}
+
+#subagent-list > .option-list--option-highlighted,
+#subagent-list:focus > .option-list--option-highlighted {
+    color: $primary;
+}
+
+#subagent-list:focus {
+    border: none;
+}
+
+#subagent-list.subagent-view:focus {
+    border-top: solid $foreground;
+}
+
+#subagent-list > .option-list--option-highlighted,
+#subagent-list:focus > .option-list--option-highlighted {
+    background: $surface;
 }
 
 #completion-popup {
@@ -355,6 +429,34 @@ Markdown {
 .user-message-container {
     width: 100%;
     height: auto;
+}
+
+.user-message-severity .user-message-container {
+    padding: 0 1;
+}
+
+.user-message-info .user-message-container {
+    border-left: heavy $success;
+}
+
+.user-message-info .user-message-content {
+    color: $success;
+}
+
+.user-message-warning .user-message-container {
+    border-left: heavy $warning;
+}
+
+.user-message-warning .user-message-content {
+    color: $warning;
+}
+
+.user-message-error .user-message-container {
+    border-left: heavy $error;
+}
+
+.user-message-error .user-message-content {
+    color: $error;
 }
 
 .user-message-row {
@@ -845,6 +947,7 @@ StatusMessage {
 }
 
 .compact-message,
+.model-change-message,
 .reload-config-message,
 .tool-call {
     width: 100%;
@@ -1258,6 +1361,10 @@ StatusMessage {
 
 /* Skills browser: two panes (option list + live preview), fixed height so the
    layout does not jump as row/preview content changes. */
+#skillsbrowser-title {
+    margin: 0 0 1 0;
+}
+
 #skillsbrowser-tabs {
     width: 100%;
     height: 1;
@@ -1267,13 +1374,26 @@ StatusMessage {
 #skillsbrowser-search {
     width: 100%;
     margin: 0 0 1 0;
-    background: $boost;
+    border: none;
+    padding: 0 1;
+    background: $panel;
     color: $foreground;
 }
 
 #skillsbrowser-search:focus {
+    border: none;
     background: $surface;
     color: $text;
+}
+
+#skillsbrowser-search .input--cursor {
+    background: $foreground;
+    color: $background;
+}
+
+#skillsbrowser-search .input--selection {
+    background: $primary;
+    color: $foreground;
 }
 
 #skillsbrowser-body {
@@ -1283,7 +1403,7 @@ StatusMessage {
 }
 
 #skillsbrowser-options {
-    width: 2fr;
+    width: 1fr;
     height: 100%;
     border: none;
 }
@@ -1293,7 +1413,7 @@ StatusMessage {
 }
 
 #skillsbrowser-preview {
-    width: 3fr;
+    width: 1fr;
     height: 100%;
     padding: 0 1;
     border-left: solid $foreground-muted;

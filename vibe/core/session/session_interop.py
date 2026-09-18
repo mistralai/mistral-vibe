@@ -310,6 +310,7 @@ def _export_image_content(
     image: ImageAttachment, session_dir: Path
 ) -> dict[str, JsonValue]:
     source = image.source
+    file_fallback: dict[str, JsonValue] | None = None
     if isinstance(source, InlineImageSource):
         data = source.data
     elif isinstance(source, FileImageSource):
@@ -322,9 +323,15 @@ def _export_image_content(
             raise InvalidLegacyInteropSourceError(
                 f"Cannot read persisted image {image.alias!r}: {exc}"
             ) from exc
+        file_fallback = {"type": "file", "name": image.alias}
     else:
         raise InvalidLegacyInteropSourceError("Unknown persisted image source")
-    return {"type": "image", "data": data, "mimeType": image.mime_type}
+    return {
+        "type": "image",
+        "data": data,
+        "mimeType": image.mime_type,
+        **({"file_fallback": file_fallback} if file_fallback is not None else {}),
+    }
 
 
 def _export_resource_content(resource: Any) -> dict[str, JsonValue]:

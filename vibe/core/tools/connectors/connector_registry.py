@@ -253,7 +253,7 @@ def _bootstrap_error_message(exc: Exception) -> str:
             body = http_err.response.text[:500].strip()
         except Exception:
             body = ""
-        detail = f"Failed to load workspace connectors (HTTP {status})."
+        detail = f"Failed to load connectors (HTTP {status})."
         if body:
             detail += f"\nServer response: {body}"
         if status >= _SERVER_ERROR_STATUS:
@@ -264,7 +264,7 @@ def _bootstrap_error_message(exc: Exception) -> str:
         return detail
     message = str(exc).strip()
     suffix = f": {message}" if message else ""
-    return f"Failed to load workspace connectors: {type(exc).__name__}{suffix}"
+    return f"Failed to load connectors: {type(exc).__name__}{suffix}"
 
 
 def _unwrap_http_status_error(exc: Exception) -> httpx.HTTPStatusError | None:

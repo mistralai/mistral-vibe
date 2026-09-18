@@ -41,6 +41,23 @@ async def test_session_configuration_updates_and_reloads_through_the_backend(
 
 
 @pytest.mark.asyncio
+async def test_a_model_pick_goes_through_the_typed_write(
+    backend_contract_session: AppServerSession,
+) -> None:
+    """*Prepare*: A session on its configured model.
+    *Do*: Pick the thinking level, the way `/thinking` does.
+    *Assert*: It lands. The CLI used to post a JSON pointer it escaped itself at
+    `config/write`, which a running turn refuses outright; the typed operation
+    is the one the app-server can park until the turn ends.
+    """
+    config = backend_contract_session.resources.config
+
+    await config.write_model(reasoning_effort="low")
+
+    assert config.current.active_model.thinking == "low"
+
+
+@pytest.mark.asyncio
 async def test_config_updates_refresh_the_public_runtime_tool_catalog(
     backend_contract_session: AppServerSession,
 ) -> None:

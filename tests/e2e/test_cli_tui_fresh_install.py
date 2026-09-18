@@ -16,7 +16,7 @@ from tests.e2e.common import (
     ansi_tolerant_pattern,
     send_ctrl_c_until_quit_confirmation,
     wait_for_main_screen,
-    wait_for_request_count,
+    wait_for_request_count_while_draining_child_output,
 )
 from tests.e2e.mock_server import StreamingMockServer
 
@@ -96,8 +96,12 @@ def test_fresh_wheel_install_can_spawn_cli_and_complete_happy_path(
         child.send("Greet")
         child.send("\r")
 
-        wait_for_request_count(
-            lambda: len(streaming_mock_server.requests), expected_count=1, timeout=10
+        wait_for_request_count_while_draining_child_output(
+            child,
+            captured,
+            lambda: len(streaming_mock_server.requests),
+            expected_count=1,
+            timeout=10,
         )
         child.expect(ansi_tolerant_pattern("Hello from mock server"), timeout=10)
 
