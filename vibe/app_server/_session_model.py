@@ -5,13 +5,15 @@ from typing import Any
 
 from pydantic import JsonValue
 
+from vibe.app_server._config_paths import ACTIVE_MODEL_PATH, model_thinking_path
+from vibe.app_server._config_write import config_write_ops_to_patches
 from vibe.app_server.protocol import ConfigWriteOpWire
+from vibe.core.config.layers.admin import AdminConfigLayer
+from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.patch import AddOperationPatch, RemoveOperationPatch
 from vibe.core.config.vibe_schema import VibeConfigSchema
-
-ACTIVE_MODEL_PATH = "/active_model"
 
 
 def stored_session_active_model(config: Mapping[str, JsonValue] | None) -> str | None:
@@ -100,6 +102,78 @@ async def clear_session_active_model_override(
         ],
         reason=reason,
     )
+
+
+def _sets_thinking(data: object, alias: str) -> bool:
+    models = getattr(data, "models", None)
+    if isinstance(models, Mapping):
+        entry = models.get(alias)
+    elif isinstance(models, Sequence) and not isinstance(models, str | bytes):
+        entry = next(
+            (
+                candidate
+                for candidate in models
+                if isinstance(candidate, Mapping) and candidate.get("alias") == alias
+            ),
+            None,
+        )
+    else:
+        return False
+    return isinstance(entry, Mapping) and isinstance(entry.get("thinking"), str)
+
+
+# These outrank the session override, so a level they set for a model is the one
+# that model runs whatever the session says.
+_LAYERS_OUTRANKING_THE_SESSION = frozenset({
+    AgentProfileLayer.NAME,
+    AdminConfigLayer.NAME,
+})
+
+
+def model_thinking_is_session_writable(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], alias: str
+) -> bool:
+    """Whether a level scoped to the session would be the one this model runs.
+
+    Declaring the model is not claiming its level: a profile that pins one
+    without saying how hard it thinks leaves that to whoever is using it.
+    """
+    return not any(
+        layer.name in _LAYERS_OUTRANKING_THE_SESSION
+        and _sets_thinking(layer.cached_data, alias)
+        for layer in orchestrator.layers
+    )
+
+
+async def set_session_reasoning_effort_override(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    reasoning_effort: str,
+    *,
+    reason: str,
+) -> list[BaseException]:
+    """Scope the active model's level to the session.
+
+    Through the same translation a ``config/write`` uses, so a model that no
+    durable layer declares is materialized with its identity fields rather than
+    left as an entry holding one field, which is not a valid model on its own.
+    """
+    alias = orchestrator.config.get_active_model().alias
+    if not model_thinking_is_session_writable(orchestrator, alias):
+        return []
+    ops = [
+        ConfigWriteOpWire(
+            op="set",
+            path=model_thinking_path(alias),
+            value=reasoning_effort,
+            target_layer=OverridesLayer.NAME,
+        )
+    ]
+    operations = config_write_ops_to_patches(
+        orchestrator.config,
+        ops,
+        durable_model_aliases=await orchestrator.durable_model_aliases(),
+    )
+    return await orchestrator.apply_patch(operations, reason=reason)
 
 
 def config_active_model(metadata: Mapping[str, Any]) -> str | None:

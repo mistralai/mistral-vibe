@@ -132,6 +132,13 @@ def test_config_view_redacts_persistence_paths() -> None:
     assert "sessionLogging" not in config.model_dump(mode="json", by_alias=True)
 
 
+def test_config_view_reports_the_configured_default_agent() -> None:
+    config = project_config_view(build_test_vibe_config(default_agent="plan"))
+
+    assert config.default_agent == "plan"
+    assert config.model_dump(mode="json", by_alias=True)["defaultAgent"] == "plan"
+
+
 def test_stats_projection_includes_cached_token_counts() -> None:
     agent_loop = build_test_agent_loop()
     agent_loop.stats.session_cached_tokens = 42
@@ -248,6 +255,47 @@ def test_config_view_default_alias_never_follows_the_active_model() -> None:
     assert unflagged.default_model_alias == "alpha"
     assert unpinned.active_model.alias == "alpha"
     assert unpinned.default_model_alias == "alpha"
+
+
+def test_config_view_image_support_widens_for_a_backend_that_can_fall_back() -> None:
+    """``images_supported`` gates the send; it is not the model's own vision.
+
+    The unified backend describes an image for a blind model, so it accepts an
+    attachment ``active_model.supports_images`` would reject -- but only when a
+    describer is actually reachable. Core's resource-link projection alone is
+    not enough: it only exists for a file-backed image, so promising on its
+    strength would let a pasted one through to a model that cannot read it.
+    """
+    from vibe.core.config import ModelConfig
+
+    blind = build_test_vibe_config(
+        models=[ModelConfig(name="model-a", provider="mistral", alias="blind")],
+        active_model="blind",
+    )
+    describable = build_test_vibe_config(
+        models=[
+            ModelConfig(name="model-a", provider="mistral", alias="blind"),
+            ModelConfig(
+                name="model-b", provider="mistral", alias="sees", supports_images=True
+            ),
+        ],
+        active_model="blind",
+    )
+    sees = build_test_vibe_config(
+        models=[
+            ModelConfig(
+                name="model-b", provider="mistral", alias="sees", supports_images=True
+            )
+        ],
+        active_model="sees",
+    )
+
+    assert project_config_view(blind).images_supported is False
+    assert project_config_view(blind, image_fallback=True).images_supported is False
+    assert (
+        project_config_view(describable, image_fallback=True).images_supported is True
+    )
+    assert project_config_view(sees).images_supported is True
 
 
 def test_config_view_hydrates_display_name_from_alias() -> None:

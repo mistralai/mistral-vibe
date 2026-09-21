@@ -116,6 +116,8 @@ class PathCompletionController:
             with self._query_lock:
                 if query == self._last_query and generation == self._generation:
                     self._update_suggestions(suggestions)
+                    if suggestions:
+                        self._pending_future = None
         except Exception:
             with self._query_lock:
                 self._pending_future = None
@@ -142,21 +144,29 @@ class PathCompletionController:
                     self._suggestions, self._selected_index
                 )
         elif app:
-            app.call_after_refresh(self.reset)
+            app.call_after_refresh(self._reset_if_current, self._generation)
         else:
+            self.reset()
+
+    def _reset_if_current(self, generation: int) -> None:
+        if not self._is_stale(generation):
             self.reset()
 
     def on_key(
         self, event: events.Key, text: str, cursor_index: int
     ) -> CompletionResult:
+        if self._pending_future is not None and event.key in {"tab", "enter"}:
+            return CompletionResult.HANDLED
         if not self._suggestions:
             return CompletionResult.IGNORED
 
         match event.key:
             case "tab" | "enter":
-                if self._apply_selected_completion(text, cursor_index):
-                    return CompletionResult.HANDLED
-                return CompletionResult.IGNORED
+                return (
+                    CompletionResult.HANDLED
+                    if self._apply_selected_completion(text, cursor_index)
+                    else CompletionResult.IGNORED
+                )
             case "down":
                 self._move_selection(1)
                 return CompletionResult.HANDLED

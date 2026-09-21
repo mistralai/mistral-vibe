@@ -11,7 +11,7 @@ import subprocess
 from threading import Event, Lock
 from typing import Any, cast
 
-from git import Repo
+from git import Git, Repo
 from git.exc import GitCommandError
 import pytest
 
@@ -2309,6 +2309,7 @@ class _RecordingGit:
         # applied; they come apart because fetch() consumes the overrides.
         self.config_kwargs: dict[str, Any] = {}
         self.applied_config: dict[str, Any] = {}
+        self.GIT_PYTHON_GIT_EXECUTABLE = Git.GIT_PYTHON_GIT_EXECUTABLE
 
     def __call__(self, **config: Any) -> _RecordingGit:
         # GitPython's Git is callable: git(c=...) returns a git with that
@@ -2325,40 +2326,71 @@ class _RecordingGit:
         return type("_AutoInterrupt", (), {"proc": self.process})()
 
 
-def _fetch_with(git: _RecordingGit) -> None:
-    repo = cast(Any, type("_Repo", (), {"git": git})())
+def _fetch_with(git: _RecordingGit, git_dir: Path) -> None:
+    # The secure fetch preflight inspects repository-scoped HTTP configuration
+    # with the real Git executable before handing execution to this test double.
+    Repo.init(git_dir, bare=True).close()
+    config = type(
+        "_Config",
+        (),
+        {
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *_args: None,
+            "get": lambda self, _key: "https://example.invalid/repo.git",
+            "sections": lambda self: [],
+        },
+    )()
+    remote = type("_Remote", (), {"config_reader": config})()
+    repo = cast(
+        Any,
+        type(
+            "_Repo",
+            (),
+            {
+                "common_dir": git_dir,
+                "git_dir": git_dir,
+                "git": git,
+                "remote": lambda self, _name: remote,
+                "config_reader": lambda self, _level: config,
+            },
+        )(),
+    )
     git_repo_module.GitRepo(repo).fetch_branch("origin", "main")
 
 
-def test_fetch_kills_a_remote_that_never_answers() -> None:
+def test_fetch_kills_a_remote_that_never_answers(tmp_path: Path) -> None:
     git = _RecordingGit(hangs=True)
 
     with pytest.raises(GitError, match="Timed out"):
-        _fetch_with(git)
+        _fetch_with(git, tmp_path)
 
     assert git.process.killed
 
 
-def test_fetch_refuses_to_stop_and_ask_for_credentials() -> None:
+def test_fetch_refuses_to_stop_and_ask_for_credentials(tmp_path: Path) -> None:
     # A credential helper would block the fetch behind a prompt the user may
     # never see, and this refresh is optional enough to fail instead.
     git = _RecordingGit()
 
-    _fetch_with(git)
+    _fetch_with(git, tmp_path)
 
     assert git.fetch_kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
-    # Pins the sanitizer at the argument level, so it holds even where hooks
-    # never run. The live config_kwargs is empty by now: fetch consumed it.
-    assert git.applied_config == {
-        "c": ["core.fsmonitor=", git_repo_module._NO_HOOKS_CONFIG]
+    env = git.fetch_kwargs["env"]
+    config = {
+        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"]
+        for index in range(int(env["GIT_CONFIG_COUNT"]))
     }
+    assert config["core.fsmonitor"] == ""
+    assert (
+        config["core.hooksPath"] == git_repo_module._NO_HOOKS_CONFIG.partition("=")[2]
+    )
     assert git.config_kwargs == {}
 
 
-def test_fetch_does_not_use_the_timeout_windows_rejects() -> None:
+def test_fetch_does_not_use_the_timeout_windows_rejects(tmp_path: Path) -> None:
     git = _RecordingGit()
 
-    _fetch_with(git)
+    _fetch_with(git, tmp_path)
 
     assert "kill_after_timeout" not in git.fetch_kwargs
 

@@ -612,6 +612,145 @@ def test_compaction_model_provider_must_match_active() -> None:
         VibeConfigSchema(compaction_model=compaction, providers=providers)
 
 
+def test_vision_model_must_support_images() -> None:
+    vision = ModelConfig(name="blind-model", provider="mistral", alias="vision")
+    with pytest.raises(ValueError, match="must set supports_images"):
+        VibeConfigSchema(vision_model=vision)
+
+
+def test_vision_model_may_use_another_provider() -> None:
+    providers = [
+        ProviderConfig(
+            name="mistral",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="MISTRAL_API_KEY",
+        ),
+        ProviderConfig(
+            name="other",
+            api_base="https://other.ai/v1",
+            api_key_env_var="OTHER_API_KEY",
+        ),
+    ]
+    vision = ModelConfig(
+        name="sees-model", provider="other", alias="vision", supports_images=True
+    )
+    models = [ModelConfig(name="blind-model", provider="mistral", alias="blind")]
+
+    config = VibeConfigSchema.model_validate({
+        "active_model": "blind",
+        "models": models,
+        "providers": providers,
+        "vision_model": vision,
+    })
+
+    assert config.get_vision_fallback_model() == vision
+
+
+def test_vision_falls_back_to_a_model_on_the_active_provider() -> None:
+    models = [
+        ModelConfig(name="blind-model", provider="mistral", alias="blind"),
+        ModelConfig(
+            name="sees-model", provider="mistral", alias="sees", supports_images=True
+        ),
+    ]
+
+    config = VibeConfigSchema.model_validate({
+        "active_model": "blind",
+        "models": models,
+    })
+
+    fallback = config.get_vision_fallback_model()
+    assert fallback is not None
+    assert fallback.alias == "sees"
+
+
+def test_vision_never_falls_back_across_providers() -> None:
+    providers = [
+        ProviderConfig(
+            name="mistral",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="MISTRAL_API_KEY",
+        ),
+        ProviderConfig(
+            name="local", api_base="http://127.0.0.1:8080/v1", api_key_env_var=""
+        ),
+    ]
+    models = [
+        ModelConfig(name="blind-model", provider="local", alias="blind"),
+        ModelConfig(
+            name="sees-model", provider="mistral", alias="sees", supports_images=True
+        ),
+    ]
+
+    config = VibeConfigSchema.model_validate({
+        "active_model": "blind",
+        "models": models,
+        "providers": providers,
+    })
+
+    # Reaching another provider would ship the image somewhere the session was
+    # not already talking; only an explicit vision_model may do that.
+    assert config.get_vision_fallback_model() is None
+
+
+def test_vision_fallback_skips_models_the_allowlist_excludes() -> None:
+    models = [
+        ModelConfig(name="blind-model", provider="mistral", alias="blind"),
+        ModelConfig(
+            name="sees-model", provider="mistral", alias="sees", supports_images=True
+        ),
+    ]
+
+    config = VibeConfigSchema.model_validate({
+        "active_model": "blind",
+        "models": models,
+        "allowed_models": ["blind"],
+    })
+
+    assert config.get_vision_fallback_model() is None
+
+
+def test_explicit_vision_model_wins_over_the_provider_scan() -> None:
+    models = [
+        ModelConfig(name="blind-model", provider="mistral", alias="blind"),
+        ModelConfig(
+            name="sees-model", provider="mistral", alias="sees", supports_images=True
+        ),
+    ]
+    chosen = ModelConfig(
+        name="chosen-model", provider="mistral", alias="chosen", supports_images=True
+    )
+
+    config = VibeConfigSchema.model_validate({
+        "active_model": "blind",
+        "models": models,
+        "vision_model": chosen,
+    })
+
+    fallback = config.get_vision_fallback_model()
+    assert fallback is not None
+    assert fallback.alias == "chosen"
+
+
+def test_no_vision_fallback_when_the_active_model_sees_images() -> None:
+    vision = ModelConfig(
+        name="sees-model", provider="mistral", alias="vision", supports_images=True
+    )
+    models = [
+        ModelConfig(
+            name="also-sees", provider="mistral", alias="active", supports_images=True
+        )
+    ]
+
+    config = VibeConfigSchema.model_validate({
+        "active_model": "active",
+        "models": models,
+        "vision_model": vision,
+    })
+
+    assert config.get_vision_fallback_model() is None
+
+
 def test_api_key_readiness_is_separate_from_schema_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,0 +1,11 @@
+[
+ {
+  "method": "connector_catalog/toggle",
+  "params": {
+   "alias": "github_app",
+   "disabled": true,
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "toolName": "tool_13"
+  }
+ }
+]

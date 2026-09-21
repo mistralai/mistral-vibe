@@ -5,6 +5,8 @@ from pathlib import Path
 import shutil
 import tempfile
 
+from vibe.core.git.fetch import fetch_remote
+
 # Re-exported so `teleport.git.GitHubRemoteInfo` keeps resolving. Reading a
 # GitHub remote is not a teleport concern, so it lives with the rest of git.
 from vibe.core.git.remote import (
@@ -201,7 +203,11 @@ class GitRepository:
 
     async def _fetch(self, repo: Repo, remote: str) -> None:
         try:
-            await self._executor.run(lambda: repo.remote(remote).fetch())
+            await self._executor.run(
+                lambda: fetch_remote(
+                    repo, remote, (f"+refs/heads/*:refs/remotes/{remote}/*",)
+                )
+            )
         except (TimeoutError, ValueError, GitCommandError):
             pass
 

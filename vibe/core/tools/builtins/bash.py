@@ -20,6 +20,8 @@ from vibe.core.tools.base import (
 )
 from vibe.core.tools.builtins._shell_command_policy import (
     analyze_shell_command_policy,
+    git_repository_identity,
+    git_repository_requires_approval,
     has_option_guardrails,
     path_candidates,
 )
@@ -196,17 +198,82 @@ def _wrapped_guardrail_commands(command: str) -> list[str]:
 
 
 def _expand_guardrail_commands(command_parts: list[str]) -> list[str]:
+    """Expand shell wrappers without dropping repeated command occurrences.
+
+    Repository guardrails depend on the directory reached at each occurrence,
+    so equal command text cannot be deduplicated globally. The ancestry set only
+    prevents a pathological wrapper expansion from cycling within one branch.
+    """
     expanded: list[str] = []
-    pending = list(command_parts)
-    seen: set[str] = set()
+    pending = [(part, frozenset()) for part in command_parts]
     while pending:
-        part = pending.pop(0)
-        if part in seen:
-            continue
-        seen.add(part)
+        part, ancestors = pending.pop(0)
         expanded.append(part)
-        pending.extend(_wrapped_guardrail_commands(part))
+        if part in ancestors:
+            continue
+        next_ancestors = ancestors | {part}
+        pending.extend(
+            (wrapped, next_ancestors) for wrapped in _wrapped_guardrail_commands(part)
+        )
     return expanded
+
+
+_WORKING_DIRECTORY_COMMANDS = {
+    "cd",
+    "chdir",
+    "pushd",
+    "push-location",
+    "set-location",
+    "sl",
+}
+_WORKING_DIRECTORY_POP_COMMANDS = {"popd", "pop-location"}
+_WORKING_DIRECTORY_TOKEN_COUNT = 2
+_SHELL_GLOB_CHARACTERS = frozenset("*?[")
+
+
+def _update_guardrail_cwds(tokens: list[str], possible_cwds: set[Path]) -> bool:
+    """Track every statically possible cwd; return whether it became unknown."""
+    if not tokens:
+        return False
+    command = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    if command in _WORKING_DIRECTORY_POP_COMMANDS:
+        # The cwd set is monotonic, so a plain pop can only return to a location
+        # already recorded by an earlier push. Named/option-bearing stacks are
+        # not statically knowable and therefore fail closed.
+        return len(tokens) != 1
+    if command not in _WORKING_DIRECTORY_COMMANDS:
+        return False
+    if command in {"pushd", "push-location"} and len(tokens) == 1:
+        # Swapping an existing directory stack cannot introduce a new path.
+        return False
+    if (
+        len(tokens) != _WORKING_DIRECTORY_TOKEN_COUNT
+        or tokens[1].startswith("-")
+        or any(character in tokens[1] for character in _SHELL_GLOB_CHARACTERS)
+    ):
+        return True
+    possible_cwds.update(
+        resolve_tool_path(tokens[1], cwd) for cwd in tuple(possible_cwds)
+    )
+    return False
+
+
+def _git_repository_permission_pattern(
+    command: str, possible_cwds: set[Path], *, cwd_is_unknown: bool
+) -> str:
+    """Key a Git-reader approval to every repository it may inspect."""
+    identities: set[str] = set()
+    for cwd in possible_cwds:
+        identity = git_repository_identity(cwd)
+        if identity is None:
+            try:
+                identity = f"directory:{cwd.resolve()}"
+            except OSError:
+                identity = f"directory:{cwd.absolute()}"
+        identities.add(identity)
+    if cwd_is_unknown:
+        identities.add("dynamic-directory")
+    return f"{command} [git repositories: {' | '.join(sorted(identities))}]"
 
 
 def _collect_outside_dirs(
@@ -479,10 +546,11 @@ class Bash(
         return tokens[0] in self.config.sensitive_patterns
 
     def _resolve_guardrail_permission(
-        self, command_parts: list[str]
+        self, command_parts: list[str], *, command_cwd: Path
     ) -> PermissionContext | None:
-        option_required: list[RequiredPermission] = []
-        seen_option_required: set[str] = set()
+        option_required_by_command: dict[str, RequiredPermission] = {}
+        possible_cwds = {command_cwd}
+        cwd_is_unknown = False
 
         for part in _expand_guardrail_commands(command_parts):
             if matched := self._find_denylist_match(part):
@@ -495,26 +563,37 @@ class Bash(
                     permission=ToolPermission.NEVER,
                     reason=f"Command denied: '{part}' is not allowed as a standalone command. Do not attempt to run this command.",
                 )
-            if not analyze_shell_command_policy(
-                _split_command_tokens(part)
-            ).requires_approval:
-                continue
-            if part in seen_option_required:
-                continue
-            seen_option_required.add(part)
-            option_required.append(
-                self._build_command_required_permission(
-                    invocation_pattern=part,
-                    session_pattern=part,
-                    label=part,
-                    literal=True,
+            tokens = _split_command_tokens(part)
+            cwd_is_unknown = (
+                _update_guardrail_cwds(tokens, possible_cwds) or cwd_is_unknown
+            )
+            policy = analyze_shell_command_policy(tokens)
+            repository_requires_approval = policy.inspect_git_repository and (
+                cwd_is_unknown
+                or any(
+                    git_repository_requires_approval(tokens, cwd=cwd)
+                    for cwd in possible_cwds
                 )
             )
+            if not (policy.requires_approval or repository_requires_approval):
+                continue
+            permission_pattern = part
+            if policy.inspect_git_repository:
+                permission_pattern = _git_repository_permission_pattern(
+                    part, possible_cwds, cwd_is_unknown=cwd_is_unknown
+                )
+            option_required_by_command[part] = self._build_command_required_permission(
+                invocation_pattern=permission_pattern,
+                session_pattern=permission_pattern,
+                label=part,
+                literal=True,
+            )
 
-        if not option_required:
+        if not option_required_by_command:
             return None
         return PermissionContext(
-            permission=ToolPermission.ASK, required_permissions=option_required
+            permission=ToolPermission.ASK,
+            required_permissions=list(option_required_by_command.values()),
         )
 
     def _is_unconditionally_allowed(
@@ -593,7 +672,9 @@ class Bash(
         if not command_parts and not analysis.requires_approval:
             return None
 
-        guardrail_permission = self._resolve_guardrail_permission(command_parts)
+        guardrail_permission = self._resolve_guardrail_permission(
+            command_parts, command_cwd=self.workspace.cwd
+        )
         if (
             guardrail_permission
             and guardrail_permission.permission == ToolPermission.NEVER

@@ -120,11 +120,18 @@ class StdioJsonRpcTransport:
 
     async def _write_messages(self) -> None:
         while (line := await self._outbox.get()) is not None:
-            await asyncio.to_thread(self._write_line, line)
+            if not await asyncio.to_thread(self._write_line, line):
+                return
 
-    def _write_line(self, line: bytes) -> None:
-        self._writer.write(line)
-        self._writer.flush()
+    def _write_line(self, line: bytes) -> bool:
+        try:
+            self._writer.write(line)
+            self._writer.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            # The peer went away (e.g. client hit Ctrl-C). Stop the writer
+            # cleanly so shutdown can complete instead of surfacing the error.
+            return False
+        return True
 
 
 class MemoryJsonRpcTransport:

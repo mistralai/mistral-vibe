@@ -18,6 +18,7 @@ from vibe.core.git.errors import (
     GitRepositoryNotFoundError,
     GitUnavailableError,
 )
+from vibe.core.git.fetch import UnsafeGitFetchError, fetch_remote
 from vibe.core.git.remote import GitHubRemoteInfo, find_github_remote, find_remote_url
 from vibe.utils.platform import configure_git_python_executable
 
@@ -422,12 +423,8 @@ class GitRepo:
         return ref[len(prefix) :] if ref.startswith(prefix) else None
 
     def fetch_branch(self, remote: str, branch: str) -> None:
-        # A source-only refspec looks like it would only write FETCH_HEAD, but
-        # git also updates the remote-tracking ref whenever the configured
-        # remote.<name>.fetch covers it, which is how callers see the new tip
-        # under refs/remotes. An explicit destination would force the update
-        # past a deliberately narrow refspec, so leave the configured one to
-        # decide.
+        # Use an explicit destination refspec so callers see the fetched tip
+        # without trusting the repository's remote.<name>.fetch configuration.
         #
         # The wait is bounded here rather than with GitPython's
         # kill_after_timeout, which raises on Windows before it runs git at
@@ -435,14 +432,15 @@ class GitRepo:
         # communicate() drains the pipes, so a fetch with a lot of progress
         # output cannot fill stderr and block on a full buffer.
         try:
-            process = sanitized_git(self._repo).fetch(
+            process = fetch_remote(
+                self._repo,
                 remote,
-                branch,
+                (f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}",),
+                allow_file=True,
                 as_process=True,
                 universal_newlines=True,
-                env=_NON_INTERACTIVE_GIT_ENV,
             )
-        except self._gitpy.git_command_error as e:
+        except (self._gitpy.git_command_error, UnsafeGitFetchError) as e:
             raise GitError(f"Failed to fetch {remote}/{branch}: {e}") from e
 
         proc = process.proc

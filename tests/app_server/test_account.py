@@ -44,7 +44,7 @@ from vibe.setup.auth.whoami import load_cached_whoami, store_cached_whoami
         "teleport_eligible",
     ),
     [
-        (AccountPlanKind.CHAT, "FREE", "Free", "Free", True, False, False),
+        (AccountPlanKind.CHAT, "FREE", "Free", "Free", True, False, True),
         (
             AccountPlanKind.CHAT,
             "INDIVIDUAL",
@@ -72,7 +72,7 @@ from vibe.setup.auth.whoami import load_cached_whoami, store_cached_whoami
             False,
             True,
         ),
-        (AccountPlanKind.API, "FREE", "Free API", "Free", True, True, False),
+        (AccountPlanKind.API, "FREE", "Free API", "Free", True, True, True),
         (
             AccountPlanKind.API,
             "PAY_AS_YOU_GO",
@@ -80,7 +80,7 @@ from vibe.setup.auth.whoami import load_cached_whoami, store_cached_whoami
             "[API] Scale plan",
             True,
             True,
-            False,
+            True,
         ),
         (
             AccountPlanKind.MISTRAL_CODE,
@@ -134,16 +134,22 @@ async def test_account_controller_projects_plan_semantics(
 
 
 @pytest.mark.asyncio
-async def test_account_controller_projects_switch_key_action(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("plan_type", "plan_name"),
+    [
+        (AccountPlanKind.CHAT, "INDIVIDUAL"),
+        (AccountPlanKind.API, "FREE"),
+        (AccountPlanKind.API, "PAY_AS_YOU_GO"),
+    ],
+)
+async def test_account_controller_allows_teleport_without_switching_key(
+    monkeypatch: pytest.MonkeyPatch, plan_type: AccountPlanKind, plan_name: str
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "server-secret")
     agent_loop = build_test_agent_loop()
     gateway = FakeAccountGateway(
         WhoAmIResult(
-            plan_type=AccountPlanKind.CHAT,
-            plan_name="INDIVIDUAL",
-            prompt_switching_to_pro_plan=True,
+            plan_type=plan_type, plan_name=plan_name, prompt_switching_to_pro_plan=True
         )
     )
 
@@ -154,9 +160,8 @@ async def test_account_controller_projects_switch_key_action(
 
     assert account.plan_offer is not None
     assert account.plan_offer.kind is AccountActionKind.SWITCH_API_KEY
-    assert account.teleport_action is not None
-    assert account.teleport_action.kind is AccountActionKind.SWITCH_API_KEY
-    assert not account.teleport_eligible
+    assert account.teleport_action is None
+    assert account.teleport_eligible
 
 
 @pytest.mark.asyncio

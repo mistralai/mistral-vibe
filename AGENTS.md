@@ -27,6 +27,8 @@ When creating or editing an ADR, follow the `write-vibe-adr` skill and keep the 
 | Queued-prompt selection/edit mode, copy-on-write consumed edits, or promotion-race widget-identity tracking | [0013 Queue Selection and Edit Mode](docs/adr/0013-queue-edit-mode.md) |
 | Parsing backend responses, connector/MCP bootstrap fields, or any client/backend wire-contract change that must tolerate self-hosted version skew | [0014 Backend Contract Compatibility](docs/adr/0014-backend-contract-compatibility.md) |
 | Outbound TLS connections, certificate roots, or `enable_system_trust_store` | [0015 Outbound TLS Trust Policy](docs/adr/0015-outbound-tls-trust-policy.md) |
+| Rust CLI delivery surface, thin-client boundary, unidirectional state, or bounded-resource rules | [0016 Rust CLI Delivery Surface](docs/adr/0016-rust-cli-delivery-surface.md) |
+| Narration playback, TTS, audio output device following, or the `AudioPlayer`/`DeviceFollower`/`NarrationController` classes | [0017 Narration Playback in the ACP Subprocess](docs/adr/0017-narration-playback-in-subprocess.md) |
 
 ## Commands
 

@@ -1,19 +1,36 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import subprocess
-import time
+from threading import Event
+from typing import TYPE_CHECKING
 
 import pytest
 
 from vibe.cli.autocompletion.file_indexer import FileIndexer
 
+if TYPE_CHECKING:
+    from watchfiles import Change
+
 # This suite runs against the real filesystem and watcher. A faked store/watcher
 # split would be faster to unit-test, but given time constraints and the low churn
 # expected for this feature, integration coverage was chosen as a trade-off.
+#
+# Nothing here waits on a clock. Every assertion used to sit behind a polling
+# `_wait_for(..., timeout=3.0)`, which handed the verdict to whatever else the
+# agent was running: the rename case went red on CI having waited three seconds
+# for a watcher that normally answers in under one. The negatives were worse --
+# they sampled the index for a second and called the absence of news a proof.
+#
+# Instead, a positive blocks on the watcher's own callback, so a slow machine
+# makes these tests slower and never redder, and a genuinely lost event stops on
+# pytest's timeout rather than being reported as a three-second-old opinion. A
+# negative asserts that no watcher is running, which settles the question
+# outright and takes no time at all.
 
 
 @pytest.fixture
@@ -23,27 +40,65 @@ def file_indexer() -> Generator[FileIndexer]:
     indexer.shutdown()
 
 
-def _wait_for(condition: Callable[[], bool], timeout=3.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+def _current_entries(file_indexer: FileIndexer) -> set[str]:
+    return {entry.rel for entry in file_indexer.get_index(Path("."))}
+
+
+def _indexed(file_indexer: FileIndexer) -> set[str]:
+    """Entries straight from the store.
+
+    Conditions run on the watcher thread, which must not re-enter `get_index`:
+    that call manages the very watcher it would be running inside.
+    """
+    with file_indexer._lock:
+        return {entry.rel for entry in file_indexer._store.snapshot()}
+
+
+@contextmanager
+def _watcher_applies(
+    file_indexer: FileIndexer, condition: Callable[[], bool]
+) -> Generator[None]:
+    """Run the block, then block until the watcher has made ``condition`` true.
+
+    The wait tracks the work: it ends when the indexer finishes applying a batch
+    of changes, whenever that is. The controller looks `_on_changes` up per call,
+    so the observer survives the watcher being stopped and restarted.
+    """
+    controller = file_indexer._watcher
+    deliver = controller._on_changes
+    satisfied = Event()
+
+    def observing(root: Path, raw_changes: Iterable[tuple[Change, str]]) -> None:
+        deliver(root, raw_changes)
         if condition():
-            return True
-        time.sleep(0.05)
-    return False
+            satisfied.set()
+
+    controller._on_changes = observing
+    try:
+        yield
+        if not condition():
+            # Deliberately unbounded. A deadline here would be a guess about the
+            # agent competing with a guess about the watcher, which is the thing
+            # that made this file flaky; the suite-wide `timeout` in pyproject is
+            # the backstop, and reaching it means an event was lost rather than
+            # late.
+            satisfied.wait()
+        assert condition()
+    finally:
+        controller._on_changes = deliver
 
 
-def _assert_index_state_stable(
-    file_indexer: FileIndexer,
-    expected_entries: set[str],
-    expected_incremental_updates: int,
-    duration: float = 1.0,
+def _assert_index_is_frozen(
+    file_indexer: FileIndexer, expected_entries: set[str], expected_updates: int
 ) -> None:
-    deadline = time.monotonic() + duration
-    while time.monotonic() < deadline:
-        current_entries = {entry.rel for entry in file_indexer.get_index(Path("."))}
-        assert current_entries == expected_entries
-        assert file_indexer.stats.incremental_updates == expected_incremental_updates
-        time.sleep(0.1)
+    """Assert no runtime update can reach the index, rather than that none has.
+
+    With no watcher running there is no path by which an update could arrive, so
+    this holds immediately and for good.
+    """
+    assert not file_indexer._watcher.is_watching
+    assert _current_entries(file_indexer) == expected_entries
+    assert file_indexer.stats.incremental_updates == expected_updates
 
 
 def test_updates_index_on_file_creation(
@@ -51,15 +106,12 @@ def test_updates_index_on_file_creation(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     file_indexer.get_index(Path("."))
-
     target = tmp_path / "new_file.py"
-    target.write_text("", encoding="utf-8")
 
-    assert _wait_for(
-        lambda: any(
-            entry.rel == target.name for entry in file_indexer.get_index(Path("."))
-        )
-    )
+    with _watcher_applies(file_indexer, lambda: target.name in _indexed(file_indexer)):
+        target.write_text("", encoding="utf-8")
+
+    assert target.name in _current_entries(file_indexer)
 
 
 def test_updates_index_on_file_deletion(
@@ -70,13 +122,12 @@ def test_updates_index_on_file_deletion(
     target.write_text("", encoding="utf-8")
     file_indexer.get_index(Path("."))
 
-    target.unlink()
+    with _watcher_applies(
+        file_indexer, lambda: target.name not in _indexed(file_indexer)
+    ):
+        target.unlink()
 
-    assert _wait_for(
-        lambda: all(
-            entry.rel != target.name for entry in file_indexer.get_index(Path("."))
-        )
-    )
+    assert target.name not in _current_entries(file_indexer)
 
 
 def test_updates_index_on_file_rename(
@@ -86,22 +137,18 @@ def test_updates_index_on_file_rename(
     old_file = tmp_path / "old_name.py"
     old_file.write_text("", encoding="utf-8")
     file_indexer.get_index(Path("."))
-
     new_file = tmp_path / "new_name.py"
-    old_file.rename(new_file)
 
-    assert _wait_for(
-        lambda: (
-            all(
-                entry.rel != old_file.name
-                for entry in file_indexer.get_index(Path("."))
-            )
-            and any(
-                entry.rel == new_file.name
-                for entry in file_indexer.get_index(Path("."))
-            )
-        )
-    )
+    def renamed() -> bool:
+        entries = _indexed(file_indexer)
+        return old_file.name not in entries and new_file.name in entries
+
+    with _watcher_applies(file_indexer, renamed):
+        old_file.rename(new_file)
+
+    entries = _current_entries(file_indexer)
+    assert old_file.name not in entries
+    assert new_file.name in entries
 
 
 def test_updates_index_on_folder_rename(
@@ -112,24 +159,25 @@ def test_updates_index_on_folder_rename(
     old_folder.mkdir()
     number_of_files = 5
     file_names = [f"file{i}.py" for i in range(1, number_of_files + 1)]
-    old_file_paths = [old_folder / name for name in file_names]
-    for file_path in old_file_paths:
-        file_path.write_text("", encoding="utf-8")
+    for name in file_names:
+        (old_folder / name).write_text("", encoding="utf-8")
     file_indexer.get_index(Path("."))
 
     new_folder = tmp_path / "new_folder"
-    old_folder.rename(new_folder)
+    expected = {f"new_folder/{name}" for name in file_names}
 
-    assert _wait_for(
-        lambda: (
-            entries := file_indexer.get_index(Path(".")),
-            all(not entry.rel.startswith("old_folder/") for entry in entries)
-            and all(
-                any(entry.rel == f"new_folder/{name}" for entry in entries)
-                for name in file_names
-            ),
-        )[1]
-    )
+    def moved() -> bool:
+        entries = _indexed(file_indexer)
+        return expected <= entries and not any(
+            entry.startswith("old_folder/") for entry in entries
+        )
+
+    with _watcher_applies(file_indexer, moved):
+        old_folder.rename(new_folder)
+
+    entries = _current_entries(file_indexer)
+    assert expected <= entries
+    assert not any(entry.startswith("old_folder/") for entry in entries)
 
 
 def test_updates_index_incrementally_by_default(
@@ -140,16 +188,12 @@ def test_updates_index_incrementally_by_default(
 
     rebuilds_before = file_indexer.stats.rebuilds
     incremental_before = file_indexer.stats.incremental_updates
-
     target = tmp_path / "stats_file.py"
-    target.write_text("", encoding="utf-8")
 
-    assert _wait_for(
-        lambda: any(
-            entry.rel == target.name for entry in file_indexer.get_index(Path("."))
-        )
-    )
+    with _watcher_applies(file_indexer, lambda: target.name in _indexed(file_indexer)):
+        target.write_text("", encoding="utf-8")
 
+    assert target.name in _current_entries(file_indexer)
     assert file_indexer.stats.rebuilds == rebuilds_before
     assert file_indexer.stats.incremental_updates >= incremental_before + 1
 
@@ -169,13 +213,28 @@ def test_rebuilds_index_when_mass_change_threshold_is_exceeded(
     try:
         indexer.get_index(Path("."))
         rebuilds_before = indexer.stats.rebuilds
+        expected = {f"bulk{i}.py" for i in range(number_of_files)}
 
-        ThreadPoolExecutor(max_workers=number_of_files).map(
-            lambda i: (tmp_path / f"bulk{i}.py").write_text("", encoding="utf-8"),
-            range(number_of_files),
-        )
+        def rebuilt() -> bool:
+            return (
+                indexer.stats.rebuilds >= rebuilds_before + 1
+                and _indexed(indexer) == expected
+            )
 
-        assert _wait_for(lambda: len(indexer.get_index(Path("."))) == number_of_files)
+        with _watcher_applies(indexer, rebuilt):
+            # Consumed inside the pool's own block, so every file exists before
+            # the wait begins rather than racing it.
+            with ThreadPoolExecutor(max_workers=number_of_files) as pool:
+                list(
+                    pool.map(
+                        lambda i: (tmp_path / f"bulk{i}.py").write_text(
+                            "", encoding="utf-8"
+                        ),
+                        range(number_of_files),
+                    )
+                )
+
+        assert _current_entries(indexer) == expected
         # we do not assert that "incremental_updates" did not change,
         # as the watcher potentially reported some batches of events that were
         # smaller than the threshold
@@ -190,55 +249,46 @@ def test_switching_between_roots_restarts_index(
     monkeypatch: pytest.MonkeyPatch,
     file_indexer: FileIndexer,
 ) -> None:
+    """`get_index` rebuilds before it returns, so a new root needs no waiting."""
     first_root = tmp_path
     second_root = tmp_path_factory.mktemp("second-root")
     (first_root / "first.py").write_text("", encoding="utf-8")
     (second_root / "second.py").write_text("", encoding="utf-8")
 
     monkeypatch.chdir(first_root)
-    assert _wait_for(
-        lambda: any(
-            entry.rel == "first.py" for entry in file_indexer.get_index(Path("."))
-        )
-    )
+    assert "first.py" in _current_entries(file_indexer)
 
     monkeypatch.chdir(second_root)
-    assert _wait_for(
-        lambda: all(
-            entry.rel != "first.py" for entry in file_indexer.get_index(Path("."))
-        )
-    )
-    assert _wait_for(
-        lambda: any(
-            entry.rel == "second.py" for entry in file_indexer.get_index(Path("."))
-        )
-    )
+    entries = _current_entries(file_indexer)
+    assert "first.py" not in entries
+    assert "second.py" in entries
 
 
 def test_watcher_failure_does_not_break_existing_index(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file_indexer: FileIndexer
 ) -> None:
+    """The index must survive the watcher raising while applying a change.
+
+    Waiting for the failing call is what gives the test its teeth: the index
+    looks intact before the watcher has done anything, so asserting that first
+    would pass without ever reaching the failure.
+    """
     monkeypatch.chdir(tmp_path)
-    seed = tmp_path / "seed.py"
-    seed.write_text("", encoding="utf-8")
+    (tmp_path / "seed.py").write_text("", encoding="utf-8")
     file_indexer.get_index(Path("."))
 
+    attempted = Event()
+
     def boom(*_: object, **__: object) -> None:
+        attempted.set()
         raise RuntimeError("boom")
 
     monkeypatch.setattr(file_indexer._store, "apply_changes", boom)
 
     (tmp_path / "new_file.py").write_text("", encoding="utf-8")
+    attempted.wait()
 
-    assert _wait_for(
-        lambda: (
-            entries := file_indexer.get_index(Path(".")),
-            # new file was not added: watcher failed
-            all(entry.rel != "new_file.py" for entry in entries)
-            # but the existing index is still intact
-            and all(entry.rel == "seed.py" for entry in entries),
-        )[1]
-    )
+    assert _current_entries(file_indexer) == {"seed.py"}
 
 
 def test_shutdown_cleans_up_resources(
@@ -259,15 +309,12 @@ def test_watcher_is_disabled_without_an_enabled_callback(
     monkeypatch.chdir(tmp_path)
     file_indexer = FileIndexer()
     try:
-        baseline_entries = {entry.rel for entry in file_indexer.get_index(Path("."))}
+        baseline_entries = _current_entries(file_indexer)
         incremental_before = file_indexer.stats.incremental_updates
+
         (tmp_path / "file.py").write_text("", encoding="utf-8")
 
-        _assert_index_state_stable(
-            file_indexer=file_indexer,
-            expected_entries=baseline_entries,
-            expected_incremental_updates=incremental_before,
-        )
+        _assert_index_is_frozen(file_indexer, baseline_entries, incremental_before)
     finally:
         file_indexer.shutdown()
 
@@ -311,8 +358,8 @@ def test_git_catalog_refreshes_lazily_after_watcher_event(
     file_indexer.get_index(Path("."))
     rebuilds_before = file_indexer.stats.rebuilds
 
-    (tmp_path / "new.py").write_text("", encoding="utf-8")
-    assert _wait_for(lambda: file_indexer._store.is_dirty)
+    with _watcher_applies(file_indexer, lambda: file_indexer._store.is_dirty):
+        (tmp_path / "new.py").write_text("", encoding="utf-8")
 
     assert "new.py" in _current_entries(file_indexer)
     assert file_indexer.stats.rebuilds == rebuilds_before + 1
@@ -369,51 +416,40 @@ def test_disabling_watcher_stops_runtime_updates(
         tracked = tmp_path / "tracked.py"
         tracked.write_text("", encoding="utf-8")
         file_indexer.get_index(Path("."))
-        assert any(
-            entry.rel == "tracked.py" for entry in file_indexer.get_index(Path("."))
-        )
+        assert "tracked.py" in _current_entries(file_indexer)
 
         watcher_enabled = False
         file_indexer.get_index(Path("."))
 
-        expected_entries = {entry.rel for entry in file_indexer.get_index(Path("."))}
+        expected_entries = _current_entries(file_indexer)
         incremental_before = file_indexer.stats.incremental_updates
         tracked.unlink()
 
-        _assert_index_state_stable(
-            file_indexer=file_indexer,
-            expected_entries=expected_entries,
-            expected_incremental_updates=incremental_before,
-        )
+        _assert_index_is_frozen(file_indexer, expected_entries, incremental_before)
     finally:
         file_indexer.shutdown()
-
-
-def _current_entries(file_indexer: FileIndexer) -> set[str]:
-    return {entry.rel for entry in file_indexer.get_index(Path("."))}
 
 
 def _assert_created_file_is_not_indexed(
     file_indexer: FileIndexer, tmp_path: Path, filename: str
 ) -> None:
     expected_entries = _current_entries(file_indexer)
-    expected_incremental_updates = file_indexer.stats.incremental_updates
+    expected_updates = file_indexer.stats.incremental_updates
+
     (tmp_path / filename).write_text("", encoding="utf-8")
 
-    _assert_index_state_stable(
-        file_indexer=file_indexer,
-        expected_entries=expected_entries,
-        expected_incremental_updates=expected_incremental_updates,
-    )
+    _assert_index_is_frozen(file_indexer, expected_entries, expected_updates)
 
 
 def _assert_created_file_is_indexed(
     file_indexer: FileIndexer, tmp_path: Path, filename: str
 ) -> None:
     incremental_before = file_indexer.stats.incremental_updates
-    (tmp_path / filename).write_text("", encoding="utf-8")
 
-    assert _wait_for(lambda: filename in _current_entries(file_indexer))
+    with _watcher_applies(file_indexer, lambda: filename in _indexed(file_indexer)):
+        (tmp_path / filename).write_text("", encoding="utf-8")
+
+    assert filename in _current_entries(file_indexer)
     assert file_indexer.stats.incremental_updates >= incremental_before + 1
 
 

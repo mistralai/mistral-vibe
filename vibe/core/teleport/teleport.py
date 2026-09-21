@@ -10,7 +10,6 @@ from uuid import uuid4
 import httpx
 import zstandard
 
-from vibe.core.config import VibeConfigSchema
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.git import GitRepoInfo, GitRepository
 from vibe.core.teleport.nuage import (
@@ -41,17 +40,15 @@ class TeleportService:
     def __init__(
         self,
         vibe_code_sessions_base_url: str,
-        vibe_code_api_key: str,
+        api_key: str,
         workdir: Path | None = None,
         *,
-        vibe_config: VibeConfigSchema | None = None,
         client: VibeAsyncHTTPClient | None = None,
         project_store: VibeProjectsStore | None = None,
         timeout: float = 60.0,
     ) -> None:
         self._vibe_code_sessions_base_url = vibe_code_sessions_base_url
-        self._vibe_code_api_key = vibe_code_api_key
-        self._vibe_config = vibe_config
+        self._api_key = api_key
         self._git = GitRepository(workdir)
         self._client = client
         self._project_store = project_store or VibeProjectsStore()
@@ -65,9 +62,7 @@ class TeleportService:
                 timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
             )
         self._nuage_client_instance = NuageClient(
-            self._vibe_code_sessions_base_url,
-            self._vibe_code_api_key,
-            client=self._client,
+            self._vibe_code_sessions_base_url, self._api_key, client=self._client
         )
         await self._git.__aenter__()
         return self
@@ -97,7 +92,7 @@ class TeleportService:
         if self._nuage_client_instance is None:
             self._nuage_client_instance = NuageClient(
                 self._vibe_code_sessions_base_url,
-                self._vibe_code_api_key,
+                self._api_key,
                 client=self._http_client,
             )
         return self._nuage_client_instance
@@ -174,13 +169,8 @@ class TeleportService:
             raise ServiceTeleportError(f"Failed to push current branch to {remote}.")
 
     def _validate_config(self) -> None:
-        if not self._vibe_code_api_key:
-            env_var = (
-                self._vibe_config.vibe_code_api_key_env_var
-                if self._vibe_config
-                else "MISTRAL_API_KEY"
-            )
-            raise ServiceTeleportError(f"{env_var} not set.")
+        if not self._api_key:
+            raise ServiceTeleportError("Mistral API key not set.")
 
     def _build_nuage_request(
         self,

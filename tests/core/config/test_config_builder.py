@@ -5,7 +5,7 @@ from typing import Annotated, Any
 from pydantic import BeforeValidator, Field, ValidationError
 import pytest
 
-from vibe.core.config.builder import ConfigBuilder
+from vibe.core.config.builder import ConfigBuilder, ConfigMergeError
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.models import normalize_model_configs
 from vibe.core.config.schema import (
@@ -356,6 +356,31 @@ async def test_validation_error_on_wrong_type() -> None:
     )
     with pytest.raises(ValidationError):
         await builder.build()
+
+
+@pytest.mark.asyncio
+async def test_invalid_mcp_server_table_reports_actionable_config_error() -> None:
+    class McpSchema(ConfigSchema):
+        mcp_servers: Annotated[
+            list[dict[str, Any]], WithUnionMerge(merge_key="name")
+        ] = Field(default_factory=list)
+
+    builder = ConfigBuilder(McpSchema)
+    builder.add_layer(FakeLayer(name="defaults", data={"mcp_servers": []}))
+    builder.add_layer(
+        FakeLayer(
+            name="user-toml",
+            data={"mcp_servers": {"growthbook-staging": {"transport": "stdio"}}},
+        )
+    )
+
+    with pytest.raises(ConfigMergeError) as exc_info:
+        await builder.build()
+
+    assert str(exc_info.value) == (
+        "Invalid configuration: mcp_servers from user-toml must be a list, not a "
+        "dictionary. Use [[mcp_servers]] instead of [mcp_servers.<name>]."
+    )
 
 
 # --- Fragment defaults ---

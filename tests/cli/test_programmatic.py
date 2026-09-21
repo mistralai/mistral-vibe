@@ -4,6 +4,7 @@ from dataclasses import replace
 from io import StringIO
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -190,27 +191,20 @@ def test_conversation_limits_cross_the_public_turn_boundary(
             run_programmatic(harness_options=options, prompt="Continue")
 
 
-def test_teleport_flag_runs_normal_turn_when_vibe_code_is_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_teleport_flag_always_runs_teleport(monkeypatch: pytest.MonkeyPatch) -> None:
     config = build_test_vibe_config(
-        include_model_info=False,
-        include_commit_signature=False,
-        vibe_code_enabled=False,
+        include_model_info=False, include_commit_signature=False
     )
     _use_runtime_config(monkeypatch, config)
+    teleport = AsyncMock()
+    monkeypatch.setattr("vibe.cli.programmatic._teleport", teleport)
 
-    with mock_backend_factory(
-        Backend.MISTRAL,
-        lambda provider, **kwargs: FakeBackend([
-            mock_llm_chunk(content="Normal response.")
-        ]),
-    ):
-        result = run_programmatic(
-            harness_options=_options(),
-            prompt="Hello",
-            output_format=OutputFormat.TEXT,
-            teleport=True,
-        )
+    result = run_programmatic(
+        harness_options=_options(),
+        prompt="Hello",
+        output_format=OutputFormat.TEXT,
+        teleport=True,
+    )
 
-    assert result == "Normal response."
+    assert result is None
+    teleport.assert_awaited_once()

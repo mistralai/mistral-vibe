@@ -130,6 +130,7 @@ from vibe.app_server.protocol import (
     SessionForkParams,
     SessionHistoryClearParams,
     SessionHistoryClearResponse,
+    SessionImageContentBlock,
     SessionKind,
     SessionListParams,
     SessionListResponse,
@@ -466,7 +467,11 @@ def _session_stub(**attributes: Any) -> Any:
     A class-based double states its own methods, so a port the adapter starts
     requiring fails there loudly. This is only for the namespace doubles.
     """
-    return SimpleNamespace(configure_turn_settlement=lambda _settle: None, **attributes)
+    return SimpleNamespace(
+        configure_turn_settlement=lambda _settle: None,
+        pin=lambda _pin: None,
+        **attributes,
+    )
 
 
 def _inert_adapter(
@@ -2722,6 +2727,172 @@ async def test_unified_picking_the_default_leaves_the_session_unpinned(
     assert session.pin(SessionPin.ACTIVE_MODEL) == ""
     active = context.config_orchestrator.config.get_active_model().alias
     assert active == default
+
+
+@pytest.mark.asyncio
+async def test_unified_a_thinking_pick_is_pinned_to_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A live Unified adapter on its configured thinking level.
+    *Do*: Pick a different level, the way `/thinking` does.
+    *Assert*: The session records it, and the level it runs is the picked one.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
+
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    opened_on = context.config_orchestrator.config.get_active_model().thinking
+    picked = "high" if opened_on != "high" else "low"
+    session = _RecordingSession()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
+    )
+
+    # Do
+    await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id, reasoning_effort=picked
+        )
+    )
+
+    # Assert
+    assert session.pin(SessionPin.REASONING_EFFORT) == picked
+    assert context.config_orchestrator.config.get_active_model().thinking == picked
+
+
+@pytest.mark.asyncio
+async def test_unified_a_model_pick_moves_the_pinned_thinking_to_that_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A session that picked a thinking level on its opening model.
+    *Do*: Pick a different model, naming no level.
+    *Assert*: The pinned level is the new model's own. The pin carries no model,
+    so keeping the old one would hand the next reopen a level never picked for it.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
+
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    config = context.config_orchestrator.config
+    opened_on = config.get_active_model()
+    picked_level = "high" if opened_on.thinking != "high" else "low"
+    # Configured differently from the pick, so the pin cannot come out right by
+    # agreeing with what the session already carried.
+    other = next(
+        alias
+        for alias, model in config.models.items()
+        if alias != opened_on.alias and model.thinking != picked_level
+    )
+    session = _RecordingSession()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
+    )
+    await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id, reasoning_effort=picked_level
+        )
+    )
+    assert session.pin(SessionPin.REASONING_EFFORT) == picked_level
+
+    # Do
+    await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id, model_alias=other
+        )
+    )
+
+    # Assert
+    now_active = context.config_orchestrator.config.get_active_model()
+    assert now_active.alias == other
+    assert session.pin(SessionPin.REASONING_EFFORT) == now_active.thinking
+
+
+@pytest.mark.asyncio
+async def test_unified_moving_to_a_profile_owned_model_clears_the_pinned_thinking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A session that picked a level, then moved to a model an agent
+    profile declares, as switching to Lean does.
+    *Do*: Record the level the session now runs.
+    *Assert*: The pin is cleared rather than left on the previous model's level.
+    The profile owns that model's level, and a stale pin would be read back as
+    this session's own by every client that reads it without resuming it.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
+
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ModelConfigWriteParams
+    from vibe.core.agents.registry import apply_profile_overrides
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = HarnessProcess(experimental_harness=True)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path))
+    )
+    orchestrator = context.config_orchestrator
+    opened_on = orchestrator.config.get_active_model()
+    picked = "high" if opened_on.thinking != "high" else "low"
+    session = _RecordingSession()
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, session), context, context.derive(UnifiedSessionSettings())
+    )
+    await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id, reasoning_effort=picked
+        )
+    )
+    assert session.pin(SessionPin.REASONING_EFFORT) == picked
+    apply_profile_overrides(
+        orchestrator,
+        {
+            "active_model": "profile-owned",
+            "models": [
+                {
+                    "name": "profile-owned-model",
+                    "provider": "mistral",
+                    "alias": "profile-owned",
+                    "thinking": "medium",
+                }
+            ],
+        },
+    )
+
+    # Do
+    await adapter._persist_session_reasoning_effort()  # pyright: ignore[reportPrivateUsage]
+
+    # Assert
+    assert orchestrator.config.get_active_model().alias == "profile-owned"
+    assert not session.pin(SessionPin.REASONING_EFFORT)
 
 
 @pytest.mark.asyncio
@@ -5219,6 +5390,81 @@ async def test_unified_harness_prepares_a_text_prompt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unified_harness_enqueues_ephemeral_prompt_with_external_image(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    pasted_images = tmp_path / "vibe-pasted-images"
+    pasted_images.mkdir()
+    image_path = pasted_images / "pasted.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    session_root = tmp_path / "sessions"
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(session_root))
+    )
+    client, server = _connect_harness_host(config)
+
+    try:
+        await client.initialize(ClientInfo(name="test", version="0"))
+        await client.notify("initialized")
+        started = SessionReadResponse.model_validate(
+            await client.request(
+                "session/start",
+                SessionStartParams(
+                    agent_config=SessionOptions(cwd=str(workspace)),
+                    kind=SessionKind.EPHEMERAL,
+                ),
+            )
+        )
+        session_id = started.state.session.id
+        response: WorkspacePromptPrepareResponse = (
+            WorkspacePromptPrepareResponse.model_validate(
+                await client.request(
+                    "workspace/prompt/prepare",
+                    WorkspacePromptPrepareParams(
+                        session_id=session_id, message=f"describe @{image_path}"
+                    ),
+                )
+            )
+        )
+        image = response.prompt.images[0]
+        assert isinstance(image.source, FileImageSource)
+        snapshot_path = Path(image.source.path)
+        assert snapshot_path.is_relative_to(
+            session_root / "unified" / session_id / "attachments"
+        )
+
+        enqueued = TurnEnqueueResponse.model_validate(
+            await client.request(
+                "session/turn/enqueue",
+                TurnEnqueueParams(
+                    session_id=session_id,
+                    entries=[
+                        TurnUserInputEntry(
+                            entry_id="user-1",
+                            content=[
+                                SessionTextContentBlock(
+                                    text=response.prompt.prompt_text
+                                ),
+                                SessionImageContentBlock(
+                                    uri=snapshot_path.as_uri(),
+                                    media_type=image.mime_type,
+                                    alt_text=image.alias,
+                                ),
+                            ],
+                        )
+                    ],
+                ),
+            )
+        )
+    finally:
+        await server.close()
+
+    assert enqueued.queue_item_id
+
+
+@pytest.mark.asyncio
 async def test_unified_harness_snapshots_mentioned_images_for_an_unpersisted_session(
     tmp_path: Path,
 ) -> None:
@@ -5251,12 +5497,14 @@ async def test_unified_harness_snapshots_mentioned_images_for_an_unpersisted_ses
 
     try:
         # Do
-        response = WorkspacePromptPrepareResponse.model_validate(
-            await client.request(
-                "workspace/prompt/prepare",
-                WorkspacePromptPrepareParams(
-                    session_id=started.state.session.id, message="look at @shot.png"
-                ),
+        response: WorkspacePromptPrepareResponse = (
+            WorkspacePromptPrepareResponse.model_validate(
+                await client.request(
+                    "workspace/prompt/prepare",
+                    WorkspacePromptPrepareParams(
+                        session_id=started.state.session.id, message="look at @shot.png"
+                    ),
+                )
             )
         )
 
@@ -5441,6 +5689,9 @@ async def test_unified_flush_events_does_not_wait_before_event_stream_starts(
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
 
+        def pin(self, _pin: SessionPin) -> str | None:
+            return None
+
         async def read(self, _params: object) -> object:
             return type("ReadResult", (), {"snapshot": self._snapshot(1)})()
 
@@ -5507,6 +5758,9 @@ async def test_unified_flush_events_tracks_queue_event_watermarks(
             self.events_started = asyncio.Event()
             self.release_events = asyncio.Event()
             self.turn_queue = HarnessTurnQueue(items=[], paused=False, max_items=32)
+
+        def pin(self, _pin: SessionPin) -> str | None:
+            return None
 
         async def read(self, _params: object) -> object:
             return type("ReadResult", (), {"snapshot": self._snapshot(1)})()
@@ -5950,6 +6204,9 @@ async def test_unified_root_subscription_translates_child_session_events(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def pin(self, _pin: SessionPin) -> str | None:
+            return None
 
         async def subscribe(self, _params: object) -> HarnessSessionSubscription:
             async def events():
@@ -7014,6 +7271,9 @@ async def test_unified_flush_events_returns_after_an_event_carrying_a_signal(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def pin(self, _pin: SessionPin) -> str | None:
+            return None
 
         async def read(self, _params: object) -> object:
             return type("ReadResult", (), {"snapshot": self._snapshot(2)})()
@@ -8831,6 +9091,299 @@ async def test_unified_resume_and_continue_restore_the_running_mode(
     # Assert
     assert resumed_agent == "plan"
     assert continued_agent == "plan"
+
+
+@pytest.mark.asyncio
+async def test_unified_cold_read_reports_the_session_pins_without_resuming(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A promoted session pinned to a non-default model and to ``plan``.
+    *Do*: Cold-read it from a fresh host, never resuming it.
+    *Assert*: The read names the session's own model and running mode, and no
+    session was loaded to answer. Both differ from the host's own values, so a
+    read that ignored the pins could not pass.
+    """
+    from vibe.app_server.protocol import AgentSwitchParams, ModelConfigWriteParams
+
+    # Prepare
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    host_model = config.get_active_model().alias
+    pinned_model = next(alias for alias in config.models if alias != host_model)
+    first_host = _harness_backend_host(config)
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path), agent="ask"))
+    )
+    session_id = started.backend.session_id
+    await started.backend.write_model_config(
+        ModelConfigWriteParams(session_id=session_id, model_alias=pinned_model)
+    )
+    await started.backend.switch_agent(
+        AgentSwitchParams(session_id=session_id, agent_name="plan")
+    )
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=session_id, message=[TextContentBlock(text="persist me")]
+        )
+    )
+    await first_host.shutdown()
+
+    # Do
+    second_host = _harness_backend_host(config)
+    cold_read = await second_host.read(SessionReadParams(session_id=session_id))
+    live_after_read = cast(Any, second_host)._host._live_session_ids()
+    await second_host.shutdown()
+
+    # Assert
+    assert cold_read.state.session.model == pinned_model
+    assert cold_read.state.session.agent is not None
+    assert cold_read.state.session.agent.name == "plan"
+    assert live_after_read == frozenset()
+    assert pinned_model != host_model
+
+
+@pytest.mark.asyncio
+async def test_unified_cold_read_reports_a_model_picked_back_to_the_default(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A session pinned to a model and then switched back to the default.
+    *Do*: Cold-read it from a fresh host.
+    *Assert*: The model reads as unpinned rather than as the empty string that
+    picking the default stores, which a client would show as a blank selection.
+    """
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    # Prepare
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    host_model = config.get_active_model().alias
+    pinned_model = next(alias for alias in config.models if alias != host_model)
+    first_host = _harness_backend_host(config)
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path)))
+    )
+    session_id = started.backend.session_id
+    # The turn comes first: starting one pins whatever model is active, so a
+    # pick made before it would be overwritten and prove nothing.
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=session_id, message=[TextContentBlock(text="persist me")]
+        )
+    )
+    await started.backend.write_model_config(
+        ModelConfigWriteParams(session_id=session_id, model_alias=pinned_model)
+    )
+    await started.backend.write_model_config(
+        ModelConfigWriteParams(session_id=session_id, model_alias="")
+    )
+    await first_host.shutdown()
+
+    # Do
+    second_host = _harness_backend_host(config)
+    cold_read = await second_host.read(SessionReadParams(session_id=session_id))
+    await second_host.shutdown()
+
+    # Assert
+    assert cold_read.state.session.model is None
+
+
+@pytest.mark.asyncio
+async def test_unified_cold_read_reports_the_thinking_level_without_resuming(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A promoted session whose user picked a thinking level.
+    *Do*: Cold-read it from a fresh host, never resuming it.
+    *Assert*: The read names the session's own level, and no session was loaded
+    to answer. This is the read a client's picker makes before it attaches.
+    """
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    # Prepare
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    host_level = config.get_active_model().thinking
+    picked = "high" if host_level != "high" else "low"
+    first_host = _harness_backend_host(config)
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path)))
+    )
+    session_id = started.backend.session_id
+    await started.backend.write_model_config(
+        ModelConfigWriteParams(session_id=session_id, reasoning_effort=picked)
+    )
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=session_id, message=[TextContentBlock(text="persist me")]
+        )
+    )
+    await first_host.shutdown()
+
+    # Do
+    second_host = _harness_backend_host(config)
+    cold_read = await second_host.read(SessionReadParams(session_id=session_id))
+    live_after_read = cast(Any, second_host)._host._live_session_ids()
+    await second_host.shutdown()
+
+    # Assert
+    assert cold_read.state.session.reasoning_effort == picked
+    assert live_after_read == frozenset()
+    assert picked != host_level
+
+
+@pytest.mark.asyncio
+async def test_unified_config_read_answers_for_a_session_it_is_not_sitting_on(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A promoted session whose user picked a model and a level.
+    *Do*: Read the configuration for it from a fresh host, naming the session.
+    *Assert*: The answer is the session's, not the host's. A client renders its
+    pickers from this read before it attaches anything.
+    """
+    from vibe.app_server.protocol import ConfigReadParams, ModelConfigWriteParams
+
+    # Prepare
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    host_model = config.get_active_model()
+    picked_model = next(alias for alias in config.models if alias != host_model.alias)
+    picked_level = "high" if host_model.thinking != "high" else "low"
+    first_host = _harness_backend_host(config)
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path)))
+    )
+    session_id = started.backend.session_id
+    await started.backend.write_model_config(
+        ModelConfigWriteParams(
+            session_id=session_id,
+            model_alias=picked_model,
+            reasoning_effort=picked_level,
+        )
+    )
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=session_id, message=[TextContentBlock(text="persist me")]
+        )
+    )
+    await first_host.shutdown()
+
+    # Do
+    second_host = _harness_backend_host(config)
+    read = await cast(Any, second_host).read_config(
+        ConfigReadParams(session_id=session_id)
+    )
+    live_after_read = cast(Any, second_host)._host._live_session_ids()
+    await second_host.shutdown()
+
+    # Assert
+    assert read.config.active_model.alias == picked_model
+    assert read.config.active_model.thinking == picked_level
+    assert live_after_read == frozenset()
+    assert (picked_model, picked_level) != (host_model.alias, host_model.thinking)
+
+
+@pytest.mark.asyncio
+async def test_unified_config_read_answers_for_a_legacy_session(tmp_path: Path) -> None:
+    """*Prepare*: A legacy session, listed by the merged list but never imported,
+    left on a model that is not the host's.
+    *Do*: Read the configuration for it, as a picker does before attaching.
+    *Assert*: It answers with that session's model rather than refusing. The
+    store resolves a legacy id through the same cwd and pin lookups it uses for
+    a unified one, so the read needs no separate branch -- this is what proves
+    that, since refusing here would break the picker on every unmigrated session.
+    """
+    from vibe.app_server.protocol import ConfigReadParams
+
+    # Prepare
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    host_model = config.get_active_model().alias
+    legacy_model = next(alias for alias in config.models if alias != host_model)
+    legacy = build_test_agent_loop(config=config)
+    legacy.messages.append(LLMMessage(role=Role.user, content="hello"))
+    await legacy.session_logger.save_interaction(
+        legacy.messages,
+        legacy.stats,
+        legacy.config,
+        legacy.tool_manager,
+        legacy.agent_profile,
+    )
+    await legacy.session_logger.persist_active_model(legacy_model)
+    session_id = legacy.session_id
+    await legacy.aclose()
+
+    # Do
+    host = _harness_backend_host(config)
+    read = await cast(Any, host).read_config(ConfigReadParams(session_id=session_id))
+    await host.shutdown()
+
+    # Assert
+    assert read.config.active_model.alias == legacy_model
+    assert legacy_model != host_model
+
+
+@pytest.mark.asyncio
+async def test_unified_resume_restores_the_thinking_level_the_session_ran(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A promoted session whose user picked a thinking level.
+    *Do*: Cold-reopen it against the unchanged configuration.
+    *Assert*: It comes back on the picked level, not the configured one.
+    """
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    # Prepare
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    configured = config.get_active_model().thinking
+    picked = "high" if configured != "high" else "low"
+    first_host = _harness_backend_host(config)
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path)))
+    )
+    session_id = started.backend.session_id
+    await started.backend.write_model_config(
+        ModelConfigWriteParams(session_id=session_id, reasoning_effort=picked)
+    )
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=session_id, message=[TextContentBlock(text="persist me")]
+        )
+    )
+    await first_host.shutdown()
+
+    # Do
+    second_host = _harness_backend_host(config)
+    resumed = await second_host.resume(
+        SessionResumeParams(
+            session_id=session_id, agent_config=SessionOptions(cwd=str(tmp_path))
+        )
+    )
+    assert isinstance(resumed.backend, SessionBackendRuntimeView)
+    resumed_thinking = (
+        resumed.backend.runtime_updated_params().runtime.config.active_model.thinking
+    )
+    await second_host.shutdown()
+
+    # Assert
+    assert resumed_thinking == picked
 
 
 @pytest.mark.asyncio
@@ -12635,8 +13188,8 @@ async def test_deferred_turn_persists_activity_metadata_after_promotion(
         return WorktreeResolution(options=SessionOptions(cwd=str(tmp_path)))
 
     monkeypatch.setattr(adapter, "_settle_reserved_turn_configuration", AsyncMock())
-    pin_active_model = AsyncMock(return_value=True)
-    monkeypatch.setattr(adapter, "_pin_session_active_model", pin_active_model)
+    pin_model_choice = AsyncMock(return_value=True)
+    monkeypatch.setattr(adapter, "_pin_session_model_choice", pin_model_choice)
     monkeypatch.setattr(
         adapter, "_prepared_turn_params", AsyncMock(return_value=params)
     )
@@ -12669,7 +13222,7 @@ async def test_deferred_turn_persists_activity_metadata_after_promotion(
 
     metadata = json.loads(meta_path.read_text(encoding="utf-8"))
     assert metadata["bumped_at"] == accepted_bumped_at
-    pin_active_model.assert_awaited_once_with()
+    pin_model_choice.assert_awaited_once_with()
     persist_scheduled_loops.assert_awaited_once_with(was_ephemeral=True)
 
 
@@ -12931,7 +13484,7 @@ async def test_reused_worktree_is_not_reported_as_created(
     )
     monkeypatch.setattr(adapter, "_settle_reserved_turn_configuration", AsyncMock())
     monkeypatch.setattr(
-        adapter, "_pin_session_active_model", AsyncMock(return_value=False)
+        adapter, "_pin_session_model_choice", AsyncMock(return_value=False)
     )
     monkeypatch.setattr(
         adapter, "_prepared_turn_params", AsyncMock(return_value=params)
@@ -13121,7 +13674,7 @@ async def test_deferred_start_falls_back_when_concurrent_promotion_wins(
 
     monkeypatch.setattr(adapter, "_settle_reserved_turn_configuration", AsyncMock())
     monkeypatch.setattr(
-        adapter, "_pin_session_active_model", AsyncMock(return_value=False)
+        adapter, "_pin_session_model_choice", AsyncMock(return_value=False)
     )
     monkeypatch.setattr(
         adapter, "_prepared_turn_params", AsyncMock(return_value=params)

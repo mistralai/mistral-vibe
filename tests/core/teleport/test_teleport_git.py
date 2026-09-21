@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
+import shutil
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -350,6 +352,27 @@ class TestGitRepositoryIsCommitPushed:
         with patch.object(repo, "_repo_or_raise", return_value=mock):
             assert await repo.is_commit_pushed("abc123", remote="upstream") is True
             assert await repo.is_commit_pushed("abc123", remote="origin") is False
+
+    @pytest.mark.skipif(
+        sys.platform == "win32" or shutil.which("ssh") is None,
+        reason="uses a POSIX marker command and the system SSH client",
+    )
+    @pytest.mark.asyncio
+    async def test_does_not_execute_repository_ssh_command(
+        self, tmp_path: Path
+    ) -> None:
+        source_repo = make_real_repo(tmp_path)
+        source_repo.create_remote("origin", "ssh://127.0.0.1:1/repo.git")
+        marker = tmp_path / "ssh-command-ran"
+        source_repo.config_writer().set_value(
+            "core", "sshCommand", f"touch {shlex.quote(str(marker))}"
+        ).release()
+
+        async with GitRepository(tmp_path) as git_repo:
+            pushed = await git_repo.is_commit_pushed(source_repo.head.commit.hexsha)
+
+        assert pushed is False
+        assert not marker.exists()
 
 
 class TestGitRepositoryGetUnpushedCommitCount:

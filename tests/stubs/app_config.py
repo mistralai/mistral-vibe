@@ -43,7 +43,6 @@ def build_test_app_config(
         enable_update_checks=True,
         enable_notifications=True,
         experimental_enable_tab_status=False,
-        vibe_code_enabled=True,
         models=[
             ModelConfigView(
                 name="test-model",

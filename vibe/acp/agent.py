@@ -121,6 +121,7 @@ from vibe.acp.utils import (
     is_jetbrains_client,
     make_thinking_response,
 )
+from vibe.acp.voice import VoiceController
 from vibe.app_server._integration_resources import MCPResource
 from vibe.app_server._project_links import (
     ProjectLinksAuthError,
@@ -128,6 +129,7 @@ from vibe.app_server._project_links import (
     ProjectLinksInternalError,
     ProjectLinksInvalidRequest,
 )
+from vibe.app_server.config import ConfigView
 from vibe.app_server.events import (
     AppServerEvent,
     CallbackRequested,
@@ -443,6 +445,7 @@ class VibeAcpAgent(AcpAgent):
         self._command_controller = AcpCommandController(
             lambda: self.client, self._send_config_options
         )
+        self._voice = VoiceController(lambda: self.client)
 
     @override
     async def initialize(
@@ -624,9 +627,7 @@ class VibeAcpAgent(AcpAgent):
             raise ConfigurationError(str(exc)) from exc
         session_id = acp_session_id or app_server.session_id
         client_tool_handler.bind_session(session_id)
-        commands = AcpCommandRegistry(
-            vibe_code_enabled=app_server.resources.config.current.vibe_code_enabled
-        )
+        commands = AcpCommandRegistry()
         session = AcpSession(
             session_id=session_id,
             app_server=app_server,
@@ -960,6 +961,7 @@ class VibeAcpAgent(AcpAgent):
             await self._passive_host.close()
             self._passive_host = None
         await self._harness_host.close()
+        await self._voice.close()
 
     @override
     async def list_sessions(
@@ -1179,9 +1181,64 @@ class VibeAcpAgent(AcpAgent):
                 result = await self._whoami_extension(method, params)
             case _ if method.startswith("logLevel/"):
                 result = await self._log_level_extension(method, params)
+            case _ if method.startswith("voice/"):
+                result = await self._voice_extension(method, params)
             case _:
                 raise NotImplementedMethodError(method)
         return result
+
+    async def _voice_extension(self, method: str, params: dict) -> dict:
+        # Voice features need the current session's app server resources
+        # (ConfigView, NarrationResource, telemetry) to construct the
+        # CLI's VoiceManager and NarratorManager.
+        #
+        # The webview gates on VS Code settings (voice.enabled /
+        # voiceNarration.enabled) before calling narrate/transcribeStart, so by
+        # the time we get here the user has explicitly opted in. The CLI's own
+        # narrator_enabled / voice_mode_enabled flags come from the CLI config
+        # file and are unrelated to the VS Code toggles, so we force them to True
+        # to let the CLI managers actually materialize and run.
+        try:
+            session = next(iter(self.sessions.values()), None)
+
+            def config_getter() -> ConfigView:
+                assert session is not None
+                return session.app_server.resources.config.current.model_copy(
+                    update={"narrator_enabled": True, "voice_mode_enabled": True}
+                )
+
+            narration_resource = (
+                session.app_server.resources.narration if session else None
+            )
+            telemetry = session.app_server.resources.telemetry if session else None
+
+            match method:
+                case "voice/transcribeStart":
+                    return await self._voice.transcribe_start(
+                        language=params.get("language", "en"),
+                        config_getter=config_getter,
+                        narration_resource=narration_resource,
+                        telemetry=telemetry,
+                    )
+                case "voice/transcribeStop":
+                    return await self._voice.transcribe_stop()
+                case "voice/transcribeCancel":
+                    return await self._voice.transcribe_cancel()
+                case "voice/narrate":
+                    return await self._voice.narrate(
+                        user_message=params.get("userMessage", ""),
+                        assistant_text=params.get("assistantText", ""),
+                        config_getter=config_getter,
+                        narration_resource=narration_resource,
+                        telemetry=telemetry,
+                    )
+                case "voice/narrateCancel":
+                    return await self._voice.narrate_cancel()
+                case _:
+                    raise NotImplementedMethodError(method)
+        except Exception:
+            logger.error("voice extension method %s failed", method, exc_info=True)
+            raise
 
     async def _config_schema(self) -> dict[str, Any]:
         response = await (await self._host_resources()).read_config_schema()

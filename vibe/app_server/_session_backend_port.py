@@ -22,6 +22,8 @@ from vibe.app_server.protocol import (
     CallbackResultParams,
     CallbackResultResponse,
     ConfigMutationResponse,
+    ConfigReadParams,
+    ConfigReadResponse,
     ConfigReloadParams,
     ConfigWriteParams,
     ConfigWriteResponse,
@@ -548,6 +550,13 @@ class SessionBackendHostPin(Protocol):
     """Optional selected-backend ownership of durable session pinning."""
 
     async def pin(self, params: SessionPinParams) -> SessionPinResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostConfigRead(Protocol):
+    """Optional selected-backend ownership of a stored session's configuration."""
+
+    async def read_config(self, params: ConfigReadParams) -> ConfigReadResponse: ...
 
 
 @runtime_checkable

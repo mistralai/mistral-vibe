@@ -891,10 +891,6 @@ class VibeApp(App):  # noqa: PLR0904
             self.app_server.resources.loops,
             tools_collapsed=lambda: self._tools_collapsed,
         )
-        self._teleport_on_start = (
-            self._teleport_on_start
-            and self.app_server.resources.config.current.vibe_code_enabled
-        )
         self._client_dependencies_ready = True
 
     def _configure_startup_options(self, startup: StartupOptions | None) -> None:
@@ -1071,7 +1067,6 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _command_context(self) -> CommandContext:
         return CommandContext(
-            vibe_code_enabled=self.app_server.resources.config.current.vibe_code_enabled,
             registry_skills_enabled=self.app_server.resources.config.current.experimental_enable_registry_skills,
             experimental_harness=self.app_server.resources.runtime.experimental_harness,
         )

@@ -14,6 +14,7 @@ from vibe.cli import (
     programmatic as programmatic_mod,
 )
 from vibe.core.config import MissingAPIKeyError, VibeConfigSchema, harness_files
+from vibe.core.config.builder import ConfigMergeError
 from vibe.core.config.layer import ConfigStorageError
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.git.worktree import ManagedWorktree, WorktreeRepository
@@ -149,6 +150,24 @@ def test_unreadable_config_file_exits_with_storage_guidance(
     out = capsys.readouterr().out
     assert "Cannot read" in out
     assert "VIBE_HOME" in out
+
+
+def test_invalid_config_merge_exits_without_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def raise_merge_error() -> ConfigOrchestrator[VibeConfigSchema]:
+        raise ConfigMergeError("mcp_servers", "user-toml", "list", {})
+
+    monkeypatch.setattr(cli_mod, "build_default_orchestrator", raise_merge_error)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_mod.load_config_orchestrator_or_exit()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "mcp_servers from user-toml must be a list" in captured.out
+    assert "Use [[mcp_servers]]" in captured.out
+    assert "Traceback" not in captured.out + captured.err
 
 
 def test_interactive_trust_flag_is_delegated_without_launcher_mutation(

@@ -1826,6 +1826,7 @@ class FeedbackShouldShowParams(ProtocolModel):
 
 class FeedbackShouldShowResponse(ProtocolModel):
     show: bool
+    snooze_duration_seconds: int | None = None
 
 
 class FeedbackRecordParams(ProtocolModel):

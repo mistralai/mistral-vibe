@@ -458,12 +458,12 @@ class VibeCodeController:
         )
         if action is not None and action.kind is AccountActionKind.SWITCH_API_KEY:
             return (
-                "Teleport requires a Vibe Pro API key, but the current key is on a "
-                f"different plan. Switch to your Vibe Pro API key: {url}"
+                "Teleport does not support Codestral API keys. "
+                f"Switch to a Vibe or workspace API key: {url}"
             )
         return (
-            "Teleport requires a Vibe Pro subscription. Your current API key isn't "
-            f"eligible. Upgrade to Vibe Pro: {url}"
+            "Teleport requires a valid Mistral API key. Your current key couldn't be "
+            f"verified. Check your Mistral sign-in: {url}"
         )
 
     async def reset(self) -> None:
@@ -575,9 +575,9 @@ class VibeCodeController:
 
     def _make_service(self) -> VibeCodeProjectPickerService:
         config = self._session.config
-        api_key = config.vibe_code_api_key
+        api_key = config.resolve_mistral_api_key()
         if not api_key:
-            raise VibeCodeError(f"{config.vibe_code_api_key_env_var} not set.")
+            raise VibeCodeError("Mistral API key not set.")
         return VibeCodeProjectPickerService(
             base_url=config.vibe_code_sessions_base_url,
             api_key=api_key,
