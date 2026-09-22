@@ -49,6 +49,16 @@
           buildInputs = (old.buildInputs or []) ++ final.resolveBuildSystem {setuptools = [];};
         });
 
+        # miniaudio 1.71 has no aarch64 Linux wheel. Source builds use
+        # setuptools.build_meta and cffi's setuptools integration but don't
+        # declare them in build-system.requires.
+        miniaudio = prev.miniaudio.overrideAttrs (old: {
+          nativeBuildInputs = (old.nativeBuildInputs or []) ++ final.resolveBuildSystem {
+            setuptools = [];
+            cffi = [];
+          };
+        });
+
         # cryptography 50.0.0 has no macOS x86_64 wheel. Source builds need
         # the Python backend and vendored Rust crates inside the Nix sandbox.
         cryptography = prev.cryptography.overrideAttrs (old:
