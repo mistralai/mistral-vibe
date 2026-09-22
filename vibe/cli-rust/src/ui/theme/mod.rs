@@ -27,14 +27,14 @@ pub fn set_active(name: &str) {
     set_active_index(index);
 }
 
-/// Painted on every cell (Textual fills the whole screen with `$background`).
+/// The theme's `$background`, composited into blends and painted behind modal overlays.
 pub fn background() -> Color {
     active().background
 }
-/// The unstyled terminal surface, explicitly clearing prior frame modifiers.
+/// Terminal-default background fill (SGR 49), matching Python's transparent `Screen`.
 pub fn screen_style() -> Style {
     Style::default()
-        .bg(background())
+        .bg(Color::Reset)
         .remove_modifier(Modifier::all())
 }
 /// Text that must not inherit an ANSI dim modifier from a previous paint.
