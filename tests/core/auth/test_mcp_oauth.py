@@ -1174,6 +1174,28 @@ class TestPerformOAuthLogin:
         assert await Fingerprint.load("demo") is None
 
     @pytest.mark.asyncio
+    async def test_probe_without_challenge_fails_instead_of_saving_fingerprint(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        # A probe the server never challenges leaves no token: login must fail, not save a fingerprint (VIBE-4667).
+        server_url = "https://mcp.example.com/mcp"
+        srv = _oauth_server(name="demo", url=server_url, scopes=["read"])
+
+        async def on_url(_url: str) -> None:
+            pass
+
+        async with respx.mock(assert_all_called=False) as router:
+            post_route = router.post(server_url).mock(
+                return_value=httpx.Response(200, json={"ok": True})
+            )
+            with pytest.raises(MCPOAuthLoginFailed):
+                await perform_oauth_login(srv, on_url=on_url)
+
+        assert post_route.called
+        assert await KeyringTokenStorage(alias="demo").get_tokens() is None
+        assert await Fingerprint.load("demo") is None
+
+    @pytest.mark.asyncio
     async def test_the_challenge_carries_the_headers_the_server_was_declared_with(
         self, memory_keyring: _MemoryKeyring
     ) -> None:

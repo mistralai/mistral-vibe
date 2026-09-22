@@ -3,7 +3,7 @@ from __future__ import annotations
 import platform
 import time
 from typing import Any
-from unittest.mock import AsyncMock, PropertyMock, patch
+from unittest.mock import PropertyMock, patch
 
 import pytest
 
@@ -20,23 +20,15 @@ from vibe.app_server.models import AccountPlanKind
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.messages import ErrorMessage
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
+from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.types import Backend
 from vibe.core.utils import get_platform_id, get_platform_version
 
 
-def _chat_account_gateway(*, prompt_switching_to_pro_plan: bool) -> FakeAccountGateway:
+def _chat_account_gateway(*, plan_name: str = "INDIVIDUAL") -> FakeAccountGateway:
     return FakeAccountGateway(
-        WhoAmIResult(
-            plan_type=AccountPlanKind.CHAT,
-            plan_name="INDIVIDUAL",
-            prompt_switching_to_pro_plan=prompt_switching_to_pro_plan,
-        )
+        WhoAmIResult(plan_type=AccountPlanKind.CHAT, plan_name=plan_name)
     )
-
-
-def _vibe_code_enabled_config() -> VibeConfigSchema:
-    return build_test_vibe_config(vibe_code_enabled=True)
 
 
 async def _wait_until(pause, predicate, timeout: float = 2.0) -> None:
@@ -77,8 +69,7 @@ def _error_messages(app) -> list[str]:
 @pytest.mark.asyncio
 async def test_teleport_command_visible_for_paid_chat_users() -> None:
     app = build_test_vibe_app(
-        config=_vibe_code_enabled_config(),
-        account_gateway=_chat_account_gateway(prompt_switching_to_pro_plan=False),
+        config=build_test_vibe_config(), account_gateway=_chat_account_gateway()
     )
 
     async with app.run_test() as pilot:
@@ -96,7 +87,7 @@ async def test_teleport_command_visible_for_paid_chat_users() -> None:
 
 @pytest.mark.asyncio
 async def test_teleport_command_uses_effective_harness_backend() -> None:
-    app = build_test_vibe_app(config=_vibe_code_enabled_config())
+    app = build_test_vibe_app(config=build_test_vibe_config())
 
     async with app.run_test() as pilot:
         await _wait_until(
@@ -118,12 +109,10 @@ async def test_teleport_command_uses_effective_harness_backend() -> None:
 
 @pytest.mark.asyncio
 async def test_account_read_updates_subscription_banner() -> None:
-    config = _vibe_code_enabled_config()
+    config = build_test_vibe_config()
     agent_loop = build_test_agent_loop(config=config)
     app = build_test_vibe_app(
-        config=config,
-        agent_loop=agent_loop,
-        account_gateway=_chat_account_gateway(prompt_switching_to_pro_plan=False),
+        config=config, agent_loop=agent_loop, account_gateway=_chat_account_gateway()
     )
 
     async with app.run_test() as pilot:
@@ -138,12 +127,30 @@ async def test_account_read_updates_subscription_banner() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("plan_type", "plan_name", "has_chat_subscription", "user_plan"),
+    [
+        (AccountPlanKind.CHAT, "INDIVIDUAL", False, "Pro"),
+        (AccountPlanKind.API, "FREE", True, "Free API"),
+        (AccountPlanKind.API, "PAY_AS_YOU_GO", True, "PAYG API"),
+    ],
+)
 async def test_teleport_command_without_history_sends_early_failure_telemetry(
     telemetry_events: list[dict[str, Any]],
+    plan_type: AccountPlanKind,
+    plan_name: str,
+    has_chat_subscription: bool,
+    user_plan: str,
 ) -> None:
     app = build_test_vibe_app(
-        config=_vibe_code_enabled_config(),
-        account_gateway=_chat_account_gateway(prompt_switching_to_pro_plan=False),
+        config=build_test_vibe_config(),
+        account_gateway=FakeAccountGateway(
+            WhoAmIResult(
+                plan_type=plan_type,
+                plan_name=plan_name,
+                prompt_switching_to_pro_plan=has_chat_subscription,
+            )
+        ),
     )
 
     async with app.run_test() as pilot:
@@ -161,7 +168,7 @@ async def test_teleport_command_without_history_sends_early_failure_telemetry(
             "event_name": "vibe.teleport_failed",
             "properties": {
                 **_expected_system_metadata(),
-                "user_plan": "Pro",
+                "user_plan": user_plan,
                 "stage": "no_history",
                 "error_class": "TeleportNoHistoryError",
                 "push_required": False,
@@ -175,12 +182,14 @@ async def test_teleport_command_without_history_sends_early_failure_telemetry(
 
 
 @pytest.mark.asyncio
-async def test_teleport_command_visible_but_errors_when_key_not_eligible(
+async def test_teleport_command_allowed_for_free_chat_users(
     telemetry_events: list[dict[str, Any]],
 ) -> None:
+    # Any Mistral API key is teleport-eligible now, including a free chat key.
+    # With no history the command reaches the no-history stage, not "ineligible".
     app = build_test_vibe_app(
-        config=_vibe_code_enabled_config(),
-        account_gateway=_chat_account_gateway(prompt_switching_to_pro_plan=True),
+        config=build_test_vibe_config(),
+        account_gateway=_chat_account_gateway(plan_name="FREE"),
     )
 
     async with app.run_test() as pilot:
@@ -198,8 +207,7 @@ async def test_teleport_command_visible_but_errors_when_key_not_eligible(
             ChatInputContainer.Submitted("/teleport")
         )
         await _wait_until(
-            pilot.pause,
-            lambda: any("Vibe Pro API key" in error for error in _error_messages(app)),
+            pilot.pause, lambda: bool(_teleport_failed_events(telemetry_events))
         )
 
     assert _teleport_failed_events(telemetry_events) == [
@@ -207,9 +215,9 @@ async def test_teleport_command_visible_but_errors_when_key_not_eligible(
             "event_name": "vibe.teleport_failed",
             "properties": {
                 **_expected_system_metadata(),
-                "user_plan": "Pro",
-                "stage": "ineligible",
-                "error_class": "TeleportIneligibleError",
+                "user_plan": "Free",
+                "stage": "no_history",
+                "error_class": "TeleportNoHistoryError",
                 "push_required": False,
                 "nb_session_messages": 0,
                 "context_summary": "skipped",
@@ -221,64 +229,11 @@ async def test_teleport_command_visible_but_errors_when_key_not_eligible(
 
 
 @pytest.mark.asyncio
-async def test_teleport_command_errors_instead_of_user_text_when_not_eligible() -> None:
-    app = build_test_vibe_app(
-        config=_vibe_code_enabled_config(),
-        account_gateway=_chat_account_gateway(prompt_switching_to_pro_plan=True),
-    )
-
-    async with app.run_test() as pilot:
-        await _wait_until(
-            pilot.pause,
-            lambda: app.commands.get_command_name("/teleport") == "teleport",
-        )
-
-        app._handle_user_message = AsyncMock()
-
-        await app.on_chat_input_container_submitted(
-            ChatInputContainer.Submitted("/teleport")
-        )
-        await _wait_until(
-            pilot.pause,
-            lambda: any("Vibe Pro API key" in error for error in _error_messages(app)),
-        )
-
-        app._handle_user_message.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_ampersand_teleport_shortcut_errors_when_not_eligible() -> None:
-    app = build_test_vibe_app(
-        config=_vibe_code_enabled_config(),
-        account_gateway=_chat_account_gateway(prompt_switching_to_pro_plan=True),
-    )
-
-    async with app.run_test() as pilot:
-        await _wait_until(
-            pilot.pause,
-            lambda: app.commands.get_command_name("/teleport") == "teleport",
-        )
-
-        app._handle_user_message = AsyncMock()
-
-        await app.on_chat_input_container_submitted(
-            ChatInputContainer.Submitted("&continue")
-        )
-        await _wait_until(
-            pilot.pause,
-            lambda: any("Vibe Pro API key" in error for error in _error_messages(app)),
-        )
-
-        app._handle_user_message.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_teleport_command_errors_after_switching_to_non_mistral_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "mock-openai-key")
     config = build_test_vibe_config(
-        vibe_code_enabled=True,
         providers=[
             ProviderConfig(
                 name="mistral",
@@ -301,10 +256,7 @@ async def test_teleport_command_errors_after_switching_to_non_mistral_model(
         ],
         active_model="devstral",
     )
-    app = build_test_vibe_app(
-        config=config,
-        account_gateway=_chat_account_gateway(prompt_switching_to_pro_plan=False),
-    )
+    app = build_test_vibe_app(config=config, account_gateway=_chat_account_gateway())
 
     async with app.run_test() as pilot:
         await _wait_until(

@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.25.7] - 2026-09-22
+
+### Fixed
+
+- Allow /teleport with Vibe and workspace API keys, including free accounts, without an internal feature gate.
+- Explain which API keys to use when teleport rejects a Codestral key.
+- Warn when managed configuration contains removed Vibe Code settings.
+- On Windows, opening a session that is already open in another process reports 'Session is already open' instead of a raw permission error.
+- On Windows, idle-session cleanup no longer mistakes a session held by another process for an idle one.
+- Automatic project context no longer runs repository-configured Git clean or process filters.
+
+## [2.25.6] - 2026-09-21
+
+### Added
+
+- Attach images while running a model that cannot see them: under `--experimental-harness`, any vision-capable model on the active model's own provider describes them for the agent. Set `vision_model` in `config.toml` to override that choice or to use another provider.
+
+### Changed
+
+- Vibe packages now bundle the Unified Harness Runtime
+- Described UI and design screenshots now include a layout contract — regions, colors, typography hierarchy, and recurring components — so the agent can rebuild them.
+- VS Code narration now plays through the ACP subprocess (PortAudio) instead of the webview AudioContext, following the system default output device mid-playback
+
+### Fixed
+
+- Invalid MCP server tables now show actionable configuration guidance instead of a traceback
+- Concurrent Vibe sessions now merge their prompt history instead of overwriting each other.
+- Submitting a prompt no longer pauses the UI on history file I/O.
+- The session no longer freezes for good when a burst of subagents finishes at the same time
+- Path completion no longer inserts outdated suggestions while searching.
+- ACP integrations now preserve Windows MCP executable paths containing spaces and backslashes
+- Picking a model and a thinking level together no longer leaves that model's configuration unwritable when the model came from a rollout.
+- A session reopens on the thinking level it ran with, instead of the level another session left in the configuration.
+- Secure Git fetches no longer trust inherited Git configuration path overrides.
+- Repository worktree configuration can no longer rewrite validated Git fetch URLs.
+- Untrusted checkouts can no longer choose the SSH client or Git hooks used for approval-free fetches.
+- Secure fetches reject encoded network file paths, checkout-controlled credential helpers, and repository HTTP configuration.
+- Risky options, output operands, repository hooks, and shell redirections on otherwise read-only commands now require approval.
+- Git-reader approvals are scoped to one repository and cover repeated commands and remerge diffs.
+- Interactive pager input now requires approval on PowerShell and when session metadata cannot be verified.
+- `/mcp login` fails loudly when a server never issues an OAuth challenge, instead of reporting a false success with no token
+- Opening a session is faster on machines with many git worktrees: listing them no longer re-inspects each one, and the composer's model and approval-policy pickers no longer wait for the session to resume.
+
 ## [2.25.5] - 2026-09-18
 
 ### Added

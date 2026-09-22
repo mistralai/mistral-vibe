@@ -1067,6 +1067,66 @@ def test_bash_stdin_control_field_rejects_unknown_keys():
         BashStdinArgs.model_validate({"session_id": "s", "control": ["not_a_real_key"]})
 
 
+@pytest.mark.parametrize(
+    "command", ["less input.txt", "cat input.txt | more", "git log -p"]
+)
+def test_bash_stdin_to_pager_session_requires_approval(
+    command, monkeypatch: pytest.MonkeyPatch
+):
+    terminal_runtime = TerminalRuntime()
+    tool = BashStdin(
+        config_getter=lambda: BashStdinConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
+    )
+    manager = tool._session_manager()
+    info = _fake_session_info("running").model_copy(update={"command": command})
+    monkeypatch.setattr(manager, "info", lambda _session_id: info)
+
+    permission = tool.resolve_permission(BashStdinArgs(session_id="s", text="q"))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert [required.label for required in permission.required_permissions] == [
+        "input to pager session s"
+    ]
+
+
+def test_bash_stdin_to_non_pager_session_keeps_configured_permission(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    terminal_runtime = TerminalRuntime()
+    tool = BashStdin(
+        config_getter=lambda: BashStdinConfig(),
+        state=BaseToolState(),
+        terminal_runtime=terminal_runtime,
+    )
+    manager = tool._session_manager()
+    monkeypatch.setattr(
+        manager, "info", lambda _session_id: _fake_session_info("running")
+    )
+
+    assert tool.resolve_permission(BashStdinArgs(session_id="s", text="q")) is None
+
+
+@pytest.mark.parametrize("error_type", [ManagedShellError, ManagedShellBackendError])
+def test_bash_stdin_requires_approval_when_session_lookup_fails(
+    error_type, monkeypatch: pytest.MonkeyPatch
+):
+    tool = BashStdin(config_getter=lambda: BashStdinConfig(), state=BaseToolState())
+    manager = tool._session_manager()
+
+    def fail(_session_id: str) -> None:
+        raise error_type("session lookup failed")
+
+    monkeypatch.setattr(manager, "info", fail)
+
+    permission = tool.resolve_permission(BashStdinArgs(session_id="s", text="q"))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
 def test_bash_byte_limit_models_accept_legacy_max_chars_alias():
     assert (
         BashOutputArgs.model_validate({"session_id": "s", "max_chars": 12}).max_bytes
@@ -1751,25 +1811,382 @@ def _resolve_default_shell_permission(
         "sort --compress-program=gzip input.txt",
         "sort --files0-from=input-files.txt",
         "sort --files0-f=input-files.txt",
+        "file --files-from=input-files.txt",
+        "file --files-f=input-files.txt",
+        "file -f input-files.txt",
+        "file -C",
+        "file --compile",
+        "file -z archive.gz",
+        "file -Z archive.gz",
+        "du --files0-from=input-files.txt",
+        "du --files0-f=input-files.txt",
+        "wc --files0-from=input-files.txt",
+        "wc --files0-f=input-files.txt",
         "find . -delete",
         "find . -fprint matches.txt",
+        "find -files0-from input-files.txt",
         r"find . -exec echo {} \;",
+        "md5sum --check checksums.txt",
+        "sha1sum -c checksums.txt",
+        "sha256sum --check checksums.txt",
+        "shasum -c checksums.txt",
         "less -o less.log input.txt",
         "less -Noless.log input.txt",
         "less --LOG-FILE=less.log input.txt",
         "tree -o tree.txt .",
         "tree -aotree.txt .",
+        "tree -Xo ignored tree.txt .",
+        "tree -Ho ignored tree.txt .",
+        "tree -Io ignored tree.txt .",
+        "tree -Lo 2 tree.txt .",
+        "tree -Po ignored tree.txt .",
+        "tree -To ignored tree.txt .",
+        "uniq input.txt output.txt",
+        "uniq input.txt +output.txt",
+        "uniq -f 1 input.txt output.txt",
         "git diff --output=diff.txt",
         "git diff --out=diff.txt",
         "git log --output=log.txt",
         "git diff --ext-diff",
+        "git log --remerge-diff -1",
+        "git log -p --diff-merges=remerge",
+        "git log -p --diff-merges=r",
         "date -s 2020-01-01",
         "date -us 2020-01-01",
         "date --set=2020-01-01",
         "date --se=2020-01-01",
+        "date 010112002026",
+        "date -f %Y 2026",
     ],
 )
 def test_side_effecting_allowlisted_options_require_approval(shell_kind, command):
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "--lesskey-src=keys",
+        "--lesskey-src keys",
+        "--lesskey-sr=keys",
+        "--lesskey-sr keys",
+        "--lesskey-context=keys",
+        "--lesskey-context keys",
+        "--lesskey-contex=keys",  # typos:disable-line
+        "--lesskey-contex keys",  # typos:disable-line
+        "--lesskey-content=keys",
+        "--lesskey-content keys",
+        "--lesskey-conten=keys",  # typos:disable-line
+        "--lesskey-conten keys",  # typos:disable-line
+        "--lesskey-con=keys",
+        "--lesskey-con keys",
+        "--lesskey-file=keys",
+        "--lesskey-file keys",
+        "--lesskey-fi=keys",
+        "--lesskey-fi keys",
+        "--Lesskey-src=keys",
+        "--LESSKEY-CONTEXT keys",
+        "--Lesskey-Fi=keys",
+        "--+LESSKEY-SRC=keys",
+        "--+lesskey-src=keys",
+        "--+lesskey-src keys",
+        "--+lesskey-content=keys",
+        "--+lesskey-content keys",
+        "--+lesskey-file=keys",
+        "--+lesskey-file keys",
+        "--+lesskey-sr=keys",
+        "--+lesskey-conten keys",  # typos:disable-line
+        "--+lesskey-fi=keys",
+        "-kkeys",
+        "-k keys",
+        "-Nkkeys",
+        "-Nk keys",
+        "-+kkeys",
+        "-+k keys",
+    ],
+)
+def test_lesskey_configuration_options_require_approval(shell_kind, pager, arguments):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {arguments} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "non_consuming_option",
+    [
+        "--header",
+        "--intr",
+        "--match-shift",
+        "--modelines",
+        "--search-options",
+        "--line-num-width",
+        "--status-col-width",
+        "--wheel-lines",
+        "--ma",
+        "--p",
+        "--s",
+        "--w",
+    ],
+)
+@pytest.mark.parametrize("lesskey_option", ["-kkeys", "-k keys", "--lesskey-src=keys"])
+def test_non_consuming_less_options_do_not_hide_lesskey_options(
+    shell_kind, pager, non_consuming_option, lesskey_option
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {non_consuming_option} {lesskey_option} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize("numeric_option", ["#", "b", "h", "j", "x", "y", "z"])
+@pytest.mark.parametrize(
+    "suffix",
+    ["-kkeys", "kkeys", "-olog.txt", "tlabel", "--lesskey-src=keys", "+!harmless"],
+)
+def test_short_numeric_less_options_do_not_hide_following_options(
+    shell_kind, pager, numeric_option, suffix
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} -{numeric_option}8{suffix} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "numeric_option",
+    [
+        "--buffers",
+        "--jump-target",
+        "--max-back-scroll",
+        "--max-forw-scroll",
+        "--shift",
+        "--tab",
+        "--tabs",
+        "--window",
+        "--header",
+        "--line-num-width",
+        "--match-shift",
+        "--modelines",
+        "--status-col-width",
+        "--wheel-lines",
+    ],
+)
+@pytest.mark.parametrize(
+    "suffix",
+    ["-kkeys", "kkeys", "-olog.txt", "tlabel", "--lesskey-src=keys", "+!harmless"],
+)
+def test_long_numeric_less_options_do_not_hide_following_options(
+    shell_kind, pager, numeric_option, suffix
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {numeric_option}=8{suffix} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        r"'-Pprompt$kkeys'",
+        r"'--prompt=prompt$kkeys'",
+        r"'-Dsr$kkeys'",
+        r"'--color=sr$kkeys'",
+        "'-\"ab$kkeys'",
+        r"'--quotes=ab$kkeys'",
+        r"'-Pprompt$+!harmless'",
+        r"'--prompt=prompt$--lesskey-src=keys'",
+        r"'--emouse=mask$-kkeys'",
+        r"'--end-prompt=prompt$-kkeys'",
+        r"'--autosave=history$-kkeys'",
+    ],
+)
+def test_attached_less_string_terminator_cannot_hide_lesskey_options(
+    shell_kind, pager, arguments
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {arguments} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "'--lesskey-src keys'",
+        "'+/needle$-kkeys'",
+        "'-Dsr -kkeys'",
+        "'--color=sr -kkeys'",
+        "'-b+1!harmless'",
+        "-8+!harmless",
+        "-8+v",
+        "-n8+!harmless",
+        "-N+!harmless",
+        "'-$+!harmless'",
+        "'-Pprompt$$+!harmless'",
+        "-N--cmd=harmless",
+    ],
+)
+def test_less_embedded_option_resumption_requires_approval(
+    shell_kind, pager, arguments
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {arguments} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "'safe -- -kkeys'",
+        "'safe -- --lesskey-src=keys'",
+        "'-Pprompt text$kkeys'",
+        "'--prompt=prompt text$--lesskey-src=keys'",
+    ],
+)
+def test_quoted_less_arguments_cannot_hide_lesskey_options(
+    shell_kind, pager, arguments
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {arguments} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "+!harmless",
+        "+#harmless",
+        "+|harmless",
+        "+sharmless",
+        "+v",
+        "+:e harmless.txt",
+        "--cmd=harmless",
+        "--cmd harmless",
+        "--cm=harmless",
+        "--cm harmless",
+        "--+cmd=harmless",
+        "--+cmd harmless",
+        "--+cm=harmless",
+        "-t harmless",
+        "--tag=harmless",
+        "--tag harmless",
+        "-Tharmless.tags",
+        "-T harmless.tags",
+        "--tag-file=harmless.tags",
+        "--tag-file harmless.tags",
+    ],
+)
+def test_less_startup_commands_and_tag_options_require_approval(
+    shell_kind, pager, arguments
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} {arguments} input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("pager", ["less", "more"])
+@pytest.mark.parametrize("prefix", ["+/", "++/"])
+@pytest.mark.parametrize(
+    "control",
+    ["\x07", "\x08", "\x1b", "\x7f", "\r", "\n"],
+    ids=["bell", "backspace", "escape", "delete", "carriage-return", "newline"],
+)
+def test_less_startup_search_control_characters_require_approval(
+    shell_kind, pager, prefix, control
+):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{pager} '{prefix}needle{control}v' input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "LESSOPEN=harmless",
+        "LESSCLOSE=harmless",
+        "LESSKEYIN=harmless.lesskey",
+        "LESSKEY_CONTENT=harmless",
+    ],
+)
+def test_less_environment_assignments_require_approval(shell_kind, assignment):
+    permission = _resolve_default_shell_permission(
+        shell_kind, f"{assignment} less input.txt"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+
+
+def test_managed_less_environment_override_requires_approval():
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+
+    permission = tool.resolve_permission(
+        ExperimentalBashArgs(command="less input.txt", env={"LESSOPEN": "harmless"})
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert [required.label for required in permission.required_permissions] == [
+        "custom environment (LESSOPEN)"
+    ]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "less input.txt && less -kkeys input.txt",
+        "exec less -kkeys input.txt",
+        "eval 'less --lesskey-src keys input.txt'",
+    ],
+)
+def test_shell_wrappers_do_not_hide_lesskey_options(shell_kind, command):
     permission = _resolve_default_shell_permission(shell_kind, command)
 
     assert isinstance(permission, PermissionContext)
@@ -1781,14 +2198,34 @@ def test_side_effecting_allowlisted_options_require_approval(shell_kind, command
     "command",
     [
         "sort -r input.txt",
+        "md5sum input.txt",
+        "shasum -a 256 input.txt",
         "find . -name '*.py'",
         "less -N input.txt",
+        "less -Pkey input.txt",
+        "less -P -k input.txt",
+        "less --prompt -k input.txt",
+        "less -# -k input.txt",
+        "less -x8Pprompt-k input.txt",
+        "less --tabs=8Pprompt-k input.txt",
+        "less +G input.txt",
+        "less +42 input.txt",
+        "less +/needle input.txt",
+        "less -- --lesskey-src=ordinary-filename",
+        "less -- -kordinary-filename",
+        "less -- --+lesskey-content=ordinary-filename",
+        "less -- +G",
+        "more -N input.txt",
+        "more +10 input.txt",
+        "more +/needle input.txt",
+        "more -- --lesskey-src=ordinary-filename",
+        "more -- -kordinary-filename",
+        "more -- --+lesskey-content=ordinary-filename",
         "tree -L 2 .",
-        "git diff --stat",
-        "git log --oneline",
         "sort -- --output=ordinary-filename",
         "date -d yesterday",
         "date -Iseconds",
+        "date -j -f %Y 2026",
         "date -- -s",
     ],
 )
@@ -1808,6 +2245,12 @@ def test_benign_allowlisted_options_remain_allowed(shell_kind, command):
         "git diff --no-index {outside} other.txt",
         "sort --random-source={outside} input.txt",
         "sort --random={outside} input.txt",
+        "git diff -O{outside}",
+        "git diff --pathspec-from-file={outside}",
+        "git log -O{outside}",
+        "git log --pathspec-from-file={outside}",
+        "git status --pathspec-from-file={outside}",
+        "tree --gitfile={outside} .",
     ],
 )
 def test_allowlisted_option_paths_outside_workspace_require_approval(
@@ -1838,6 +2281,7 @@ def test_allowlisted_option_paths_outside_workspace_require_approval(
         "grep --file={outside} input.txt",
         "grep --fil={outside} input.txt",
         "grep -if{outside} input.txt",
+        "grep --exclude-from={outside} input.txt",
         "file --files-from={outside}",
         "file --files-f={outside}",
         "file -f{outside}",
@@ -1847,6 +2291,8 @@ def test_allowlisted_option_paths_outside_workspace_require_approval(
         "file -m{outside}:magic.mgc input.txt",
         "du --files0-from={outside}",
         "du --files0-f={outside}",
+        "du --exclude-from={outside}",
+        "du -X{outside}",
         "wc --files0-from={outside}",
         "wc --files0-f={outside}",
         "date --file={outside}",
@@ -1854,6 +2300,8 @@ def test_allowlisted_option_paths_outside_workspace_require_approval(
         "date -uf{outside}",
         "diff --from-file={outside} input.txt",
         "diff --to={outside} input.txt",
+        "diff --exclude-from={outside} input.txt",
+        "diff -X{outside} input.txt",
     ],
 )
 def test_read_only_option_paths_outside_workspace_require_approval(
@@ -1881,12 +2329,13 @@ def test_read_only_option_paths_outside_workspace_require_approval(
     "command",
     [
         "grep --file=patterns.txt input.txt",
-        "file -f names.txt",
+        "grep --exclude-from=patterns.txt input.txt",
         "file --magic-file=magic.mgc input.txt",
-        "du --files0-from=names.txt",
-        "wc --files0-from=names.txt",
+        "du -Xpatterns.txt .",
         "date -f dates.txt",
         "diff --from-file=base.txt input.txt",
+        "diff -Xpatterns.txt input.txt",
+        "tree --gitfile=.gitignore .",
     ],
 )
 def test_read_only_option_paths_inside_workspace_remain_allowed(shell_kind, command):
@@ -2459,7 +2908,233 @@ def test_nested_dynamic_redirections_require_approval(shell_kind, command):
 
 
 @pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
-def test_shell_permission_analysis_preserves_simple_allowlisted_commands(shell_kind):
+@pytest.mark.parametrize("command", ["git diff", "git log", "git status"])
+def test_git_readers_remain_allowed_for_an_ordinary_repository(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("command", "config"),
+    [
+        ("git status", "[core]\n\tfsmonitor = ./monitor\n"),
+        ("git status", '[filter "unsafe"]\n\tclean = ./clean\n'),
+        ("git diff", '[filter "unsafe"]\n\tprocess = ./filter\n'),
+        ("git diff", "[diff]\n\texternal = ./external-diff\n"),
+        ("git diff", "[diff.unsafe]\n\ttextconv = ./textconv\n"),
+        ("git log -p", "[diff.unsafe]\n\ttextconv = ./textconv\n"),
+        ("git status -v", "[diff]\n\texternal = ./external-diff\n"),
+        ("git diff", "[core]\n\tpager = ./pager\n"),
+        ("git log", "[pager]\n\tlog = ./pager\n"),
+        ("git status", "[pager]\n\tstatus = ./pager\n"),
+        ("git status", "[include]\n\tpath = ./included-config\n"),
+        ("git log", "[gpg]\n\tprogram = ./fake-gpg\n"),
+        ("git log", '[gpg "ssh"]\n\tprogram = ./fake-gpg\n'),
+        ("git log", '[merge "unsafe"]\n\tdriver = ./merge-driver\n'),
+    ],
+    ids=[
+        "fsmonitor",
+        "clean-filter",
+        "process-filter",
+        "external-diff",
+        "old-style-textconv",
+        "log-textconv",
+        "status-external-diff",
+        "core-pager",
+        "log-pager",
+        "status-pager",
+        "include",
+        "signature-program",
+        "ssh-signature-program",
+        "merge-driver",
+    ],
+)
+def test_git_readers_require_approval_for_executable_repository_config(
+    shell_kind, command, config, tmp_path, monkeypatch
+):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text(config)
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_git_reader_approval_is_scoped_to_the_repository(
+    shell_kind, tmp_path, monkeypatch
+):
+    repositories = [tmp_path / "first", tmp_path / "second"]
+    for repository in repositories:
+        (repository / ".git").mkdir(parents=True)
+        (repository / ".git" / "config").write_text("[core]\n\tfsmonitor = ./monitor\n")
+
+    monkeypatch.chdir(repositories[0])
+    first = _resolve_default_shell_permission(shell_kind, "git status")
+    assert isinstance(first, PermissionContext)
+    assert first.permission is ToolPermission.ASK
+    assert len(first.required_permissions) == 1
+    granted = first.required_permissions[0]
+    store = PermissionStore()
+    store.add_rule(
+        ApprovedRule(
+            tool_name="bash",
+            scope=granted.scope,
+            session_pattern=granted.session_pattern,
+        )
+    )
+
+    same = _resolve_default_shell_permission(shell_kind, "git status")
+    assert isinstance(same, PermissionContext)
+    assert store.covers("bash", same.required_permissions[0])
+
+    monkeypatch.chdir(repositories[1])
+    second = _resolve_default_shell_permission(shell_kind, "git status")
+    assert isinstance(second, PermissionContext)
+    assert second.permission is ToolPermission.ASK
+    assert not store.covers("bash", second.required_permissions[0])
+    assert granted.session_pattern != second.required_permissions[0].session_pattern
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("config", ["", "[core]\n\tfsmonitor = ./monitor\n"])
+def test_git_reader_inspects_repository_reached_by_cd(
+    shell_kind, config, tmp_path, monkeypatch
+):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+    nested = tmp_path / "nested"
+    (nested / ".git").mkdir(parents=True)
+    (nested / ".git" / "config").write_text(config)
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command="cd nested && git status"))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(
+            ExperimentalBashArgs(command="cd nested && git status")
+        )
+
+    assert isinstance(result, PermissionContext)
+    expected = ToolPermission.ASK if config else ToolPermission.ALWAYS
+    assert result.permission is expected
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_repeated_git_reader_inspects_every_repository_reached_by_cd(
+    shell_kind, tmp_path, monkeypatch
+):
+    clean = tmp_path / "clean"
+    evil = clean / "evil"
+    for repository in (tmp_path, clean, evil):
+        (repository / ".git").mkdir(parents=True)
+        (repository / ".git" / "config").write_text(
+            "[core]\n\trepositoryformatversion = 0\n"
+        )
+    (evil / ".git" / "config").write_text("[diff]\n\texternal = ./evil-diff\n")
+    monkeypatch.chdir(tmp_path)
+
+    result = _resolve_default_shell_permission(
+        shell_kind, "cd clean && git diff && cd evil && git diff"
+    )
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    git_permissions = [
+        permission
+        for permission in result.required_permissions
+        if permission.label == "git diff"
+    ]
+    assert len(git_permissions) == 1
+    assert str(evil.resolve()) in git_permissions[0].invocation_pattern
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command", ["pushd evil && git diff", "pushd evil && popd && git diff"]
+)
+def test_git_reader_tracks_directory_stack_builtins(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    evil = tmp_path / "evil"
+    for repository in (tmp_path, evil):
+        (repository / ".git").mkdir(parents=True)
+        (repository / ".git" / "config").write_text(
+            "[core]\n\trepositoryformatversion = 0\n"
+        )
+    (evil / ".git" / "config").write_text("[diff]\n\texternal = ./evil-diff\n")
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        tool = Bash(
+            config_getter=lambda: BashToolConfig(
+                allowlist=["pushd", "popd", "git diff"]
+            ),
+            state=BaseToolState(),
+        )
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(
+                allowlist=["pushd", "popd", "git diff"]
+            ),
+            state=BaseToolState(),
+        )
+        result = tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_git_reader_requires_approval_after_globbed_cd(shell_kind):
+    if shell_kind == "legacy":
+        tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command="cd * && git status"))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+        )
+        result = tool.resolve_permission(
+            ExperimentalBashArgs(command="cd * && git status")
+        )
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_git_reader_inspects_bare_repository_config(shell_kind, tmp_path, monkeypatch):
+    (tmp_path / "objects").mkdir()
+    (tmp_path / "refs").mkdir()
+    (tmp_path / "HEAD").write_text("ref: refs/heads/main\n")
+    (tmp_path / "config").write_text("[core]\n\tfsmonitor = ./monitor\n")
+    monkeypatch.chdir(tmp_path)
     if shell_kind == "legacy":
         tool = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
         result = tool.resolve_permission(BashArgs(command="git status"))
@@ -2470,7 +3145,7 @@ def test_shell_permission_analysis_preserves_simple_allowlisted_commands(shell_k
         result = tool.resolve_permission(ExperimentalBashArgs(command="git status"))
 
     assert isinstance(result, PermissionContext)
-    assert result.permission is ToolPermission.ALWAYS
+    assert result.permission is ToolPermission.ASK
 
 
 @pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
@@ -2768,18 +3443,24 @@ def test_a_heredoc_grant_covers_only_the_body_it_was_shown(shell_kind, command):
 
 _WITHHOLDS_APPROVAL = {
     "date": ["date", "--set", "2020-01-01"],
+    "du": ["du", "--files0-from=/tmp/x"],
+    "file": ["file", "--files-from=/tmp/x"],
     "find": ["find", ".", "-delete"],
     "git": ["git", "log", "--ext-diff"],
     "less": ["less", "--log-file=/tmp/x", "f"],
+    "md5sum": ["md5sum", "--check", "/tmp/x"],
+    "more": ["more", "--log-file=/tmp/x", "f"],
+    "sha1sum": ["sha1sum", "--check", "/tmp/x"],
+    "sha256sum": ["sha256sum", "--check", "/tmp/x"],
+    "shasum": ["shasum", "--check", "/tmp/x"],
     "sort": ["sort", "--output=/tmp/x", "f"],
     "tree": ["tree", "--output=/tmp/x"],
+    "uniq": ["uniq", "input", "/tmp/x"],
+    "wc": ["wc", "--files0-from=/tmp/x"],
 }
 _ONLY_NAMES_PATHS = {
     "diff": ["diff", "--from-file=/etc/hosts", "b"],
-    "du": ["du", "--files0-from=/etc/hosts"],
-    "file": ["file", "--magic-file=/etc/magic", "x"],
     "grep": ["grep", "--file=/etc/hosts", "x"],
-    "wc": ["wc", "--files0-from=/etc/hosts"],
 }
 
 

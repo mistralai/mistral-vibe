@@ -149,6 +149,16 @@ def resolve_git_executable(*, cwd: Path | None = None) -> str | None:
     return _find_standard_windows_git() if is_windows() else None
 
 
+def resolve_ssh_executable(*, cwd: Path | None = None) -> str | None:
+    """Return an absolute SSH client that is not a project-local binary.
+
+    Automatic discovery never searches relative PATH entries or selects an
+    executable from the working directory, including Windows' implicit
+    current-directory search used by ``shutil.which``.
+    """
+    return _search_trusted_path("ssh", cwd=(cwd or Path.cwd()).resolve())
+
+
 def configure_git_python_executable(*, cwd: Path | None = None) -> str | None:
     """Pin GitPython to the same trusted executable used by direct callers."""
     executable = resolve_git_executable(cwd=cwd)

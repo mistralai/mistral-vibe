@@ -283,15 +283,19 @@ def main() -> None:
         dist_dir = tmp_path / "dist"
         dist_dir.mkdir()
 
-        _run([
-            "uv",
-            "build",
-            "--directory",
-            str(project),
-            "--wheel",
-            "--out-dir",
-            str(dist_dir),
-        ])
+        # Import-cost timing needs only the Python package, so skip the Rust terminal build.
+        _run(
+            [
+                "uv",
+                "build",
+                "--directory",
+                str(project),
+                "--wheel",
+                "--out-dir",
+                str(dist_dir),
+            ],
+            env={**os.environ, "VIBE_SKIP_RUST_TUI": "1"},
+        )
 
         wheel = _find_wheel(dist_dir)
         python = _venv_python(tmp_path / "env")

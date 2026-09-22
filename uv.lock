@@ -12,9 +12,6 @@ resolution-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P2D"
 
-[options.exclude-newer-package]
-mistralai-vibe-local-harness = false
-
 [manifest]
 overrides = [{ name = "pytest", specifier = ">=9.0.3" }]
 
@@ -766,6 +763,27 @@ wheels = [
 ]
 
 [[package]]
+name = "maturin"
+version = "1.14.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e7/b3/addd877f871fb1860d46d3a4f206ecb10b946c85846805e6367631926fd3/maturin-1.14.1.tar.gz", hash = "sha256:9d6577a62cd08e0ceba7a0db06fb098e0c9b1b3429bad747a4f3a18215a1b3df", size = 369637, upload-time = "2026-06-19T05:19:49.774Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f4/f0/97c5a5bd9c71653a066c0976a484eaaae50b9369557838a4176b7b0bdaa5/maturin-1.14.1-py3-none-linux_armv6l.whl", hash = "sha256:522292398945442cdafa9daeb2271b2340fbde57027b818f923f88eab04174f8", size = 10207496, upload-time = "2026-06-19T05:19:09.321Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/83/294bca639b0e052f1e2f65199b3db258780c7d4e31408b934c9c974a1379/maturin-1.14.1-py3-none-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:ffe5ad71f21d1e6603c4dd75f7fee34adf5ed5ebcebb692886549888ebb329ed", size = 19680113, upload-time = "2026-06-19T05:19:13.43Z" },
+    { url = "https://files.pythonhosted.org/packages/43/b6/79c881410a3b1c187f7eb3d407aecae646c6a4433d630d72200359015e83/maturin-1.14.1-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:f3306078070c1508fd715b9116070cbcaff5959024272a9f1e6f5cb29768b86c", size = 10169205, upload-time = "2026-06-19T05:19:16.615Z" },
+    { url = "https://files.pythonhosted.org/packages/93/9d/44b6f26dcb7f7a04c5501ac2dbb6ca1490150682baa525ca5860504f9eab/maturin-1.14.1-py3-none-manylinux_2_12_i686.manylinux2010_i686.musllinux_1_1_i686.whl", hash = "sha256:cd457cd88961156e26379e1155bd287cc0ec1c8b2f1582b0660fb31b87c8842d", size = 10188098, upload-time = "2026-06-19T05:19:19.736Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/bd/9c0d5d6983905ce2c9edaa073a7e89355a9cf7f396988e05d32f1c37785d/maturin-1.14.1-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.musllinux_1_1_x86_64.whl", hash = "sha256:dfc54ae32e6fcb18302193ab9a30b0b25eefffba994ae13238974805533ef75e", size = 10627576, upload-time = "2026-06-19T05:19:22.713Z" },
+    { url = "https://files.pythonhosted.org/packages/e5/33/b096412bd6a7cb399652b260666f901adf88a687181a6dbd6a3f89f0a94e/maturin-1.14.1-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl", hash = "sha256:a131d912b5267e640bc96d70f4914e10590aed64082ec9abacba7cea52004224", size = 10085181, upload-time = "2026-06-19T05:19:25.69Z" },
+    { url = "https://files.pythonhosted.org/packages/56/8d/08c3bf469c38a23c9e6c877e338193001eb604d010fedc08341974e38528/maturin-1.14.1-py3-none-manylinux_2_17_armv7l.manylinux2014_armv7l.musllinux_1_1_armv7l.whl", hash = "sha256:be18fc568fb76884c0205456336892a75105ec398e6b667cd777c6268bd06d69", size = 10026363, upload-time = "2026-06-19T05:19:28.904Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/a4/c4d1a92839f8745ab4aab988a7db884a79d6d710bd3b286fcf9316dece1a/maturin-1.14.1-py3-none-manylinux_2_17_ppc64le.manylinux2014_ppc64le.musllinux_1_1_ppc64le.whl", hash = "sha256:994a0c8ba3ad8a92b3a9ee1b02645d200d610216b15cff5102b0fe65e8e08666", size = 13321347, upload-time = "2026-06-19T05:19:32.411Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/fa/170f04624d03fd07d2a8b1b67de83a127af93aef9eaa425839553347297b/maturin-1.14.1-py3-none-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:be80866363e605d137991b491a741a84cde9ae350183c4c85f49690ca9aaaa65", size = 10877609, upload-time = "2026-06-19T05:19:35.448Z" },
+    { url = "https://files.pythonhosted.org/packages/61/ad/1ae2e1d0ded282bf2c55ac13f0811d87deb425e200ae64a15785675dede9/maturin-1.14.1-py3-none-manylinux_2_31_riscv64.musllinux_1_1_riscv64.whl", hash = "sha256:5282dffd4b539d2be245f4e5b1a5ab6bc1033b58f4a4872f5833f9d43c954aa4", size = 10417316, upload-time = "2026-06-19T05:19:38.28Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/27/bf677183920718da49cd7982d6a3ffc440aad8919329f571d189f81b7bdf/maturin-1.14.1-py3-none-win32.whl", hash = "sha256:1a04de0a20188f95c721b5702eed18140bdcccb28c386797093eca3f62f4d4e0", size = 8931293, upload-time = "2026-06-19T05:19:41.183Z" },
+    { url = "https://files.pythonhosted.org/packages/63/4b/585adeb9167b08d3cdff0032a938b0e72655c92003df4f52c3f696a1bcc2/maturin-1.14.1-py3-none-win_amd64.whl", hash = "sha256:3c9f94640ecc4895e94abaf834a0684430032c865b2748a36c12461fd9252fdd", size = 10314067, upload-time = "2026-06-19T05:19:44.389Z" },
+    { url = "https://files.pythonhosted.org/packages/51/d4/dac8c0720ae246be1700afb6fbdbbea20fe35b13f6570b2f70faa005df77/maturin-1.14.1-py3-none-win_arm64.whl", hash = "sha256:15cea8fcb3ba47dd636f50092bb34baea8b04ac777392f23e6bf8a9a61efb894", size = 9718943, upload-time = "2026-06-19T05:19:47.49Z" },
+]
+
+[[package]]
 name = "mcp"
 version = "1.28.1"
 source = { registry = "https://pypi.org/simple" }
@@ -842,7 +860,7 @@ wheels = [
 
 [[package]]
 name = "mistral-vibe"
-version = "2.25.5"
+version = "2.25.7"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -852,7 +870,7 @@ dependencies = [
     { name = "beautifulsoup4" },
     { name = "cachetools" },
     { name = "certifi" },
-    { name = "cffi" },
+    { name = "cffi", marker = "platform_machine != 'aarch64' or platform_python_implementation != 'PyPy' or sys_platform != 'linux'" },
     { name = "charset-normalizer" },
     { name = "click", marker = "sys_platform != 'emscripten'" },
     { name = "colorama", marker = "sys_platform == 'win32'" },
@@ -886,9 +904,8 @@ dependencies = [
     { name = "mcp" },
     { name = "mdit-py-plugins" },
     { name = "mdurl" },
-    { name = "miniaudio" },
+    { name = "miniaudio", marker = "platform_machine != 'aarch64' or sys_platform != 'linux'" },
     { name = "mistralai" },
-    { name = "mistralai-vibe-local-harness" },
     { name = "more-itertools" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-common" },
@@ -903,7 +920,7 @@ dependencies = [
     { name = "ptyprocess" },
     { name = "pyasn1" },
     { name = "pyasn1-modules" },
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser", marker = "(implementation_name != 'PyPy' and platform_machine != 'aarch64') or (implementation_name != 'PyPy' and platform_python_implementation != 'PyPy') or (implementation_name != 'PyPy' and sys_platform != 'linux')" },
     { name = "pydantic" },
     { name = "pydantic-core" },
     { name = "pydantic-settings" },
@@ -947,6 +964,11 @@ dependencies = [
     { name = "zstandard" },
 ]
 
+[package.optional-dependencies]
+voice-aarch64 = [
+    { name = "miniaudio" },
+]
+
 [package.dev-dependencies]
 build = [
     { name = "altgraph" },
@@ -960,10 +982,12 @@ build = [
 ]
 dev = [
     { name = "cryptography" },
+    { name = "maturin" },
     { name = "pre-commit" },
     { name = "pre-commit-uv" },
     { name = "pyinstrument" },
     { name = "pyright" },
+    { name = "pyte" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-textual-snapshot" },
@@ -986,7 +1010,7 @@ requires-dist = [
     { name = "beautifulsoup4", specifier = "==4.14.3" },
     { name = "cachetools", specifier = "==7.0.6" },
     { name = "certifi", specifier = "==2026.7.22" },
-    { name = "cffi", specifier = "==2.0.0" },
+    { name = "cffi", marker = "platform_machine != 'aarch64' or platform_python_implementation != 'PyPy' or sys_platform != 'linux'", specifier = "==2.0.0" },
     { name = "charset-normalizer", specifier = "==3.4.7" },
     { name = "click", marker = "sys_platform != 'emscripten'", specifier = "==8.3.3" },
     { name = "colorama", marker = "sys_platform == 'win32'", specifier = "==0.4.6" },
@@ -1020,9 +1044,9 @@ requires-dist = [
     { name = "mcp", specifier = "==1.28.1" },
     { name = "mdit-py-plugins", specifier = "==0.5.0" },
     { name = "mdurl", specifier = "==0.1.2" },
-    { name = "miniaudio", specifier = "==1.71" },
+    { name = "miniaudio", marker = "platform_machine != 'aarch64' or sys_platform != 'linux'", specifier = "==1.71" },
+    { name = "miniaudio", marker = "extra == 'voice-aarch64'", specifier = ">=1.59" },
     { name = "mistralai", specifier = "==2.6.0" },
-    { name = "mistralai-vibe-local-harness", specifier = "==0.5.1" },
     { name = "more-itertools", specifier = "==11.0.2" },
     { name = "opentelemetry-api", specifier = "==1.39.1" },
     { name = "opentelemetry-exporter-otlp-proto-common", specifier = "==1.39.1" },
@@ -1037,7 +1061,7 @@ requires-dist = [
     { name = "ptyprocess", specifier = "==0.7.0" },
     { name = "pyasn1", specifier = "==0.6.4" },
     { name = "pyasn1-modules", specifier = "==0.4.2" },
-    { name = "pycparser", marker = "implementation_name != 'PyPy'", specifier = "==3.0" },
+    { name = "pycparser", marker = "(implementation_name != 'PyPy' and platform_machine != 'aarch64') or (implementation_name != 'PyPy' and platform_python_implementation != 'PyPy') or (implementation_name != 'PyPy' and sys_platform != 'linux')", specifier = "==3.0" },
     { name = "pydantic", specifier = "==2.13.4" },
     { name = "pydantic-core", specifier = "==2.46.4" },
     { name = "pydantic-settings", specifier = "==2.14.2" },
@@ -1080,6 +1104,7 @@ requires-dist = [
     { name = "zipp", specifier = "==3.23.1" },
     { name = "zstandard", specifier = "==0.25.0" },
 ]
+provides-extras = ["voice-aarch64"]
 
 [package.metadata.requires-dev]
 build = [
@@ -1094,10 +1119,12 @@ build = [
 ]
 dev = [
     { name = "cryptography", specifier = ">=48.0.0" },
+    { name = "maturin", specifier = "==1.14.1" },
     { name = "pre-commit", specifier = ">=4.2.0" },
     { name = "pre-commit-uv", specifier = ">=4.3.0" },
     { name = "pyinstrument", specifier = ">=5.1.2" },
     { name = "pyright", specifier = ">=1.1.403" },
+    { name = "pyte", specifier = ">=0.8.2" },
     { name = "pytest", specifier = ">=8.3.5" },
     { name = "pytest-asyncio", specifier = ">=1.2.0" },
     { name = "pytest-textual-snapshot", specifier = ">=1.1.0" },
@@ -1128,30 +1155,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/39/c1/c6452c81a3d7fc0423b4cfcd84840cf7141c93a0c50755abc27a7619a988/mistralai-2.6.0.tar.gz", hash = "sha256:531a86292ad498fc0fcd6dfcd480a3f4db9e92f558e14ffb22172824831e3a6e", size = 518760, upload-time = "2026-07-06T14:40:08.578Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e3/d5/6b9c08ab9b5b890970e8949bf00a9f8f82653826de5cc5ad506fe1c1fb73/mistralai-2.6.0-py3-none-any.whl", hash = "sha256:4b7202b0cab84ea03f8ff4a933c8cfc615b3057520d9d76467c07aa23939dab2", size = 1235945, upload-time = "2026-07-06T14:40:06.226Z" },
-]
-
-[[package]]
-name = "mistralai-vibe-local-harness"
-version = "0.5.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anyio" },
-    { name = "certifi" },
-    { name = "httpx" },
-    { name = "mcp" },
-    { name = "mistralai" },
-    { name = "opentelemetry-api" },
-    { name = "pydantic" },
-    { name = "pywinpty", marker = "sys_platform == 'win32'" },
-    { name = "rfc8785" },
-    { name = "truststore" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4a/c8/0d62bb843e805f8b52494689e03e0ed23859bbd58e3c37ca42371633be62/mistralai_vibe_local_harness-0.5.1-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:0123e73b4d03b1dccda467c7bc12d818a8c30db9196eb7ec4f41a59878db2b2d", size = 25540215, upload-time = "2026-09-18T09:38:01.119Z" },
-    { url = "https://files.pythonhosted.org/packages/ca/e7/033e5a568b261603734d2ac183a95ffd6aedde2907dab30467e23c9736bd/mistralai_vibe_local_harness-0.5.1-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:f97887e5cdf33b8fbe9dfa018de0eccb3a61d47358c075f832c5a0238f2f27f2", size = 24495059, upload-time = "2026-09-18T09:38:04.8Z" },
-    { url = "https://files.pythonhosted.org/packages/99/60/5cdb29ab09af2758d7c3f0d7f8ab89250ab47f5cdbf9e3f02016151fada3/mistralai_vibe_local_harness-0.5.1-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:0b735d8bbd0b81b5e861ae8daa1b194a644afed3e882ebc4803ed0adb48529cc", size = 23762283, upload-time = "2026-09-18T09:38:07.757Z" },
-    { url = "https://files.pythonhosted.org/packages/69/c0/614599e44ab69ef127351eb0c83313c39f21c48fd38fa26d18cf236a791f/mistralai_vibe_local_harness-0.5.1-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:601ddeb1b75310618116d3f5c6305ff720d4f4317b8c0470c8e2bc552bbf1c45", size = 24780499, upload-time = "2026-09-18T09:38:11.118Z" },
-    { url = "https://files.pythonhosted.org/packages/07/08/3d5c46567b458243012ffdb400393353e72b387d9251cf3c6e06bf7b615f/mistralai_vibe_local_harness-0.5.1-cp312-abi3-win_amd64.whl", hash = "sha256:583b7e16e25207baa9c636a4f60ed446e1372fd937953498c0e505de17cbd753", size = 24235566, upload-time = "2026-09-18T09:38:14.73Z" },
 ]
 
 [[package]]
@@ -1647,6 +1650,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/51/4e/3aa27f74211522dba7e9cbc3e74de779c6d4b654c54e50a4840623be8014/pyright-1.1.409.tar.gz", hash = "sha256:986ee05beca9e077c165758ad123667c679e050059a2546aa02473930394bc93", size = 4430434, upload-time = "2026-04-23T11:02:03.799Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/16/6b/330d8ebae582b30c2959a1ef4c3bc344ebde48c2ff0c3f113c4710735e11/pyright-1.1.409-py3-none-any.whl", hash = "sha256:aa3ea228cab90c845c7a60d28db7a844c04315356392aa09fafcee98c8c22fb3", size = 6438161, upload-time = "2026-04-23T11:02:01.309Z" },
+]
+
+[[package]]
+name = "pyte"
+version = "0.8.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "wcwidth" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ab/ab/b599762933eba04de7dc5b31ae083112a6c9a9db15b01d3109ad797559d9/pyte-0.8.2.tar.gz", hash = "sha256:5af970e843fa96a97149d64e170c984721f20e52227a2f57f0a54207f08f083f", size = 92301, upload-time = "2023-11-12T09:33:43.217Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/59/d0/bb522283b90853afbf506cd5b71c650cf708829914efd0003d615cf426cd/pyte-0.8.2-py3-none-any.whl", hash = "sha256:85db42a35798a5aafa96ac4d8da78b090b2c933248819157fc0e6f78876a0135", size = 31627, upload-time = "2023-11-12T09:33:41.096Z" },
 ]
 
 [[package]]
@@ -2591,6 +2606,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/56/fe/cb8ef3d6f929d14158fdaaad9925985b7310abc9384dcd4d82dd0016fb59/watchfiles-1.2.0-cp315-cp315-manylinux_2_31_riscv64.whl", hash = "sha256:cee9d5efd929efdac5f7e58f72b3376f676b64050a91c5b99a7094c5b2317488", size = 465096, upload-time = "2026-05-18T04:31:30.384Z" },
     { url = "https://files.pythonhosted.org/packages/25/91/80908e835e100527a9267147b08c0eee1fa6ab0ffec15edc04d1d44885f7/watchfiles-1.2.0-cp315-cp315-musllinux_1_1_aarch64.whl", hash = "sha256:b718bf356bbc15e559bd8ef41782b573b8ae0e3f177ab244b440568d7ea02cfb", size = 630638, upload-time = "2026-05-18T04:30:49.89Z" },
     { url = "https://files.pythonhosted.org/packages/46/4b/95ab2f256bb4af3cb2eb23b9317bda984ee6e0f11733a5c004a6c95b06e3/watchfiles-1.2.0-cp315-cp315-musllinux_1_1_x86_64.whl", hash = "sha256:922c0e019fe68b3ae392965a766b02a71ba1168c932cebc3733cd52c5fe5b377", size = 657684, upload-time = "2026-05-18T04:31:32.027Z" },
+]
+
+[[package]]
+name = "wcwidth"
+version = "0.8.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/36/57/ed58088fafdf4c55a0ad6bde846502567645424d7ebf325230b9237f4085/wcwidth-0.8.3.tar.gz", hash = "sha256:d128512515fbf4612e0ff21fd6380399210318b7b54a9af59dff8454cf9730eb", size = 1458450, upload-time = "2026-08-28T18:10:06.875Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/0e/57f6bb3024a597b2e8ec4aee710ffe62ddc95af2e2bb1ee7a7abdc22c68c/wcwidth-0.8.3-py3-none-any.whl", hash = "sha256:d5b73dba6158a595ec9370350e7f2637bcac8d6c5e4fde34f30fcffb6103a5e4", size = 331669, upload-time = "2026-08-28T18:10:04.909Z" },
 ]
 
 [[package]]

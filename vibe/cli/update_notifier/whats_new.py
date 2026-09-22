@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import os
+from pathlib import Path
 import time
 
 from vibe import VIBE_ROOT
@@ -20,8 +22,17 @@ async def should_show_whats_new(
     return cache.seen_whats_new_version != current_version
 
 
+# Test-only override for the what's-new body, so e2e snapshots render frozen
+# fixture content instead of the shipped whats_new.md, which changes per release.
+_WHATS_NEW_FILE_ENV = "VIBE_WHATS_NEW_FILE"
+
+
 def load_whats_new_content() -> str | None:
-    whats_new_file = VIBE_ROOT / "whats_new.md"
+    whats_new_file = (
+        Path(os.environ[_WHATS_NEW_FILE_ENV])
+        if _WHATS_NEW_FILE_ENV in os.environ
+        else VIBE_ROOT / "whats_new.md"
+    )
     if not whats_new_file.exists():
         return None
     try:

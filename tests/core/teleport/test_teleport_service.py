@@ -68,7 +68,7 @@ def _make_service(tmp_path: Path, **kwargs: Any) -> TeleportService:
         vibe_code_sessions_base_url=kwargs.pop(
             "vibe_code_sessions_base_url", "https://api.example.com"
         ),
-        vibe_code_api_key=kwargs.pop("vibe_code_api_key", "api-key"),
+        api_key=kwargs.pop("api_key", "api-key"),
         workdir=tmp_path,
         **kwargs,
     )
@@ -125,20 +125,13 @@ class TestTeleportServiceCompressDiff:
 
 class TestTeleportServiceValidateConfig:
     def test_raises_when_no_api_key(self, tmp_path: Path) -> None:
-        service = _make_service(tmp_path, vibe_code_api_key="")
-        with pytest.raises(ServiceTeleportError, match="MISTRAL_API_KEY not set"):
+        service = _make_service(tmp_path, api_key="")
+        with pytest.raises(ServiceTeleportError, match="Mistral API key not set"):
             service._validate_config()
 
     def test_passes_when_api_key_set(self, tmp_path: Path) -> None:
-        service = _make_service(tmp_path, vibe_code_api_key="valid-key")
+        service = _make_service(tmp_path, api_key="valid-key")
         service._validate_config()
-
-    def test_uses_custom_env_var_name_in_error(self, tmp_path: Path) -> None:
-        mock_config = MagicMock()
-        mock_config.vibe_code_api_key_env_var = "CUSTOM_API_KEY"
-        service = _make_service(tmp_path, vibe_code_api_key="", vibe_config=mock_config)
-        with pytest.raises(ServiceTeleportError, match="CUSTOM_API_KEY not set"):
-            service._validate_config()
 
 
 class TestTeleportServiceCheckSupported:

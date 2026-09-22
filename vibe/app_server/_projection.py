@@ -105,17 +105,28 @@ def project_config_view(
     *,
     active_model_pinned: bool = False,
     awaiting_experiment_model: bool = False,
+    # Whether the caller's backend can show a blind model a description in
+    # place of the pixels. Only the Unified one can, so the legacy projection
+    # keeps reporting the active model's own vision.
+    image_fallback: bool = False,
 ) -> ConfigView:
     transcribe_model = config.get_active_transcribe_model()
     tts_model = config.get_active_tts_model()
+    active_model = config.get_active_model()
+    # A describer, not Core's resource-link projection, is what makes the
+    # promise good for every source kind: the link only exists for a
+    # file-backed image, so an inline one would still reach a blind model.
+    describable = image_fallback and config.get_vision_fallback_model() is not None
     return ConfigView(
-        active_model=_project_model_config(config.get_active_model()),
+        active_model=_project_model_config(active_model),
         active_model_pinned=active_model_pinned,
+        images_supported=active_model.supports_images or describable,
         awaiting_experiment_model=awaiting_experiment_model,
         # The configured default, never the active model: clients render it as
         # the "Default (currently X)" hint, which must stay stable while a pin
         # is in effect.
         default_model_alias=config.resolve_default_model_alias(),
+        default_agent=config.default_agent,
         theme=config.theme,
         log_level=config.log_level,
         disable_welcome_banner_animation=config.disable_welcome_banner_animation,
@@ -131,7 +142,7 @@ def project_config_view(
         enable_update_checks=config.enable_update_checks,
         enable_notifications=config.enable_notifications,
         experimental_enable_tab_status=config.experimental_enable_tab_status,
-        vibe_code_enabled=config.vibe_code_enabled,
+        enable_telemetry=config.enable_telemetry,
         experimental_enable_registry_skills=config.experimental_enable_registry_skills,
         models=[
             _project_model_config(model) for model in config.available_models().values()
@@ -237,7 +248,9 @@ def project_stats(agent_loop: AgentLoop) -> AgentStatsSnapshot:
 def project_agent_summaries(
     active: AgentProfile, available: Iterable[AgentProfile]
 ) -> tuple[AgentSummary, list[AgentSummary]]:
-    return _project_agent(active), [_project_agent(profile) for profile in available]
+    return project_agent_summary(active), [
+        project_agent_summary(profile) for profile in available
+    ]
 
 
 # Modes hidden from the Unified Harness mode picker/cycle. They stay selectable
@@ -832,7 +845,7 @@ class _ConfigIssue(Protocol):
     message: str
 
 
-def _project_agent(profile: AgentProfile) -> AgentSummary:
+def project_agent_summary(profile: AgentProfile) -> AgentSummary:
     return AgentSummary(
         name=profile.name,
         display_name=profile.display_name,

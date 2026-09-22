@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 from rich import print as rprint
+from rich.markup import escape
 
 from vibe import __version__
 from vibe.cli.session_exit import print_session_resume_message
@@ -90,7 +91,7 @@ def load_config_orchestrator_or_exit() -> ConfigOrchestrator[VibeConfigSchema]:
         )
         sys.exit(1)
     except ValueError as e:
-        rprint(f"[yellow]{e}[/]")
+        rprint(f"[yellow]{escape(str(e))}[/]")
         sys.exit(1)
 
 

@@ -79,7 +79,12 @@ from vibe.app_server.protocol import (
 from vibe.app_server.session import AppServerSession
 from vibe.app_server.transport import memory_transport_pair
 from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import ModelConfig, SessionLoggingConfig, VibeConfigSchema
+from vibe.core.config import (
+    MCPStdio,
+    ModelConfig,
+    SessionLoggingConfig,
+    VibeConfigSchema,
+)
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -2208,6 +2213,7 @@ async def test_build_runtime_applies_cli_overrides_inside_harness(
     hook_config = HookConfigResult(hooks=[], issues=[])
     sentinel = cast(AgentLoop, object())
     captured: dict[str, Any] = {}
+    windows_command = r"C:\Program Files\JetBrains\GoLand 2026.2.1\bin\goland64.exe"
 
     workspace_root = tmp_path / "extra"
     workspace_root.mkdir()
@@ -2252,7 +2258,7 @@ async def test_build_runtime_applies_cli_overrides_inside_harness(
             mcp_servers=[
                 SessionMCPStdioServer(
                     name="ephemeral",
-                    command="server",
+                    command=windows_command,
                     args=["--stdio"],
                     env={"TOKEN": "value"},
                 )
@@ -2271,7 +2277,9 @@ async def test_build_runtime_applies_cli_overrides_inside_harness(
     assert orchestrator.config.enabled_tools == ["read_file"]
     assert orchestrator.config.disabled_tools == ["configured", "bash"]
     assert [server.name for server in orchestrator.config.mcp_servers] == ["ephemeral"]
-    assert orchestrator.config.mcp_servers[0].transport == "stdio"
+    mcp_server = orchestrator.config.mcp_servers[0]
+    assert isinstance(mcp_server, MCPStdio)
+    assert mcp_server.argv() == [windows_command, "--stdio"]
     assert captured["agent_name"] == "lean"
     assert captured["enable_streaming"] is True
     assert captured["max_turns"] == 2
@@ -2290,7 +2298,9 @@ async def test_build_runtime_applies_cli_overrides_inside_harness(
     await orchestrator.reload()
     assert orchestrator.config.enabled_tools == ["read_file"]
     assert orchestrator.config.disabled_tools == ["configured", "bash"]
-    assert [server.name for server in orchestrator.config.mcp_servers] == ["ephemeral"]
+    reloaded_mcp_server = orchestrator.config.mcp_servers[0]
+    assert isinstance(reloaded_mcp_server, MCPStdio)
+    assert reloaded_mcp_server.argv() == [windows_command, "--stdio"]
 
 
 @pytest.mark.asyncio

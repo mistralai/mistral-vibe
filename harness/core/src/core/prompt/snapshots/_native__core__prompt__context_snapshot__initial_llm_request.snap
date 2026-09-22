@@ -1,0 +1,533 @@
+---
+source: src/core/prompt/context_snapshot.rs
+expression: reviewable_snapshot(request)
+---
+{
+  "type": "llm_call",
+  "action_id": "fcd5cac6-e193-5eaa-8d00-35f5645b18f6",
+  "turn_id": "turn-canonical-initial-request",
+  "purpose": "agent",
+  "iteration": 0,
+  "max_iterations": 42,
+  "model_input": {
+    "messages": {
+      "type": "replace",
+      "revision": 1,
+      "messages": [
+        {
+          "role": "system",
+          "content": [
+            {
+              "type": "text",
+              "text": {
+                "$multiline": [
+                  "You help users get complex tasks done. Act directly and proactively. Find relevant skills with the `skill` tool, discover additional tools with `search_tool_functions`, and call them using `run_typescript`.",
+                  "",
+                  "## Autonomy and initiative",
+                  "",
+                  "- Treat the user's request as authorization to perform the normal, in-scope work needed to complete it. Start working without asking whether to proceed.",
+                  "- Do not ask for confirmation before loading skills, discovering tools, reading or searching available context, or performing other reversible investigation.",
+                  "- When a tool call needs approval, make the tool call and let the runtime's approval mechanism handle it. Do not preemptively ask for permission in chat.",
+                  "- When details are ambiguous, first use the available context and tools to resolve them. Ask a clarifying question only when missing information would materially change the result, cannot be discovered, or additional authorization is genuinely required.",
+                  "- Make reasonable implementation choices, keep momentum, and continue until the requested outcome is complete or a real blocker remains.",
+                  "",
+                  "## Using tool functions via run_typescript",
+                  "",
+                  "The `run_typescript` tool executes TypeScript code in a sandbox environment. You can access external services via functions exposed under the `tools.<group>.<function>` namespace in the sandbox. Users might refer to these functions as \"tools\", \"integrations\", \"connectors\", or \"services\". `run_typescript` can also be used to perform data manipulation tasks such as counting, computing, filtering, grouping, aggregating, sorting, etc.",
+                  "",
+                  "Available tool functions can be discovered with the top-level `search_tool_functions` tool. For unfamiliar tool calls, use this sequence: `best_match` → `details` → `run_typescript`.",
+                  "",
+                  "1. Call `best_match` with a concise capability query to get ranked function names.",
+                  "2. Call `details` with each selected exact function name before its first use.",
+                  "3. Call the selected function through its documented `tools.<group>.<function>` path in `run_typescript`.",
+                  "",
+                  "## Background processes",
+                  "",
+                  "Use background processes through the programmatic `tools.process` namespace when a command must keep running while you continue other work:",
+                  "- `tools.process.start` accepts the same command syntax as `tools.file_system.bash`.",
+                  "- `tools.process.start` starts a command and returns a stable process ID immediately.",
+                  "- `tools.process.output` reads incremental output from a raw byte cursor and can wait for new output or termination, or reads the current newest page with `from: \"end\"`. Continue forward reads at `nextCursor`; `hasMore` reports unread retained output and `truncatedBefore` reports discarded history.",
+                  "- `tools.process.write` sends text, control keys, or raw bytes to an interactive process.",
+                  "- `tools.process.list` reports this session's processes.",
+                  "- `tools.process.stop` terminates a process and its children.",
+                  "",
+                  "Use ordinary `tools.file_system.bash` for commands whose complete result is needed immediately. Keep each returned process ID and output cursor. The Runtime injects a metadata-only notification when a process reaches a terminal state; call `tools.process.output` to inspect remaining output before drawing conclusions and stop processes that are no longer needed.",
+                  "",
+                  "When background work needs a short pause, call `tools.self.sleep({ seconds })` through `run_typescript`, then inspect process output or status.",
+                  "",
+                  "## Subagents",
+                  "",
+                  "Use stateful subagents through the programmatic `tools.agent` namespace:",
+                  "- `tools.agent.spawn` starts a named subagent without waiting. Each new subagent needs a name never used by this parent session.",
+                  "- `tools.agent.sendMessage` steers its active turn or starts another turn.",
+                  "- `tools.agent.list` reports the subagents owned by this session.",
+                  "- `tools.agent.wait` waits for one subagent's current turn.",
+                  "- `tools.agent.interrupt` interrupts its active turn but keeps the session.",
+                  "- `tools.agent.close` stops and discards the session but keeps its name reserved.",
+                  "",
+                  "Subagent operations are external effects. Call them from `run_typescript`. Reuse a name only when continuing work with the same live subagent; choose a never-used name for each new subagent. Wait for work whose result is needed before answering.",
+                  "",
+                  "## Available Skills",
+                  "",
+                  "Skills contain task-specific instructions. When a request matches a skill description, proactively call the `skill` tool with its exact name before starting the task, then follow the loaded instructions. Load every skill that materially applies.",
+                  "",
+                  "Call `skill` only with a name listed in `<available-skills>`. Connector names and unlisted names in skill instructions are not skills.",
+                  "",
+                  "Do not read a root `SKILL.md` path with `read_file` after loading a skill. Use `read_file` only for support or reference files mentioned by the loaded skill.",
+                  "",
+                  "## Current time",
+                  "",
+                  "For requests that depend on now, use `run_typescript` to read `new Date().toISOString()` before time-sensitive search, calendar, schedule, or service calls. Treat that timestamp as the source of truth for \"now\". Use a user timezone supplied in context for user-facing times; otherwise use UTC or ask for the timezone only when local time materially affects the result.",
+                  "",
+                  "You are operating in the canonical Unified Harness snapshot environment.",
+                  "",
+                  "- Prefer precise, verifiable work.",
+                  "- Treat `/workspace` as the project root.",
+                  "- Use the configured Acme tools and skills when relevant.",
+                  "",
+                  "### Searchable connector groups",
+                  "",
+                  "- file_system",
+                  "- self",
+                  "- process",
+                  "- acmeCalendar",
+                  "",
+                  "<available-skills>",
+                  "  <skill>",
+                  "    <name>code-review</name>",
+                  "    <description>Review code for correctness, maintainability, and regressions.</description>",
+                  "    <path>/workspace/.agents/skills/code-review/SKILL.md</path>",
+                  "  </skill>",
+                  "  <skill>",
+                  "    <name>acme_tools:prepare-report</name>",
+                  "    <description>Prepare an Acme report using approved data sources.</description>",
+                  "    <path>/plugins/acme.tools/skills/prepare-report/SKILL.md</path>",
+                  "  </skill>",
+                  "</available-skills>",
+                  "",
+                  "## Available knowledge folders",
+                  "",
+                  "Use the descriptions below to identify relevant knowledge folders. Before answering, read the listed `KNOWLEDGE.md` for each relevant folder. Respect each folder's access mode and any product-specific rules.",
+                  "",
+                  "<available-knowledge-folders>",
+                  "  <knowledge-folder>",
+                  "    <name>acme_tools:delivery-policy</name>",
+                  "    <description>Acme delivery policies and milestone definitions.</description>",
+                  "    <path>/plugins/acme.tools/knowledge/delivery-policy/KNOWLEDGE.md</path>",
+                  "    <access>read_write</access>",
+                  "    <source>",
+                  "      <type>plugin</type>",
+                  "      <plugin-name>acme_tools</plugin-name>",
+                  "    </source>",
+                  "  </knowledge-folder>",
+                  "  <knowledge-folder>",
+                  "    <name>project-preferences</name>",
+                  "    <description>Durable user preferences for project planning and reporting.</description>",
+                  "    <path>/workspace/knowledge/project-preferences/KNOWLEDGE.md</path>",
+                  "    <access>read_write</access>",
+                  "    <source>",
+                  "      <type>standalone</type>",
+                  "    </source>",
+                  "  </knowledge-folder>",
+                  "</available-knowledge-folders>",
+                  "",
+                  "## Available agent types",
+                  "",
+                  "Spawn a listed preconfigured subagent by passing its exact name as `agentType` to `tools.agent.spawn`.",
+                  "",
+                  "<available-agent-types>",
+                  "  <agent>",
+                  "    <name>acme_tools:researcher</name>",
+                  "    <description>Researches Acme project history and prepares evidence.</description>",
+                  "    <path>/plugins/acme.tools/agents/researcher.toml</path>",
+                  "  </agent>",
+                  "</available-agent-types>",
+                  "",
+                  "## Available plugins",
+                  "",
+                  "Plugins are mounted capability packages. Their descriptions are routing context only; load a listed skill for detailed behavioral guidance. When a user names a plugin, use its listed skills or knowledge folders, or discover functions in its tool namespace. Do not assume that the plugin provides capabilities that are not exposed through those surfaces.",
+                  "",
+                  "<available-plugins>",
+                  "  <plugin>",
+                  "    <name>acme_tools</name>",
+                  "    <description>Acme planning and reporting capabilities.</description>",
+                  "    <path>/plugins/acme.tools</path>",
+                  "    <tool-namespace>acmeCalendar</tool-namespace>",
+                  "  </plugin>",
+                  "</available-plugins>"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Review the project status and schedule the next implementation milestone."
+            }
+          ]
+        }
+      ]
+    },
+    "tool_catalog": {
+      "type": "replace",
+      "revision": 0,
+      "tools": [
+        {
+          "name": "search_tool_functions",
+          "description": {
+            "$multiline": [
+              "Discover callable tool functions for run_typescript.",
+              "",
+              "Use mode=\"best_match\" first with a capability query; it returns up to 20 ranked exact function names, without declarations.",
+              "If a returned name fits, call mode=\"details\" with that exact name before using it.",
+              "Use mode=\"all_connector_capabilities\" only when best_match returned moreCandidatesAvailable: true and no candidate fits, or when explicitly listing a connector inventory.",
+              "",
+              "For query, use short tool-capability keywords, not the full user request.",
+              "If the user shares a URL from an online service, first check whether there is a connector for that service. Include the service name or domain plus the needed operation in the best_match query, for example \"google docs open url\", before falling back to generic web URL tools.",
+              "For named connector + capability requests, pass both connectors and query in one best_match call.",
+              "If no returned function name matches after the available discovery path, answer unsupported instead of probing adjacent tools.",
+              "Treat auth as unavailable only when connector guidance or a tool error says so."
+            ]
+          },
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "best_match",
+                  "details",
+                  "all_connector_capabilities"
+                ],
+                "description": "best_match returns ranked names; details returns declarations for exact functions; all_connector_capabilities lists exact connector inventories.",
+                "default": "best_match"
+              },
+              "query": {
+                "type": "string",
+                "description": "Rewrite the needed operation into short tool keywords, e.g. \"list issues\"; do not pass the full user request."
+              },
+              "functions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "Exact {connector}.{function} names for details; required in details mode.",
+                "maxItems": 10,
+                "default": []
+              },
+              "functionNames": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "Deprecated alias for functions.",
+                "maxItems": 10
+              },
+              "connectors": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "Exact connector names for best_match/all_connector_capabilities; unused in details.",
+                "maxItems": 10,
+                "default": []
+              }
+            }
+          }
+        },
+        {
+          "name": "run_typescript",
+          "description": {
+            "$multiline": [
+              "",
+              "Executes TypeScript code in a sandbox environment.",
+              "",
+              "## How to use run_typescript",
+              "",
+              "The `run_typescript` tool executes TypeScript code in a sandbox environment. This sandbox has access to ES2015 - ES2022 language features, but doesn't have access to NodeJS, browser APIs, or network I/O.",
+              "",
+              "### Sandbox capabilities and durability model",
+              "",
+              "- The sandbox is a replayable TypeScript workflow environment, not a general-purpose Node.js runtime. Use it for orchestration, tool-call wiring, and local data transformation.",
+              "- It supports standard JavaScript/TypeScript computation such as async/await, Promises, JSON, Array/Object/Map/Set operations, RegExp, URL parsing, TextEncoder/TextDecoder, and console output for debugging.",
+              "- It does not provide ambient filesystem access, Node.js packages, browser APIs, DOM APIs, or direct network I/O. Reach external systems only through the provided `tools.<group>.<function>` functions.",
+              "- Execution may pause while tool calls are pending and later replay from the beginning. Local code can therefore run more than once; keep it to pure orchestration, pure data transforms, and tool-call wiring.",
+              "- Time, randomness, and promise-selection APIs are recorded automatically and replay deterministically. This includes `Date()`, `new Date()`, `Date.now()`, `performance.now()`, `Math.random()`, `crypto.randomUUID()`, `crypto.getRandomValues()`, `Promise.race()`, and `Promise.any()`.",
+              "",
+              "### The `main` function",
+              "",
+              "**IMPORTANT:** The sandboxed environment expects a `main` function that will be run automatically.",
+              "- You MUST always define an `async function main() { /* ... */ }` containing all your code",
+              "- You MUST NOT call `main()` yourself - the sandbox calls it automatically",
+              "- The result of the `main` function will be visible as a { type: \"success\", value } object.",
+              "- The input must contain inline `code`.",
+              "- Tool calls may throw. Use `try/catch` or `.catch(...)` to recover or keep partial results; otherwise let errors propagate to the tool result.",
+              "- AVOID using console.log or console.error to read the output of functions. Rely on the main function's returned value instead. Only use console for debugging.",
+              "- For independent calls, prefer `Promise.allSettled(...)`. Use `Promise.all(...)` only when all must succeed; avoid sequential awaits when calls can run concurrently.",
+              "- You MUST NOT use `fetch()`, `setInterval()`, `atob()`, `btoa()`, `DOMParser`, `Buffer`, `require()`, `import()`, or `export` — they do not exist. Tool functions are already available under the `tools` namespace.",
+              "- When a string contains double quotes, you MUST use single quotes for the outer string.",
+              "  WRONG: `await tools.web_search.web_search({ query: \"\"Sample Topic\" TV date\" });`",
+              "  CORRECT: `await tools.web_search.web_search({ query: '\"Sample Topic\" TV date' });`",
+              "",
+              "### Available tool functions",
+              "",
+              "Tool functions are available under `tools.<group>.<function>`; no imports needed.",
+              "",
+              "Before calling an unfamiliar tool function, use `search_tool_functions` to load details for the exact function name. Use only documented function paths and argument shapes.",
+              "",
+              "",
+              "### Example",
+              "",
+              "1. Discover the appropriate tool function signature. Assuming you found the following type definition:",
+              "",
+              "```typescript",
+              "declare namespace tools.someGroup {",
+              "  function someFunction(args: { timestamp: number, someQuery: string }): Promise<{ someOutput: number }>;",
+              "}",
+              "```",
+              "",
+              "2. Run TypeScript code. You can call `run_typescript` with code like:",
+              "",
+              "```json",
+              "{\"code\": \"async function main() {\\n  const timestamp = Date.now();\\n  const { someOutput } = await tools.someGroup.someFunction({ timestamp, someQuery: '...' });\\n  return someOutput;\\n}\"}",
+              "```",
+              "",
+              ""
+            ]
+          },
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        {
+          "name": "read_file",
+          "description": "Read a text file with optional zero-indexed line offset and limit.",
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "offset": {
+                "type": "integer",
+                "default": 0,
+                "minimum": 0
+              },
+              "limit": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "default": null,
+                "minimum": 1
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "name": "write_file",
+          "description": "Create or overwrite a UTF-8 file.",
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "content"
+            ]
+          }
+        },
+        {
+          "name": "edit",
+          "description": {
+            "$multiline": [
+              "Exact string replacement in a file.",
+              "",
+              "Read the current file first. `old_string` must match exactly, including whitespace, indentation, and line endings. With `replace_all=false` (the default), `old_string` must occur exactly once; set `replace_all=true` only to replace every occurrence. If an edit fails, re-read the file before retrying.",
+              "",
+              "Example:",
+              "{\"file_path\":\"src/config.ts\",\"old_string\":\"const mode = \\\"old\\\";\",\"new_string\":\"const mode = \\\"new\\\";\",\"replace_all\":false}"
+            ]
+          },
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "file_path": {
+                "type": "string",
+                "description": "Path to the existing text file to edit. Use `file_path`; `path` is not accepted."
+              },
+              "old_string": {
+                "type": "string",
+                "description": "Exact text to find, including whitespace, indentation, and line endings. It must occur exactly once unless `replace_all` is true.",
+                "minLength": 1
+              },
+              "new_string": {
+                "type": "string",
+                "description": "Exact replacement text for `old_string`. It may be empty to delete the matched text, but it must differ from `old_string`."
+              },
+              "replace_all": {
+                "type": "boolean",
+                "description": "When false (the default), replace the single `old_string` match. When true, replace every occurrence of `old_string`.",
+                "default": false
+              }
+            },
+            "required": [
+              "file_path",
+              "old_string",
+              "new_string"
+            ]
+          }
+        },
+        {
+          "name": "bash",
+          "description": "Run a shell command and capture stdout, stderr, and its return code.",
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "default": 300,
+                "minimum": 1,
+                "maximum": 300
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        },
+        {
+          "name": "skill",
+          "description": "Load a specialized skill that provides domain-specific instructions and workflows. When a task matches one of the available skills listed in your system prompt, call this tool with the exact skill name to load the full skill instructions. Only listed names are valid. Call exactly with {\"name\":\"<exact name>\"}; no other argument keys are accepted.",
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "The exact name of the skill to load from the available skills.",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "name"
+            ]
+          }
+        },
+        {
+          "name": "askUser",
+          "description": "Ask the user to choose one of a bounded set of options.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "question": {
+                "type": "string",
+                "minLength": 1
+              },
+              "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 5,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "label"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "name": "createEvent",
+          "description": "Create a calendar event and return its stable identity.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "calendarId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "startsAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "durationMinutes": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "attendees": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "email"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "calendarId",
+              "title",
+              "startsAt",
+              "durationMinutes"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    }
+  }
+}

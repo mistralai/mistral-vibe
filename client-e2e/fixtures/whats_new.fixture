@@ -1,0 +1,5 @@
+# What's new in v9.9.9-fixture
+
+- **Bold bullet**: frozen fixture content, so this golden never churns when the shipped whats_new.md changes per release
+- A very long bullet that runs comfortably past the 120-column capture width so the banner's line wrapping stays exercised by this golden across releases
+- See the [VS Code extension](vscode:extension/mistralai.mistral-vibe-code) for a rich UI

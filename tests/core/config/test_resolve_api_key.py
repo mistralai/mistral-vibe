@@ -166,7 +166,7 @@ def test_mistral_backend_reads_keyring_only_key(
     assert backend._api_key == "keyring-key"
 
 
-def test_vibe_code_api_key_resolves_from_keyring(
+def test_mistral_api_key_resolves_from_keyring(
     monkeypatch: pytest.MonkeyPatch, build_config: ConfigBuilder
 ) -> None:
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
@@ -176,10 +176,28 @@ def test_vibe_code_api_key_resolves_from_keyring(
 
     config = build_config()
 
-    assert config.vibe_code_api_key == "keyring-key"
+    assert config.resolve_mistral_api_key() == "keyring-key"
 
 
-def test_vibe_code_api_key_reuses_cached_keyring_value(
+def test_mistral_api_key_uses_configured_mistral_provider_env_var(
+    monkeypatch: pytest.MonkeyPatch, build_config: ConfigBuilder
+) -> None:
+    monkeypatch.setenv("CUSTOM_API_KEY", "custom-key")
+    config = build_config(
+        providers=[
+            ProviderConfig(
+                name="custom-mistral",
+                api_base="https://api.example.com/v1",
+                api_key_env_var="CUSTOM_API_KEY",
+                backend=Backend.MISTRAL,
+            )
+        ]
+    )
+
+    assert config.resolve_mistral_api_key() == "custom-key"
+
+
+def test_mistral_api_key_reuses_cached_keyring_value(
     monkeypatch: pytest.MonkeyPatch, build_config: ConfigBuilder
 ) -> None:
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
@@ -191,10 +209,10 @@ def test_vibe_code_api_key_reuses_cached_keyring_value(
 
     monkeypatch.setattr(keyring, "get_password", lambda service, username: None)
 
-    assert config.vibe_code_api_key == "keyring-key"
+    assert config.resolve_mistral_api_key() == "keyring-key"
 
 
-def test_vibe_code_api_key_empty_when_cache_cleared_and_unresolved(
+def test_mistral_api_key_empty_when_cache_cleared_and_unresolved(
     monkeypatch: pytest.MonkeyPatch, build_config: ConfigBuilder
 ) -> None:
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
@@ -206,4 +224,4 @@ def test_vibe_code_api_key_empty_when_cache_cleared_and_unresolved(
     clear_api_key_keyring_cache()
     monkeypatch.setattr(keyring, "get_password", lambda service, username: None)
 
-    assert config.vibe_code_api_key == ""
+    assert config.resolve_mistral_api_key() == ""

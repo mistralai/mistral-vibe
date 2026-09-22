@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.25.5"
+version = "2.25.7"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -18,7 +18,6 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
-    "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
@@ -34,7 +33,7 @@ dependencies = [
     "beautifulsoup4==4.14.3",
     "cachetools==7.0.6",
     "certifi==2026.7.22",
-    "cffi==2.0.0",
+    "cffi==2.0.0 ; platform_machine != 'aarch64' or platform_python_implementation != 'PyPy' or sys_platform != 'linux'",
     "charset-normalizer==3.4.7",
     "click==8.3.3 ; sys_platform != 'emscripten'",
     "colorama==0.4.6 ; sys_platform == 'win32'",
@@ -68,9 +67,8 @@ dependencies = [
     "mcp==1.28.1",
     "mdit-py-plugins==0.5.0",
     "mdurl==0.1.2",
-    "miniaudio==1.71",
+    "miniaudio==1.71 ; platform_machine != 'aarch64' or sys_platform != 'linux'",
     "mistralai==2.6.0",
-    "mistralai-vibe-local-harness==0.5.1",
     "more-itertools==11.0.2",
     "opentelemetry-api==1.39.1",
     "opentelemetry-exporter-otlp-proto-common==1.39.1",
@@ -85,7 +83,7 @@ dependencies = [
     "ptyprocess==0.7.0",
     "pyasn1==0.6.4",
     "pyasn1-modules==0.4.2",
-    "pycparser==3.0 ; implementation_name != 'PyPy'",
+    "pycparser==3.0 ; (implementation_name != 'PyPy' and platform_machine != 'aarch64') or (implementation_name != 'PyPy' and platform_python_implementation != 'PyPy') or (implementation_name != 'PyPy' and sys_platform != 'linux')",
     "pydantic==2.13.4",
     "pydantic-core==2.46.4",
     "pydantic-settings==2.14.2",
@@ -129,6 +127,13 @@ dependencies = [
     "zstandard==0.25.0",
 ]
 
+[project.optional-dependencies]
+# Opt-in for aarch64 Linux, where upstream publishes no miniaudio wheel. The
+# default install needs no C++ toolchain; uv tool install "mistral-vibe[voice-aarch64]"
+# resolves the prebuilt manylinux wheel the release CI publishes to Gemfury
+# (see the miniaudio-aarch64 job in vibe-release-gemfury.yaml).
+voice-aarch64 = ["miniaudio>=1.59"]
+
 [project.urls]
 Homepage = "https://github.com/mistralai/mistral-vibe"
 Repository = "https://github.com/mistralai/mistral-vibe"
@@ -136,28 +141,52 @@ Issues = "https://github.com/mistralai/mistral-vibe/issues"
 Documentation = "https://github.com/mistralai/mistral-vibe#readme"
 
 [build-system]
-requires = ["hatchling==1.31.0", "hatch-vcs==0.5.0", "editables==0.6"]
-build-backend = "hatchling.build"
-
-[tool.hatch.metadata]
-allow-direct-references = true
+requires = ["maturin==1.14.1"]
+build-backend = "maturin_backend"
+backend-path = ["build_backend"]
 
 [[tool.uv.index]]
 default = true
 name = "pypi"
 url = "https://pypi.org/simple"
 
-[tool.hatch.build.targets.wheel]
-include = ["vibe/"]
+[tool.maturin]
+manifest-path = ".native-build/harness-core/Cargo.toml"
+module-name = "mistralai_vibe_local_harness._native"
+python-source = "."
+python-packages = ["vibe", "mistralai_vibe_local_harness"]
+include = [
+    { path = "vibe/_bin/*", format = "wheel" },
+    # The runtime is staged during the build and ignored by Git. Include it
+    # explicitly so Maturin does not filter its Python sources out.
+    { path = "mistralai_vibe_local_harness/*", format = "wheel" },
+    { path = "mistralai_vibe_local_harness/**/*", format = "wheel" },
+]
+exclude = [
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "vibe/cli-rust/**",
+]
+features = ["extension-module"]
 
 [project.scripts]
-vibe = "vibe.cli.entrypoint:main"
+vibe = "vibe.cli.launcher:main"
 vibe-acp = "vibe.acp.entrypoint:main"
 vibe-app-server = "vibe.app_server.stdio:main"
 
 [tool.uv]
 exclude-newer = "2 days"
-exclude-newer-package = { mistralai-vibe-local-harness = false }
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "build_backend/**/*.py" },
+    { file = "vibe/cli-rust/Cargo.toml" },
+    { file = "vibe/cli-rust/Cargo.lock" },
+    { file = "vibe/cli-rust/src/**/*.rs" },
+    { file = "harness/core/Cargo.toml" },
+    { file = "harness/core/Cargo.lock" },
+    { file = "harness/core/src/**/*.rs" },
+    { file = "harness/runtimes/python/python/mistralai_vibe_local_harness/**/*" },
+]
 index-strategy = "first-index"
 package = true
 required-version = ">=0.8.0"
@@ -171,6 +200,7 @@ override-dependencies = [
 [dependency-groups]
 dev = [
     "cryptography>=48.0.0",
+    "maturin==1.14.1",
     "pre-commit-uv>=4.3.0",
     "pre-commit>=4.2.0",
     "pyinstrument>=5.1.2",
@@ -180,6 +210,7 @@ dev = [
     "pytest-textual-snapshot>=1.1.0",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
+    "pyte>=0.8.2",
     "respx>=0.22.0",
     "ruff>=0.15.18",
     "tomlkit>=0.13.0",
@@ -204,13 +235,13 @@ pythonVersion = "3.12"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
 
-include = ["vibe/**/*.py", "tests/**/*.py"]
+include = ["build_backend/**/*.py", "vibe/**/*.py", "tests/**/*.py"]
 exclude = ["pyinstaller/"]
 venvPath = "."
 venv = ".venv"
 
 [tool.ruff]
-include = ["vibe/**/*.py", "tests/**/*.py"]
+include = ["build_backend/**/*.py", "vibe/**/*.py", "tests/**/*.py"]
 exclude = ["pyinstaller/"]
 line-length = 88
 target-version = "py312"
@@ -248,6 +279,7 @@ ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
 known-first-party = ["vibe"]
+known-third-party = ["mistralai_vibe_local_harness"]
 force-sort-within-sections = true
 split-on-trailing-comma = false
 combine-as-imports = true
@@ -269,7 +301,8 @@ max-nested-blocks = 5
 ignore_decorators = ["@*"]
 
 [tool.pytest.ini_options]
-addopts = "-p pytest_vibe -vvvv -q -n auto --dist=loadgroup --durations=10 --import-mode=importlib --maxschedchunk=1"
+# client-e2e is a standalone harness with its own pytest.ini; the main suite must not collect it.
+addopts = "-p pytest_vibe -vvvv -q -n auto --dist=loadgroup --durations=10 --import-mode=importlib --maxschedchunk=1 --ignore=client-e2e"
 timeout = 10
 markers = [
     "unified_supported: backend contract behavior implemented by the Unified Harness",

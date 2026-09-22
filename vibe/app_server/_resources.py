@@ -134,7 +134,8 @@ from vibe.core.proxy_setup import (
     unset_proxy_var,
 )
 from vibe.core.types import Role, ScheduledLoop as CoreScheduledLoop
-from vibe.observability.logging import logger
+from vibe.feedback import FEEDBACK_SNOOZED_COOLDOWN_SECONDS
+from vibe.observability.logging import logger, set_config_log_level
 
 
 class _LegacySkillsHost:
@@ -533,7 +534,8 @@ class ResourceRequestHandler:
                             user_messages + params.pending_user_messages
                         ),
                         cache_store=self._agent_loop.cache_store,
-                    )
+                    ),
+                    snooze_duration_seconds=FEEDBACK_SNOOZED_COOLDOWN_SECONDS,
                 )
             case "feedback/record":
                 params = validate_wire(FeedbackRecordParams, raw_params)
@@ -634,6 +636,9 @@ class ResourceRequestHandler:
                     runtime=self.runtime_snapshot(),
                     failures=[str(failure) for failure in failures],
                 )
+        # The config tier is latched once per process at session start, so without
+        # this a written log_level only takes effect after a restart.
+        set_config_log_level(self._agent_loop.config.log_level)
         if params.reload_runtime:
             self._clear_mcp_discovery_errors()
             await self._agent_loop.reload_with_initial_messages(reload_hooks=True)

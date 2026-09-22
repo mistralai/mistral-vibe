@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -240,14 +241,22 @@ def test_lists_immediate_children_when_path_ends_with_slash(file_tree: Path) -> 
 
 
 def test_respects_max_entries_to_process_limit(file_tree: Path) -> None:
+    # Put the candidates in a subdirectory and query with that directory as a
+    # prefix. _prioritize_exact_directory_prefix hoists the directory's
+    # descendants ahead of the unrelated fixture entries, so the first
+    # max_entries_to_process entries the scorer sees are always matches —
+    # otherwise os.scandir's filesystem-dependent ordering could let the
+    # fixture's non-matching entries consume the whole processing budget.
+    matches_dir = file_tree / "matches"
+    matches_dir.mkdir()
     for i in range(30):
-        (file_tree / f"file_{i:03d}.txt").write_text("", encoding="utf-8")
+        (matches_dir / f"file_{i:03d}.txt").write_text("", encoding="utf-8")
 
     controller, view = make_controller(max_entries_to_process=10)
 
-    controller.on_text_changed("@f", cursor_index=2)
+    controller.on_text_changed("@matches/f", cursor_index=10)
 
-    assert view.suggestions, "Expected completion suggestions for @f"
+    assert view.suggestions, "Expected completion suggestions for @matches/f"
     suggestions, _ = view.suggestions[-1]
     assert len(suggestions) <= 10
 
@@ -276,6 +285,42 @@ def test_respects_target_matches_limit_for_fuzzy_search(file_tree: Path) -> None
     assert view.suggestions, "Expected completion suggestions for @test"
     suggestions, _ = view.suggestions[-1]
     assert len(suggestions) <= 5
+
+
+def test_deferred_empty_result_does_not_reset_newer_query(
+    file_tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller, view = make_controller()
+    controller.on_text_changed("@", 1)
+    callbacks = []
+
+    class FakeApp:
+        def call_after_refresh(self, callback, *args):
+            callbacks.append(partial(callback, *args))
+
+    empty = Future[list[CompletionEntry]]()
+    current = Future[list[CompletionEntry]]()
+    futures = iter([empty, current])
+    monkeypatch.setattr(view, "app", FakeApp(), raising=False)
+    monkeypatch.setattr(controller._executor, "submit", lambda *args: next(futures))
+
+    controller.on_text_changed("@missing", 8)
+    empty.set_result([])
+    assert (
+        controller.on_key(events.Key("tab", None), "@missing", 8)
+        is CompletionResult.HANDLED
+    )
+    assert view.replacements == []
+
+    controller.on_text_changed("@sr", 3)
+    current.set_result([CompletionEntry("@src/", "")])
+    for callback in callbacks:
+        callback()
+
+    result = controller.on_key(events.Key("tab", None), "@sr", 3)
+
+    assert result is CompletionResult.HANDLED
+    assert view.replacements == [(0, 3, "@src/")]
 
 
 def test_only_the_latest_query_can_render_results(file_tree: Path) -> None:

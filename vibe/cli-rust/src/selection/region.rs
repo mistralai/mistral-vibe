@@ -1,0 +1,181 @@
+//! Selectable region: resolve a screen drag into selectable cell spans and text.
+
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+
+use crate::app::App;
+use crate::selection::flow::{resolve, Flow};
+use crate::selection::table;
+
+/// Stable identity for each concurrently painted selectable region. A toast
+/// carries its own id, so a selection stays with that toast while the rack
+/// shifts it and dies with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionId {
+    Main,
+    Toast(u64),
+}
+
+/// The screen region a drag can select, published by whichever surface painted it.
+#[derive(Clone, Copy, Default)]
+pub struct Region {
+    pub area: Rect,
+    /// Screen y of document row zero, so a selection survives scrolling.
+    pub top: i32,
+    /// The region reserved its rightmost column for a scrollbar.
+    pub scrollbar: bool,
+    /// Stock Textual screens stop before the cell under the pointer; the
+    /// transcript keeps it, like Python's `WordSelectScreen`.
+    pub end_exclusive: bool,
+    /// The region can re-render its document off-screen, so a copy also reaches
+    /// rows scrolled out of the viewport. Only the transcript can.
+    pub document: bool,
+}
+
+impl Region {
+    /// True when `at` is over selectable text (never the scrollbar gutter).
+    pub fn contains(&self, at: (u16, u16)) -> bool {
+        at.0 >= self.area.x
+            && at.0 < self.area.right()
+            && at.1 >= self.area.y
+            && at.1 < self.area.bottom()
+            && !(self.scrollbar && at.0 == self.area.right().saturating_sub(1))
+    }
+
+    /// Screen cell `at` in document coordinates.
+    pub fn point(&self, at: (u16, u16)) -> (u16, i32) {
+        (at.0, at.1 as i32 - self.top)
+    }
+
+    /// The area without its scrollbar gutter, which is chrome.
+    pub fn content(&self) -> Rect {
+        Rect {
+            width: self.area.width.saturating_sub(u16::from(self.scrollbar)),
+            ..self.area
+        }
+    }
+}
+
+pub fn get(app: &App, id: RegionId) -> Region {
+    match id {
+        RegionId::Main => app.view.selection_region,
+        RegionId::Toast(_) => app.view.toast_selection_region,
+    }
+}
+
+/// One selected row: inclusive screen columns `[x0, x1]` on screen row `y`.
+pub type RowSpan = (u16, u16, u16);
+
+/// Resolve the active selection against the painted frame.
+pub fn spans(app: &App, buf: &Buffer, chat: Rect) -> Vec<RowSpan> {
+    let Some(selection) = app.selection.region.as_ref() else {
+        return Vec::new();
+    };
+    if let Some(table_cell) = &selection.table_cell {
+        return table::screen_spans(app, table_cell, chat);
+    }
+    let region = get(app, selection.owner);
+    // The chrome map and the diff gutters belong to the main screen. A toast
+    // paints over it with text-only rows, so neither applies to its selection.
+    let chrome = selection.owner == RegionId::Main;
+    let gutters: &[RowSpan] = if chrome { &app.view.diff_hitmap } else { &[] };
+    let spans = resolve(
+        Flow {
+            selection: (selection.anchor, selection.head),
+            origin: region.top,
+            end_exclusive: region.end_exclusive,
+            chrome,
+        },
+        app.selection.granularity,
+        buf,
+        chat,
+        gutters,
+        false,
+    );
+    if !chrome {
+        return spans;
+    }
+    spans
+        .into_iter()
+        .flat_map(|span| split(&app.view.selection_chrome, span))
+        .collect()
+}
+
+/// Read the complete document selection, including rows outside the viewport.
+pub fn extract_document(app: &App) -> Option<String> {
+    let selection = app.selection.region.as_ref()?;
+    if let Some(table_cell) = &selection.table_cell {
+        return Some(table_cell.selected_text(app.selection.granularity));
+    }
+    let region = get(app, selection.owner);
+    // A dialog paints everything it owns, so its copy comes from the frame.
+    if !region.document {
+        return None;
+    }
+    let document = crate::ui::transcript::selection_slice(app)?;
+    let spans = resolve(
+        Flow {
+            selection: (selection.anchor, selection.head),
+            origin: 0,
+            end_exclusive: region.end_exclusive,
+            chrome: true,
+        },
+        app.selection.granularity,
+        &document.buffer,
+        document.area,
+        &document.gutters,
+        true,
+    );
+    Some(extract(&document.buffer, &spans))
+}
+
+/// True when a press at `at` anchors a selection: inside the region and on a
+/// cell some widget owns, since Textual anchors nothing on bare padding. The
+/// chrome map belongs to the main region; a toast publishes only its text rows.
+pub fn selectable(app: &App, at: (u16, u16), owner: RegionId) -> bool {
+    if !get(app, owner).contains(at) {
+        return false;
+    }
+    if owner != RegionId::Main {
+        return true;
+    }
+    !app.view
+        .selection_chrome
+        .iter()
+        .any(|&(y, x0, x1)| y == at.1 && at.0 >= x0 && at.0 <= x1)
+}
+
+/// Cut the cells a screen painted as chrome out of a row span.
+fn split(gaps: &[RowSpan], span: RowSpan) -> Vec<RowSpan> {
+    let (y, x0, x1) = span;
+    let mut spans = vec![span];
+    for &(gap_y, gap_x0, gap_x1) in gaps {
+        if gap_y != y || gap_x1 < x0 || gap_x0 > x1 {
+            continue;
+        }
+        spans = spans
+            .into_iter()
+            .flat_map(|(y, x0, x1)| {
+                [(y, x0, gap_x0.saturating_sub(1)), (y, gap_x1 + 1, x1)]
+                    .into_iter()
+                    .filter(|&(_, lo, hi)| lo <= hi && lo >= x0 && hi <= x1)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    }
+    spans
+}
+
+/// Read the selected text back from the rendered buffer, one line per row.
+pub fn extract(buf: &Buffer, spans: &[RowSpan]) -> String {
+    spans
+        .iter()
+        .map(|&(y, x0, x1)| {
+            let row: String = (x0..=x1)
+                .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol()))
+                .collect();
+            row.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}

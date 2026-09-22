@@ -1,0 +1,62 @@
+[package]
+name = "vibe-rs"
+version = "2.25.7"
+edition = "2021"
+license = "Proprietary"
+publish = false
+
+[lib]
+name = "vibe_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vibe-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "vibe-replay"
+path = "src/bin/replay.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+shlex = "1"
+tokio = { version = "1", features = ["rt", "macros", "process", "io-util", "io-std", "sync", "time", "signal"] }
+futures = "0.3"
+ignore = "0.4"
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
+crossterm = { version = "0.28" }
+pulldown-cmark = { version = "0.10", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+cpal = { version = "0.15", optional = true }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+base64 = "0.22"
+notify = "8"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+syntect = "5"
+two-face = { version = "0.5", default-features = false, features = [
+    "syntect-default-onig",
+] }
+toml_edit = "0.25"
+tempfile = "3"
+url = "2"
+sentry = { version = "0.49.2", default-features = false, features = ["backtrace", "contexts", "reqwest", "rustls", "tracing"] }
+
+[features]
+# Voice capture pulls in `cpal`, whose Linux backend links ALSA via pkg-config
+# (a system dependency the CI build image lacks). Keep voice on by default for
+# local builds; CI builds with `--no-default-features` to skip the audio path.
+default = ["voice"]
+voice = ["dep:cpal"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+debug = 1

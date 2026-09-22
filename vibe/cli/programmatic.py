@@ -152,7 +152,7 @@ def run_programmatic(
             await session.resources.runtime.wait_until_ready()
             await _warn_if_workspace_untrusted(session)
             output.start(session.history)
-            if teleport and session.resources.config.current.vibe_code_enabled:
+            if teleport:
                 await _teleport(session, prompt, output)
             else:
                 async with aclosing(session.act(prompt)) as events:

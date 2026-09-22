@@ -735,6 +735,12 @@ async def perform_oauth_login(
         ) from exc
     except (OAuthTokenError, OAuthFlowError, httpx.HTTPError, OSError) as exc:
         raise MCPOAuthLoginFailed(server_alias=server.name, reason=str(exc)) from exc
+    # A probe the server never challenges leaves no token, so fail loudly rather than save a false-success fingerprint.
+    if await KeyringTokenStorage(alias=server.name).get_tokens() is None:
+        raise MCPOAuthLoginFailed(
+            server_alias=server.name,
+            reason="the server never issued an OAuth challenge, so no token was obtained",
+        )
     await Fingerprint.compute(server).save(server.name)
 
 

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from itertools import cycle
+from collections.abc import Iterator
 from pathlib import Path
-import threading
+from typing import IO, Any
 
 import pytest
 
+from vibe.core.config import fingerprint as fingerprint_module
 from vibe.core.config.fingerprint import (
     create_dict_fingerprint,
     create_file_fingerprint,
@@ -13,6 +14,72 @@ from vibe.core.config.fingerprint import (
 )
 from vibe.core.config.layer import RawConfig
 from vibe.core.config.layers._base import _read_toml_snapshot, _write_toml_snapshot
+from vibe.core.config.types import LayerConfigSnapshot
+
+# Every point of a read at which a concurrent save can land, relative to the
+# descriptor the fingerprint is taken from. Together they cover the interleaving
+# space: the save is invisible to the read, or it is the version the read gets.
+SAVE_POINTS = ("before the open", "after the open", "after the fingerprint")
+
+
+def _save_during_read(
+    patch: pytest.MonkeyPatch, target: Path, payload: RawConfig, when: str
+) -> None:
+    """Arrange for one save of ``target`` to land at ``when`` during a read.
+
+    Placed rather than raced: a writer thread contends only when the machine
+    lets it, and this one cannot be starved. See the test for what that cost.
+    """
+    if when not in SAVE_POINTS:
+        raise ValueError(f"unknown save point {when!r}")
+
+    saved = False
+
+    def save_once() -> None:
+        nonlocal saved
+        if saved:  # exactly one save per read, wherever the read is hooked
+            return
+        saved = True
+        _write_toml_snapshot(target, payload)
+
+    if when == "after the fingerprint":
+        take_fingerprint = fingerprint_module.create_file_fingerprint
+
+        def fingerprinting(file: IO[Any]) -> str:
+            token = take_fingerprint(file)
+            save_once()
+            return token
+
+        # Rebinding it here reaches `open_fingerprinted_file` only: `_base`
+        # imported the name directly, so its own writes stay unpatched.
+        patch.setattr(fingerprint_module, "create_file_fingerprint", fingerprinting)
+        return
+
+    open_path = Path.open
+
+    def opening(self: Path, *args: Any, **kwargs: Any) -> IO[Any]:
+        if self != target:
+            return open_path(self, *args, **kwargs)
+        if when == "before the open":
+            save_once()
+        file = open_path(self, *args, **kwargs)
+        if when == "after the open":
+            save_once()
+        return file
+
+    patch.setattr(Path, "open", opening)
+
+
+def _reads_under_a_save_at_every_point(
+    monkeypatch: pytest.MonkeyPatch, target: Path, versions: tuple[RawConfig, RawConfig]
+) -> Iterator[LayerConfigSnapshot]:
+    """Yield the snapshot of a read meeting a save at each point, both ways round."""
+    for when in SAVE_POINTS:
+        for before, after in (versions, versions[::-1]):
+            _write_toml_snapshot(target, before)
+            with monkeypatch.context() as patch:
+                _save_during_read(patch, target, after, when)
+                yield _read_toml_snapshot(target)
 
 
 class TestOpenFingerprintedFile:
@@ -164,18 +231,26 @@ class TestSnapshotReadUnderConcurrentWrites:
     """
 
     def test_a_fingerprint_always_describes_the_data_returned_with_it(
-        self, tmp_working_directory: Path
+        self, tmp_working_directory: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """*Prepare*: A config file a background thread keeps atomically
-        replacing between two distinguishable versions.
-        *Do*: Read a snapshot repeatedly while that runs.
-        *Assert*: No read fails, both versions are observed, and no fingerprint
-        is ever handed out with two different payloads.
+        """*Prepare*: A config file and two distinguishable versions of it.
+        *Do*: Read a snapshot with a save of the other version landing at each
+        point of the read where a concurrent save can land, both ways round.
+        *Assert*: No read fails, every payload read is one whole version, both
+        versions are observed, and no fingerprint is ever handed out with two
+        different payloads.
 
         That last property is the one the optimistic-concurrency token rests
         on: a patch is accepted only when its fingerprint still matches, so a
         fingerprint that could describe two payloads would let a patch built on
         one of them be applied to the other.
+
+        The saves are placed, not raced. This used to run a free-running writer
+        thread and assert afterwards that it had managed to contend; whether it
+        did was decided by the agent's disk, since a writer iteration costs an
+        ``fsync`` while a read is page-cache-hot. Past roughly 10ms of fsync
+        latency the reads finished before the writer's second iteration and the
+        test failed reporting that its own writer never ran.
         """
         # Prepare
         target = tmp_working_directory / "config.toml"
@@ -183,36 +258,14 @@ class TestSnapshotReadUnderConcurrentWrites:
         big = RawConfig.model_validate({
             "tools": {f"tool-{index}": {"permission": "always"} for index in range(40)}
         })
-        _write_toml_snapshot(target, small)
-
-        stop = threading.Event()
-        writes = 0
-        writer_error: list[BaseException] = []
-
-        def keep_replacing() -> None:
-            nonlocal writes
-            payloads = cycle((big, small))
-            try:
-                while not stop.is_set():
-                    _write_toml_snapshot(target, next(payloads))
-                    writes += 1
-            except BaseException as error:  # surfaced below; a dead writer
-                writer_error.append(error)  # would leave the read uncontended
-
-        writer = threading.Thread(target=keep_replacing, daemon=True)
-        writer.start()
 
         # Do
-        try:
-            snapshots = [_read_toml_snapshot(target) for _ in range(200)]
-        finally:
-            stop.set()
-            writer.join(timeout=5)
+        snapshots = list(
+            _reads_under_a_save_at_every_point(monkeypatch, target, (small, big))
+        )
 
         # Assert
-        assert not writer_error, f"the writer died: {writer_error[0]!r}"
-        assert not writer.is_alive()
-        assert writes > 1, "the writer never contended with the reads"
+        assert len(snapshots) == len(SAVE_POINTS) * 2
 
         payload_by_fingerprint: dict[str, object] = {}
         for snapshot in snapshots:
@@ -225,7 +278,7 @@ class TestSnapshotReadUnderConcurrentWrites:
 
         observed = {len(snapshot.data.get("tools") or {}) for snapshot in snapshots}
         assert observed == {0, 40}, (
-            f"expected to read both versions while writing, saw {observed}"
+            f"every read must return one whole version, saw {observed}"
         )
 
     def test_a_read_survives_the_file_being_replaced_mid_parse(

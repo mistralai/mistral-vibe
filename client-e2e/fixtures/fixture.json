@@ -1,0 +1,2012 @@
+{
+  "sessionId": "00000000-0000-4000-8000-000000000001",
+  "turnId": "00000000-0000-4000-8000-000000000002",
+  "handshake": {
+    "initialize": {
+      "serverInfo": {
+        "name": "vibe-app-server",
+        "version": "0.0.0-eval"
+      }
+    },
+    "workspace/trust/status": {
+      "status": "trusted",
+      "details": null
+    },
+    "workspace/trust/decision": {
+      "status": "trusted",
+      "details": null
+    },
+    "config/read": {
+      "config": {
+        "activeModel": {
+          "name": "mistral-vibe-cli",
+          "alias": "mistral-medium-3.5",
+          "thinking": "medium",
+          "supportsImages": true,
+          "displayName": "mistral-medium-3.5"
+        },
+        "activeModelPinned": false,
+        "awaitingExperimentModel": false,
+        "defaultModelAlias": "mistral-medium-3.5",
+        "defaultAgent": "accept-edits",
+        "theme": "ansi-dark",
+        "logLevel": null,
+        "disableWelcomeBannerAnimation": true,
+        "showGreeting": true,
+        "autocopyToClipboard": true,
+        "fileWatcherForAutocomplete": false,
+        "askConfirmationOnExit": true,
+        "voiceModeEnabled": true,
+        "narratorEnabled": false,
+        "showThinkingNodes": false,
+        "showSubagentStatusList": true,
+        "worktreeLimit": 15,
+        "enableUpdateChecks": true,
+        "enableNotifications": true,
+        "experimentalEnableTabStatus": true,
+        "vibeCodeEnabled": true,
+        "models": [
+          {
+            "name": "mistral-vibe-cli",
+            "alias": "mistral-medium-3.5",
+            "thinking": "medium",
+            "supportsImages": true,
+            "displayName": "mistral-medium-3.5"
+          },
+          {
+            "name": "devstral-small-latest",
+            "alias": "devstral-small",
+            "thinking": "off",
+            "supportsImages": false,
+            "displayName": "devstral-small"
+          }
+        ],
+        "transcribeModels": [
+          "voxtral-realtime"
+        ],
+        "ttsModels": [
+          "voxtral-tts"
+        ],
+        "transcription": {
+          "model": {
+            "name": "voxtral-mini-transcribe-realtime-2602",
+            "sampleRate": 16000,
+            "encoding": "pcm_s16le",
+            "language": "en",
+            "targetStreamingDelayMs": 500
+          },
+          "provider": {
+            "apiBase": "wss://api.mistral.ai",
+            "apiKeyEnvVar": "MISTRAL_API_KEY",
+            "client": "mistral"
+          }
+        },
+        "speech": {
+          "model": {
+            "name": "voxtral-mini-tts-latest",
+            "voice": "gb_jane_neutral",
+            "responseFormat": "wav"
+          },
+          "provider": {
+            "apiBase": "https://api.mistral.ai",
+            "apiKeyEnvVar": "MISTRAL_API_KEY",
+            "client": "mistral"
+          }
+        },
+        "validationWarnings": []
+      },
+      "strippedHistoryImages": 0,
+      "skillsCount": 21,
+      "hooksCount": 1,
+      "mcpServersTotal": 4,
+      "mcpServersEnabled": 0
+    },
+    "session/start": {
+      "lastEventId": 0,
+      "state": {
+        "format": "vibe.public-session-state/v1",
+        "eventId": 0,
+        "session": {
+          "id": "00000000-0000-4000-8000-000000000001",
+          "rootSessionId": "00000000-0000-4000-8000-000000000001",
+          "parentSessionId": null,
+          "title": null,
+          "preview": "",
+          "status": {
+            "type": "idle"
+          },
+          "createdAt": 1787821243784,
+          "updatedAt": 1787821243863,
+          "cwd": "/workspace",
+          "workspaceRoots": [
+            "/workspace"
+          ],
+          "model": "mistral-medium-3.5",
+          "agent": {
+            "name": "accept-edits",
+            "displayName": "Accept Edits",
+            "description": "Auto-approves file edits only",
+            "safety": "destructive",
+            "agentType": "agent"
+          },
+          "tokenUsage": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "totalTokens": 0
+          }
+        },
+        "history": [],
+        "historyBeforeCursor": null,
+        "turns": [],
+        "activeCallbacks": [],
+        "retrying": null
+      }
+    },
+    "session/list": {
+      "items": [
+        {
+          "id": "00000000-0000-4000-8000-000000000003",
+          "rootSessionId": "00000000-0000-4000-8000-000000000003",
+          "parentSessionId": null,
+          "title": "Saved implementation",
+          "preview": "Continue the implementation",
+          "status": {"type": "idle"},
+          "createdAt": 1787821243000,
+          "updatedAt": 1787821245000,
+          "cwd": "/workspace"
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000001",
+          "rootSessionId": "00000000-0000-4000-8000-000000000001",
+          "parentSessionId": null,
+          "title": null,
+          "preview": "",
+          "status": {"type": "idle"},
+          "createdAt": 1787821243000,
+          "updatedAt": 1787821243863,
+          "cwd": "/workspace"
+        }
+      ],
+      "nextCursor": null,
+      "previousCursor": null,
+      "continueSessionId": "00000000-0000-4000-8000-000000000003"
+    },
+    "session/delete": {},
+    "session/read": {
+      "lastEventId": 1,
+      "state": {
+        "format": "vibe.public-session-state/v1",
+        "eventId": 1,
+        "session": {"id": "00000000-0000-4000-8000-000000000003", "rootSessionId": "00000000-0000-4000-8000-000000000003", "parentSessionId": null, "title": "Saved implementation", "preview": "Continue the implementation", "status": {"type": "idle"}, "createdAt": 1787821243000, "updatedAt": 1787821245000, "cwd": "/workspace"},
+        "history": [
+          {
+            "id": "saved-user",
+            "sessionId": "00000000-0000-4000-8000-000000000003",
+            "turnId": null,
+            "createdAt": 1787821243000,
+            "updatedAt": 1787821243000,
+            "generationStatus": "completed",
+            "relatedEntryId": null,
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "text", "text": "Continue the implementation"}]
+          },
+          {
+            "id": "saved-assistant",
+            "sessionId": "00000000-0000-4000-8000-000000000003",
+            "turnId": null,
+            "createdAt": 1787821243000,
+            "updatedAt": 1787821243000,
+            "generationStatus": "completed",
+            "relatedEntryId": null,
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Saved session restored."}]
+          }
+        ]
+      }
+    },
+    "session/resume": {
+      "lastEventId": 2,
+      "state": {
+        "format": "vibe.public-session-state/v1",
+        "eventId": 2,
+        "session": {"id": "00000000-0000-4000-8000-000000000003", "rootSessionId": "00000000-0000-4000-8000-000000000003", "parentSessionId": null, "title": "Saved implementation", "preview": "Continue the implementation", "status": {"type": "idle"}, "createdAt": 1787821243000, "updatedAt": 1787821245000, "cwd": "/workspace"},
+        "history": [
+          {
+            "id": "saved-user",
+            "sessionId": "00000000-0000-4000-8000-000000000003",
+            "turnId": null,
+            "createdAt": 1787821243000,
+            "updatedAt": 1787821243000,
+            "generationStatus": "completed",
+            "relatedEntryId": null,
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "text", "text": "Continue the implementation"}]
+          },
+          {
+            "id": "saved-assistant",
+            "sessionId": "00000000-0000-4000-8000-000000000003",
+            "turnId": null,
+            "createdAt": 1787821243000,
+            "updatedAt": 1787821243000,
+            "generationStatus": "completed",
+            "relatedEntryId": null,
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Saved session restored."}]
+          }
+        ]
+      }
+    },
+    "runtime/read": {
+      "runtime": {
+        "config": {
+          "activeModel": {
+            "name": "mistral-vibe-cli",
+            "alias": "mistral-medium-3.5",
+            "thinking": "medium",
+            "supportsImages": true,
+            "displayName": "mistral-medium-3.5"
+          },
+          "activeModelPinned": false,
+          "awaitingExperimentModel": false,
+          "defaultModelAlias": "mistral-medium-3.5",
+          "defaultAgent": "accept-edits",
+          "theme": "ansi-dark",
+          "logLevel": null,
+          "disableWelcomeBannerAnimation": true,
+          "showGreeting": true,
+          "autocopyToClipboard": true,
+          "fileWatcherForAutocomplete": false,
+          "askConfirmationOnExit": true,
+          "voiceModeEnabled": true,
+          "narratorEnabled": false,
+          "showThinkingNodes": false,
+          "showSubagentStatusList": true,
+          "worktreeLimit": 15,
+          "enableUpdateChecks": true,
+          "enableNotifications": true,
+          "experimentalEnableTabStatus": true,
+          "vibeCodeEnabled": true,
+          "models": [
+            {
+              "name": "mistral-vibe-cli",
+              "alias": "mistral-medium-3.5",
+              "thinking": "medium",
+              "supportsImages": true,
+              "displayName": "mistral-medium-3.5"
+            },
+            {
+              "name": "devstral-small-latest",
+              "alias": "devstral-small",
+              "thinking": "off",
+              "supportsImages": false,
+              "displayName": "devstral-small"
+            }
+          ],
+          "transcribeModels": [
+            "voxtral-realtime"
+          ],
+          "ttsModels": [
+            "voxtral-tts"
+          ],
+          "transcription": {
+            "model": {
+              "name": "voxtral-mini-transcribe-realtime-2602",
+              "sampleRate": 16000,
+              "encoding": "pcm_s16le",
+              "language": "en",
+              "targetStreamingDelayMs": 500
+            },
+            "provider": {
+              "apiBase": "wss://api.mistral.ai",
+              "apiKeyEnvVar": "MISTRAL_API_KEY",
+              "client": "mistral"
+            }
+          },
+          "speech": {
+            "model": {
+              "name": "voxtral-mini-tts-latest",
+              "voice": "gb_jane_neutral",
+              "responseFormat": "wav"
+            },
+            "provider": {
+              "apiBase": "https://api.mistral.ai",
+              "apiKeyEnvVar": "MISTRAL_API_KEY",
+              "client": "mistral"
+            }
+          },
+          "validationWarnings": []
+        },
+        "activeAgent": {
+          "name": "accept-edits",
+          "displayName": "Accept Edits",
+          "description": "Auto-approves file edits only",
+          "safety": "destructive",
+          "agentType": "agent"
+        },
+        "agents": [
+          {
+            "name": "ask",
+            "displayName": "Ask",
+            "description": "Requires approval for tool executions",
+            "safety": "neutral",
+            "agentType": "agent"
+          },
+          {
+            "name": "plan",
+            "displayName": "Plan",
+            "description": "Read-only agent for exploration and planning",
+            "safety": "safe",
+            "agentType": "agent"
+          },
+          {
+            "name": "accept-edits",
+            "displayName": "Accept Edits",
+            "description": "Auto-approves file edits only",
+            "safety": "destructive",
+            "agentType": "agent"
+          },
+          {
+            "name": "auto-approve",
+            "displayName": "Auto Approve",
+            "description": "Auto-approves all tool executions",
+            "safety": "yolo",
+            "agentType": "agent"
+          },
+          {
+            "name": "explore",
+            "displayName": "Explore",
+            "description": "Read-only subagent for codebase exploration",
+            "safety": "safe",
+            "agentType": "subagent"
+          }
+        ],
+        "skills": [],
+        "tools": [
+          {
+            "name": "skill",
+            "isCustom": false
+          },
+          {
+            "name": "task",
+            "isCustom": false
+          },
+          {
+            "name": "web_fetch",
+            "isCustom": false
+          },
+          {
+            "name": "bash",
+            "isCustom": false
+          },
+          {
+            "name": "edit",
+            "isCustom": false
+          },
+          {
+            "name": "grep",
+            "isCustom": false
+          },
+          {
+            "name": "ask_user_question",
+            "isCustom": false
+          },
+          {
+            "name": "read_file",
+            "isCustom": false
+          },
+          {
+            "name": "web_search",
+            "isCustom": false
+          },
+          {
+            "name": "todo",
+            "isCustom": false
+          },
+          {
+            "name": "write_file",
+            "isCustom": false
+          }
+        ],
+        "stats": {
+          "steps": 0,
+          "sessionPromptTokens": 0,
+          "sessionCompletionTokens": 0,
+          "sessionCachedTokens": 0,
+          "inputPricePerMillion": 0.0,
+          "outputPricePerMillion": 0.0,
+          "cachedInputPricePerMillion": null,
+          "toolCallsAgreed": 0,
+          "toolCallsRejected": 0,
+          "toolCallsFailed": 0,
+          "toolCallsSucceeded": 0,
+          "contextTokens": 0,
+          "lastTurnPromptTokens": 0,
+          "lastTurnCompletionTokens": 0,
+          "lastTurnCachedTokens": 0,
+          "lastTurnDuration": 0.0,
+          "tokensPerSecond": 0.0
+        },
+        "contextWindow": 600000,
+        "issues": [],
+        "hooksCount": 0,
+        "connectors": {
+          "connected": 0,
+          "total": 0
+        },
+        "mcp": {
+          "sources": []
+        }
+      },
+      "sessionLog": {
+        "enabled": true,
+        "sessionId": "2d0e487c-9f19-f019-f4a0-8332f5bd6e21",
+        "persisted": false,
+        "path": null,
+        "title": null,
+        "needsInitialAutoTitle": true
+      },
+      "ready": true
+    },
+    "workspace/trust/untrustedConfig": {
+      "dirs": [],
+      "settingsPath": "/home/user/.vibe/trusted_folders.toml"
+    },
+    "account/read": {
+      "account": {
+        "status": "unavailable",
+        "plan": null,
+        "planOffer": null,
+        "rateLimitAction": null,
+        "teleportEligible": false,
+        "teleportAction": {
+          "kind": "upgrade_to_pro",
+          "url": "https://chat.mistral.ai/code/extensions?focus=key"
+        }
+      }
+    },
+    "identity/read": {
+      "identity": null
+    },
+    "session/ready/wait": {
+      "ready": true,
+      "initDurationMs": 1501
+    },
+    "telemetry/record": {},
+    "workspace/prompt/prepare": {
+      "prompt": {
+        "displayText": "hi",
+        "promptText": "hi",
+        "images": [],
+        "autoTitle": "hi",
+        "mentions": {
+          "count": 0,
+          "contextTypes": {},
+          "fileExtensions": {}
+        }
+      }
+    },
+    "feedback/shouldShow": {
+      "show": false
+    },
+    "session/turn/enqueue": {
+      "queueItemId": "00000000-0000-4000-8000-000000000003"
+    },
+    "session/turn/queue/read": {
+      "queue": {
+        "items": [],
+        "paused": false
+      }
+    },
+    "session/turn/queue/remove": {},
+    "session/turn/queue/resume": {},
+    "session/turn/queue/replace": {
+      "queueItemId": "00000000-0000-4000-8000-000000000003"
+    },
+    "turn/start": {
+      "lastEventId": 0,
+      "turn": {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "status": "in_progress",
+        "startedAt": 1787821248230,
+        "completedAt": null,
+        "error": null,
+        "stopReason": null
+      }
+    },
+    "config/fields/read": {
+      "fields": [
+        {
+          "name": "active_model",
+          "kind": "str",
+          "description": "",
+          "value": "mistral-medium-3.5",
+          "path": "/active_model",
+          "popular": true,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": "mistral-medium-3.5"
+            }
+          ]
+        },
+        {
+          "name": "providers",
+          "kind": "complex",
+          "description": "",
+          "value": [
+            {
+              "name": "mistral",
+              "api_base": "https://api.mistral.ai/v1",
+              "api_key_env_var": "MISTRAL_API_KEY",
+              "browser_auth_base_url": "https://console.mistral.ai",
+              "browser_auth_api_base_url": "https://console.mistral.ai/api",
+              "api_style": "openai",
+              "backend": "mistral",
+              "reasoning_field_name": "reasoning_content",
+              "emits_finish_reason": true,
+              "project_id": "",
+              "region": "",
+              "extra_headers": {}
+            }
+          ],
+          "path": "/providers",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": [
+                {
+                  "name": "mistral",
+                  "api_base": "https://api.mistral.ai/v1",
+                  "api_key_env_var": "MISTRAL_API_KEY",
+                  "browser_auth_base_url": "https://console.mistral.ai",
+                  "browser_auth_api_base_url": "https://console.mistral.ai/api",
+                  "api_style": "openai",
+                  "backend": "mistral",
+                  "reasoning_field_name": "reasoning_content",
+                  "emits_finish_reason": true,
+                  "project_id": "",
+                  "region": "",
+                  "extra_headers": {}
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "models",
+          "kind": "complex",
+          "description": "",
+          "value": {
+            "mistral-medium-3.5": {
+              "name": "mistral-vibe-cli",
+              "provider": "mistral",
+              "alias": "mistral-medium-3.5",
+              "display_name": "mistral-medium-3.5",
+              "temperature": 1.0,
+              "input_price": 1.5,
+              "output_price": 7.5,
+              "cached_input_price": 0.15,
+              "thinking": "medium",
+              "supports_images": true,
+              "auto_compact_threshold": 200000
+            },
+            "devstral-small": {
+              "name": "devstral-small-latest",
+              "provider": "mistral",
+              "alias": "devstral-small",
+              "display_name": "devstral-small",
+              "temperature": 0.2,
+              "input_price": 0.1,
+              "output_price": 0.3,
+              "cached_input_price": 0.01,
+              "thinking": "off",
+              "supports_images": false,
+              "auto_compact_threshold": 200000
+            }
+          },
+          "path": "/models",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": {
+                "mistral-medium-3.5": {
+                  "name": "mistral-vibe-cli",
+                  "provider": "mistral",
+                  "alias": "mistral-medium-3.5",
+                  "display_name": "mistral-medium-3.5",
+                  "temperature": 1.0,
+                  "input_price": 1.5,
+                  "output_price": 7.5,
+                  "cached_input_price": 0.15,
+                  "thinking": "medium",
+                  "supports_images": true,
+                  "auto_compact_threshold": 200000
+                },
+                "devstral-small": {
+                  "name": "devstral-small-latest",
+                  "provider": "mistral",
+                  "alias": "devstral-small",
+                  "display_name": "devstral-small",
+                  "temperature": 0.2,
+                  "input_price": 0.1,
+                  "output_price": 0.3,
+                  "cached_input_price": 0.01,
+                  "thinking": "off",
+                  "supports_images": false,
+                  "auto_compact_threshold": 200000
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "allowed_models",
+          "kind": "list",
+          "description": "An explicit list of model aliases/patterns to allow. If set, only these models are selectable. An empty list allows all configured models. Supports glob patterns (e.g., 'mistral-*') and regex with 're:' prefix.",
+          "value": [],
+          "path": "/allowed_models",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "compaction_model",
+          "kind": "complex",
+          "description": "",
+          "value": null,
+          "path": "/compaction_model",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "auto_compact_threshold",
+          "kind": "int",
+          "description": "",
+          "value": 200000,
+          "path": "/auto_compact_threshold",
+          "popular": true,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": 200000
+            }
+          ]
+        },
+        {
+          "name": "active_transcribe_model",
+          "kind": "str",
+          "description": "",
+          "value": "voxtral-realtime",
+          "path": "/active_transcribe_model",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": "voxtral-realtime"
+            }
+          ]
+        },
+        {
+          "name": "transcribe_providers",
+          "kind": "complex",
+          "description": "",
+          "value": [
+            {
+              "name": "mistral",
+              "api_base": "wss://api.mistral.ai",
+              "api_key_env_var": "MISTRAL_API_KEY",
+              "client": "mistral"
+            }
+          ],
+          "path": "/transcribe_providers",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": [
+                {
+                  "name": "mistral",
+                  "api_base": "wss://api.mistral.ai",
+                  "api_key_env_var": "MISTRAL_API_KEY",
+                  "client": "mistral"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "transcribe_models",
+          "kind": "complex",
+          "description": "",
+          "value": [
+            {
+              "name": "voxtral-mini-transcribe-realtime-2602",
+              "provider": "mistral",
+              "alias": "voxtral-realtime",
+              "sample_rate": 16000,
+              "encoding": "pcm_s16le",
+              "language": "en",
+              "target_streaming_delay_ms": 500
+            }
+          ],
+          "path": "/transcribe_models",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": [
+                {
+                  "name": "voxtral-mini-transcribe-realtime-2602",
+                  "provider": "mistral",
+                  "alias": "voxtral-realtime",
+                  "sample_rate": 16000,
+                  "encoding": "pcm_s16le",
+                  "language": "en",
+                  "target_streaming_delay_ms": 500
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "active_tts_model",
+          "kind": "str",
+          "description": "",
+          "value": "voxtral-tts",
+          "path": "/active_tts_model",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": "voxtral-tts"
+            }
+          ]
+        },
+        {
+          "name": "tts_providers",
+          "kind": "complex",
+          "description": "",
+          "value": [
+            {
+              "name": "mistral",
+              "api_base": "https://api.mistral.ai",
+              "api_key_env_var": "MISTRAL_API_KEY",
+              "client": "mistral"
+            }
+          ],
+          "path": "/tts_providers",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": [
+                {
+                  "name": "mistral",
+                  "api_base": "https://api.mistral.ai",
+                  "api_key_env_var": "MISTRAL_API_KEY",
+                  "client": "mistral"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "tts_models",
+          "kind": "complex",
+          "description": "",
+          "value": [
+            {
+              "name": "voxtral-mini-tts-latest",
+              "provider": "mistral",
+              "alias": "voxtral-tts",
+              "voice": "gb_jane_neutral",
+              "response_format": "wav"
+            }
+          ],
+          "path": "/tts_models",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": [
+                {
+                  "name": "voxtral-mini-tts-latest",
+                  "provider": "mistral",
+                  "alias": "voxtral-tts",
+                  "voice": "gb_jane_neutral",
+                  "response_format": "wav"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "tool_paths",
+          "kind": "list",
+          "description": "Additional directories or files to explore for custom tools. Paths may be absolute or relative to the current working directory. Directories are shallow-searched for tool definition files, while files are loaded directly if valid.",
+          "value": [],
+          "path": "/tool_paths",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "enabled_tools",
+          "kind": "list",
+          "description": "An explicit list of tool names/patterns to enable. If set, only these tools will be active. Supports glob patterns (e.g., 'serena_*') and regex with 're:' prefix (e.g., 're:^serena_.*').",
+          "value": [],
+          "path": "/enabled_tools",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "disabled_tools",
+          "kind": "list",
+          "description": "A list of tool names/patterns to disable after 'enabled_tools' filtering. Supports glob patterns and regex with 're:' prefix.",
+          "value": [
+            "exit_plan_mode"
+          ],
+          "path": "/disabled_tools",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "agent-profile",
+              "value": [
+                "exit_plan_mode"
+              ]
+            },
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "mcp_servers",
+          "kind": "complex",
+          "description": "Preferred MCP server configuration entries.",
+          "value": [],
+          "path": "/mcp_servers",
+          "popular": true,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "enable_connectors",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/enable_connectors",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "connectors",
+          "kind": "complex",
+          "description": "Per-connector settings (disable, disabled_tools).",
+          "value": [],
+          "path": "/connectors",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "agent_paths",
+          "kind": "list",
+          "description": "Additional directories to search for custom agent profiles. Each path may be absolute or relative to the current working directory.",
+          "value": [],
+          "path": "/agent_paths",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "enabled_agents",
+          "kind": "list",
+          "description": "An explicit list of agent names/patterns to enable. If set, only these agents will be available. Supports glob patterns (e.g., 'custom-*') and regex with 're:' prefix.",
+          "value": [],
+          "path": "/enabled_agents",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "disabled_agents",
+          "kind": "list",
+          "description": "A list of agent names/patterns to disable. Ignored if 'enabled_agents' is set. Supports glob patterns and regex with 're:' prefix.",
+          "value": [],
+          "path": "/disabled_agents",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "installed_agents",
+          "kind": "list",
+          "description": "A list of opt-in builtin agent names that have been explicitly installed.",
+          "value": [],
+          "path": "/installed_agents",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "default_agent",
+          "kind": "str",
+          "description": "Agent profile to use when no --agent flag is passed. Builtin: ask, plan, accept-edits, auto-approve. Applies in both interactive and programmatic (-p/--prompt) mode.",
+          "value": "accept-edits",
+          "path": "/default_agent",
+          "popular": true,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "user-toml",
+              "value": "accept-edits"
+            },
+            {
+              "layer": "default",
+              "value": "accept-edits"
+            }
+          ]
+        },
+        {
+          "name": "skill_paths",
+          "kind": "list",
+          "description": "Additional directories to search for skills. Each path may be absolute or relative to the current working directory.",
+          "value": [],
+          "path": "/skill_paths",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "enabled_skills",
+          "kind": "list",
+          "description": "An explicit list of skill names/patterns to enable. If set, only these skills will be active. Supports glob patterns (e.g., 'search-*') and regex with 're:' prefix.",
+          "value": [],
+          "path": "/enabled_skills",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "disabled_skills",
+          "kind": "list",
+          "description": "A list of skill names/patterns to disable. Ignored if 'enabled_skills' is set. Supports glob patterns and regex with 're:' prefix.",
+          "value": [],
+          "path": "/disabled_skills",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "experimental_enable_registry_skills",
+          "kind": "bool",
+          "description": "Experimental: pull workspace skills from the Mistral AI Registry (api.mistral.ai) and make them available alongside local skills. Requires a Mistral provider and API key. Local and builtin skills take precedence on name collision.",
+          "value": false,
+          "path": "/experimental_enable_registry_skills",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": false
+            }
+          ]
+        },
+        {
+          "name": "vibe_code_enabled",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/vibe_code_enabled",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "vibe_code_api_key_env_var",
+          "kind": "str",
+          "description": "",
+          "value": "MISTRAL_API_KEY",
+          "path": "/vibe_code_api_key_env_var",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": "MISTRAL_API_KEY"
+            }
+          ]
+        },
+        {
+          "name": "enable_otel",
+          "kind": "bool",
+          "description": "Export OpenTelemetry traces for agent, model, and tool operations. Requires enable_telemetry to be enabled.",
+          "value": false,
+          "path": "/enable_otel",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": false
+            }
+          ]
+        },
+        {
+          "name": "otel_endpoint",
+          "kind": "str",
+          "description": "Base URL of a custom OTLP/HTTP collector. Vibe appends /v1/traces. When empty, Vibe uses the configured Mistral telemetry endpoint.",
+          "value": "",
+          "path": "/otel_endpoint",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": ""
+            }
+          ]
+        },
+        {
+          "name": "otel_redaction",
+          "kind": "enum",
+          "description": "Client-side span attribute redaction: default redacts sensitive values, strict redacts sensitive attributes, and none disables redaction.",
+          "value": "default",
+          "path": "/otel_redaction",
+          "popular": false,
+          "enumChoices": [
+            "default",
+            "none",
+            "strict"
+          ],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": "default"
+            }
+          ]
+        },
+        {
+          "name": "console_base_url",
+          "kind": "str",
+          "description": "",
+          "value": "https://console.mistral.ai",
+          "path": "/console_base_url",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": "https://console.mistral.ai"
+            }
+          ]
+        },
+        {
+          "name": "theme",
+          "kind": "str",
+          "description": "",
+          "value": "ansi-dark",
+          "path": "/theme",
+          "popular": true,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "user-toml",
+              "value": "ansi-dark"
+            },
+            {
+              "layer": "default",
+              "value": "auto"
+            }
+          ]
+        },
+        {
+          "name": "applied_migrations",
+          "kind": "list",
+          "description": "",
+          "value": [
+            "bash_read_only_defaults_v1"
+          ],
+          "path": "/applied_migrations",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "user-toml",
+              "value": [
+                "bash_read_only_defaults_v1"
+              ]
+            },
+            {
+              "layer": "default",
+              "value": []
+            }
+          ]
+        },
+        {
+          "name": "disable_welcome_banner_animation",
+          "kind": "bool",
+          "description": "",
+          "value": false,
+          "path": "/disable_welcome_banner_animation",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": false
+            }
+          ]
+        },
+        {
+          "name": "show_greeting",
+          "kind": "bool",
+          "description": "Show greeting at startup (Mistral providers only, once per 24h).",
+          "value": true,
+          "path": "/show_greeting",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "autocopy_to_clipboard",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/autocopy_to_clipboard",
+          "popular": true,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "file_watcher_for_autocomplete",
+          "kind": "bool",
+          "description": "",
+          "value": false,
+          "path": "/file_watcher_for_autocomplete",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": false
+            }
+          ]
+        },
+        {
+          "name": "ask_confirmation_on_exit",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/ask_confirmation_on_exit",
+          "popular": true,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "displayed_workdir",
+          "kind": "str",
+          "description": "",
+          "value": "",
+          "path": "/displayed_workdir",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": ""
+            }
+          ]
+        },
+        {
+          "name": "context_warnings",
+          "kind": "bool",
+          "description": "",
+          "value": false,
+          "path": "/context_warnings",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": false
+            }
+          ]
+        },
+        {
+          "name": "voice_mode_enabled",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/voice_mode_enabled",
+          "popular": true,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "user-toml",
+              "value": true
+            },
+            {
+              "layer": "default",
+              "value": false
+            }
+          ]
+        },
+        {
+          "name": "narrator_enabled",
+          "kind": "bool",
+          "description": "",
+          "value": false,
+          "path": "/narrator_enabled",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": false
+            }
+          ]
+        },
+        {
+          "name": "show_thinking_nodes",
+          "kind": "bool",
+          "description": "",
+          "value": false,
+          "path": "/show_thinking_nodes",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "user-toml",
+              "value": false
+            },
+            {
+              "layer": "default",
+              "value": false
+            }
+          ]
+        },
+        {
+          "name": "bypass_tool_permissions",
+          "kind": "bool",
+          "description": "",
+          "value": false,
+          "path": "/bypass_tool_permissions",
+          "popular": true,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": false
+            }
+          ]
+        },
+        {
+          "name": "raise_on_compaction_failure",
+          "kind": "bool",
+          "description": "",
+          "value": false,
+          "path": "/raise_on_compaction_failure",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": false
+            }
+          ]
+        },
+        {
+          "name": "enable_telemetry",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/enable_telemetry",
+          "popular": true,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "system_prompt_id",
+          "kind": "str",
+          "description": "",
+          "value": "cli",
+          "path": "/system_prompt_id",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": "cli"
+            }
+          ]
+        },
+        {
+          "name": "compaction_prompt_id",
+          "kind": "str",
+          "description": "",
+          "value": "compact",
+          "path": "/compaction_prompt_id",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": "compact"
+            }
+          ]
+        },
+        {
+          "name": "include_commit_signature",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/include_commit_signature",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "include_model_info",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/include_model_info",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "include_project_context",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/include_project_context",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "include_prompt_detail",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/include_prompt_detail",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "enable_update_checks",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/enable_update_checks",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "enable_auto_update",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/enable_auto_update",
+          "popular": true,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "enable_notifications",
+          "kind": "bool",
+          "description": "",
+          "value": true,
+          "path": "/enable_notifications",
+          "popular": true,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "enable_system_trust_store",
+          "kind": "bool",
+          "description": "",
+          "value": false,
+          "path": "/enable_system_trust_store",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": false
+            }
+          ]
+        },
+        {
+          "name": "api_timeout",
+          "kind": "float",
+          "description": "",
+          "value": 720.0,
+          "path": "/api_timeout",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": 720.0
+            }
+          ]
+        },
+        {
+          "name": "api_retry_max_elapsed_time",
+          "kind": "float",
+          "description": "",
+          "value": 300.0,
+          "path": "/api_retry_max_elapsed_time",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": 300.0
+            }
+          ]
+        },
+        {
+          "name": "vibe_base_url",
+          "kind": "str",
+          "description": "",
+          "value": "https://chat.mistral.ai",
+          "path": "/vibe_base_url",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": "https://chat.mistral.ai"
+            }
+          ]
+        },
+        {
+          "name": "vibe_code_sessions_base_url",
+          "kind": "str",
+          "description": "",
+          "value": "https://chat.mistral.ai",
+          "path": "/vibe_code_sessions_base_url",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": "https://chat.mistral.ai"
+            }
+          ]
+        },
+        {
+          "name": "log_level",
+          "kind": "str",
+          "description": "",
+          "value": null,
+          "path": "/log_level",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "project_context",
+          "kind": "complex",
+          "description": "",
+          "value": {
+            "default_commit_count": 5,
+            "timeout_seconds": 2.0
+          },
+          "path": "/project_context",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": {
+                "default_commit_count": 5,
+                "timeout_seconds": 2.0
+              }
+            }
+          ]
+        },
+        {
+          "name": "session_logging",
+          "kind": "complex",
+          "description": "",
+          "value": {
+            "save_dir": "/home/user/.vibe/logs/session",
+            "session_prefix": "session",
+            "enabled": true
+          },
+          "path": "/session_logging",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "user-toml",
+              "value": {
+                "save_dir": "/home/user/.vibe/logs/session",
+                "session_prefix": "session",
+                "enabled": true
+              }
+            },
+            {
+              "layer": "default",
+              "value": {
+                "save_dir": "/home/user/.vibe/logs/session",
+                "session_prefix": "session",
+                "enabled": true
+              }
+            }
+          ]
+        },
+        {
+          "name": "experiments",
+          "kind": "complex",
+          "description": "",
+          "value": {
+            "enable": true,
+            "api_host": "https://experiments.mistral.services/",
+            "client_key": "sdk-OE8yJgTXZY6tj"
+          },
+          "path": "/experiments",
+          "popular": false,
+          "enumChoices": [],
+          "valueLabels": {},
+          "layerValues": [
+            {
+              "layer": "default",
+              "value": {
+                "enable": true,
+                "api_host": "https://experiments.mistral.services/",
+                "client_key": "sdk-OE8yJgTXZY6tj"
+              }
+            }
+          ]
+        }
+      ],
+      "targets": [
+        "user-toml",
+        "overrides"
+      ]
+    },
+    "turn/interrupt": {
+      "accepted": true,
+      "lastEventId": 0
+    },
+    "session/stop": {
+      "closed": true
+    },
+    "config/write": {
+      "runtime": {
+        "config": {
+          "activeModel": {
+            "name": "mistral-vibe-cli",
+            "alias": "mistral-medium-3.5",
+            "thinking": "medium",
+            "supportsImages": true,
+            "displayName": "mistral-medium-3.5"
+          },
+          "activeModelPinned": false,
+          "awaitingExperimentModel": false,
+          "defaultModelAlias": "mistral-medium-3.5",
+          "defaultAgent": "accept-edits",
+          "theme": "gruvbox",
+          "logLevel": null,
+          "disableWelcomeBannerAnimation": true,
+          "showGreeting": true,
+          "autocopyToClipboard": true,
+          "fileWatcherForAutocomplete": false,
+          "askConfirmationOnExit": true,
+          "voiceModeEnabled": true,
+          "narratorEnabled": false,
+          "showThinkingNodes": false,
+          "showSubagentStatusList": true,
+          "worktreeLimit": 15,
+          "enableUpdateChecks": true,
+          "enableNotifications": true,
+          "experimentalEnableTabStatus": true,
+          "vibeCodeEnabled": true,
+          "models": [
+            {
+              "name": "mistral-vibe-cli",
+              "alias": "mistral-medium-3.5",
+              "thinking": "medium",
+              "supportsImages": true,
+              "displayName": "mistral-medium-3.5"
+            },
+            {
+              "name": "devstral-small-latest",
+              "alias": "devstral-small",
+              "thinking": "off",
+              "supportsImages": false,
+              "displayName": "devstral-small"
+            }
+          ],
+          "transcribeModels": [
+            "voxtral-realtime"
+          ],
+          "ttsModels": [
+            "voxtral-tts"
+          ],
+          "transcription": {
+            "model": {
+              "name": "voxtral-mini-transcribe-realtime-2602",
+              "sampleRate": 16000,
+              "encoding": "pcm_s16le",
+              "language": "en",
+              "targetStreamingDelayMs": 500
+            },
+            "provider": {
+              "apiBase": "wss://api.mistral.ai",
+              "apiKeyEnvVar": "MISTRAL_API_KEY",
+              "client": "mistral"
+            }
+          },
+          "speech": {
+            "model": {
+              "name": "voxtral-mini-tts-latest",
+              "voice": "gb_jane_neutral",
+              "responseFormat": "wav"
+            },
+            "provider": {
+              "apiBase": "https://api.mistral.ai",
+              "apiKeyEnvVar": "MISTRAL_API_KEY",
+              "client": "mistral"
+            }
+          },
+          "validationWarnings": []
+        },
+        "activeAgent": {
+          "name": "accept-edits",
+          "displayName": "Accept Edits",
+          "description": "Auto-approves file edits only",
+          "safety": "destructive",
+          "agentType": "agent"
+        },
+        "agents": [
+          {
+            "name": "ask",
+            "displayName": "Ask",
+            "description": "Requires approval for tool executions",
+            "safety": "neutral",
+            "agentType": "agent"
+          },
+          {
+            "name": "plan",
+            "displayName": "Plan",
+            "description": "Read-only agent for exploration and planning",
+            "safety": "safe",
+            "agentType": "agent"
+          },
+          {
+            "name": "accept-edits",
+            "displayName": "Accept Edits",
+            "description": "Auto-approves file edits only",
+            "safety": "destructive",
+            "agentType": "agent"
+          },
+          {
+            "name": "auto-approve",
+            "displayName": "Auto Approve",
+            "description": "Auto-approves all tool executions",
+            "safety": "yolo",
+            "agentType": "agent"
+          },
+          {
+            "name": "explore",
+            "displayName": "Explore",
+            "description": "Read-only subagent for codebase exploration",
+            "safety": "safe",
+            "agentType": "subagent"
+          }
+        ],
+        "skills": [],
+        "tools": [
+          {
+            "name": "skill",
+            "isCustom": false
+          },
+          {
+            "name": "task",
+            "isCustom": false
+          },
+          {
+            "name": "web_fetch",
+            "isCustom": false
+          },
+          {
+            "name": "bash",
+            "isCustom": false
+          },
+          {
+            "name": "edit",
+            "isCustom": false
+          },
+          {
+            "name": "grep",
+            "isCustom": false
+          },
+          {
+            "name": "ask_user_question",
+            "isCustom": false
+          },
+          {
+            "name": "read_file",
+            "isCustom": false
+          },
+          {
+            "name": "web_search",
+            "isCustom": false
+          },
+          {
+            "name": "todo",
+            "isCustom": false
+          },
+          {
+            "name": "write_file",
+            "isCustom": false
+          }
+        ],
+        "stats": {
+          "steps": 0,
+          "sessionPromptTokens": 0,
+          "sessionCompletionTokens": 0,
+          "sessionCachedTokens": 0,
+          "inputPricePerMillion": 0.0,
+          "outputPricePerMillion": 0.0,
+          "cachedInputPricePerMillion": null,
+          "toolCallsAgreed": 0,
+          "toolCallsRejected": 0,
+          "toolCallsFailed": 0,
+          "toolCallsSucceeded": 0,
+          "contextTokens": 0,
+          "lastTurnPromptTokens": 0,
+          "lastTurnCompletionTokens": 0,
+          "lastTurnCachedTokens": 0,
+          "lastTurnDuration": 0.0,
+          "tokensPerSecond": 0.0
+        },
+        "contextWindow": 600000,
+        "issues": [],
+        "hooksCount": 0,
+        "connectors": {
+          "connected": 0,
+          "total": 0
+        },
+        "mcp": {
+          "sources": []
+        }
+      },
+      "rejected": false,
+      "failures": [],
+      "strippedHistoryImages": 0
+    }
+  }
+}

@@ -1667,8 +1667,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if self._teleport_service is None:
             self._teleport_service = _load_teleport_service()(
                 vibe_code_sessions_base_url=self.config.vibe_code_sessions_base_url,
-                vibe_code_api_key=self.config.vibe_code_api_key,
-                vibe_config=self.config,
+                api_key=self.config.resolve_mistral_api_key(),
                 workdir=self.cwd,
             )
         return self._teleport_service

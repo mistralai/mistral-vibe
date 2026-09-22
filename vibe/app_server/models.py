@@ -1139,7 +1139,9 @@ class PublicSession(ProtocolModel):
     pinned_at: int | None = None
     cwd: str | None = None
     workspace_roots: list[str] = Field(default_factory=list)
+    # What this session runs; ``None`` follows the current default.
     model: str | None = None
+    reasoning_effort: str | None = None
     agent: AgentSummary | None = None
     token_usage: TokenUsage | None = None
     context_usage: TokenUsage | None = None

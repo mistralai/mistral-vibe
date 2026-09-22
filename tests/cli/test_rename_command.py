@@ -85,9 +85,7 @@ async def test_rename_command_persists_existing_session_metadata(
 async def test_resume_picker_shows_renamed_session_title(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config = build_test_vibe_config(
-        session_logging=_enabled_session_config(tmp_path), vibe_code_enabled=False
-    )
+    config = build_test_vibe_config(session_logging=_enabled_session_config(tmp_path))
     agent_loop = build_test_agent_loop(config=config)
     app = build_test_vibe_app(agent_loop=agent_loop)
     logger = agent_loop.session_logger

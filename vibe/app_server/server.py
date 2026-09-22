@@ -27,6 +27,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendHistoryClearHost,
     SessionBackendHost,
     SessionBackendHostBackgroundTasks,
+    SessionBackendHostConfigRead,
     SessionBackendHostDelete,
     SessionBackendHostPin,
     SessionBackendNotificationSink,
@@ -55,6 +56,7 @@ from vibe.app_server.protocol import (
     CallbackResultParams,
     ClientCapabilities,
     ClientInfo,
+    ConfigReadParams,
     ConfigReloadParams,
     ConfigWriteParams,
     ContextInjectParams,
@@ -865,7 +867,7 @@ class AppServer:
     async def _dispatch_backend_host_operation(
         self, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult | None:
-        if method in {"session/list", "session/read"}:
+        if method in {"session/list", "session/read", "config/read"}:
             return await self._dispatch_backend_host_read(method, raw_params)
         if method == "session/rename":
             params = validate_wire(SessionTitleUpdateParams, raw_params)
@@ -907,9 +909,29 @@ class AppServer:
             return handoff
         return await self._dispatch_backend_host_lifecycle(method, raw_params)
 
+    async def _read_stored_session_config(
+        self, raw_params: dict[str, Any]
+    ) -> DispatchResult | None:
+        """A stored session's configuration, answered without resuming it.
+
+        The attached session answers for itself: it is the one holding the
+        configuration the next turn will run. Only a session this connection is
+        not sitting on reaches the store.
+        """
+        params = validate_wire(ConfigReadParams, raw_params)
+        if params.session_id is None:
+            return None
+        if self._root is not None and self._root.session_id == params.session_id:
+            return None
+        if not isinstance(self._session_backend_host, SessionBackendHostConfigRead):
+            return None
+        return DispatchResult(await self._session_backend_host.read_config(params))
+
     async def _dispatch_backend_host_read(
         self, method: str, raw_params: dict[str, Any]
-    ) -> DispatchResult:
+    ) -> DispatchResult | None:
+        if method == "config/read":
+            return await self._read_stored_session_config(raw_params)
         if method == "session/list":
             response = await self._session_backend_host.list(
                 validate_wire(SessionListParams, raw_params)

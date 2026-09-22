@@ -270,6 +270,17 @@ supports_images = true            # vision-capable; allows @-mentioned images
 name = "devstral"
 provider = "llamacpp"
 alias = "local"
+
+# Optional override, requires --experimental-harness. A non-vision active model
+# already picks up any supports_images model on its OWN provider automatically;
+# set this only to point somewhere else, which is also the only way to cross
+# providers. Ignored whenever the active model has supports_images = true --
+# that model sees the image itself.
+[vision_model]
+name = "mistral-vibe-cli-latest"
+provider = "mistral"
+alias = "vision"
+supports_images = true            # required
 ```
 
 ### Tool Configuration
@@ -918,9 +929,26 @@ behavior then depends on the mention kind:
 Image attachments:
 
 - Require `supports_images = true` on the active model in `config.toml`.
-  By default this is enabled only on `mistral-vibe-cli-latest`. Sending
-  images to a non-vision model raises a clear error and the message is
-  not added to the conversation.
+  The legacy loop rejects an image its model cannot read; under
+  `--experimental-harness` the send always goes through, and the agent is
+  shown a description of the image or, failing that, a link to the file.
+- The describer is picked automatically: any `supports_images` model on
+  the active model's **own** provider, no config needed. Same provider
+  means same key and same endpoint, so no image goes anywhere the session
+  was not already talking. A `vision_model` in `config.toml` overrides
+  that choice and is the only way to reach another provider.
+- Each image is then described once as the turn's input is prepared, and
+  the agent receives the text inside an `<image alias="...">` block in
+  place of the pixels. The user's prompt steers what the describer looks
+  for, and the description is reused for the rest of the session. The
+  describer never reasons, whatever its `thinking` says: the trace is
+  charged against the description budget and buys nothing on a
+  transcription.
+- A describe that fails does not fail the turn. The agent gets a
+  placeholder saying the image could not be read, and a warning names the
+  image and the provider's reason.
+- With no describer reachable the image is left alone, and the harness
+  hands the model a `file://` link to it instead of the pixels.
 - Snapshotted into `<session_dir>/attachments/<sha1>.<ext>` so that
   resumed sessions stay reproducible even if the source file is moved.
 - Capped at 10 MiB per image and 8 images per message.
@@ -933,9 +961,9 @@ Image attachments:
   spaces. This applies to text files, folders, and images; pasted prose,
   relative paths, and missing paths are left unchanged.
 - **Image copy/paste from the clipboard** (**macOS only** for now):
-  writes the image to `<session_dir>/attachments/clipboard-<ts>.png`
-  (or the system temp dir when no session is active) and inserts an
-  `@<path>` token at the cursor. Two entry points:
+  writes the image to a persistent temporary PNG, inserts an `@<path>` token
+  at the cursor, then snapshots it under the session attachments on submit.
+  Two entry points:
   1. `Ctrl+V` keybinding inside the prompt.
   2. `/paste-image` slash command.
 

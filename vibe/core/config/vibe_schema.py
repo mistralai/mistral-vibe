@@ -344,6 +344,16 @@ class VibeConfigSchema(ConfigSchema):
         ),
     )
     compaction_model: Annotated[ModelConfig | None, WithShallowMerge()] = None
+    vision_model: Annotated[ModelConfig | None, WithShallowMerge()] = Field(
+        default=None,
+        description=(
+            "Vision-capable model that describes attached images for an active"
+            " model that cannot see them. Only needed to override the default,"
+            " which is any vision-capable model on the active model's own"
+            " provider; set this to reach a different provider."
+            " Requires --experimental-harness."
+        ),
+    )
     auto_compact_threshold: Annotated[int, WithReplaceMerge()] = Field(
         default=DEFAULT_AUTO_COMPACT_THRESHOLD,
         description=(
@@ -512,12 +522,6 @@ class VibeConfigSchema(ConfigSchema):
         ),
     )
 
-    # Internal
-    vibe_code_enabled: Annotated[bool, WithReplaceMerge()] = True
-    vibe_code_api_key_env_var: Annotated[str, WithReplaceMerge()] = (
-        DEFAULT_MISTRAL_API_ENV_KEY
-    )
-
     # Tracing
     enable_otel: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
@@ -683,14 +687,33 @@ class VibeConfigSchema(ConfigSchema):
             f"Provider '{model.provider}' for model '{model.name}' not found in configuration."
         )
 
-    @property
-    def vibe_code_api_key(self) -> str:
-        return resolve_api_key(self.vibe_code_api_key_env_var) or ""
-
     def get_compaction_model(self) -> ModelConfig:
         if self.compaction_model is not None:
             return self.compaction_model
         return self.get_active_model()
+
+    def get_vision_fallback_model(self) -> ModelConfig | None:
+        try:
+            active = self.get_active_model()
+        except ValueError:
+            return self.vision_model
+        # Describing an image the model is about to receive anyway only loses
+        # detail.
+        if active.supports_images:
+            return None
+        if self.vision_model is not None:
+            return self.vision_model
+        # Same provider means same key and same endpoint, so a blind model
+        # picks up vision with no config and no image leaves where the session
+        # was already talking. Crossing providers stays the user's call.
+        return next(
+            (
+                model
+                for model in self.available_models().values()
+                if model.supports_images and model.provider == active.provider
+            ),
+            None,
+        )
 
     def connectors_by_name(self) -> dict[str, ConnectorConfig]:
         return {c.name: c for c in self.connectors}
@@ -715,6 +738,12 @@ class VibeConfigSchema(ConfigSchema):
         except ValueError:
             pass
         return next((p for p in self.providers if p.backend == Backend.MISTRAL), None)
+
+    def resolve_mistral_api_key(self) -> str:
+        provider = self.get_mistral_provider()
+        if provider is None:
+            return ""
+        return resolve_api_key(provider.api_key_env_var) or ""
 
     def is_active_model_mistral(self) -> bool:
         try:
@@ -918,6 +947,21 @@ class VibeConfigSchema(ConfigSchema):
                 f"'{compaction_provider.name}' but active model uses provider "
                 f"'{active_provider.name}'. They must share the same provider."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_vision_model(self) -> VibeConfigSchema:
+        if self.vision_model is None:
+            return self
+        if not self.vision_model.supports_images:
+            raise ValueError(
+                f"Vision model '{self.vision_model.alias}' must set "
+                "supports_images = true."
+            )
+        # Deliberately no same-provider check, unlike `compaction_model`:
+        # crossing providers is the whole point of setting this, and the
+        # description is a standalone completion on its own backend.
+        self.get_provider_for_model(self.vision_model)
         return self
 
     @model_validator(mode="after")

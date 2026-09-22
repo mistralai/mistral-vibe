@@ -3,8 +3,10 @@ from __future__ import annotations
 import io
 import os
 from pathlib import Path
+import platform
 import subprocess
 import sys
+import zipfile
 
 import pexpect
 import pytest
@@ -35,6 +37,19 @@ def _build_wheel(dist_dir: Path) -> Path:
     )
     wheels = sorted(dist_dir.glob("mistral_vibe-*.whl"))
     assert len(wheels) == 1
+    assert "-cp312-abi3-" in wheels[0].name
+    # The global test fixture mocks sys.platform to Linux; platform.system()
+    # reflects the host that actually produced the wheel.
+    if platform.system() == "Linux":
+        assert wheels[0].name.endswith(
+            f"-cp312-abi3-manylinux_2_28_{platform.machine()}.whl"
+        )
+    with zipfile.ZipFile(wheels[0]) as wheel:
+        names = wheel.namelist()
+        assert any(name.startswith("vibe/_bin/vibe-rs") for name in names)
+        assert any(
+            name.startswith("mistralai_vibe_local_harness/_native.") for name in names
+        )
     return wheels[0]
 
 
@@ -66,7 +81,7 @@ def _install_fresh_wheel(tmp_path: Path, wheel_path: Path) -> Path:
     return _venv_executable(venv_path, "vibe")
 
 
-@pytest.mark.timeout(90)
+@pytest.mark.timeout(900)
 def test_fresh_wheel_install_can_spawn_cli_and_complete_happy_path(
     streaming_mock_server: StreamingMockServer,
     setup_e2e_env: None,
@@ -74,6 +89,8 @@ def test_fresh_wheel_install_can_spawn_cli_and_complete_happy_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("VIBE_SKIP_RUST_TUI", raising=False)
+    monkeypatch.delenv("VIBE_CLI", raising=False)
     wheel_path = _build_wheel(tmp_path / "dist")
     vibe_executable = _install_fresh_wheel(tmp_path, wheel_path)
 

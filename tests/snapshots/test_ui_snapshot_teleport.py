@@ -127,13 +127,9 @@ class TeleportPushConfirmationMultipleCommitsApp(TeleportPushConfirmationTestApp
         super().__init__(count=5)
 
 
-def _teleport_snapshot_config():
-    return default_config().model_copy(update={"vibe_code_enabled": True})
-
-
 class TeleportCommandHelpSnapshotApp(BaseSnapshotTestApp):
     def __init__(self, gateway: FakeAccountGateway):
-        super().__init__(config=_teleport_snapshot_config(), account_gateway=gateway)
+        super().__init__(config=default_config(), account_gateway=gateway)
 
     async def on_mount(self) -> None:
         await super().on_mount()

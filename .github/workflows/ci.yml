@@ -32,6 +32,11 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
       - name: Sync dependencies
         run: uv sync --all-extras
 
@@ -72,6 +77,11 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
       - name: Sync dependencies
         run: uv sync --all-extras
 
@@ -92,6 +102,112 @@ jobs:
             uv run pytest --ignore tests/snapshots --lf && exit 0
           done
           exit 1
+
+  build-install-smoke:
+    name: "Build+install smoke: ${{ matrix.os }}-${{ matrix.arch }}"
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # cargo_flags mirrors release.yml: Linux builds without voice (cpal
+          # needs ALSA/libasound, absent here); macOS/Windows ship voice via
+          # CoreAudio/WASAPI. This gate builds the real wheel (non-editable, so
+          # the combined build backend bundles both native components), installs
+          # it, then launches both the
+          # default Python mode and VIBE_CLI=rust from the installed artifact.
+          - runner: ubuntu-22.04
+            os: linux
+            arch: x86_64
+            cargo_flags: "--no-default-features"
+          - runner: ubuntu-22.04-arm
+            os: linux
+            arch: aarch64
+            cargo_flags: "--no-default-features"
+          - runner: macos-15-intel
+            os: darwin
+            arch: x86_64
+            cargo_flags: ""
+          - runner: macos-14
+            os: darwin
+            arch: aarch64
+            cargo_flags: ""
+          - runner: windows-2022
+            os: windows
+            arch: x86_64
+            cargo_flags: ""
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_BUILD_FLAGS: ${{ matrix.cargo_flags }}
+      # macOS only (ignored elsewhere): tag wheels macosx_11_0 so they install
+      # on macOS 11+ rather than only the runner's OS version.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv with caching
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Build wheel
+        shell: bash
+        run: uv build --wheel --out-dir dist
+
+      - name: Install wheel into a clean environment
+        shell: bash
+        run: |
+          uv venv .smoke
+          wheel=$(ls dist/*.whl)
+          echo "Installing $wheel"
+          uv pip install --python .smoke "$wheel"
+
+      - name: Smoke test default (Python) mode
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            vibe=".smoke/Scripts/vibe"
+          else
+            vibe=".smoke/bin/vibe"
+          fi
+          "$vibe" --version
+
+      - name: Smoke test bundled Harness
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python=".smoke/Scripts/python.exe"
+          else
+            python=".smoke/bin/python"
+          fi
+          "$python" scripts/ci/validate-combined-wheel.py
+
+      - name: Smoke test Rust mode (VIBE_CLI=rust)
+        shell: bash
+        env:
+          VIBE_CLI: rust
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            vibe=".smoke/Scripts/vibe"
+          else
+            vibe=".smoke/bin/vibe"
+          fi
+          "$vibe" --version
 
   snapshot-tests:
     name: Snapshot Tests
@@ -114,6 +230,11 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
 
       - name: Sync dependencies
         run: uv sync --all-extras

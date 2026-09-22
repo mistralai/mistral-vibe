@@ -2328,7 +2328,9 @@ def build_unified_runtime_snapshot(
     )
     return RuntimeSnapshot(
         config=project_config_view(
-            config, active_model_pinned=active_model_is_pinned(config_orchestrator)
+            config,
+            active_model_pinned=active_model_is_pinned(config_orchestrator),
+            image_fallback=True,
         ),
         active_agent=active,
         agents=available,
@@ -2544,7 +2546,8 @@ def _project_session_mcp_server(server: SessionMCPServer) -> MCPServer:
             return MCPStdio(
                 transport="stdio",
                 name=server.name,
-                command=server.command,
+                # The session protocol already separates the executable from its args.
+                command=[server.command],
                 args=server.args,
                 env=server.env,
                 cwd=server.cwd,

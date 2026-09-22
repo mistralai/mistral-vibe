@@ -107,9 +107,11 @@ from vibe.app_server._config_introspect import (
     build_field_wires,
     collect_layer_values,
 )
+from vibe.app_server._config_paths import model_thinking_path
 from vibe.app_server._config_write import (
     config_write_ops_to_patches,
     config_write_targets,
+    model_after_write,
     model_config_write_ops,
 )
 from vibe.app_server._deferred_config import DeferredConfiguration
@@ -128,6 +130,7 @@ from vibe.app_server._plugins import (
     plugin_reload_notices,
 )
 from vibe.app_server._projection import (
+    project_agent_summary,
     project_config_view,
     project_debug_logs,
     project_installed_skill_summaries,
@@ -176,7 +179,9 @@ from vibe.app_server._session_model import (
     active_model_is_pinned,
     active_model_override_write_requested,
     clear_session_active_model_override,
+    model_thinking_is_session_writable,
     set_session_active_model_override,
+    set_session_reasoning_effort_override,
     with_session_active_model_write,
 )
 from vibe.app_server._shell import (
@@ -219,6 +224,7 @@ from vibe.app_server._vibe_code import (
     VibeCodeController,
     VibeCodeError,
 )
+from vibe.app_server._vision import SessionImageDescriber
 from vibe.app_server._workspace import (
     PromptPreparationError,
     WorkspaceTrustError,
@@ -258,6 +264,7 @@ from vibe.app_server.mcp_catalog import project_mcp_sources
 from vibe.app_server.models import (
     AccountView,
     AgentStatsSnapshot,
+    AgentSummary,
     ApprovalCallbackDetail,
     ApprovalCallbackOutput,
     ApprovalDecisionType,
@@ -326,6 +333,7 @@ from vibe.app_server.protocol import (
     ConfigReadResponse,
     ConfigReloadParams,
     ConfigSchemaReadParams,
+    ConfigWriteOpWire,
     ConfigWriteParams,
     ConfigWriteResponse,
     ConnectorAuthRequiredParams,
@@ -461,6 +469,7 @@ from vibe.core.config import MissingAPIKeyError, VibeConfigSchema
 from vibe.core.config.admin_config import MANAGED_CONFIG_TIMEOUT
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.layers.growthbook import GrowthbookLayer
+from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator, ConfigPatchValidationError
 from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.experiments.manager import ExperimentManager
@@ -1788,7 +1797,12 @@ class UnifiedHarnessBackendHostAdapter:
                         context.storage_root, result.snapshot.state.session.id
                     ),
                 )
-            return _read_response(result.snapshot, result.cwd, metadata=metadata)
+            pins = await _stored_session_pins(
+                self._host, result.snapshot.state.session.id, context.agents
+            )
+            return _read_response(
+                result.snapshot, result.cwd, metadata=metadata, pins=pins
+            )
         except SessionBackendError as exc:
             if exc.code is not ProtocolErrorCode.NOT_FOUND:
                 raise
@@ -1802,6 +1816,36 @@ class UnifiedHarnessBackendHostAdapter:
             return legacy_response
         raise SessionBackendError(
             ProtocolErrorCode.NOT_FOUND, f"Session not found: {params.session_id}"
+        )
+
+    async def read_config(self, params: ConfigReadParams) -> ConfigReadResponse:
+        """The configuration a stored session runs, without resuming it.
+
+        A client renders its pickers from this long before it attaches, so the
+        answer is the session's rather than the host's: the same context a
+        resume builds, put on the same pins.
+        """
+        if params.session_id is None:
+            raise SessionBackendError(
+                ProtocolErrorCode.INVALID_PARAMS, "A session id is required"
+            )
+        # The first build is what configures the Host's storage, so the stored
+        # cwd is only knowable after it. A session kept elsewhere is answered
+        # from a context rebuilt against its own, the way a resume is.
+        options = SessionOptions(cwd=params.cwd)
+        context, _ = await self._lifecycle_context(options, require_api_key=False)
+        stored_cwd = await _harness_call(self._host.session_cwd(params.session_id))
+        if stored_cwd is None:
+            raise SessionBackendError(
+                ProtocolErrorCode.NOT_FOUND, f"Session not found: {params.session_id}"
+            )
+        if stored_cwd != _session_cwd(options):
+            context, _ = await self._lifecycle_context(
+                _with_session_cwd(options, stored_cwd), require_api_key=False
+            )
+        await self._restore_session_pins(params.session_id, context)
+        return await _config_read_response(
+            context.config_orchestrator, context.harness_files
         )
 
     async def rename(
@@ -2325,16 +2369,7 @@ class UnifiedHarnessBackendHostAdapter:
                 context, derivation = await self._lifecycle_context(
                     resolution.options, require_api_key=require_api_key
                 )
-            # Every stored pin is a user choice the session must reopen with. Storage
-            # and lookup are generic (see ``SessionPin``); only applying a pin is
-            # per-pin policy. Layers are independent, so restore order does not matter.
-            rederive = False
-            for pin in SessionPin:
-                value = await _harness_call(self._host.session_pin(session_id, pin))
-                if value is not None and await self._apply_restored_pin(
-                    pin, context, value
-                ):
-                    rederive = True
+            rederive = await self._restore_session_pins(session_id, context)
             if rederive:
                 derivation = await asyncio.to_thread(
                     context.derive, UnifiedSessionSettings()
@@ -2346,6 +2381,32 @@ class UnifiedHarnessBackendHostAdapter:
         except BaseException:
             await self._worktrees.cleanup(resolution)
             raise
+
+    async def _restore_session_pins(
+        self, session_id: str, context: UnifiedSessionContext
+    ) -> bool:
+        """Put a context on the choices a session was left with.
+
+        Every stored pin is a user choice the session reopens with. Storage and
+        lookup are generic (see ``SessionPin``); only applying one is per-pin
+        policy. Declaration order is restore order: the level applies to
+        whichever model the model and agent pins leave active.
+        """
+        restored = False
+        for pin in SessionPin:
+            value = await _harness_call(self._host.session_pin(session_id, pin))
+            applied = value is not None and await self._apply_restored_pin(
+                pin, context, value
+            )
+            logger.debug(
+                "Session pin restore session=%s pin=%s stored=%r applied=%s",
+                session_id,
+                pin.value,
+                value,
+                applied,
+            )
+            restored = restored or applied
+        return restored
 
     async def _apply_restored_pin(
         self, pin: SessionPin, context: UnifiedSessionContext, value: str
@@ -2380,6 +2441,20 @@ class UnifiedHarnessBackendHostAdapter:
                         value,
                     )
                     return False
+                return True
+            case SessionPin.REASONING_EFFORT:
+                if not value:
+                    return False
+                failures = await set_session_reasoning_effort_override(
+                    context.config_orchestrator,
+                    value,
+                    reason="restore session reasoning effort",
+                )
+                if failures:
+                    raise SessionBackendError(
+                        ProtocolErrorCode.INTERNAL_ERROR,
+                        f"Failed to restore session reasoning effort: {failures[0]}",
+                    )
                 return True
             case _:
                 assert_never(pin)
@@ -3309,6 +3384,12 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                 user_plan=self._user_plan,
             )
         )
+        self._image_describer = SessionImageDescriber(
+            lambda: self._context.config_orchestrator.config,
+            notice=lambda message: self._session.publish_notice(message),
+            session_id=lambda: self._session.session_id,
+            record_event=self._telemetry.send_telemetry_event,
+        )
         self._session_replaced = session_replaced
         self._teleport_active: str | None = None
         self._vibe_code: VibeCodeController | None = None
@@ -4049,6 +4130,8 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         await _harness_call(
             self._session.persist_pin(SessionPin.AGENT_NAME, params.agent_name)
         )
+        # A profile can repoint the model, and the level belongs to that model.
+        await self._persist_session_reasoning_effort()
         return SessionBackendResult(
             response=RuntimeMutationResponse(
                 runtime=self._runtime, status=self._mutation_status()
@@ -4123,6 +4206,22 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
             raise SessionBackendError(
                 ProtocolErrorCode.INVALID_PARAMS, str(exc)
             ) from exc
+        # In the same batch, so one derivation serves both, and against the
+        # model the write leaves active rather than the one it found.
+        orchestrator = self._context.config_orchestrator
+        written_model = model_after_write(orchestrator.config, params.model_alias)
+        if params.reasoning_effort is not None and model_thinking_is_session_writable(
+            orchestrator, written_model
+        ):
+            ops = [
+                *ops,
+                ConfigWriteOpWire(
+                    op="set",
+                    path=model_thinking_path(written_model),
+                    value=params.reasoning_effort,
+                    target_layer=OverridesLayer.NAME,
+                ),
+            ]
         result = await self._write_config(
             ConfigWriteParams(
                 session_id=params.session_id,
@@ -4135,6 +4234,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
             return result
         if params.model_alias is not None:
             await self._persist_session_active_model(params.model_alias)
+        await self._persist_session_reasoning_effort()
         return result
 
     async def _write_config(
@@ -4213,32 +4313,8 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         )
 
     async def _config_read_response(self) -> ConfigReadResponse:
-        orchestrator = self._context.config_orchestrator
-        config = orchestrator.config
-        harness_files = self._context.harness_files
-        skills = SkillManager(
-            config_getter=lambda: config, harness_files=harness_files
-        ).available_skills
-        return ConfigReadResponse(
-            config=project_config_view(
-                config, active_model_pinned=active_model_is_pinned(orchestrator)
-            ),
-            skills_count=sum(
-                1
-                for skill in skills.values()
-                if skill.source is not SkillSource.BUILTIN
-            ),
-            hooks_count=len(
-                (
-                    await asyncio.to_thread(
-                        load_hooks_from_fs, harness_files=harness_files
-                    )
-                ).hooks
-            ),
-            mcp_servers_total=len(config.mcp_servers),
-            mcp_servers_enabled=sum(
-                1 for server in config.mcp_servers if not server.disabled
-            ),
+        return await _config_read_response(
+            self._context.config_orchestrator, self._context.harness_files
         )
 
     async def _config_fields_response(self) -> ConfigFieldsReadResponse:
@@ -4678,7 +4754,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                 if not isinstance(exc, Exception) or self._session.ephemeral:
                     raise
         await self._await_deferred_setup()
-        runtime_updated = await self._pin_session_active_model()
+        runtime_updated = await self._pin_session_model_choice()
         params = await self._prepared_turn_params(params, inject_skill=True)
         # Set the message id before the harness session schedules the runtime
         # task, so the provider request metadata reads it on the first
@@ -4772,7 +4848,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                     raise RuntimeError("Deferred worktree setup returned no resolution")
                 resolution = setup
                 await self._settle_reserved_turn_configuration()
-                if await self._pin_session_active_model():
+                if await self._pin_session_model_choice():
                     await self._announce_runtime()
                 prepared = await self._prepared_turn_params(params, inject_skill=True)
             except Exception as exc:
@@ -4941,9 +5017,30 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
             self._session.persist_pin(SessionPin.ACTIVE_MODEL, active_model)
         )
 
-    async def _pin_session_active_model(self) -> bool:
-        active_model = self._context.config_orchestrator.config.get_active_model().alias
-        if not await self._persist_session_active_model(active_model):
+    async def _persist_session_reasoning_effort(self) -> bool:
+        """Record the level this session runs, so a reopen does not read the host's."""
+        orchestrator = self._context.config_orchestrator
+        model = orchestrator.config.get_active_model()
+        # A model owned above the session has no level the session can call its
+        # own, and the one recorded for a previous model is not it: the empty
+        # pin is how a session says it follows the configuration.
+        level = (
+            model.thinking
+            if model_thinking_is_session_writable(orchestrator, model.alias)
+            else ""
+        )
+        if (self._session.pin(SessionPin.REASONING_EFFORT) or "") == level:
+            return False
+        return await _harness_call(
+            self._session.persist_pin(SessionPin.REASONING_EFFORT, level)
+        )
+
+    async def _pin_session_model_choice(self) -> bool:
+        """Pin what the turn about to start runs on: the model, and its level."""
+        model = self._context.config_orchestrator.config.get_active_model()
+        pinned_model = await self._persist_session_active_model(model.alias)
+        pinned_effort = await self._persist_session_reasoning_effort()
+        if not (pinned_model or pinned_effort):
             return False
         derivation = await asyncio.to_thread(self._context.derive, self._settings)
         self._adopt_derivation(derivation)
@@ -5146,6 +5243,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
             else None
         )
         try:
+            params = await self._with_described_input_images(params)
             params = await self._with_mentioned_file_blocks_for_input(params)
         except PromptPreparationError as exc:
             raise SessionBackendError(
@@ -5620,8 +5718,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         config = self.config
         teleport_service = TeleportService(
             vibe_code_sessions_base_url=config.vibe_code_sessions_base_url,
-            vibe_code_api_key=config.vibe_code_api_key,
-            vibe_config=config,
+            api_key=config.resolve_mistral_api_key(),
             workdir=self._cwd_path(),
         )
         summarizer = UnifiedTeleportContextSummarizer(self)
@@ -5826,6 +5923,9 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         )
         scratchpad = await self._scratchpad_block()
         try:
+            # Ahead of the mentioned files, so an image description is steered
+            # by what the user typed rather than by an inlined file's contents.
+            params = await self._with_described_images(params)
             params = await self._with_mentioned_file_blocks(params)
         except PromptPreparationError as exc:
             raise SessionBackendError(
@@ -5839,6 +5939,12 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
     async def _prepared_queue_params[
         ParamsT: TurnEnqueueParams | TurnQueueReplaceParams
     ](self, params: ParamsT) -> ParamsT:
+        try:
+            params = await self._with_described_image_entries(params)
+        except ValueError as exc:
+            raise SessionBackendError(
+                ProtocolErrorCode.INVALID_PARAMS, str(exc)
+            ) from exc
         user_index = next(
             (
                 index
@@ -5874,6 +5980,35 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                 ]
             }
         )
+        return params.model_copy(update={"entries": entries})
+
+    async def _with_described_images[ParamsT: TurnStartParams | TurnSteerParams](
+        self, params: ParamsT
+    ) -> ParamsT:
+        described = await self._image_describer.described_blocks(params.message)
+        if described is params.message:
+            return params
+        return params.model_copy(update={"message": described})
+
+    async def _with_described_image_entries[
+        ParamsT: TurnEnqueueParams | TurnQueueReplaceParams
+    ](self, params: ParamsT) -> ParamsT:
+        # Core dequeues into a turn on its own, so the adapter gets no second
+        # look at this content: an image left queued reaches the provider.
+        entries = list(params.entries)
+        changed = False
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, TurnUserInputEntry):
+                continue
+            content = await self._image_describer.described_session_blocks(
+                entry.content
+            )
+            if content is entry.content:
+                continue
+            entries[index] = entry.model_copy(update={"content": content})
+            changed = True
+        if not changed:
+            return params
         return params.model_copy(update={"entries": entries})
 
     async def _with_mentioned_file_blocks[ParamsT: TurnStartParams | TurnSteerParams](
@@ -5918,6 +6053,14 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         )
         return params.model_copy(update={"entries": entries})
 
+    async def _with_described_input_images(
+        self, params: ContextInjectParams
+    ) -> ContextInjectParams:
+        described = await self._image_describer.described_blocks(params.input)
+        if described is params.input:
+            return params
+        return params.model_copy(update={"input": described})
+
     async def _with_mentioned_file_blocks_for_input(
         self, params: ContextInjectParams
     ) -> ContextInjectParams:
@@ -5938,7 +6081,12 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         if session_id != self.session_id:
             return (await self._read_child_response(params)).state
         result = await self._session.read(_harness_read_params(params))
-        return _read_response(result.snapshot, self.cwd, metadata=self._metadata).state
+        return _read_response(
+            result.snapshot,
+            self.cwd,
+            metadata=self._metadata,
+            pins=self._live_session_pins(),
+        ).state
 
     async def _read_child_response(
         self, params: SessionReadParams
@@ -5960,9 +6108,22 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
             result.snapshot, result.cwd, event_id=self._event_id, metadata=metadata
         )
 
+    def _live_session_pins(self) -> _SessionPins:
+        return _SessionPins(
+            model=self._session.pin(SessionPin.ACTIVE_MODEL) or None,
+            reasoning_effort=self._session.pin(SessionPin.REASONING_EFFORT) or None,
+            agent=_pinned_agent(
+                self._context.agents, self._session.pin(SessionPin.AGENT_NAME)
+            ),
+        )
+
     def _read_response(self, snapshot: HarnessSessionSnapshot) -> SessionReadResponse:
         response = _read_response(
-            snapshot, self.cwd, event_id=self._event_id, metadata=self._metadata
+            snapshot,
+            self.cwd,
+            event_id=self._event_id,
+            metadata=self._metadata,
+            pins=self._live_session_pins(),
         )
         state = self._state_with_child_summaries(response.state)
         response = response.model_copy(update={"state": state})
@@ -7156,6 +7317,35 @@ def _session_cwd(options: SessionOptions) -> str:
     return str(Path(options.cwd or Path.cwd()).expanduser().resolve())
 
 
+async def _config_read_response(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    harness_files: HarnessFilesManager,
+) -> ConfigReadResponse:
+    config = orchestrator.config
+    skills = SkillManager(
+        config_getter=lambda: config, harness_files=harness_files
+    ).available_skills
+    return ConfigReadResponse(
+        config=project_config_view(
+            config,
+            active_model_pinned=active_model_is_pinned(orchestrator),
+            image_fallback=True,
+        ),
+        skills_count=sum(
+            1 for skill in skills.values() if skill.source is not SkillSource.BUILTIN
+        ),
+        hooks_count=len(
+            (
+                await asyncio.to_thread(load_hooks_from_fs, harness_files=harness_files)
+            ).hooks
+        ),
+        mcp_servers_total=len(config.mcp_servers),
+        mcp_servers_enabled=sum(
+            1 for server in config.mcp_servers if not server.disabled
+        ),
+    )
+
+
 def _with_session_cwd(options: SessionOptions, cwd: str | None) -> SessionOptions:
     """Pin the context build to a session's stored cwd on resume/continue/fork.
 
@@ -7327,12 +7517,50 @@ def _normalize_effect_output(entry: PublicHistoryEntry) -> PublicHistoryEntry:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _SessionPins:
+    """What a session runs, in the ``PublicSession`` fields that already say so.
+
+    Picking the default back writes an empty pin rather than clearing it, so
+    every value here is normalised to ``None`` for "follows the default".
+    """
+
+    model: str | None = None
+    reasoning_effort: str | None = None
+    agent: AgentSummary | None = None
+
+
+def _pinned_agent(agents: AgentManager, name: str | None) -> AgentSummary | None:
+    profile = None if name is None else agents.available_agents.get(name)
+    return None if profile is None else project_agent_summary(profile)
+
+
+async def _stored_session_pins(
+    host: UnifiedHarnessSessionBackendHost, session_id: str, agents: AgentManager
+) -> _SessionPins:
+    """The pins of a session that is not loaded, read without resuming it."""
+    model, agent_name, reasoning_effort = await asyncio.gather(
+        _harness_call(host.session_pin(session_id, SessionPin.ACTIVE_MODEL)),
+        _harness_call(host.session_pin(session_id, SessionPin.AGENT_NAME)),
+        _harness_call(host.session_pin(session_id, SessionPin.REASONING_EFFORT)),
+    )
+    return _SessionPins(
+        model=model or None,
+        reasoning_effort=reasoning_effort or None,
+        agent=_pinned_agent(agents, agent_name),
+    )
+
+
+_NO_SESSION_PINS = _SessionPins()
+
+
 def _read_response(
     snapshot: HarnessSessionSnapshot,
     cwd: str | None,
     *,
     event_id: int | None = None,
     metadata: SessionMetadata | None = None,
+    pins: _SessionPins = _NO_SESSION_PINS,
 ) -> SessionReadResponse:
     history = []
     for raw_entry in snapshot.state.history.entries:
@@ -7354,7 +7582,9 @@ def _read_response(
     return SessionReadResponse(
         state=PublicSessionState(
             event_id=last_event_id,
-            session=_public_session(snapshot.state.session, cwd, metadata=metadata),
+            session=_public_session(
+                snapshot.state.session, cwd, metadata=metadata, pins=pins
+            ),
             history=history,
             turns=(
                 [_public_turn(snapshot.state.latest_turn)]
@@ -7419,6 +7649,7 @@ def _public_session(
     *,
     harness: Literal["legacy", "unified"] = "unified",
     metadata: SessionMetadata | None = None,
+    pins: _SessionPins = _NO_SESSION_PINS,
 ) -> PublicSession:
     status = cast(Any, session.status)
     if getattr(status, "type", None) == "running":
@@ -7449,6 +7680,9 @@ def _public_session(
         bumped_at=_metadata_bumped_at_ms(metadata),
         pinned_at=_metadata_pinned_at_ms(metadata),
         cwd=cwd,
+        model=pins.model,
+        reasoning_effort=pins.reasoning_effort,
+        agent=pins.agent,
         token_usage=token_usage,
         context_usage=context_usage,
         harness=harness,
@@ -7458,6 +7692,8 @@ def _public_session(
 def _public_unified_sessions(
     storage_root: str, items: Sequence[HarnessSessionListItem]
 ) -> list[PublicSession]:
+    # Without pins: a listing feeds a session list, not a composer, and reading
+    # one costs a full Harness catalogue parse per row.
     return [
         _public_session(
             item.session,

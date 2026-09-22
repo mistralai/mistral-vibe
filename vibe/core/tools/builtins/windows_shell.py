@@ -288,7 +288,11 @@ def _split_windows_command_parts(command: str) -> list[str]:
                 _flush_windows_command_part(parts, buffer)
                 index += 2
                 continue
-            if char in {"&", "|", ";", "\n", "\r"}:
+            # ``2>&1`` and ``*>&1`` duplicate an existing stream; the ampersand
+            # is part of the redirect rather than a command separator.
+            if char in {"&", "|", ";", "\n", "\r"} and not (
+                char == "&" and buffer and buffer[-1] == ">"
+            ):
                 _flush_windows_command_part(parts, buffer)
                 index += 1
                 continue
@@ -565,6 +569,19 @@ def _windows_redirection_targets(command: str) -> list[str]:
     return targets
 
 
+def _windows_file_redirection_targets(command: str) -> list[str]:
+    """Return output redirects that can write a file.
+
+    PowerShell's null variable and CMD's null device discard output. Descriptor
+    duplication is filtered by ``_read_windows_redirection_target``.
+    """
+    return [
+        target
+        for target in _windows_redirection_targets(command)
+        if target.casefold() not in {"$null", "nul", "nul:"}
+    ]
+
+
 def _windows_path_parent(
     token: str,
     *,
@@ -642,7 +659,7 @@ def _analyze_windows_paths(
         executable, arguments = _windows_invoked_command(tokens)
         if executable != _windows_basename(executable):
             collect(executable)
-        for target in _windows_redirection_targets(part):
+        for target in _windows_file_redirection_targets(part):
             collect(target)
 
         command = _windows_command_name(executable)
@@ -747,7 +764,7 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         return False
 
     def _build_windows_context_permissions(
-        self, shell: str | None, env: dict[str, str] | None
+        self, command_parts: list[str], shell: str | None, env: dict[str, str] | None
     ) -> list[RequiredPermission]:
         required: list[RequiredPermission] = []
         if shell:
@@ -767,6 +784,19 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
                     label=f"custom environment ({names})",
                 )
             )
+        redirection_targets = {
+            target
+            for part in command_parts
+            for target in _windows_file_redirection_targets(part)
+        }
+        required.extend(
+            self._build_command_required_permission(
+                invocation_pattern=f"output redirection: {target}",
+                session_pattern=f"output redirection: {target}",
+                label=f"output redirection ({target})",
+            )
+            for target in sorted(redirection_targets)
+        )
         return required
 
     def _resolve_windows_permission(
@@ -781,14 +811,16 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         if not command_parts:
             return None
 
-        guardrail_permission = self._resolve_guardrail_permission(command_parts)
+        command_cwd = resolve_tool_path(cwd, self.cwd)
+        guardrail_permission = self._resolve_guardrail_permission(
+            command_parts, command_cwd=command_cwd, preserve_backslashes=True
+        )
         if (
             guardrail_permission
             and guardrail_permission.permission == ToolPermission.NEVER
         ):
             return guardrail_permission
 
-        command_cwd = resolve_tool_path(cwd, self.cwd)
         outside_dirs, dynamic_paths = _analyze_windows_paths(
             command_parts,
             command_cwd=command_cwd,
@@ -796,7 +828,9 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
             scratchpad_dir=self.scratchpad_dir,
             environment={**os.environ, **(env or {})},
         )
-        context_required = self._build_windows_context_permissions(shell, env)
+        context_required = self._build_windows_context_permissions(
+            command_parts, shell, env
+        )
         if (
             self._is_unconditionally_allowed(
                 command_parts, outside_dirs | dynamic_paths, context_required

@@ -106,6 +106,11 @@ def escape_json_pointer_token(value: str) -> str:
     return value.replace("~", "~0").replace("/", "~1")
 
 
+def unescape_json_pointer_token(value: str) -> str:
+    """Read one JSON Pointer path segment back to the value it names."""
+    return value.replace("~1", "/").replace("~0", "~")
+
+
 def resolve_upsert_op(
     existing: Any,
     path: str,

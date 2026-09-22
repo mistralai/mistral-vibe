@@ -16,7 +16,7 @@ from acp.schema import (
     UserMessageChunk,
 )
 
-from vibe.acp.commands.registry import AcpCommand, AcpCommandContext, AcpCommandKind
+from vibe.acp.commands.registry import AcpCommand, AcpCommandKind
 from vibe.acp.commands.teleport import (
     TELEPORT_PUSH_OPTION_ID,
     teleport_event_update,
@@ -202,11 +202,7 @@ class AcpCommandController:
             await session.app_server.resources.config.reload(reload_runtime=True)
         except Exception as exc:
             return await self._reply(session, f"Failed to reload config: {exc}")
-        session.commands.refresh(
-            AcpCommandContext(
-                vibe_code_enabled=session.app_server.resources.config.current.vibe_code_enabled
-            )
-        )
+        session.commands.refresh()
         try:
             await self.send_commands(session)
         except Exception as exc:

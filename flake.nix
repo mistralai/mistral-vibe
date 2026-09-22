@@ -74,6 +74,13 @@
                 pkgs.pkg-config
               ];
           });
+
+        # The Rust terminal build fetches crates from the network, which is
+        # forbidden in the Nix build sandbox. Skip that optional executable;
+        # the required Harness extension is still built by Maturin.
+        mistral-vibe = prev.mistral-vibe.overrideAttrs (old: {
+          env = (old.env or {}) // {VIBE_SKIP_RUST_TUI = "1";};
+        });
       };
 
       pkgs = import nixpkgs {

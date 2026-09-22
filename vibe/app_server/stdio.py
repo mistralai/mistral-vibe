@@ -64,9 +64,29 @@ def main() -> None:
     init_harness_files_manager("user", "project")
     init_file_logging(LOG_FILE.path)
     load_dotenv_values()
-    asyncio.run(
-        serve_stdio(
-            experimental_harness=args.experimental_harness,
-            legacy_harness=args.legacy_harness,
+    try:
+        asyncio.run(
+            serve_stdio(
+                experimental_harness=args.experimental_harness,
+                legacy_harness=args.legacy_harness,
+            )
         )
-    )
+    finally:
+        _neutralize_stdout()
+
+
+def _neutralize_stdout() -> None:
+    """Prevent a disconnected client from breaking the interpreter's final flush."""
+    import os
+    import sys
+
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return
+    try:
+        os.dup2(devnull, sys.stdout.fileno())
+    except (OSError, ValueError):
+        pass
+    finally:
+        os.close(devnull)

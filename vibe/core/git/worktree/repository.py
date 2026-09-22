@@ -447,9 +447,7 @@ class WorktreeRepository:
             if record.branch is None or record.prunable:
                 continue
             try:
-                _validate_existing_worktree(
-                    record.root, record.branch, paths.common_git_dir
-                )
+                _validate_listed_worktree(record.root)
                 root = record.root.resolve()
                 path = _target_cwd(root, relative_base)
             except WorktreeError:
@@ -1235,6 +1233,33 @@ def _validate_existing_worktree(
         raise WorktreeError(
             f"Path {target} is checked out on {actual!r}, expected {expected_branch!r}."
         )
+
+
+def _validate_listed_worktree(target: Path) -> None:
+    """The part of :func:`_validate_existing_worktree` a *listing* still needs.
+
+    The callers that adopt a directory have to establish what it is: the path
+    merely exists, and it has to be proven a worktree of this repository on the
+    branch expected. A listing starts from the other end. Every record here came
+    out of this repository's own ``git worktree list``, so the repository it
+    belongs to and the branch it is on are things git has already answered.
+
+    Re-asking costs a GitPython repository object plus a ``git rev-parse``
+    subprocess *per worktree*, and that is the entire cost of listing: roughly
+    29ms x 40 worktrees, ~1.15s, paid on every ``sessions.byId`` because
+    resolving a session's project walks this listing.
+
+    The filesystem checks stay. They cost a symlink check per path component
+    and one ``.is_file()``, and they catch the one thing the record cannot: a
+    path removed or swapped for a symlink since git wrote it.
+    """
+    if _has_linked_path_component(target):
+        raise WorktreeError(
+            f"Path {target} contains a symbolic link or junction, "
+            "not a stable git worktree path."
+        )
+    if not (target / ".git").is_file():
+        raise WorktreeError(f"Path {target} already exists but is not a git worktree.")
 
 
 def _has_linked_path_component(path: Path) -> bool:
