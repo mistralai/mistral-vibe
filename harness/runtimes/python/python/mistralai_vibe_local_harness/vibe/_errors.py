@@ -22,6 +22,18 @@ class HarnessSessionBusyError(HarnessSessionError):
         )
 
 
+class HarnessRegistryLockTimeoutError(HarnessSessionError):
+    def __init__(self, timeout_seconds: float) -> None:
+        super().__init__(
+            "registry_lock_timeout",
+            "Timed out after "
+            f"{timeout_seconds}s waiting for the session registry lock (.registry). "
+            "Another process may be stuck holding it; check for orphaned vibe "
+            "processes.",
+            details={"timeout_seconds": timeout_seconds},
+        )
+
+
 class HarnessChildSessionRequiresParentError(HarnessSessionError):
     def __init__(self, session_id: str, operation: str) -> None:
         super().__init__(
@@ -242,6 +254,7 @@ __all__ = [
     "HarnessInvalidMigrationSourceError",
     "HarnessInvalidSessionStoreError",
     "HarnessNotImplementedError",
+    "HarnessRegistryLockTimeoutError",
     "HarnessReplayDivergenceError",
     "HarnessResourceLockError",
     "HarnessSessionBusyError",
