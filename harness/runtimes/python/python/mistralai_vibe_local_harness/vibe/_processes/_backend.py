@@ -1,5 +1,7 @@
 """Terminal backend contract shared by the Session process manager."""
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Literal, Protocol
 

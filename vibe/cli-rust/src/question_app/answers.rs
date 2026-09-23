@@ -194,6 +194,10 @@ pub fn cancel(app: &mut App, client: &Arc<Client>) {
 /// Close the app and answer the callback the turn is blocked on.
 fn respond(app: &mut App, client: &Arc<Client>, result: UserQuestionResult) {
     app.question_app.open = false;
+    app.question_app.mouse_press_row = None;
+    app.view.question_selection_chrome.clear();
+    crate::selection::clear_region(app, crate::selection::RegionId::Question);
+    crate::selection::clear_region(app, crate::selection::RegionId::Loading);
     crate::terminal_notifier::restore_running(app);
     app.view.loading.end_action_required();
     let callback_id = std::mem::take(&mut app.question_app.callback_id);

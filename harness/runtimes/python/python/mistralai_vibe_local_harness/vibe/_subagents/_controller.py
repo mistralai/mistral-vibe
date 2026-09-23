@@ -1,10 +1,12 @@
 """Durable parent-side orchestration for Core stateful-subagent Actions."""
 
+from __future__ import annotations
+
 import asyncio
-import logging
-import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping
+import logging
+import time
 from typing import Literal, Protocol, cast
 
 from opentelemetry import trace
@@ -20,13 +22,13 @@ from mistralai_vibe_local_harness.protocol import (
     RustToolSucceededEvent,
     RustToolSuccessResult,
 )
-from mistralai_vibe_local_harness.vibe._storage import RuntimeStateV3
 from mistralai_vibe_local_harness.vibe._observability import (
     add_subagent_active_turns,
     add_subagent_recovery_failure,
     record_subagent_notification_lag,
     record_subagent_operation,
 )
+from mistralai_vibe_local_harness.vibe._storage import RuntimeStateV3
 from mistralai_vibe_local_harness.vibe._subagents._host import (
     ChildSessionHandle,
     ChildSessionHost,
@@ -75,12 +77,14 @@ from mistralai_vibe_local_harness.vibe._subagents._models import (
     TurnFailedChild,
     WaitTarget,
 )
-from mistralai_vibe_local_harness.vibe._subagents._notifications import pending_notification
+from mistralai_vibe_local_harness.vibe._subagents._notifications import (
+    pending_notification,
+)
 from mistralai_vibe_local_harness.vibe._subagents._operations import (
+    SUBAGENT_TOOL_NAMES,
     AgentInput,
     ListInput,
     MessageInput,
-    SUBAGENT_TOOL_NAMES,
     SpawnInput,
     WaitInput,
     child_is_sendable,
@@ -113,9 +117,11 @@ class ParentRuntime(Protocol):
         self, update: Callable[[RuntimeStateV3], RuntimeStateV3]
     ) -> None: ...
 
-    async def deliver_notification(self, notification: RustHarnessNotification) -> object: ...
+    async def deliver_notification(
+        self, notification: RustHarnessNotification
+    ) -> object: ...
 
-    def configure_subagent_controller(self, controller: "SubagentController") -> None: ...
+    def configure_subagent_controller(self, controller: SubagentController) -> None: ...
 
 
 class SubagentController:
@@ -151,16 +157,22 @@ class SubagentController:
         bindings: Mapping[str | None, ResolvedChildSessionBinding],
         policy_ceiling: ResolvedSubagentPolicyCeiling,
         limits: SubagentLimits | None = None,
-    ) -> "SubagentController":
+    ) -> SubagentController:
         def initialize_subagents(state: RuntimeStateV3) -> RuntimeStateV3:
             if isinstance(state.identity, SubagentSessionIdentity):
-                raise ValueError("a depth-one child cannot install a subagent controller")
+                raise ValueError(
+                    "a depth-one child cannot install a subagent controller"
+                )
             if state.subagents is None:
                 return state.model_copy(
-                    update={"subagents": SubagentRuntimeState(policy_ceiling=policy_ceiling)},
+                    update={
+                        "subagents": SubagentRuntimeState(policy_ceiling=policy_ceiling)
+                    },
                     deep=True,
                 )
-            drifted = not _same_enforced_policy(state.subagents.policy_ceiling, policy_ceiling)
+            drifted = not _same_enforced_policy(
+                state.subagents.policy_ceiling, policy_ceiling
+            )
             unbindable = _unbindable_recoverable_children(state.subagents, bindings)
             if drifted or unbindable:
                 # ``open`` is always a cold boundary: nothing here is live.
@@ -169,7 +181,9 @@ class SubagentController:
                     # Enforced policy changed: nothing was admitted under it, so
                     # settle every child and adopt the new ceiling for future work.
                     subagents = _settle_children_for_restore(
-                        subagents, frozenset(subagents.children), observed_at=_now_milliseconds()
+                        subagents,
+                        frozenset(subagents.children),
+                        observed_at=_now_milliseconds(),
                     )
                 elif unbindable:
                     # Same policy, but some children can no longer be bound; settle
@@ -213,13 +227,14 @@ class SubagentController:
         # refused; ``reconfigure_subagents`` updates it explicitly via
         # ``update_policy_ceiling`` instead.
         if not _same_enforced_policy(self._policy_ceiling, policy_ceiling):
-            raise ValueError("cannot rebind subagent agent types under a different policy ceiling")
+            raise ValueError(
+                "cannot rebind subagent agent types under a different policy ceiling"
+            )
         async with self._graph_lock:
             self._bindings = dict(bindings)
 
     async def update_policy_ceiling(
-        self,
-        policy_ceiling: ResolvedSubagentPolicyCeiling,
+        self, policy_ceiling: ResolvedSubagentPolicyCeiling
     ) -> None:
         """Replace the enforced policy ceiling.
 
@@ -233,7 +248,9 @@ class SubagentController:
         self._policy_ceiling = policy_ceiling
         async with self._graph_lock:
             state = self._subagents()
-            state = state.model_copy(update={"policy_ceiling": policy_ceiling}, deep=True)
+            state = state.model_copy(
+                update={"policy_ceiling": policy_ceiling}, deep=True
+            )
             await self._commit(state)
 
     async def reconfigure_children(self) -> None:
@@ -264,8 +281,7 @@ class SubagentController:
                 if binding is None:
                     continue
                 reconfigured = await self._child_host.reconfigure_child(
-                    ChildSessionHandle(session_id=child.child_session_id),
-                    binding,
+                    ChildSessionHandle(session_id=child.child_session_id), binding
                 )
                 if not reconfigured:
                     continue
@@ -289,7 +305,6 @@ class SubagentController:
 
     async def reconcile_actions(self, pending_action_ids: frozenset[str]) -> None:
         """Prune consumed receipts and finish effects abandoned by Core."""
-
         abandoning: list[tuple[int, str]] = []
         changed = False
         async with self._graph_lock:
@@ -347,10 +362,7 @@ class SubagentController:
             outcome, failure_code = _event_outcome(event, operation=operation)
             elapsed_s = time.perf_counter() - started_at
             record_subagent_operation(
-                elapsed_s,
-                operation=operation,
-                outcome=outcome,
-                recovering=recovering,
+                elapsed_s, operation=operation, outcome=outcome, recovering=recovering
             )
             span.set_attribute("mistral_ai.vibe_harness.outcome", outcome)
             if failure_code is not None:
@@ -358,8 +370,7 @@ class SubagentController:
                 span.set_status(Status(StatusCode.ERROR))
             if isinstance(event, RustFailTurnEvent):
                 add_subagent_recovery_failure(
-                    failure_code=event.error.code,
-                    phase="action_reconciliation",
+                    failure_code=event.error.code, phase="action_reconciliation"
                 )
             logger.info(
                 "Unified subagent operation finished",
@@ -374,7 +385,7 @@ class SubagentController:
             )
             return event
 
-    async def _execute(
+    async def _execute(  # noqa: PLR0911 - one return per execution outcome
         self, action: RustRuntimeBuiltinToolCallAction, *, recovering: bool
     ) -> RustEvent:
         try:
@@ -408,7 +419,9 @@ class SubagentController:
         except ValidationError as exc:
             return _result_event(
                 action,
-                error_output(failure("subagent_invalid_arguments", str(exc), retryable=False)),
+                error_output(
+                    failure("subagent_invalid_arguments", str(exc), retryable=False)
+                ),
             )
         except ExpectedSubagentError as exc:
             return _result_event(action, error_output(exc.failure))
@@ -447,13 +460,15 @@ class SubagentController:
             if receipt is None:
                 return
             if not isinstance(receipt.state, AbandoningReceipt):
-                raise RuntimeError("abandoned receipt lost its durable abandonment marker")
+                raise RuntimeError(
+                    "abandoned receipt lost its durable abandonment marker"
+                )
             previous = receipt.state.previous
             agent_name = receipt.agent_name
 
-        if isinstance(previous, SucceededReceipt | FailedReceipt | PreparedReceipt) and isinstance(
-            previous.target, WaitTarget
-        ):
+        if isinstance(
+            previous, SucceededReceipt | FailedReceipt | PreparedReceipt
+        ) and isinstance(previous.target, WaitTarget):
             await self._remove_receipt(action_id)
             return
         if isinstance(previous, SucceededReceipt | FailedReceipt):
@@ -465,25 +480,25 @@ class SubagentController:
             return
         if isinstance(previous.target, SpawnTarget | SendIntentTarget):
             async with self._turn_admission_lock:
-                await self._finish_abandoned_child_command(action_id, agent_name, previous)
+                await self._finish_abandoned_child_command(
+                    action_id, agent_name, previous
+                )
             return
-        if isinstance(previous.target, SendStartTarget | SendSteerTarget | InterruptTarget):
+        if isinstance(
+            previous.target, SendStartTarget | SendSteerTarget | InterruptTarget
+        ):
             await self._finish_abandoned_child_command(action_id, agent_name, previous)
             return
         raise RuntimeError("unsupported abandoned subagent receipt")
 
     async def _finish_abandoned_child_command(
-        self,
-        action_id: str,
-        agent_name: str,
-        previous: ActiveSubagentReceiptState,
+        self, action_id: str, agent_name: str, previous: ActiveSubagentReceiptState
     ) -> None:
         child = self._require_child(agent_name)
         target = previous.target
         if isinstance(previous, PreparedReceipt):
             admission = await self._child_host.child_command_admission(
-                child.child_session_id,
-                operation_key=action_id,
+                child.child_session_id, operation_key=action_id
             )
             if admission is None:
                 if isinstance(target, SpawnTarget):
@@ -513,12 +528,16 @@ class SubagentController:
                 state = self._subagents()
                 current = state.operation_receipts[action_id]
                 if not isinstance(current.state, AbandoningReceipt):
-                    raise RuntimeError("abandoned command receipt changed phase unexpectedly")
+                    raise RuntimeError(
+                        "abandoned command receipt changed phase unexpectedly"
+                    )
                 current.state = AbandoningReceipt(
                     previous=ChildCommandAcceptedReceipt(target=target)
                 )
                 if isinstance(target, SpawnTarget | SendStartTarget | SendSteerTarget):
-                    state.children[agent_name].state = RunningChild(active=target.command)
+                    state.children[agent_name].state = RunningChild(
+                        active=target.command
+                    )
                 await self._commit(state)
             previous = ChildCommandAcceptedReceipt(target=target)
         if not isinstance(previous, ChildCommandAcceptedReceipt):
@@ -526,17 +545,18 @@ class SubagentController:
                 "subagent_recovery_unsafe",
                 "Abandoned child command has an invalid durable phase",
             )
-        handle = await self._open_child(child, self._binding(child), require_existing=True)
-        await self._child_host.acknowledge_child_command(handle, operation_key=action_id)
+        handle = await self._open_child(
+            child, self._binding(child), require_existing=True
+        )
+        await self._child_host.acknowledge_child_command(
+            handle, operation_key=action_id
+        )
         if isinstance(previous.target, SpawnTarget | SendStartTarget | SendSteerTarget):
             self._ensure_watcher(agent_name, previous.target.command)
         await self._remove_receipt(action_id)
 
     async def _cleanup_abandoned_spawn(
-        self,
-        action_id: str,
-        agent_name: str,
-        target: SpawnTarget,
+        self, action_id: str, agent_name: str, target: SpawnTarget
     ) -> None:
         abandoned = failure(
             "subagent_action_abandoned",
@@ -545,7 +565,9 @@ class SubagentController:
         )
         async with self._graph_lock:
             state = self._subagents()
-            state.children[agent_name].state = CreationCleanupPendingChild(failure=abandoned)
+            state.children[agent_name].state = CreationCleanupPendingChild(
+                failure=abandoned
+            )
             await self._commit(state)
         try:
             await self._child_host.delete_child(target.child_session_id)
@@ -582,7 +604,9 @@ class SubagentController:
                     state = self._subagents()
                     current = state.notifications.pending[0]
                     if current != pending:
-                        raise RuntimeError("child notification queue changed during delivery")
+                        raise RuntimeError(
+                            "child notification queue changed during delivery"
+                        )
                     state.notifications.pending.pop(0)
                     state.notifications.last_committed_sequence = pending.sequence
                     child = state.children[pending.agent_name]
@@ -652,11 +676,17 @@ class SubagentController:
                         CreationFailedChild(failure=stored_failure)
                         | CreationCleanupPendingChild(failure=stored_failure)
                     ):
-                        agents.append(listed_agent(child, "failed", stored_failure.message))
+                        agents.append(
+                            listed_agent(child, "failed", stored_failure.message)
+                        )
                     case TurnFailedChild(outcome=outcome):
-                        agents.append(listed_agent(child, "failed", outcome.failure.message))
+                        agents.append(
+                            listed_agent(child, "failed", outcome.failure.message)
+                        )
                     case DeletingRunningChild() | DeletingIdleChild():
-                        agents.append(listed_agent(child, "failed", "Subagent is closing"))
+                        agents.append(
+                            listed_agent(child, "failed", "Subagent is closing")
+                        )
             return {"agents": agents}
 
     async def _spawn(
@@ -668,7 +698,9 @@ class SubagentController:
         binding = self._bindings.get(request.agent_type)
         if binding is None:
             return error_output(
-                failure("subagent_type_not_found", "Unknown subagent type", retryable=False)
+                failure(
+                    "subagent_type_not_found", "Unknown subagent type", retryable=False
+                )
             ), {}
         async with self._name_locks[request.agent_name], self._turn_admission_lock:
             if receipt is None:
@@ -706,10 +738,11 @@ class SubagentController:
                                 retryable=True,
                             )
                         ), {}
-                    child_id = child_session_id(self._runtime.session_id, action.action_id)
+                    child_id = child_session_id(
+                        self._runtime.session_id, action.action_id
+                    )
                     command = ChildGenerationRef(
-                        generation=1,
-                        turn_id=f"{child_id}:turn:1",
+                        generation=1, turn_id=f"{child_id}:turn:1"
                     )
                     target = SpawnTarget(
                         child_session_id=child_id,
@@ -728,12 +761,16 @@ class SubagentController:
                     )
                     _add_receipt(state, action, request.agent_name, target)
                     await self._commit(state)
-                receipt_state: ActiveSubagentReceiptState = PreparedReceipt(target=target)
+                receipt_state: ActiveSubagentReceiptState = PreparedReceipt(
+                    target=target
+                )
             else:
                 receipt_state = _active_receipt(receipt)
             output = await self._resume_spawn(action, request, binding, receipt_state)
             annotations = (
-                self._spawn_annotations(request.agent_name) if output["type"] == "success" else {}
+                self._spawn_annotations(request.agent_name)
+                if output["type"] == "success"
+                else {}
             )
             return output, annotations
 
@@ -748,10 +785,14 @@ class SubagentController:
         if replay is not None:
             return replay
         if not isinstance(receipt_state, PreparedReceipt | ChildCommandAcceptedReceipt):
-            raise UnsafeSubagentRecovery("subagent_recovery_unsafe", "Invalid spawn receipt phase")
+            raise UnsafeSubagentRecovery(
+                "subagent_recovery_unsafe", "Invalid spawn receipt phase"
+            )
         target = receipt_state.target
         if not isinstance(target, SpawnTarget):
-            raise UnsafeSubagentRecovery("subagent_recovery_unsafe", "Spawn receipt target changed")
+            raise UnsafeSubagentRecovery(
+                "subagent_recovery_unsafe", "Spawn receipt target changed"
+            )
         record = self._require_child(request.agent_name)
         child = await self._open_child(record, binding)
         if isinstance(receipt_state, PreparedReceipt):
@@ -763,8 +804,13 @@ class SubagentController:
                     operation_key=action.action_id,
                 )
             except Exception as exc:
-                return await self._fail_spawn(action.action_id, request.agent_name, target, exc)
-            if admission.target != target or admission.turn_id != target.command.turn_id:
+                return await self._fail_spawn(
+                    action.action_id, request.agent_name, target, exc
+                )
+            if (
+                admission.target != target
+                or admission.turn_id != target.command.turn_id
+            ):
                 return await self._fail_spawn(
                     action.action_id,
                     request.agent_name,
@@ -773,32 +819,34 @@ class SubagentController:
                 )
             async with self._graph_lock:
                 state = self._subagents()
-                state.children[request.agent_name].state = RunningChild(active=target.command)
+                state.children[request.agent_name].state = RunningChild(
+                    active=target.command
+                )
                 _set_receipt_state(
                     state, action.action_id, ChildCommandAcceptedReceipt(target=target)
                 )
                 await self._commit(state)
-        await self._child_host.acknowledge_child_command(child, operation_key=action.action_id)
+        await self._child_host.acknowledge_child_command(
+            child, operation_key=action.action_id
+        )
         result = success_output()
-        await self._finish_receipt(action.action_id, SucceededReceipt(target=target, result=result))
+        await self._finish_receipt(
+            action.action_id, SucceededReceipt(target=target, result=result)
+        )
         self._ensure_watcher(request.agent_name, target.command)
         return result
 
     async def _fail_spawn(
-        self,
-        action_id: str,
-        agent_name: str,
-        target: SpawnTarget,
-        error: Exception,
+        self, action_id: str, agent_name: str, target: SpawnTarget, error: Exception
     ) -> dict[str, JsonValue]:
         stored_failure = failure("subagent_spawn_failed", str(error), retryable=True)
         async with self._graph_lock:
             state = self._subagents()
-            state.children[agent_name].state = CreationCleanupPendingChild(failure=stored_failure)
+            state.children[agent_name].state = CreationCleanupPendingChild(
+                failure=stored_failure
+            )
             _set_receipt_state(
-                state,
-                action_id,
-                FailedReceipt(target=target, failure=stored_failure),
+                state, action_id, FailedReceipt(target=target, failure=stored_failure)
             )
             await self._commit(state)
         try:
@@ -808,7 +856,9 @@ class SubagentController:
         else:
             async with self._graph_lock:
                 state = self._subagents()
-                state.children[agent_name].state = CreationFailedChild(failure=stored_failure)
+                state.children[agent_name].state = CreationFailedChild(
+                    failure=stored_failure
+                )
                 await self._commit(state)
         return error_output(stored_failure)
 
@@ -840,7 +890,9 @@ class SubagentController:
         if not isinstance(receipt_state, PreparedReceipt) or not isinstance(
             receipt_state.target, WaitTarget
         ):
-            raise UnsafeSubagentRecovery("subagent_recovery_unsafe", "Invalid wait receipt phase")
+            raise UnsafeSubagentRecovery(
+                "subagent_recovery_unsafe", "Invalid wait receipt phase"
+            )
         target = receipt_state.target
         child = self._require_child(request.agent_name)
         immediate = _stored_outcome(child, target.generation)
@@ -857,8 +909,7 @@ class SubagentController:
                 retryable=True,
             )
             await self._finish_receipt(
-                action.action_id,
-                FailedReceipt(target=target, failure=stored_failure),
+                action.action_id, FailedReceipt(target=target, failure=stored_failure)
             )
             return error_output(stored_failure)
         await self._record_outcome(request.agent_name, outcome)
@@ -895,7 +946,8 @@ class SubagentController:
                     if not child_is_sendable(child):
                         return error_output(child_unavailable_failure(child))
                     if not isinstance(child.state, RunningChild) and (
-                        running_child_count(self._subagents()) >= self._limits.max_concurrent_turns
+                        running_child_count(self._subagents())
+                        >= self._limits.max_concurrent_turns
                     ):
                         return error_output(
                             failure(
@@ -908,7 +960,9 @@ class SubagentController:
                     state = self._subagents()
                     _add_receipt(state, action, request.agent_name, target)
                     await self._commit(state)
-                receipt_state: ActiveSubagentReceiptState = PreparedReceipt(target=target)
+                receipt_state: ActiveSubagentReceiptState = PreparedReceipt(
+                    target=target
+                )
             else:
                 receipt_state = _active_receipt(receipt)
             return await self._resume_send(action, request, receipt_state)
@@ -923,16 +977,21 @@ class SubagentController:
         if replay is not None:
             return replay
         if not isinstance(receipt_state, PreparedReceipt | ChildCommandAcceptedReceipt):
-            raise UnsafeSubagentRecovery("subagent_recovery_unsafe", "Invalid send receipt phase")
+            raise UnsafeSubagentRecovery(
+                "subagent_recovery_unsafe", "Invalid send receipt phase"
+            )
         target = receipt_state.target
         if not isinstance(target, SendIntentTarget | SendStartTarget | SendSteerTarget):
-            raise UnsafeSubagentRecovery("subagent_recovery_unsafe", "Send target changed")
+            raise UnsafeSubagentRecovery(
+                "subagent_recovery_unsafe", "Send target changed"
+            )
         child = self._require_child(request.agent_name)
         handle = await self._open_child(child, self._binding(child))
         if isinstance(receipt_state, PreparedReceipt):
             if not isinstance(target, SendIntentTarget):
                 raise UnsafeSubagentRecovery(
-                    "subagent_recovery_unsafe", "Prepared send already resolved its target"
+                    "subagent_recovery_unsafe",
+                    "Prepared send already resolved its target",
                 )
             admission = await self._child_host.send_child_message(
                 handle,
@@ -947,7 +1006,9 @@ class SubagentController:
                 )
             async with self._graph_lock:
                 state = self._subagents()
-                state.children[request.agent_name].state = RunningChild(active=resolved.command)
+                state.children[request.agent_name].state = RunningChild(
+                    active=resolved.command
+                )
                 _set_receipt_state(
                     state,
                     action.action_id,
@@ -956,10 +1017,16 @@ class SubagentController:
                 await self._commit(state)
             target = resolved
         if not isinstance(target, SendStartTarget | SendSteerTarget):
-            raise UnsafeSubagentRecovery("subagent_recovery_unsafe", "Accepted send has no target")
-        await self._child_host.acknowledge_child_command(handle, operation_key=action.action_id)
+            raise UnsafeSubagentRecovery(
+                "subagent_recovery_unsafe", "Accepted send has no target"
+            )
+        await self._child_host.acknowledge_child_command(
+            handle, operation_key=action.action_id
+        )
         result = success_output()
-        await self._finish_receipt(action.action_id, SucceededReceipt(target=target, result=result))
+        await self._finish_receipt(
+            action.action_id, SucceededReceipt(target=target, result=result)
+        )
         self._ensure_watcher(request.agent_name, target.command)
         return result
 
@@ -990,26 +1057,30 @@ class SubagentController:
                     state = self._subagents()
                     _add_receipt(state, action, request.agent_name, target)
                     await self._commit(state)
-                receipt_state: ActiveSubagentReceiptState = PreparedReceipt(target=target)
+                receipt_state: ActiveSubagentReceiptState = PreparedReceipt(
+                    target=target
+                )
             else:
                 receipt_state = _active_receipt(receipt)
             replay = _terminal_receipt_output(receipt_state)
             if replay is not None:
                 return replay
-            if not isinstance(receipt_state, PreparedReceipt | ChildCommandAcceptedReceipt):
+            if not isinstance(
+                receipt_state, PreparedReceipt | ChildCommandAcceptedReceipt
+            ):
                 raise UnsafeSubagentRecovery(
                     "subagent_recovery_unsafe", "Invalid interrupt receipt phase"
                 )
             target = receipt_state.target
             if not isinstance(target, InterruptTarget):
-                raise UnsafeSubagentRecovery("subagent_recovery_unsafe", "Interrupt target changed")
+                raise UnsafeSubagentRecovery(
+                    "subagent_recovery_unsafe", "Interrupt target changed"
+                )
             child = self._require_child(request.agent_name)
             handle = await self._open_child(child, self._binding(child))
             if isinstance(receipt_state, PreparedReceipt):
                 admission = await self._child_host.interrupt_child(
-                    handle,
-                    target=target,
-                    operation_key=action.action_id,
+                    handle, target=target, operation_key=action.action_id
                 )
                 if admission.target != target:
                     raise UnsafeSubagentRecovery(
@@ -1023,7 +1094,9 @@ class SubagentController:
                         ChildCommandAcceptedReceipt(target=target),
                     )
                     await self._commit(state)
-            await self._child_host.acknowledge_child_command(handle, operation_key=action.action_id)
+            await self._child_host.acknowledge_child_command(
+                handle, operation_key=action.action_id
+            )
             result = success_output()
             await self._finish_receipt(
                 action.action_id, SucceededReceipt(target=target, result=result)
@@ -1037,7 +1110,9 @@ class SubagentController:
         receipt: SubagentOperationReceipt | None,
     ) -> dict[str, JsonValue]:
         action_id = (
-            action.action_id if isinstance(action, RustRuntimeBuiltinToolCallAction) else action
+            action.action_id
+            if isinstance(action, RustRuntimeBuiltinToolCallAction)
+            else action
         )
         async with self._name_locks[request.agent_name]:
             if receipt is None:
@@ -1073,7 +1148,9 @@ class SubagentController:
                         | CreationCleanupPendingChild
                         | ReservedChild,
                     ):
-                        target = CloseIdleTarget(child_session_id=child.child_session_id)
+                        target = CloseIdleTarget(
+                            child_session_id=child.child_session_id
+                        )
                         next_state = DeletingIdleChild()
                     else:
                         return error_output(child_unavailable_failure(child))
@@ -1081,7 +1158,9 @@ class SubagentController:
                     state.children[request.agent_name].state = next_state
                     _add_receipt(state, action, request.agent_name, target)
                     await self._commit(state)
-                receipt_state: ActiveSubagentReceiptState = PreparedReceipt(target=target)
+                receipt_state: ActiveSubagentReceiptState = PreparedReceipt(
+                    target=target
+                )
             else:
                 receipt_state = _active_receipt(receipt)
             return await self._resume_stop(action_id, request, receipt_state)
@@ -1097,7 +1176,9 @@ class SubagentController:
             return replay
         target = receipt_state.target
         if not isinstance(target, CloseIdleTarget | CloseRunningTarget):
-            raise UnsafeSubagentRecovery("subagent_recovery_unsafe", "Close target changed")
+            raise UnsafeSubagentRecovery(
+                "subagent_recovery_unsafe", "Close target changed"
+            )
         child = self._require_child(request.agent_name)
         await self._cancel_watcher(request.agent_name, _target_generation(target))
         async with self._graph_lock:
@@ -1123,19 +1204,21 @@ class SubagentController:
             receipt_state = await self._finish_running_close(
                 action_id, request.agent_name, handle, target, receipt_state
             )
-        if isinstance(receipt_state, PreparedReceipt | CloseNotificationCommittedReceipt):
+        if isinstance(
+            receipt_state, PreparedReceipt | CloseNotificationCommittedReceipt
+        ):
             async with self._graph_lock:
                 state = self._subagents()
                 state.children[request.agent_name].state = DeletingIdleChild()
                 _set_receipt_state(
-                    state,
-                    action_id,
-                    CloseCleanupStartedReceipt(target=target),
+                    state, action_id, CloseCleanupStartedReceipt(target=target)
                 )
                 await self._commit(state)
             receipt_state = CloseCleanupStartedReceipt(target=target)
         if not isinstance(receipt_state, CloseCleanupStartedReceipt):
-            raise UnsafeSubagentRecovery("subagent_recovery_unsafe", "Close did not reach cleanup")
+            raise UnsafeSubagentRecovery(
+                "subagent_recovery_unsafe", "Close did not reach cleanup"
+            )
         if handle is not None:
             await self._child_host.unload_child(handle)
         await self._child_host.delete_child(child.child_session_id)
@@ -1144,9 +1227,7 @@ class SubagentController:
             state = self._subagents()
             state.children[request.agent_name].state = ChildTombstone()
             _set_receipt_state(
-                state,
-                action_id,
-                SucceededReceipt(target=target, result=result),
+                state, action_id, SucceededReceipt(target=target, result=result)
             )
             await self._commit(state)
         return result
@@ -1161,9 +1242,7 @@ class SubagentController:
     ) -> ActiveSubagentReceiptState:
         if isinstance(receipt_state, PreparedReceipt):
             admission = await self._child_host.interrupt_child(
-                handle,
-                target=target,
-                operation_key=action_id,
+                handle, target=target, operation_key=action_id
             )
             if admission.target != target:
                 raise UnsafeSubagentRecovery(
@@ -1183,9 +1262,13 @@ class SubagentController:
             )
             await self._record_close_outcome(action_id, agent_name, target, outcome)
             async with self._graph_lock:
-                receipt_state = _active_receipt(self._subagents().operation_receipts[action_id])
+                receipt_state = _active_receipt(
+                    self._subagents().operation_receipts[action_id]
+                )
         if isinstance(receipt_state, CloseOutcomeRecordedReceipt):
-            await self._child_host.acknowledge_child_command(handle, operation_key=action_id)
+            await self._child_host.acknowledge_child_command(
+                handle, operation_key=action_id
+            )
             await self.deliver_pending_notifications()
             async with self._graph_lock:
                 state = self._subagents()
@@ -1215,8 +1298,7 @@ class SubagentController:
                 if current.outcome != outcome:
                     raise RuntimeError("close outcome changed after commitment")
             elif isinstance(
-                current,
-                CloseNotificationCommittedReceipt | CloseCleanupStartedReceipt,
+                current, CloseNotificationCommittedReceipt | CloseCleanupStartedReceipt
             ):
                 return
             elif isinstance(current, PreparedReceipt | ChildCommandAcceptedReceipt):
@@ -1236,22 +1318,29 @@ class SubagentController:
             existing = _stored_outcome(child, outcome.generation)
             if existing is not None:
                 if existing != outcome:
-                    raise RuntimeError("child generation outcome changed after commitment")
+                    raise RuntimeError(
+                        "child generation outcome changed after commitment"
+                    )
                 return
             if isinstance(child.state, DeletingRunningChild):
-                close_receipt = _close_receipt_for_generation(state, agent_name, outcome.generation)
+                close_receipt = _close_receipt_for_generation(
+                    state, agent_name, outcome.generation
+                )
                 if close_receipt is None:
-                    raise RuntimeError("deleting-running child has no matching close receipt")
+                    raise RuntimeError(
+                        "deleting-running child has no matching close receipt"
+                    )
                 current = _active_receipt(close_receipt)
                 if isinstance(current, CloseOutcomeRecordedReceipt):
                     if current.outcome != outcome:
                         raise RuntimeError("close outcome changed after commitment")
                 elif isinstance(current, PreparedReceipt | ChildCommandAcceptedReceipt):
                     if not isinstance(current.target, CloseRunningTarget):
-                        raise RuntimeError("deleting-running child has an invalid close target")
+                        raise RuntimeError(
+                            "deleting-running child has an invalid close target"
+                        )
                     close_receipt.state = CloseOutcomeRecordedReceipt(
-                        target=current.target,
-                        outcome=outcome,
+                        target=current.target, outcome=outcome
                     )
                 elif isinstance(
                     current,
@@ -1259,9 +1348,13 @@ class SubagentController:
                 ):
                     return
                 else:
-                    raise RuntimeError("deleting-running child has an invalid close receipt")
+                    raise RuntimeError(
+                        "deleting-running child has an invalid close receipt"
+                    )
             elif isinstance(outcome, FailedChildTurnOutcome):
-                child.state = TurnFailedChild(outcome=outcome, reusable=outcome.failure.retryable)
+                child.state = TurnFailedChild(
+                    outcome=outcome, reusable=outcome.failure.retryable
+                )
             else:
                 child.state = IdleChild(last_outcome=outcome)
             _queue_outcome_notification(state, child, outcome)
@@ -1280,9 +1373,13 @@ class SubagentController:
         )
         self._watchers[key] = task
         add_subagent_active_turns(1)
-        task.add_done_callback(lambda done, watcher_key=key: self._watcher_done(watcher_key, done))
+        task.add_done_callback(
+            lambda done, watcher_key=key: self._watcher_done(watcher_key, done)
+        )
 
-    async def _watch_generation(self, agent_name: str, generation: ChildGenerationRef) -> None:
+    async def _watch_generation(
+        self, agent_name: str, generation: ChildGenerationRef
+    ) -> None:
         try:
             child = self._require_child(agent_name)
             handle = await self._open_child(child, self._binding(child))
@@ -1295,14 +1392,15 @@ class SubagentController:
             raise
         except Exception as exc:
             add_subagent_recovery_failure(
-                failure_code="subagent_child_watch_failed",
-                phase="child_watch",
+                failure_code="subagent_child_watch_failed", phase="child_watch"
             )
             outcome = FailedChildTurnOutcome(
                 generation=generation.generation,
                 turn_id=generation.turn_id,
                 completed_at_unix_ms=_now_milliseconds(),
-                failure=failure("subagent_child_watch_failed", str(exc), retryable=False),
+                failure=failure(
+                    "subagent_child_watch_failed", str(exc), retryable=False
+                ),
             )
             await self._record_outcome(agent_name, outcome)
             await self.deliver_pending_notifications()
@@ -1316,7 +1414,9 @@ class SubagentController:
         watcher.cancel()
         await asyncio.gather(watcher, return_exceptions=True)
 
-    def _forget_watcher(self, key: tuple[str, int], watcher: asyncio.Task[None]) -> None:
+    def _forget_watcher(
+        self, key: tuple[str, int], watcher: asyncio.Task[None]
+    ) -> None:
         if self._watchers.get(key) is watcher:
             self._watchers.pop(key, None)
 
@@ -1363,10 +1463,7 @@ class SubagentController:
                     raise
                 opened.append(
                     await self._open_child(
-                        child,
-                        binding,
-                        start_new_actions=False,
-                        require_existing=True,
+                        child, binding, start_new_actions=False, require_existing=True
                     )
                 )
         except BaseException as exc:
@@ -1440,13 +1537,13 @@ class SubagentController:
     async def _commit(self, subagents: SubagentRuntimeState) -> None:
         updated_subagents = _sorted_state(subagents)
         await self._runtime.update_runtime_state(
-            lambda state: state.model_copy(update={"subagents": updated_subagents}, deep=True)
+            lambda state: state.model_copy(
+                update={"subagents": updated_subagents}, deep=True
+            )
         )
 
     async def _finish_receipt(
-        self,
-        action_id: str,
-        receipt_state: SucceededReceipt | FailedReceipt,
+        self, action_id: str, receipt_state: SucceededReceipt | FailedReceipt
     ) -> None:
         async with self._graph_lock:
             state = self._subagents()
@@ -1537,7 +1634,11 @@ def _settle_children_for_restore(
     children = {
         name: (
             child.model_copy(
-                update={"state": _settle_child_for_restore(child.state, observed_at=observed_at)},
+                update={
+                    "state": _settle_child_for_restore(
+                        child.state, observed_at=observed_at
+                    )
+                },
                 deep=True,
             )
             if name in agent_names
@@ -1547,7 +1648,9 @@ def _settle_children_for_restore(
     }
     receipts = {
         action_id: (
-            _settle_receipt_for_restore(receipt) if receipt.agent_name in agent_names else receipt
+            _settle_receipt_for_restore(receipt)
+            if receipt.agent_name in agent_names
+            else receipt
         )
         for action_id, receipt in state.operation_receipts.items()
     }
@@ -1657,8 +1760,7 @@ def _result_event(
         action_id=action.action_id,
         call_id=action.call_id,
         result=RustToolSuccessResult(
-            structured_content=cast(JsonValue, output),
-            _meta=annotations or None,
+            structured_content=cast(JsonValue, output), _meta=annotations or None
         ),
     )
 
@@ -1702,10 +1804,18 @@ def _require_current_generation(child: ChildSessionRecord) -> ChildGenerationRef
     return ChildGenerationRef(generation=outcome.generation, turn_id=outcome.turn_id)
 
 
-def _stored_outcome(child: ChildSessionRecord, generation: int) -> ChildTurnOutcome | None:
-    if isinstance(child.state, IdleChild) and child.state.last_outcome.generation == generation:
+def _stored_outcome(
+    child: ChildSessionRecord, generation: int
+) -> ChildTurnOutcome | None:
+    if (
+        isinstance(child.state, IdleChild)
+        and child.state.last_outcome.generation == generation
+    ):
         return child.state.last_outcome
-    if isinstance(child.state, TurnFailedChild) and child.state.outcome.generation == generation:
+    if (
+        isinstance(child.state, TurnFailedChild)
+        and child.state.outcome.generation == generation
+    ):
         return child.state.outcome
     return None
 
@@ -1715,9 +1825,7 @@ def _target_generation(target: CloseIdleTarget | CloseRunningTarget) -> int | No
 
 
 def _queue_outcome_notification(
-    state: SubagentRuntimeState,
-    child: ChildSessionRecord,
-    outcome: ChildTurnOutcome,
+    state: SubagentRuntimeState, child: ChildSessionRecord, outcome: ChildTurnOutcome
 ) -> None:
     if child.last_notified_generation >= outcome.generation:
         return
@@ -1776,16 +1884,16 @@ def _event_outcome(
     if isinstance(content, dict) and content.get("type") == "success":
         return "success", None
     error = content.get("error") if isinstance(content, dict) else None
-    failure_code = error.partition(":")[0] if isinstance(error, str) else "invalid_result"
+    failure_code = (
+        error.partition(":")[0] if isinstance(error, str) else "invalid_result"
+    )
     if operation == "wait" and failure_code == "subagent_wait_timeout":
         return "timeout", failure_code
     return "failure", failure_code
 
 
 def _pending_notification_outcome(
-    state: SubagentRuntimeState,
-    agent_name: str,
-    generation: int,
+    state: SubagentRuntimeState, agent_name: str, generation: int
 ) -> ChildTurnOutcome:
     child = state.children[agent_name]
     outcome = _stored_outcome(child, generation)
@@ -1803,16 +1911,17 @@ def _pending_notification_outcome(
 
 
 def _close_receipt_for_generation(
-    state: SubagentRuntimeState,
-    agent_name: str,
-    generation: int,
+    state: SubagentRuntimeState, agent_name: str, generation: int
 ) -> SubagentOperationReceipt | None:
     for receipt in state.operation_receipts.values():
         receipt_state = _active_receipt(receipt)
         if receipt.agent_name != agent_name:
             continue
         target = receipt_state.target
-        if isinstance(target, CloseRunningTarget) and target.command.generation == generation:
+        if (
+            isinstance(target, CloseRunningTarget)
+            and target.command.generation == generation
+        ):
             return receipt
     return None
 

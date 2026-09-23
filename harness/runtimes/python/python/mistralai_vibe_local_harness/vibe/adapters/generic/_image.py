@@ -1,5 +1,7 @@
 """Image encoding helpers."""
 
+from __future__ import annotations
+
 import base64
 from functools import lru_cache
 from pathlib import Path

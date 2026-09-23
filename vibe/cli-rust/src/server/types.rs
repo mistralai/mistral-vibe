@@ -75,6 +75,7 @@ pub mod method {
     /// Connectors are toggled on their own catalog, keyed by alias.
     pub const CONNECTOR_TOGGLE: &str = "connector_catalog/toggle";
     pub const MCP_ADD: &str = "mcp_catalog/add";
+    pub const MCP_REMOVE: &str = "mcp_catalog/remove";
     pub const MCP_LOGIN: &str = "mcp_catalog/login";
     pub const MCP_LOGOUT: &str = "mcp_catalog/logout";
     /// The OAuth URL of a workspace connector, or none when it needs no auth.

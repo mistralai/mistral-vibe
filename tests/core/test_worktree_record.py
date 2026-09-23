@@ -46,6 +46,9 @@ def test_record_round_trips(tmp_path: Path) -> None:
     assert loaded.branch_created is True
     assert loaded.base_commit is None
     assert loaded.claimed_at == record.claimed_at
+    assert loaded.reap_requested is False
+    assert loaded.reap_requests == {}
+    assert loaded.reap_cancellations == set()
 
 
 def test_record_keeps_base_commit(tmp_path: Path) -> None:
@@ -91,6 +94,22 @@ def test_record_ignores_unknown_future_fields(tmp_path: Path) -> None:
     target.write_text(json.dumps(payload), encoding="utf-8")
 
     assert _claim().read() is not None
+
+
+def test_record_defaults_existing_claims_to_no_pending_reap(tmp_path: Path) -> None:
+    _claim().write(_record(repo_root=tmp_path))
+    target = _claim().directory / RECORD_FILENAME
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    del payload["reap_requested"]
+    del payload["reap_requests"]
+    del payload["reap_cancellations"]
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = _claim().read()
+    assert loaded is not None
+    assert loaded.reap_requested is False
+    assert loaded.reap_requests == {}
+    assert loaded.reap_cancellations == set()
 
 
 def test_missing_record_reads_as_absent() -> None:

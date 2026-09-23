@@ -34,6 +34,13 @@ class AgentProfile:
     overrides: dict[str, Any] = field(default_factory=dict)
     install_required: bool = False
     instructions: str | None = None
+    source_path: Path | None = None
+    """The file this profile was parsed from, or ``None`` when it is built in.
+
+    The Unified Harness advertises a subagent to the model with the path of the
+    file behind it, so a profile that reaches that surface has to remember where
+    it came from.
+    """
 
     @classmethod
     def from_toml(cls, path: Path) -> AgentProfile:
@@ -49,6 +56,7 @@ class AgentProfile:
             agent_type=AgentType(data.pop("agent_type", AgentType.AGENT)),
             instructions=data.pop("instructions", None),
             overrides=data,
+            source_path=path,
         )
 
 
@@ -130,7 +138,7 @@ LEAN = AgentProfile(
     overrides={
         "system_prompt_id": "lean",
         "active_model": "leanstral",
-        "allowed_models": ["leanstral"],
+        "allowed_models": ["labs-leanstral-1-5"],
         "providers": [
             {
                 "name": "mistral-testing",

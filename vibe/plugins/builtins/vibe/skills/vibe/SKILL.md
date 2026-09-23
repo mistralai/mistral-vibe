@@ -249,6 +249,10 @@ emits_finish_reason = false  # set false for OpenAI-compatible endpoints that en
 ### Models
 
 ```toml
+# Restrict selectable models by their canonical API names, not their aliases.
+# Glob patterns and regular expressions prefixed with "re:" are supported.
+allowed_models = ["mistral-vibe-cli-*"]
+
 [[models]]
 name = "mistral-vibe-cli-latest"
 provider = "mistral"

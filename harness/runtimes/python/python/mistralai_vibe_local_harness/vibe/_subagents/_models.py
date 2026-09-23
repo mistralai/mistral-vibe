@@ -1,9 +1,18 @@
 """Closed durable models for parent-owned stateful subagent orchestration."""
 
+from __future__ import annotations
+
 import re
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    field_validator,
+    model_validator,
+)
 
 from mistralai_vibe_local_harness.protocol import (
     RustHarnessNotification,
@@ -22,7 +31,9 @@ class SubagentModel(BaseModel):
 
 
 class _SessionIdentityModel(SubagentModel):
-    @field_validator("session_id", "root_session_id", "parent_session_id", check_fields=False)
+    @field_validator(
+        "session_id", "root_session_id", "parent_session_id", check_fields=False
+    )
     @classmethod
     def validate_session_id(cls, value: str | None) -> str | None:
         if value is not None and _SESSION_ID_PATTERN.fullmatch(value) is None:
@@ -134,7 +145,9 @@ class ParentNotificationQueue(SubagentModel):
         sequences = [item.sequence for item in self.pending]
         expected = list(range(self.last_committed_sequence + 1, self.next_sequence))
         if sequences != expected:
-            raise ValueError("pending child notifications must form one contiguous sequence")
+            raise ValueError(
+                "pending child notifications must form one contiguous sequence"
+            )
         return self
 
 
@@ -269,7 +282,11 @@ class CloseRunningTarget(SubagentModel):
 
 
 ChildCommandTarget = (
-    SpawnTarget | SendStartTarget | SendSteerTarget | InterruptTarget | CloseRunningTarget
+    SpawnTarget
+    | SendStartTarget
+    | SendSteerTarget
+    | InterruptTarget
+    | CloseRunningTarget
 )
 SubagentOperationTarget = Annotated[
     SpawnTarget
@@ -349,8 +366,7 @@ class AbandoningReceipt(SubagentModel):
 
 
 SubagentReceiptState = Annotated[
-    ActiveSubagentReceiptState | AbandoningReceipt,
-    Field(discriminator="type"),
+    ActiveSubagentReceiptState | AbandoningReceipt, Field(discriminator="type")
 ]
 
 
@@ -442,7 +458,10 @@ class ResolvedSubagentPolicyCeiling(SubagentModel):
             ("write roots", self.write_roots),
             ("connector IDs", self.allowed_connector_ids),
             ("connector authentication", self.allowed_connector_authentication),
-            ("connector execution identities", self.allowed_connector_execution_identities),
+            (
+                "connector execution identities",
+                self.allowed_connector_execution_identities,
+            ),
             ("environment names", self.allowed_environment_names),
         ):
             if values != sorted(set(values)):
@@ -459,9 +478,11 @@ class DeclaredAgentTypeProfile(SubagentModel):
     agent_type: str = Field(min_length=1)
     description: str = Field(min_length=1)
     profile_path: str = Field(min_length=1)
-    instructions: str | None = Field(default=None, min_length=1, max_length=_MAX_INSTRUCTION_CHARS)
-    tool_ceiling: dict[RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny"]] = Field(
-        default_factory=dict
+    instructions: str | None = Field(
+        default=None, min_length=1, max_length=_MAX_INSTRUCTION_CHARS
+    )
+    tool_ceiling: dict[RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny"]] = (
+        Field(default_factory=dict)
     )
     authority_digest: str = Field(min_length=1)
 
@@ -484,8 +505,12 @@ class SubagentRuntimeState(SubagentModel):
     policy_ceiling: ResolvedSubagentPolicyCeiling
     next_operation_sequence: int = Field(default=0, ge=0)
     children: dict[str, ChildSessionRecord] = Field(default_factory=dict)
-    operation_receipts: dict[str, SubagentOperationReceipt] = Field(default_factory=dict)
-    notifications: ParentNotificationQueue = Field(default_factory=ParentNotificationQueue)
+    operation_receipts: dict[str, SubagentOperationReceipt] = Field(
+        default_factory=dict
+    )
+    notifications: ParentNotificationQueue = Field(
+        default_factory=ParentNotificationQueue
+    )
 
     @model_validator(mode="after")
     def validate_keys_and_sequences(self) -> Self:
@@ -494,16 +519,23 @@ class SubagentRuntimeState(SubagentModel):
         if any(name != child.agent_name for name, child in self.children.items()):
             raise ValueError("child record key must match agent_name")
         if list(self.operation_receipts) != sorted(self.operation_receipts):
-            raise ValueError("subagent receipts must be stored in lexical Action-ID order")
+            raise ValueError(
+                "subagent receipts must be stored in lexical Action-ID order"
+            )
         if any(
-            action_id != receipt.action_id for action_id, receipt in self.operation_receipts.items()
+            action_id != receipt.action_id
+            for action_id, receipt in self.operation_receipts.items()
         ):
             raise ValueError("subagent receipt key must match action_id")
-        sequences = [receipt.admission_sequence for receipt in self.operation_receipts.values()]
+        sequences = [
+            receipt.admission_sequence for receipt in self.operation_receipts.values()
+        ]
         if len(sequences) != len(set(sequences)):
             raise ValueError("subagent admission sequences must be unique")
         if sequences and self.next_operation_sequence <= max(sequences):
-            raise ValueError("next subagent operation sequence must follow existing receipts")
+            raise ValueError(
+                "next subagent operation sequence must follow existing receipts"
+            )
         for receipt in self.operation_receipts.values():
             child = self.children.get(receipt.agent_name)
             if child is None:
@@ -535,7 +567,9 @@ class DeletingSessionTree(SubagentModel):
 
     @model_validator(mode="after")
     def validate_deletion_progress(self) -> Self:
-        if self.ordered_child_session_ids != sorted(set(self.ordered_child_session_ids)):
+        if self.ordered_child_session_ids != sorted(
+            set(self.ordered_child_session_ids)
+        ):
             raise ValueError("child deletion plan must be unique and lexically ordered")
         if (
             self.deleted_child_session_ids
@@ -546,8 +580,7 @@ class DeletingSessionTree(SubagentModel):
 
 
 SessionRuntimeLifecycle = Annotated[
-    ActiveSessionLifecycle | DeletingSessionTree,
-    Field(discriminator="type"),
+    ActiveSessionLifecycle | DeletingSessionTree, Field(discriminator="type")
 ]
 
 
@@ -562,33 +595,29 @@ def lifecycle_generation(state: ChildLifecycleState) -> int | None:
 
 
 def _receipt_target(state: SubagentReceiptState) -> SubagentOperationTarget:
-    return state.previous.target if isinstance(state, AbandoningReceipt) else state.target
+    return (
+        state.previous.target if isinstance(state, AbandoningReceipt) else state.target
+    )
 
 
 def _validate_operation_target(
-    target: SubagentOperationTarget,
-    *,
-    child_session_id: str,
-    operation_key: str,
+    target: SubagentOperationTarget, *, child_session_id: str, operation_key: str
 ) -> None:
     if isinstance(target, SendIntentTarget | CloseIdleTarget):
         if target.child_session_id != child_session_id:
-            raise ValueError("subagent operation target belongs to another child Session")
+            raise ValueError(
+                "subagent operation target belongs to another child Session"
+            )
         return
     if isinstance(target, WaitTarget):
         return
     _validate_command_target(
-        target,
-        child_session_id=child_session_id,
-        operation_key=operation_key,
+        target, child_session_id=child_session_id, operation_key=operation_key
     )
 
 
 def _validate_command_target(
-    target: ChildCommandTarget,
-    *,
-    child_session_id: str,
-    operation_key: str,
+    target: ChildCommandTarget, *, child_session_id: str, operation_key: str
 ) -> None:
     if isinstance(target, SpawnTarget | CloseRunningTarget):
         if target.child_session_id != child_session_id:

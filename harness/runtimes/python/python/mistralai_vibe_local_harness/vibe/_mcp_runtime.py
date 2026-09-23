@@ -1,9 +1,11 @@
 """Unified Runtime ownership of MCP descriptors, routes, calls, and cleanup."""
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import inspect
 import logging
 import math
@@ -42,6 +44,8 @@ from mistralai_vibe_local_harness.vibe._mcp_pool import MCPStdioPool, MCPStdioPo
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_HTTP_TRANSPORT_POLICY = MCPHTTPTransportPolicy()
+
 type _ServerResolution = tuple[
     ResolvedMCPServerConfig,
     tuple[MCPRemoteToolDescriptor, ...] | None,
@@ -57,7 +61,7 @@ class MCPRuntime:
         cache_root: Path,
         cache_policy: MCPDescriptorCachePolicy,
         authorization_provider: MCPAuthorizationProvider,
-        http_transport_policy: MCPHTTPTransportPolicy = MCPHTTPTransportPolicy(),
+        http_transport_policy: MCPHTTPTransportPolicy = _DEFAULT_HTTP_TRANSPORT_POLICY,
         transport_factory: MCPTransportFactory | None = None,
         stdio_pool: MCPStdioPool | None = None,
         sampling_completion: MCPSamplingCompletion | None = None,
@@ -90,7 +94,9 @@ class MCPRuntime:
         )
         self._lock = asyncio.Lock()
         self._closed = False
-        self._accept_snapshot: Callable[[MCPRouteSnapshot], Awaitable[None]] | None = None
+        self._accept_snapshot: Callable[[MCPRouteSnapshot], Awaitable[None]] | None = (
+            None
+        )
 
     @property
     def snapshot(self) -> MCPRouteSnapshot:
@@ -176,7 +182,9 @@ class MCPRuntime:
                     ),
                 )
                 return self._snapshot
-            authorization = await self._authorization_provider.resolve(updated_server.authorization)
+            authorization = await self._authorization_provider.resolve(
+                updated_server.authorization
+            )
             if authorization.descriptor_revision != descriptor_revision:
                 raise MCPRuntimeFailure(
                     "mcp_stale_authorization",
@@ -195,17 +203,11 @@ class MCPRuntime:
                 await self._authorization_required(updated_server, authorization)
                 return snapshot
             return await self._reconfigure_authorization(
-                configuration,
-                name=name,
-                authorization=authorization,
+                configuration, name=name, authorization=authorization
             )
 
     async def suspend(
-        self,
-        *,
-        name: str,
-        tool_name: str | None,
-        source_status: str = "disabled",
+        self, *, name: str, tool_name: str | None, source_status: str = "disabled"
     ) -> MCPRouteSnapshot:
         async with self._lock:
             self._guard_open()
@@ -214,23 +216,19 @@ class MCPRuntime:
             )
 
     async def execute(
-        self,
-        *,
-        group_name: str,
-        tool_name: str,
-        arguments: JsonObject,
+        self, *, group_name: str, tool_name: str, arguments: JsonObject
     ) -> MCPNormalizedResult:
         self._guard_open()
         snapshot = self._snapshot
         route = snapshot.routes.get((group_name, tool_name))
         if route is None:
-            raise MCPRuntimeFailure("mcp_unknown_route", "The provided tool route is not available")
+            raise MCPRuntimeFailure(
+                "mcp_unknown_route", "The provided tool route is not available"
+            )
         server = self._server(route.descriptor.server_name)
         if server.transport == "stdio":
             return await self._stdio_lease().call_tool(
-                server,
-                name=route.descriptor.remote_name,
-                arguments=arguments,
+                server, name=route.descriptor.remote_name, arguments=arguments
             )
         sampling_callback = self._sampling_callback(server)
         authorization = await self._authorization_provider.resolve(server.authorization)
@@ -305,7 +303,9 @@ class MCPRuntime:
                 )
             async with semaphore:
                 try:
-                    result = await self._resolve_server(server, force_remote_discovery=forced)
+                    result = await self._resolve_server(
+                        server, force_remote_discovery=forced
+                    )
                 except Exception as exc:
                     # A single source must never abort reconfiguration of the others:
                     # a failing MCP connection is isolated as an unavailable source so
@@ -316,7 +316,9 @@ class MCPRuntime:
                 return result[0], result[1], replace(result[2], status="disabled"), None
             return result
 
-        results = await asyncio.gather(*(resolve(server) for server in configuration.servers))
+        results = await asyncio.gather(
+            *(resolve(server) for server in configuration.servers)
+        )
         return await self._accept_resolutions(
             configuration,
             results,
@@ -366,7 +368,11 @@ class MCPRuntime:
     def _unavailable_resolution(
         self, server: ResolvedMCPServerConfig, *, error: BaseException
     ) -> _ServerResolution:
-        code = error.code if isinstance(error, MCPRuntimeFailure) else "mcp_transport_failed"
+        code = (
+            error.code
+            if isinstance(error, MCPRuntimeFailure)
+            else "mcp_transport_failed"
+        )
         logger.warning(
             "MCP source %r failed to resolve and was isolated as unavailable: %s",
             server.name,
@@ -398,32 +404,26 @@ class MCPRuntime:
             if server.name == name:
                 resolutions.append(
                     await self._resolve_server(
-                        server,
-                        force_remote_discovery=True,
-                        authorization=authorization,
+                        server, force_remote_discovery=True, authorization=authorization
                     )
                 )
                 continue
             descriptors = self._accepted_descriptors.get(server.name)
             source = self._source_state(server.name)
-            resolutions.append(
-                (
-                    server,
-                    descriptors,
-                    source
-                    or MCPSourceState(
-                        name=server.name,
-                        status="disabled" if server.disabled else "unavailable",
-                        descriptors=descriptors or (),
-                        descriptor_revision=server.authorization.descriptor_revision,
-                    ),
-                    None,
-                )
-            )
+            resolutions.append((
+                server,
+                descriptors,
+                source
+                or MCPSourceState(
+                    name=server.name,
+                    status="disabled" if server.disabled else "unavailable",
+                    descriptors=descriptors or (),
+                    descriptor_revision=server.authorization.descriptor_revision,
+                ),
+                None,
+            ))
         return await self._accept_resolutions(
-            configuration,
-            resolutions,
-            previous_configuration=previous_configuration,
+            configuration, resolutions, previous_configuration=previous_configuration
         )
 
     async def _accept_resolutions(
@@ -459,11 +459,15 @@ class MCPRuntime:
         for server, _, _, required in resolutions:
             if required is not None:
                 await self._authorization_required(server, required)
-        await self._close_removed_stdio_connections(previous_configuration, configuration)
+        await self._close_removed_stdio_connections(
+            previous_configuration, configuration
+        )
         return candidate
 
     def _source_state(self, name: str) -> MCPSourceState | None:
-        return next((source for source in self._snapshot.sources if source.name == name), None)
+        return next(
+            (source for source in self._snapshot.sources if source.name == name), None
+        )
 
     async def _resolve_server(
         self,
@@ -480,7 +484,10 @@ class MCPRuntime:
         if isinstance(authorization_result, MCPAuthorizationRequired):
             return self._authorization_required_resolution(server, authorization_result)
         authorization = authorization_result
-        if authorization.descriptor_revision != server.authorization.descriptor_revision:
+        if (
+            authorization.descriptor_revision
+            != server.authorization.descriptor_revision
+        ):
             raise MCPRuntimeFailure(
                 "mcp_stale_authorization",
                 "MCP authorization descriptor revision is stale",
@@ -504,7 +511,9 @@ class MCPRuntime:
             descriptors = await self._discover(server, authorization)
             discovery_authorization = authorization
         except MCPAuthorizationRejected as rejected:
-            retried = await self._retry_rejected_discovery(server, authorization, rejected)
+            retried = await self._retry_rejected_discovery(
+                server, authorization, rejected
+            )
             if isinstance(retried, MCPAuthorizationRequired):
                 return self._authorization_required_resolution(server, retried)
             descriptors, discovery_authorization = retried
@@ -532,10 +541,7 @@ class MCPRuntime:
         )
         self._memory_cache[key] = record
         await self._cache.write(
-            key,
-            source_name=server.name,
-            descriptors=descriptors,
-            now=now,
+            key, source_name=server.name, descriptors=descriptors, now=now
         )
         return (
             server,
@@ -576,9 +582,7 @@ class MCPRuntime:
         return record
 
     async def _discover(
-        self,
-        server: ResolvedMCPServerConfig,
-        authorization: MCPAuthorizationSnapshot,
+        self, server: ResolvedMCPServerConfig, authorization: MCPAuthorizationSnapshot
     ) -> tuple[MCPRemoteToolDescriptor, ...]:
         if server.transport == "stdio":
             return await self._stdio_lease().list_tools(server)
@@ -615,23 +619,26 @@ class MCPRuntime:
             pool = self._shared_pool
             if pool is None:
                 pool = MCPStdioPool(
-                    self._transport_factory, sampling_completion=self._sampling_completion
+                    self._transport_factory,
+                    sampling_completion=self._sampling_completion,
                 )
                 self._owned_pool = pool
             self._lease = pool.lease()
         return self._lease
 
-    def _sampling_callback(self, server: ResolvedMCPServerConfig) -> MCPSamplingCallback | None:
+    def _sampling_callback(
+        self, server: ResolvedMCPServerConfig
+    ) -> MCPSamplingCallback | None:
         if not server.sampling_enabled or self._sampling_completion is None:
             return None
-        from mistralai_vibe_local_harness.vibe._mcp_sampling import build_sampling_callback
+        from mistralai_vibe_local_harness.vibe._mcp_sampling import (
+            build_sampling_callback,
+        )
 
         return build_sampling_callback(self._sampling_completion)
 
     async def _authorization_required(
-        self,
-        server: ResolvedMCPServerConfig,
-        required: MCPAuthorizationRequired,
+        self, server: ResolvedMCPServerConfig, required: MCPAuthorizationRequired
     ) -> None:
         if self._event_sink is None:
             return
@@ -686,8 +693,7 @@ class MCPRuntime:
                     reason=retry_rejected.reason,
                 )
         return _authorization_required_result(
-            replacement,
-            observed_connection_revision=authorization.connection_revision,
+            replacement, observed_connection_revision=authorization.connection_revision
         )
 
     async def _retry_rejected_call(
@@ -710,11 +716,7 @@ class MCPRuntime:
         ):
             try:
                 return await self._call_http(
-                    server,
-                    replacement,
-                    tool_name,
-                    arguments,
-                    sampling_callback,
+                    server, replacement, tool_name, arguments, sampling_callback
                 )
             except MCPAuthorizationRejected as retry_rejected:
                 replacement = await self._authorization_provider.reject(
@@ -723,12 +725,13 @@ class MCPRuntime:
                     reason=retry_rejected.reason,
                 )
         required = _authorization_required_result(
-            replacement,
-            observed_connection_revision=authorization.connection_revision,
+            replacement, observed_connection_revision=authorization.connection_revision
         )
         await self._invalidate_descriptor(server, authorization.descriptor_revision)
         async with self._lock:
-            await self._suspend_locked(name=server.name, tool_name=None, source_status="needs_auth")
+            await self._suspend_locked(
+                name=server.name, tool_name=None, source_status="needs_auth"
+            )
         await self._authorization_required(server, required)
         raise MCPRuntimeFailure(
             "mcp_authorization_required", "MCP server rejected authorization"
@@ -747,8 +750,7 @@ class MCPRuntime:
             replacement = replace(server, disabled=True)
         else:
             replacement = replace(
-                server,
-                disabled_tools=server.disabled_tools | frozenset({tool_name}),
+                server, disabled_tools=server.disabled_tools | frozenset({tool_name})
             )
         servers = tuple(
             replacement if candidate.name == name else candidate
@@ -782,7 +784,11 @@ class MCPRuntime:
         )
         await self._accept(candidate)
         self._snapshot = candidate
-        if tool_name is None and self._lease is not None and server.transport == "stdio":
+        if (
+            tool_name is None
+            and self._lease is not None
+            and server.transport == "stdio"
+        ):
             await self._lease.close_server(server)
         return candidate
 
@@ -792,9 +798,7 @@ class MCPRuntime:
                 self._memory_cache.pop(key, None)
 
     async def _close_removed_stdio_connections(
-        self,
-        previous: ResolvedMCPCatalog,
-        configuration: ResolvedMCPCatalog,
+        self, previous: ResolvedMCPCatalog, configuration: ResolvedMCPCatalog
     ) -> None:
         lease = self._lease
         if lease is None:
@@ -847,7 +851,9 @@ def _validate_configuration(configuration: ResolvedMCPCatalog) -> None:
     names: set[str] = set()
     for server in configuration.servers:
         if not server.name or server.name in names:
-            raise MCPRuntimeFailure("mcp_invalid_configuration", "MCP server names must be unique")
+            raise MCPRuntimeFailure(
+                "mcp_invalid_configuration", "MCP server names must be unique"
+            )
         names.add(server.name)
         for timeout in (server.startup_timeout_s, server.tool_timeout_s):
             if not math.isfinite(timeout) or timeout <= 0:
@@ -860,12 +866,13 @@ def _validate_configuration(configuration: ResolvedMCPCatalog) -> None:
                 "mcp_invalid_configuration", "MCP stdio server requires a command"
             )
         if server.transport != "stdio" and not server.url:
-            raise MCPRuntimeFailure("mcp_invalid_configuration", "MCP HTTP server requires a URL")
+            raise MCPRuntimeFailure(
+                "mcp_invalid_configuration", "MCP HTTP server requires a URL"
+            )
 
 
 def _validate_descriptors(
-    descriptors: tuple[MCPRemoteToolDescriptor, ...],
-    policy: MCPDescriptorCachePolicy,
+    descriptors: tuple[MCPRemoteToolDescriptor, ...], policy: MCPDescriptorCachePolicy
 ) -> None:
     if len(descriptors) > policy.max_tools_per_record:
         raise MCPRuntimeFailure(
@@ -895,7 +902,7 @@ def _authorization_required_result(
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 __all__ = ["MCPRuntime"]

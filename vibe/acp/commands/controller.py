@@ -389,9 +389,12 @@ class AcpCommandController:
     async def _set_lean(
         self, session: AcpSession, *, installed: bool
     ) -> PromptResponse:
-        await session.app_server.resources.agents.set_installed(
-            "lean", installed=installed
-        )
+        try:
+            await session.app_server.resources.agents.set_installed(
+                "lean", installed=installed
+            )
+        except AppServerResponseError as exc:
+            return await self._reply(session, f"Error: {exc.error.message}")
         await self._send_config_options(session)
         action = "installed" if installed else "uninstalled"
         return await self._reply(session, f"Lean agent {action}.")

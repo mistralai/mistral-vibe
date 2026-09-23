@@ -1,12 +1,21 @@
+from __future__ import annotations
+
 import asyncio
+from contextlib import suppress
 import os
+from pathlib import Path
 import stat
 import tempfile
-from contextlib import suppress
-from pathlib import Path
 from typing import IO, Annotated, cast
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    StringConstraints,
+    ValidationError,
+)
 
 from mistralai_vibe_local_harness.protocol import (
     RustProtocolError,
@@ -19,6 +28,9 @@ from mistralai_vibe_local_harness.protocol import (
 from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
 
 SNIFF_BYTES = 4_096
+_FIRST_PRINTABLE = 0x20
+_DEL = 0x7F
+_C1_CONTROL_END = 0x9F
 DEFAULT_LINE_LIMIT = 2_000
 MAX_READ_BYTES = 50 * 1_024
 MAX_WRITE_BYTES = 64_000
@@ -129,13 +141,16 @@ def _execute_file_tool_sync(
             case "file_system.search_replace":
                 edit_args = SearchReplaceArgs.model_validate(action.call.arguments)
                 result, annotations = search_replace(
-                    edit_args, _target_path(edit_args.file_path, config, authorized_path)
+                    edit_args,
+                    _target_path(edit_args.file_path, config, authorized_path),
                 )
                 return _succeeded(
                     action,
                     result.model_dump(mode="json"),
                     meta={
-                        SEARCH_REPLACE_ANNOTATION_KEY: annotations.model_dump(mode="json"),
+                        SEARCH_REPLACE_ANNOTATION_KEY: annotations.model_dump(
+                            mode="json"
+                        )
                     },
                 )
             case _:
@@ -153,10 +168,7 @@ def read_file(args: ReadFileArgs, path: Path) -> ReadFileResult:
         try:
             offset = _resolve_read_offset(path, encoding=encoding, offset=args.offset)
             content, was_truncated = _read_content(
-                path,
-                encoding=encoding,
-                offset=offset,
-                limit=args.limit,
+                path, encoding=encoding, offset=offset, limit=args.limit
             )
             return ReadFileResult(
                 path=str(path),
@@ -183,9 +195,7 @@ def write_file(args: WriteFileArgs, path: Path) -> WriteFileResult:
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(path, args.content, "utf-8")
     return WriteFileResult(
-        path=str(path),
-        bytes_written=len(content_bytes),
-        file_existed=file_existed,
+        path=str(path), bytes_written=len(content_bytes), file_existed=file_existed
     )
 
 
@@ -195,7 +205,9 @@ def search_replace(
     handle, status = _open_file(path)
     with handle:
         if status.st_size > MAX_EDIT_FILE_SIZE_BYTES:
-            raise ValueError(f"File exceeds {MAX_EDIT_FILE_SIZE_BYTES} byte edit limit: {path}")
+            raise ValueError(
+                f"File exceeds {MAX_EDIT_FILE_SIZE_BYTES} byte edit limit: {path}"
+            )
         raw = handle.read()
     original, encoding = _decode_editable_text(raw, path)
     updated = original
@@ -218,7 +230,9 @@ def search_replace(
         old_lines = block.old_str.splitlines(keepends=True)
         new_lines = block.new_str.splitlines(keepends=True)
         line_delta = 0
-        for match_start in _find_matches(updated, block.old_str, limit=replacement_count):
+        for match_start in _find_matches(
+            updated, block.old_str, limit=replacement_count
+        ):
             old_start_line = updated[:match_start].count("\n") + 1
             previews.append(
                 SearchReplacePreviewBlock(
@@ -238,7 +252,9 @@ def search_replace(
         _atomic_write_text(path, updated, encoding)
 
     return (
-        SearchReplaceResult(file=str(path), lines_changed=lines_changed, warnings=warnings),
+        SearchReplaceResult(
+            file=str(path), lines_changed=lines_changed, warnings=warnings
+        ),
         SearchReplaceAnnotations(blocks=previews),
     )
 
@@ -342,12 +358,7 @@ def _open_file(path: Path) -> tuple[IO[bytes], os.stat_result]:
 def _open_text(path: Path, encoding: str) -> IO[str]:
     """Text counterpart of :func:`_open_bytes`."""
     return open(
-        path,
-        "r",
-        encoding=encoding,
-        errors="strict",
-        newline="",
-        opener=_no_follow_opener,
+        path, encoding=encoding, errors="strict", newline="", opener=_no_follow_opener
     )
 
 
@@ -355,21 +366,19 @@ def _resolve_read_offset(path: Path, *, encoding: str, offset: int) -> int:
     if offset >= 0:
         return offset
     if offset != -1:
-        raise ValueError("offset must be greater than or equal to 0, or -1 to read the last line")
+        raise ValueError(
+            "offset must be greater than or equal to 0, or -1 to read the last line"
+        )
 
     line_count = 0
     with _open_text(path, encoding) as handle:
-        for line_count, _line in enumerate(handle, start=1):
+        for line_count, _line in enumerate(handle, start=1):  # noqa: B007 - counting only
             pass
     return max(line_count - 1, 0)
 
 
 def _read_content(
-    path: Path,
-    *,
-    encoding: str,
-    offset: int,
-    limit: int | None,
+    path: Path, *, encoding: str, offset: int, limit: int | None
 ) -> tuple[str, bool]:
     parts: list[str] = []
     bytes_written = 0
@@ -393,7 +402,9 @@ def _read_content(
 
             remaining = MAX_READ_BYTES - bytes_written
             if remaining > 0:
-                parts.append(line.encode("utf-8")[:remaining].decode("utf-8", errors="ignore"))
+                parts.append(
+                    line.encode("utf-8")[:remaining].decode("utf-8", errors="ignore")
+                )
             return "".join(parts), True
 
     return "".join(parts), False
@@ -416,7 +427,10 @@ def _looks_binary(text: str, raw: bytes, encoding: str) -> bool:
         return True
     return any(
         character not in "\t\n\r\v\f\x1c\x1d\x1e\x85"
-        and (ord(character) < 32 or 127 <= ord(character) <= 159)
+        and (
+            ord(character) < _FIRST_PRINTABLE
+            or _DEL <= ord(character) <= _C1_CONTROL_END
+        )
         for character in text[:SNIFF_BYTES]
     )
 
@@ -471,7 +485,9 @@ def _succeeded(
     *,
     meta: dict[str, JsonValue] | None = None,
 ) -> RustToolSucceededEvent:
-    result: dict[str, JsonValue] = {"structured_content": cast(JsonValue, structured_content)}
+    result: dict[str, JsonValue] = {
+        "structured_content": cast(JsonValue, structured_content)
+    }
     if meta is not None:
         result["_meta"] = cast(JsonValue, meta)
     return RustToolSucceededEvent(
@@ -481,16 +497,15 @@ def _succeeded(
     )
 
 
-def _failed(action: RustRuntimeBuiltinToolCallAction, message: str) -> RustToolFailedEvent:
+def _failed(
+    action: RustRuntimeBuiltinToolCallAction, message: str
+) -> RustToolFailedEvent:
     return RustToolFailedEvent(
         action_id=action.action_id,
         call_id=action.call_id,
         result=RustToolFailureResult(
             error=RustProtocolError(
-                code="tool_failed",
-                message=message,
-                retryable=False,
-                details=None,
+                code="tool_failed", message=message, retryable=False, details=None
             )
         ),
     )

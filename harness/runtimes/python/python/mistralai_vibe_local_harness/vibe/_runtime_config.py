@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -141,7 +143,9 @@ class LocalProviderRoute:
     region: str = ""
 
 
-type CommandEnvironment = Literal["disabled", "unix", "git_bash", "powershell", "in_memory_bash"]
+type CommandEnvironment = Literal[
+    "disabled", "unix", "git_bash", "powershell", "in_memory_bash"
+]
 type ProcessAuthority = Literal["disabled", "host_shell"]
 
 
@@ -158,7 +162,9 @@ class LocalRuntimeAdapterConfig:
     # Replaces a frozen ``api_key``: a credential that can expire mid-session
     # cannot be a value resolved once at session open. The Host supplies a live
     # resolver; a standalone Harness or a test supplies a static token.
-    credentials: ProviderCredentialProvider = field(default_factory=StaticProviderCredentials)
+    credentials: ProviderCredentialProvider = field(
+        default_factory=StaticProviderCredentials
+    )
     # The active route's fields remain accepted for direct generic-adapter
     # callers. Runtime dispatch always selects an explicit route instead.
     model: str = "mistral-vibe-cli-latest"
@@ -209,7 +215,9 @@ class LocalRuntimeAdapterConfig:
     # "classify" routes the call through the smart-approve risk classifier at
     # dispatch time; unlike the frozen ask/allow/deny gates it can be flipped on
     # or off mid-session via apply_adapter_config, so switching modes works live.
-    tool_modes: dict[RustRuntimeBuiltinToolName, ToolApprovalMode] = field(default_factory=dict)
+    tool_modes: dict[RustRuntimeBuiltinToolName, ToolApprovalMode] = field(
+        default_factory=dict
+    )
     # Provided/MCP tools have no per-name entry in tool_modes, so a single mode gates
     # them all. Per-tool decisions come from ``permission_resolver`` instead, and a
     # Host can override the mode per group via ``configure_provided_tool_executor``.
@@ -225,9 +233,7 @@ class LocalRuntimeAdapterConfig:
 
     def __post_init__(self) -> None:
         direct_route = LocalModelRoute(
-            model=self.model,
-            temperature=self.temperature,
-            thinking=self.thinking,
+            model=self.model, temperature=self.temperature, thinking=self.thinking
         )
         active_model = self.active_model
         if (
@@ -249,7 +255,9 @@ class LocalRuntimeAdapterConfig:
         affinity_id = self.affinity_id() if self.affinity_id is not None else None
         if affinity_id:
             headers = {
-                name: value for name, value in headers.items() if name.lower() != "x-affinity"
+                name: value
+                for name, value in headers.items()
+                if name.lower() != "x-affinity"
             }
             headers["x-affinity"] = affinity_id
         return headers

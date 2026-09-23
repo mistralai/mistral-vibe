@@ -1,5 +1,7 @@
 //! Typed editor behavior for `/config` fields.
 
+mod input;
+
 use std::sync::Arc;
 
 use crate::server::Client;
@@ -15,57 +17,41 @@ pub const MAX_VISIBLE_CHOICES: usize = 14;
 pub struct ConfigEdit {
     pub field: ConfigField,
     pub draft: String,
-    pub choice: usize,
+    pub cursor: usize,
+    pub input_width: Option<u16>,
+    /// First visible row of the choice list or the text editor, once rendered.
+    pub scroll: Option<usize>,
     pub target: usize,
+    pub error: Option<String>,
+    pub choice_regions: Vec<(ratatui::layout::Rect, usize)>,
 }
 
-pub fn open(app: &mut App, mut field: ConfigField) {
-    apply_dynamic_choices(app, &mut field);
+pub fn open(app: &mut App, field: ConfigField) {
     let choices = choices(&field);
-    let draft = raw_text(&field.raw_value, &field.kind);
-    let choice = choices
-        .iter()
-        .position(|choice| choice == &draft)
-        .unwrap_or(0);
+    let mut draft = raw_text(&field.raw_value, &field.kind);
+    if !choices.is_empty() && !choices.contains(&draft) {
+        draft.clone_from(&choices[0]);
+    }
     app.config_screen.edit = Some(ConfigEdit {
-        field,
+        cursor: draft.len(),
+        input_width: None,
         draft,
-        choice,
-        target: 0,
+        scroll: None,
+        target: default_target(&field, &app.config_screen.targets),
+        field,
+        error: None,
+        choice_regions: Vec::new(),
     });
 }
 
-fn apply_dynamic_choices(app: &App, field: &mut ConfigField) {
-    if field.name == "active_model" {
-        field.kind = "enum".to_owned();
-        field.enum_choices = std::iter::once(String::new())
-            .chain(
-                app.model_picker
-                    .models
-                    .iter()
-                    .map(|model| model.alias.clone()),
-            )
-            .collect();
-        field.value_labels.insert(
-            String::new(),
-            format!(
-                "default (currently {})",
-                app.model_picker.default_display_name
-            ),
-        );
-        for model in &app.model_picker.models {
-            field
-                .value_labels
-                .insert(model.alias.clone(), model.display_name.clone());
-        }
-    }
-    if field.name == "theme" {
-        field.kind = "enum".to_owned();
-        field.enum_choices = crate::theme_picker::options()
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-    }
+/// Preselect the layer the value currently comes from, so saving rewrites it
+/// instead of shadowing it from another layer. Layers are highest priority first.
+fn default_target(field: &ConfigField, targets: &[String]) -> usize {
+    field
+        .layers
+        .iter()
+        .find_map(|(layer, _)| targets.iter().position(|target| target == layer))
+        .unwrap_or(0)
 }
 
 pub fn handle_key(
@@ -96,32 +82,29 @@ pub fn handle_key(
         return;
     };
     let choices = choices(&edit.field);
+    if choices.is_empty() && key.code != KeyCode::Tab {
+        input::handle_key(edit, key);
+        return;
+    }
     match key.code {
-        KeyCode::Enter if is_multiline(&edit.field) && choices.is_empty() => edit.draft.push('\n'),
         KeyCode::Tab if !app.config_screen.targets.is_empty() => {
             edit.target = (edit.target + 1) % app.config_screen.targets.len()
         }
         KeyCode::Up | KeyCode::Char('k') if !choices.is_empty() => {
-            edit.choice = edit.choice.saturating_sub(1)
+            let index = choice_index(edit, &choices).saturating_sub(1);
+            select_choice(edit, &choices, index);
         }
         KeyCode::Down | KeyCode::Char('j') if !choices.is_empty() => {
-            edit.choice = (edit.choice + 1).min(choices.len() - 1)
-        }
-        KeyCode::Backspace if choices.is_empty() => {
-            edit.draft.pop();
-        }
-        KeyCode::Char(c)
-            if choices.is_empty()
-                && !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
-            edit.draft.push(c)
+            let index = (choice_index(edit, &choices) + 1).min(choices.len() - 1);
+            select_choice(edit, &choices, index);
         }
         _ => {}
     }
-    if let Some(choice) = choices.get(edit.choice) {
-        edit.draft = choice.clone();
+}
+
+pub fn resized(app: &mut App) {
+    if let Some(edit) = app.config_screen.edit.as_mut() {
+        edit.input_width = None;
     }
 }
 
@@ -133,11 +116,14 @@ pub fn wheel(app: &mut App, delta: isize) {
     if choices.is_empty() {
         return;
     }
-    edit.choice = edit
-        .choice
+    if let Some(scroll) = edit.scroll.as_mut() {
+        *scroll = scroll.saturating_add_signed(delta);
+        return;
+    }
+    let index = choice_index(edit, &choices)
         .saturating_add_signed(delta)
         .min(choices.len() - 1);
-    edit.draft = choices[edit.choice].clone();
+    select_choice(edit, &choices, index);
 }
 
 pub fn click(app: &mut App, column: u16, row: u16) -> bool {
@@ -148,27 +134,15 @@ pub fn click(app: &mut App, column: u16, row: u16) -> bool {
     if choices.is_empty() {
         return false;
     }
-    let area = app.config_screen.area;
-    let width = area.width.saturating_sub(8).clamp(24, 80);
-    let height = (choices.len().min(MAX_VISIBLE_CHOICES) as u16 + 10).max(8);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let body_x = x + 3;
-    let main_width = if edit.field.layers.is_empty() {
-        width - 6
-    } else {
-        width.saturating_sub(43)
+    let Some(index) = edit
+        .choice_regions
+        .iter()
+        .find(|(rect, _)| rect.contains((column, row).into()))
+        .map(|(_, index)| *index)
+    else {
+        return false;
     };
-    let choice_y = y + 2 + u16::from(!edit.field.description.is_empty());
-    if column < body_x || column >= body_x + main_width || row < choice_y {
-        return false;
-    }
-    let index = choice_offset(edit.choice, choices.len()) + (row - choice_y) as usize;
-    if index >= choices.len() {
-        return false;
-    }
-    edit.choice = index;
-    edit.draft = choices[index].clone();
+    select_choice(edit, &choices, index);
     true
 }
 
@@ -177,7 +151,8 @@ pub fn paste(app: &mut App, text: String) {
         return;
     };
     if choices(&edit.field).is_empty() {
-        edit.draft.push_str(&text);
+        crate::utils::input_edit::insert(&mut edit.draft, &mut edit.cursor, &text);
+        edit.error = None;
     }
 }
 
@@ -189,10 +164,19 @@ pub fn choices(field: &ConfigField) -> Vec<String> {
     }
 }
 
-pub fn choice_offset(choice: usize, count: usize) -> usize {
-    choice
-        .saturating_sub(MAX_VISIBLE_CHOICES - 1)
-        .min(count.saturating_sub(MAX_VISIBLE_CHOICES))
+pub(crate) fn choice_index(edit: &ConfigEdit, choices: &[String]) -> usize {
+    choices
+        .iter()
+        .position(|choice| choice == &edit.draft)
+        .unwrap_or(0)
+}
+
+fn select_choice(edit: &mut ConfigEdit, choices: &[String], index: usize) {
+    if let Some(choice) = choices.get(index) {
+        edit.draft.clone_from(choice);
+        edit.cursor = edit.draft.len();
+        edit.scroll = None;
+    }
 }
 
 pub fn choice_label(field: &ConfigField, choice: &str) -> String {
@@ -208,7 +192,7 @@ pub fn is_multiline(field: &ConfigField) -> bool {
 }
 
 pub(crate) fn commit(app: &mut App, client: &Arc<Client>, tx: &mpsc::Sender<config::Loaded>) {
-    let Some(edit) = app.config_screen.edit.take() else {
+    let Some(mut edit) = app.config_screen.edit.take() else {
         return;
     };
     match parse_value(&edit.draft, &edit.field.kind) {
@@ -222,11 +206,7 @@ pub(crate) fn commit(app: &mut App, client: &Arc<Client>, tx: &mpsc::Sender<conf
             config::write(app, client, tx, edit.field, "set", value, target)
         }
         Err(text) => {
-            app.overlays.notice = Some(crate::app::Notice {
-                text,
-                severity: crate::app::ToastSeverity::Information,
-                until: Some(std::time::Instant::now() + std::time::Duration::from_secs(3)),
-            });
+            edit.error = Some(text);
             app.config_screen.edit = Some(edit);
         }
     }
@@ -240,7 +220,7 @@ fn raw_text(value: &Value, kind: &str) -> String {
             "False"
         }
         .to_owned(),
-        "complex" => serde_json::to_string(value).unwrap_or_default(),
+        "complex" => serde_json::to_string_pretty(value).unwrap_or_default(),
         "list" => value
             .as_array()
             .map(|items| {

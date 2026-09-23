@@ -6,6 +6,8 @@ and gets back verbatim. Every plugin format, adapter, and snapshot field lives
 in the host application.
 """
 
+from __future__ import annotations
+
 from mistralai_vibe_local_harness.vibe.plugins._session import (
     RELEASE_TIMEOUT_SECONDS,
     DeclaredAgentTypeProfile,

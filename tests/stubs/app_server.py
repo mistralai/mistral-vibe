@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from vibe.app_server._account import AccountGateway
 from vibe.app_server._identity import IdentityGateway
 from vibe.app_server._legacy_composition import create_legacy_app_server
 from vibe.app_server._legacy_session_backend import LegacySessionBackend
+from vibe.app_server._model import ProtocolModel
 from vibe.app_server._projector import EventProjector
 from vibe.app_server._runtime import AgentRuntimeFactory, RootOpenRequest
 from vibe.app_server.client import AppServerClient
@@ -14,6 +17,7 @@ from vibe.app_server.connector_catalog import ConnectorCatalogService
 from vibe.app_server.events import AppServerEvent, ClientProjection
 from vibe.app_server.models import (
     IdleSessionStatus,
+    PublicCallbackEntry,
     PublicHistoryEntry,
     PublicSession,
     PublicSessionState,
@@ -30,6 +34,56 @@ from vibe.app_server.transport import JsonRpcTransport, memory_transport_pair
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import BaseEvent, ToolCallEvent, ToolResultEvent
+
+
+class FakeSessionBackendServices:
+    """``SessionBackendServices`` that records notifications instead of sending
+    them, so a test can assert on what a backend pushed without a transport.
+    """
+
+    def __init__(self) -> None:
+        self.notifications: list[tuple[str, ProtocolModel]] = []
+
+    def client_info(self) -> ClientInfo:
+        return ClientInfo(name="test", version="1")
+
+    def client_capabilities(self) -> ClientCapabilities:
+        return ClientCapabilities()
+
+    def current_session_id(self) -> str:
+        return "root"
+
+    def event_watermark(self, session_id: str) -> int:
+        return 0
+
+    def account_gateway(self) -> AccountGateway | None:
+        return None
+
+    def identity_gateway(self) -> IdentityGateway | None:
+        return None
+
+    @asynccontextmanager
+    async def lifecycle_transition(self) -> AsyncIterator[None]:
+        yield
+
+    def task_finished(self, task: asyncio.Task[None]) -> None:
+        return None
+
+    async def notify(self, method: str, params: ProtocolModel) -> None:
+        self.notifications.append((method, params))
+
+    async def publish_callback(self, callback: PublicCallbackEntry) -> None:
+        return None
+
+    async def record_child_notification(
+        self, method: str, params: ProtocolModel
+    ) -> None:
+        return None
+
+    async def request_client_result[ResultT: ProtocolModel](
+        self, method: str, params: ProtocolModel, response_type: type[ResultT]
+    ) -> ResultT:
+        raise AssertionError("test services do not serve client requests")
 
 
 class CoreEventProjection:

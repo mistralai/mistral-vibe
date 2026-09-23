@@ -14,8 +14,10 @@ permission resolver owns that, with a tree-sitter parse and resolved paths this
 module cannot see.
 """
 
-import re
+from __future__ import annotations
+
 from collections.abc import Iterator
+import re
 
 from mistralai_vibe_local_harness.session_protocol import JsonObject
 
@@ -111,7 +113,9 @@ def protected_target(tool_name: str, args: JsonObject) -> str | None:
         command = args.get("command")
         if not isinstance(command, str):
             return None
-        if not any(_names_protected_path(token) for token in _ARGV_SPAN.findall(command)):
+        if not any(
+            _names_protected_path(token) for token in _ARGV_SPAN.findall(command)
+        ):
             return None
         return command
     if tool_name not in _WRITE_TOOLS:

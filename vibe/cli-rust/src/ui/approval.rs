@@ -2,7 +2,7 @@
 
 mod detail;
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -31,18 +31,13 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         max_height.saturating_sub(2),
     );
     let box_height = (rows.lines.len() as u16 + 2).min(max_height);
-    let chunks = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(loading_height),
-        Constraint::Length(box_height),
-        Constraint::Length(1),
-    ])
-    .split(area);
+    let chunks = super::bottom_app_chunks(app, area, loading_height, box_height);
 
     transcript::draw(app, f, chunks[0]);
     loading::draw(app, f, chunks[1]);
     crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Approval);
     draw_box(app, f, chunks[2], rows);
+    super::todo::draw_row(app, f, chunks[4]);
     bottom_bar::draw(app, f, chunks[3]);
 }
 

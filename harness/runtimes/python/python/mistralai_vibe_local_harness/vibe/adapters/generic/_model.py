@@ -5,8 +5,10 @@ accumulation, so reducing a stream of chunks with ``+`` yields the final
 assistant message.
 """
 
-import copy
+from __future__ import annotations
+
 from collections import OrderedDict
+import copy
 from enum import StrEnum, auto
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -98,7 +100,7 @@ class LLMMessage(BaseModel):
     name: str | None = None
     tool_call_id: str | None = None
 
-    def __add__(self, other: "LLMMessage") -> "LLMMessage":
+    def __add__(self, other: LLMMessage) -> LLMMessage:
         """Accumulate a streamed chunk. Careful: this is not commutative!"""
         if self.role != other.role:
             raise ValueError("Can't accumulate messages with different roles")
@@ -111,7 +113,9 @@ class LLMMessage(BaseModel):
         if not content:
             content = None
 
-        reasoning_content = (self.reasoning_content or "") + (other.reasoning_content or "")
+        reasoning_content = (self.reasoning_content or "") + (
+            other.reasoning_content or ""
+        )
         if not reasoning_content:
             reasoning_content = None
 
@@ -131,7 +135,9 @@ class LLMMessage(BaseModel):
                     existing_name = tool_calls_map[tc.index].function.name
                     new_name = tc.function.name
                     if existing_name and new_name and existing_name != new_name:
-                        raise ValueError("Can't accumulate messages with different tool call names")
+                        raise ValueError(
+                            "Can't accumulate messages with different tool call names"
+                        )
                     if new_name and not existing_name:
                         tool_calls_map[tc.index].function.name = new_name
                     new_args = (tool_calls_map[tc.index].function.arguments or "") + (
@@ -159,7 +165,7 @@ class LLMUsage(BaseModel):
     # Prompt tokens served from the provider cache; a subset of prompt_tokens.
     cached_tokens: int = 0
 
-    def __add__(self, other: "LLMUsage") -> "LLMUsage":
+    def __add__(self, other: LLMUsage) -> LLMUsage:
         return LLMUsage(
             prompt_tokens=self.prompt_tokens + other.prompt_tokens,
             completion_tokens=self.completion_tokens + other.completion_tokens,
@@ -182,7 +188,7 @@ class LLMChunk(BaseModel):
     usage: LLMUsage | None = None
     stop: StopInfo | None = None
 
-    def __add__(self, other: "LLMChunk") -> "LLMChunk":
+    def __add__(self, other: LLMChunk) -> LLMChunk:
         if self.usage is None and other.usage is None:
             new_usage = None
         else:

@@ -11,9 +11,9 @@ pub mod retry_continuation;
 pub mod retry_prompt;
 pub mod shell;
 pub mod simple;
-pub mod skill;
 pub mod stress;
 pub mod submission;
+pub(crate) mod usage;
 
 pub use commands::{builtin, entries, is_side_channel, parse};
 pub use event::CommandEvent;

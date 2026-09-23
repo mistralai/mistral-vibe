@@ -133,6 +133,8 @@ fn direct_skill_route_preserves_prompt_catalog_and_restore() {
     // Assert
     assert!(messages.contains("## Available Skills"));
     assert!(messages.contains("Call `skill` only with a name listed in `<available-skills>`"));
+    assert!(messages.contains("instructions are already present in the current context"));
+    assert!(messages.contains("without calling `skill` again"));
     assert!(messages.contains("Connector names and unlisted names"));
     assert!(messages.contains("Review &lt;code&gt; safely."));
     assert!(messages.contains("/skills/zeta&lt;&amp;/SKILL.md"));

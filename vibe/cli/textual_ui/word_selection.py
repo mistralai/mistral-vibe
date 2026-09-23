@@ -7,10 +7,9 @@ from textual import errors, events
 from textual._context import NoActiveAppError
 from textual.geometry import Offset
 from textual.screen import Screen
-from textual.selection import Selection, SelectState
+from textual.selection import SelectEnd, Selection, SelectState
 from textual.widget import Widget
 
-from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
 from vibe.cli.textual_ui.widgets.collapsible import ClickWithoutDragMixin
 
 _WORD = re.compile(r"\w+")
@@ -39,8 +38,8 @@ class _DragDirection(StrEnum):
         )
 
 
-class WordSelectScreen(Screen[None]):
-    """Default screen that owns multi-click text selection.
+class SelectableScreen(Screen[None]):
+    """Generic screen that owns multi-click text selection.
 
     Selection is driven entirely from ``MouseDown``: a double-click selects
     the word under the cursor, a triple-click selects the paragraph, and
@@ -63,16 +62,6 @@ class WordSelectScreen(Screen[None]):
     _dragged: bool = False
     _pending_reapply: bool = False
     _last_drag_selection: dict[Widget, Selection] | None = None
-
-    async def _on_paste(self, event: events.Paste) -> None:
-        # Drag-and-drop sends AppBlur → Paste → AppFocus; the Paste arrives
-        # with no focused widget, so Textual routes it to the screen. Forward
-        # it to the chat input instead of losing it.
-        container = self.app.query_one(ChatInputContainer)
-        input_widget = container.input_widget
-        if input_widget is not None and not container.disabled:
-            input_widget.post_message(event)
-            event.stop()
 
     def get_widget_and_offset_at(
         self, x: int, y: int
@@ -267,11 +256,38 @@ class WordSelectScreen(Screen[None]):
                 else SelectGranularity.PARAGRAPH
             )
             self._apply_selection(granularity, widget, offset)
-        if self._expanding:
-            return
         if not isinstance(event, events.MouseMove):
             return
-        if not self._selecting:
+        self._snap_active_drag_selection()
+
+    def _update_select(self) -> None:
+        select_state = self._select_state
+        if select_state is not None:
+            widget, offset = self.get_widget_and_offset_at(*select_state.screen_offset)
+            select_end = self._select_end_at(widget, offset)
+            if select_end is not None:
+                self._select_state = select_state.update_end(
+                    select_state.screen_offset, select_end
+                )
+        super()._update_select()
+        self._snap_active_drag_selection()
+
+    @staticmethod
+    def _select_end_at(
+        widget: Widget | None, offset: Offset | None
+    ) -> SelectEnd | None:
+        if widget is None:
+            return None
+        if offset is None:
+            return SelectEnd(widget, None, None)
+        if isinstance(widget, Screen):
+            return SelectEnd(widget, widget, offset)
+        if isinstance(widget.parent, Widget):
+            return SelectEnd(widget.parent, widget, offset)
+        return None
+
+    def _snap_active_drag_selection(self) -> None:
+        if self._expanding or not self._selecting:
             return
         if self._drag_granularity not in {
             SelectGranularity.WORD,
@@ -412,19 +428,38 @@ class WordSelectScreen(Screen[None]):
     def _selection_around(
         widget: Widget, offset: Offset, granularity: SelectGranularity
     ) -> Selection | None:
-        boundary = WordSelectScreen._boundary_around(widget, offset, granularity)
+        boundary = SelectableScreen._boundary_around(widget, offset, granularity)
         return None if boundary is None else Selection.from_offsets(*boundary)
 
     @staticmethod
     def _boundary_start(
         widget: Widget, offset: Offset, granularity: SelectGranularity
     ) -> Offset:
-        boundary = WordSelectScreen._boundary_around(widget, offset, granularity)
+        boundary = SelectableScreen._boundary_around(widget, offset, granularity)
         return offset if boundary is None else boundary[0]
 
     @staticmethod
     def _boundary_end(
         widget: Widget, offset: Offset, granularity: SelectGranularity
     ) -> Offset:
-        boundary = WordSelectScreen._boundary_around(widget, offset, granularity)
+        boundary = SelectableScreen._boundary_around(widget, offset, granularity)
         return offset if boundary is None else boundary[1]
+
+
+class WordSelectScreen(SelectableScreen):
+    """Chat screen with multi-click selection and paste forwarding."""
+
+    async def _on_paste(self, event: events.Paste) -> None:
+        # Drag-and-drop sends AppBlur → Paste → AppFocus; the Paste arrives
+        # with no focused widget, so Textual routes it to the screen. Forward
+        # it to the chat input instead of losing it.
+        from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
+
+        containers = self.app.query(ChatInputContainer)
+        if not containers:
+            return
+        container = containers.first()
+        input_widget = container.input_widget
+        if input_widget is not None and not container.disabled:
+            input_widget.post_message(event)
+            event.stop()

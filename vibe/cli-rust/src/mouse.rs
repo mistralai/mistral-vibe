@@ -35,10 +35,12 @@ pub enum MouseTarget {
     Completion,
     Approval,
     Question,
+    Loading,
     ThemePicker,
     ModelPicker,
     LogLevelPicker,
     ResumePicker,
+    RemoteProject,
     Rewind,
     Mcp,
     McpOAuth,
@@ -47,6 +49,8 @@ pub enum MouseTarget {
     ConfigEditor,
     Trust,
     BottomBar,
+    TodoRow,
+    TodoSidebar,
 }
 
 /// Render-time hit-test metadata for one screen region.
@@ -98,6 +102,10 @@ pub fn target_at(app: &App, at: (u16, u16)) -> Option<MouseTarget> {
         .map(|region| region.target)
 }
 
+pub(crate) fn scrollbar_at(app: &App, at: (u16, u16)) -> bool {
+    scrollbar::contains_track(app, at)
+}
+
 /// Route every terminal mouse event through the latest painted region map.
 pub(crate) fn handle(
     app: &mut App,
@@ -122,8 +130,10 @@ pub fn route(app: &mut App, event: MouseEvent) -> Option<MouseTarget> {
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             cancel_capture(app);
-            if scrollbar::begin(app, at) {
-                app.view.mouse.capture = Some(Capture::Scrollbar);
+            if scrollbar::contains_track(app, at) {
+                if scrollbar::begin(app, at) {
+                    app.view.mouse.capture = Some(Capture::Scrollbar);
+                }
                 return None;
             }
             let target = target_at(app, at)?;
@@ -170,33 +180,51 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         MouseTarget::LogLevelPicker => log_level_picker::navigate(app, !up),
         MouseTarget::ResumePicker => resume_picker::wheel(app, !up),
         MouseTarget::Mcp => mcp::wheel(app, !up),
+        MouseTarget::RemoteProject => crate::vibe_code_project::input::wheel(app, up),
         MouseTarget::Config => config::wheel(app, if up { -2 } else { 2 }),
         MouseTarget::ConfigEditor => crate::config_edit::wheel(app, if up { -1 } else { 1 }),
         MouseTarget::Trust => crate::trust_folders::wheel(app, up),
+        MouseTarget::TodoSidebar => {
+            let scroll = &mut app.todo_sidebar.scroll;
+            *scroll = if up {
+                scroll.saturating_sub(MOUSE_SCROLL_STEP as usize)
+            } else {
+                scroll.saturating_add(MOUSE_SCROLL_STEP as usize)
+            };
+        }
         MouseTarget::Approval => approval::handle_mouse(app, event),
         MouseTarget::Question => crate::question_input::wheel(app, up),
         MouseTarget::Blocked
+        | MouseTarget::Loading
         | MouseTarget::Toast
         | MouseTarget::Rewind
         | MouseTarget::McpOAuth
         | MouseTarget::ConnectorAuth
-        | MouseTarget::BottomBar => {}
+        | MouseTarget::BottomBar
+        | MouseTarget::TodoRow => {}
     }
     true
 }
 
 pub(crate) fn cancel_capture(app: &mut App) {
-    if matches!(
-        app.view.mouse.capture.take(),
-        Some(Capture::Target(
+    if let Some(Capture::Target(target)) = app.view.mouse.capture.take() {
+        if target == MouseTarget::RemoteProject {
+            app.vibe_code_project.pressed = None;
+            app.vibe_code_project.dragged_field = None;
+        }
+        if matches!(
+            target,
             MouseTarget::Transcript
                 | MouseTarget::Toast
                 | MouseTarget::Composer
                 | MouseTarget::Trust
+                | MouseTarget::RemoteProject
                 | MouseTarget::BottomBar
-        ))
-    ) {
-        selection::cancel_drag(app);
+                | MouseTarget::Loading
+                | MouseTarget::Question
+        ) {
+            selection::cancel_drag(app);
+        }
     }
     scrollbar::cancel(app);
 }

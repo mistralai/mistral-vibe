@@ -1,8 +1,10 @@
 """Host-owned, secret-free child configuration materialization."""
 
-import logging
+from __future__ import annotations
+
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+import logging
 from pathlib import Path
 from typing import Literal, cast
 
@@ -13,14 +15,16 @@ from mistralai_vibe_local_harness.protocol import (
     RustHarnessCapabilitySet,
     RustHarnessConfig,
 )
-from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
-from mistralai_vibe_local_harness.vibe._storage import sha256_json
 from mistralai_vibe_local_harness.vibe._connector_models import (
     ResolvedConnectorCatalog,
     ResolvedConnectorSelection,
 )
 from mistralai_vibe_local_harness.vibe._mcp_models import ResolvedMCPCatalog
-from mistralai_vibe_local_harness.vibe._subagents._host import ResolvedChildSessionBinding
+from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
+from mistralai_vibe_local_harness.vibe._storage import sha256_json
+from mistralai_vibe_local_harness.vibe._subagents._host import (
+    ResolvedChildSessionBinding,
+)
 from mistralai_vibe_local_harness.vibe._subagents._models import (
     MAX_DECLARED_AGENT_TYPES,
     DeclaredAgentTypeProfile,
@@ -68,17 +72,22 @@ def resolve_subagent_configuration(
     connector_gateway_authority_digest: str | None = None,
 ) -> ResolvedSubagentConfiguration:
     """Resolve the generic subagent profile beneath one parent ceiling."""
-
     integration_authority = _integration_authority(
         mcp_catalog=mcp_catalog,
         connector_catalog=connector_catalog,
         connector_selection=connector_selection,
         connector_gateway_authority_digest=connector_gateway_authority_digest,
     )
-    policy = _policy_ceiling(config, adapter, integration_authority=integration_authority)
+    policy = _policy_ceiling(
+        config, adapter, integration_authority=integration_authority
+    )
     policy_digest = _policy_ceiling_digest(policy)
-    generic_config = _child_core_config(config, system_instructions=config.system_instructions)
-    generic_adapter = replace(adapter, env=dict(adapter.env), tool_modes=dict(adapter.tool_modes))
+    generic_config = _child_core_config(
+        config, system_instructions=config.system_instructions
+    )
+    generic_adapter = replace(
+        adapter, env=dict(adapter.env), tool_modes=dict(adapter.tool_modes)
+    )
     generic = LocalChildSessionBinding(
         template_digest=_binding_digest(
             generic_config,
@@ -93,11 +102,15 @@ def resolve_subagent_configuration(
     )
 
     bindings: dict[str | None, LocalChildSessionBinding] = {None: generic}
-    root = advertise_bound_agent_types(config, bindings)
+    # Advertisements are left alone here. This resolve knows one binding, the
+    # generic child, and every named binding arrives later with a Session's
+    # declared profiles, so filtering against this table could only ever delete
+    # names that are about to be bound. The two places that build a Session's
+    # configuration hold the complete table and filter there
+    # (``_runtime_config`` and the promotion path), which is where a name with
+    # no binding actually has to disappear.
     return ResolvedSubagentConfiguration(
-        root_config=root,
-        policy_ceiling=policy,
-        bindings=bindings,
+        root_config=config, policy_ceiling=policy, bindings=bindings
     )
 
 
@@ -129,10 +142,7 @@ def resolve_declared_agent_types(
             )
             continue
         bindings[profile.agent_type] = _declared_binding(
-            configuration.root_config,
-            adapter,
-            profile,
-            policy_digest=policy_digest,
+            configuration.root_config, adapter, profile, policy_digest=policy_digest
         )
     return ResolvedSubagentConfiguration(
         root_config=configuration.root_config,
@@ -151,7 +161,9 @@ def _declared_binding(
     child_config = _child_core_config(
         config,
         system_instructions=(
-            profile.instructions if profile.instructions is not None else config.system_instructions
+            profile.instructions
+            if profile.instructions is not None
+            else config.system_instructions
         ),
     )
     child_config = child_config.model_copy(
@@ -193,8 +205,7 @@ def _narrow(
 
 
 def advertise_bound_agent_types(
-    config: RustHarnessConfig,
-    bindings: dict[str | None, LocalChildSessionBinding],
+    config: RustHarnessConfig, bindings: dict[str | None, LocalChildSessionBinding]
 ) -> RustHarnessConfig:
     """Retain only agent types backed by an executable child-session binding."""
     bound_names = {name for name in bindings if name is not None}
@@ -239,7 +250,9 @@ def child_config(
     )
 
 
-def _child_core_config(config: RustHarnessConfig, *, system_instructions: str) -> RustHarnessConfig:
+def _child_core_config(
+    config: RustHarnessConfig, *, system_instructions: str
+) -> RustHarnessConfig:
     tools = config.settings.tools.model_copy(
         update={"subagents": RustDisabledRuntimeToolFeature()}, deep=True
     )
@@ -262,7 +275,8 @@ def _policy_ceiling(
     integration_authority: dict[str, JsonValue] | None,
 ) -> ResolvedSubagentPolicyCeiling:
     roots = sorted(
-        str(path.expanduser().resolve()) for path in (adapter.workspace_roots or (adapter.cwd,))
+        str(path.expanduser().resolve())
+        for path in (adapter.workspace_roots or (adapter.cwd,))
     )
     tool_grants = {
         name: ResolvedToolGrant(
@@ -310,7 +324,9 @@ def _policy_ceiling(
             matcher_digest=_digest(
                 cast(
                     JsonValue,
-                    hook.selector.model_dump(mode="json", by_alias=True, exclude_none=True),
+                    hook.selector.model_dump(
+                        mode="json", by_alias=True, exclude_none=True
+                    ),
                 )
             ),
             mandatory=True,
@@ -345,12 +361,14 @@ def _policy_ceiling(
         ),
         allowed_connector_authentication=(
             ["interactive"]
-            if integration_authority is not None and integration_authority["allowed_connector_ids"]
+            if integration_authority is not None
+            and integration_authority["allowed_connector_ids"]
             else []
         ),
         allowed_connector_execution_identities=(
             ["auto"]
-            if integration_authority is not None and integration_authority["allowed_connector_ids"]
+            if integration_authority is not None
+            and integration_authority["allowed_connector_ids"]
             else []
         ),
         hook_grants=hook_grants,
@@ -367,7 +385,9 @@ def _policy_ceiling(
 def _policy_ceiling_digest(policy: ResolvedSubagentPolicyCeiling) -> str:
     # Exclude ambient env var names: the launcher reshuffles them each start and
     # the ceiling never enforces them, so they are launcher noise, not drift.
-    return _digest(policy.model_dump(mode="json", exclude={"allowed_environment_names"}))
+    return _digest(
+        policy.model_dump(mode="json", exclude={"allowed_environment_names"})
+    )
 
 
 def _binding_digest(
@@ -396,13 +416,15 @@ def _binding_digest(
                     "retry_max_elapsed_time_s": adapter.retry_max_elapsed_time_s,
                     "cwd": str(adapter.cwd.expanduser().resolve()),
                     "workspace_roots": sorted(
-                        str(path.expanduser().resolve()) for path in adapter.workspace_roots
+                        str(path.expanduser().resolve())
+                        for path in adapter.workspace_roots
                     ),
                     # Ambient env var names omitted; see _policy_ceiling_digest.
                     "bypass_approval": adapter.bypass_approval,
                     "tool_modes": dict(sorted(adapter.tool_modes.items())),
                     "skill_digests": {
-                        name: _digest(content) for name, content in sorted(adapter.skills.items())
+                        name: _digest(content)
+                        for name, content in sorted(adapter.skills.items())
                     },
                 },
                 "integration_authority": integration_authority,
@@ -420,7 +442,8 @@ def _integration_authority(
 ) -> dict[str, JsonValue] | None:
     mcp = []
     for server in sorted(
-        mcp_catalog.servers if mcp_catalog is not None else (), key=lambda item: item.name
+        mcp_catalog.servers if mcp_catalog is not None else (),
+        key=lambda item: item.name,
     ):
         authority = cast(
             JsonValue,
@@ -429,14 +452,18 @@ def _integration_authority(
                 "url": server.url,
                 "command": server.command,
                 "args": list(server.args),
-                "cwd": str(server.cwd.expanduser().resolve()) if server.cwd is not None else None,
+                "cwd": str(server.cwd.expanduser().resolve())
+                if server.cwd is not None
+                else None,
                 "environment_names": sorted(server.env),
                 "authorization": {
                     "server_fingerprint": server.authorization.server_fingerprint,
                     "kind": server.authorization.kind,
                     "descriptor_revision": server.authorization.descriptor_revision,
                 },
-                "prompt_digest": _digest(server.prompt) if server.prompt is not None else None,
+                "prompt_digest": _digest(server.prompt)
+                if server.prompt is not None
+                else None,
                 "startup_timeout_s": server.startup_timeout_s,
                 "tool_timeout_s": server.tool_timeout_s,
                 "sampling_enabled": server.sampling_enabled,
@@ -444,13 +471,11 @@ def _integration_authority(
                 "disabled_tools": sorted(server.disabled_tools),
             },
         )
-        mcp.append(
-            {
-                "name": server.name,
-                "authority_digest": _digest(authority),
-                "allowed_tool_names": [],
-            }
-        )
+        mcp.append({
+            "name": server.name,
+            "authority_digest": _digest(authority),
+            "allowed_tool_names": [],
+        })
 
     connector_policy_digest: str | None = None
     allowed_connector_ids: list[str] = []
@@ -460,7 +485,9 @@ def _integration_authority(
             or connector_selection is None
             or connector_gateway_authority_digest is None
         ):
-            raise ValueError("connector authority is not comparable for subagent policy resolution")
+            raise ValueError(
+                "connector authority is not comparable for subagent policy resolution"
+            )
         settings = {item.alias: item for item in connector_selection.connector_settings}
         if connector_selection.enable_connectors:
             allowed_connector_ids = sorted(
@@ -468,7 +495,8 @@ def _integration_authority(
                 for connector in connector_catalog.connectors
                 if connector.ready
                 and not (
-                    (setting := settings.get(connector.alias)) is not None and setting.disabled
+                    (setting := settings.get(connector.alias)) is not None
+                    and setting.disabled
                 )
             )
         connector_policy_digest = _digest(
@@ -538,7 +566,7 @@ def _permission(
         return "always"
     # `classify` (smart approve) is a gated mode, not a free grant: it caps the
     # subagent's ceiling at ``ask`` like a plain ``ask``.
-    if mode in ("ask", "classify"):
+    if mode in {"ask", "classify"}:
         return "ask"
     return "never"
 

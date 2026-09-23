@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from vibe.acp.utils import build_mode_state, build_permission_options
+from vibe.acp.utils import ToolOption, build_mode_state, build_permission_options
 from vibe.agents import AgentSafety, AgentType
 from vibe.app_server.models import AgentSummary
-from vibe.permissions import PermissionScope, RequiredPermission
+from vibe.permissions import PathGrantScope, PermissionScope, RequiredPermission
 
 
 def test_build_permission_options_serializes_scopes_with_snake_case_keys() -> None:
@@ -31,6 +31,65 @@ def test_build_permission_options_serializes_scopes_with_snake_case_keys() -> No
     for option in session_options:
         assert option.field_meta is not None
         assert option.field_meta["required_permissions"] == expected_meta
+
+
+def test_build_permission_options_exposes_exact_file_scope() -> None:
+    required = [
+        RequiredPermission(
+            scope=PermissionScope.OUTSIDE_DIRECTORY,
+            invocation_pattern="/outside/config.json",
+            session_pattern="vibe-path:exact:/outside/config.json",
+            label="outside workdir (/outside/config.json)",
+        )
+    ]
+
+    options = build_permission_options(required, [PathGrantScope.EXACT])
+
+    assert [option.option_id for option in options] == [
+        ToolOption.ALLOW_ONCE,
+        ToolOption.ALLOW_SESSION_EXACT,
+        ToolOption.ALLOW_PERMANENT_EXACT,
+        ToolOption.REJECT_ONCE,
+    ]
+    assert [option.name for option in options] == [
+        "Allow once",
+        "Allow this file only for this session",
+        "Always allow this file",
+        "Deny",
+    ]
+
+
+def test_build_permission_options_exposes_recursive_folder_scope() -> None:
+    options = build_permission_options([], [PathGrantScope.DIRECTORY_RECURSIVE])
+
+    assert [option.name for option in options] == [
+        "Allow once",
+        "Allow this folder for this session",
+        "Always allow this folder",
+        "Deny",
+    ]
+
+
+def test_build_permission_options_names_every_recursive_folder() -> None:
+    required = [
+        RequiredPermission(
+            scope=PermissionScope.OUTSIDE_DIRECTORY,
+            invocation_pattern=path,
+            session_pattern=f"vibe-path:exact:{path}",
+            label=f"outside workdir ({path})",
+            path_scope_root=path,
+        )
+        for path in ("/etc", "/var/log")
+    ]
+
+    options = build_permission_options(required, [PathGrantScope.DIRECTORY_RECURSIVE])
+
+    assert [option.name for option in options] == [
+        "Allow once",
+        "Allow these folders for this session",
+        "Always allow these folders",
+        "Deny",
+    ]
 
 
 def _agent(

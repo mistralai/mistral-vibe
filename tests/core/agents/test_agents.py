@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from tests.conftest import ConfigBuilder, OrchestratorLoader
 from vibe.core.agents.manager import AgentManager
-from vibe.core.agents.models import BUILTIN_AGENTS, EXPLORE, AgentSafety, AgentType
+from vibe.core.agents.models import (
+    BUILTIN_AGENTS,
+    EXPLORE,
+    AgentProfile,
+    AgentSafety,
+    AgentType,
+)
 from vibe.core.config import VibeConfigSchema
 
 
@@ -23,6 +31,18 @@ class TestAgentProfile:
         assert "grep" in enabled_tools
         assert "read_file" in enabled_tools
         assert "skill" in enabled_tools
+
+    def test_a_profile_remembers_the_file_it_was_parsed_from(
+        self, tmp_path: Path
+    ) -> None:
+        """The Unified Harness advertises a subagent with the path behind it."""
+        path = tmp_path / "reviewer.toml"
+        path.write_text('description = "Reviews"\n', encoding="utf-8")
+
+        assert AgentProfile.from_toml(path).source_path == path
+
+    def test_a_builtin_profile_has_no_source_file(self) -> None:
+        assert EXPLORE.source_path is None
 
     def test_builtin_agents_contains_explore(self) -> None:
         """Test that BUILTIN_AGENTS includes explore."""

@@ -113,14 +113,26 @@ pub(super) fn handle_input_event(
         Some(Event::Paste(text)) => {
             if app.trust.open {
                 // Nothing to paste into before the session exists.
+            } else if app.approval.open {
+                // The approval app takes no text input; the paste is dropped.
+            } else if app.question_app.open {
+                crate::question_input::handle_paste(app, text);
             } else if app.config_screen.open {
                 config::handle_paste(app, text);
+            } else if app.vibe_code_project.open {
+                crate::vibe_code_project::input::paste(app, &text);
+            } else if app.mcp.open {
+                crate::mcp::search::paste(app, &text);
+                crate::mcp::search_usage::record(app, client);
             } else {
                 input::handle_paste(app, text);
             }
             InputOutcome::Activity { reset_blink: false }
         }
-        Some(Event::Resize(_, _)) => InputOutcome::Activity { reset_blink: false },
+        Some(Event::Resize(_, _)) => {
+            crate::config_edit::resized(app);
+            InputOutcome::Activity { reset_blink: false }
+        }
         Some(Event::FocusGained) => {
             app.terminal_notifier.set_focus(true);
             app.set_app_focus(true);
@@ -146,6 +158,9 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
     }
     let id = format!("rs-command-{}", app.view.transcript.revision());
     match command {
+        CommandEvent::RemoteProject(event) => {
+            crate::vibe_code_project::apply_event(app, client, *event)
+        }
         CommandEvent::Result(text) => {
             local::add_command_result(&mut app.view.transcript, &id, &text)
         }
@@ -245,12 +260,9 @@ pub(super) fn draw_synchronized(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
 ) -> Result<()> {
-    use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+    use crossterm::SynchronizedUpdate;
 
-    let _ = crossterm::execute!(std::io::stdout(), BeginSynchronizedUpdate);
-    let result = terminal.draw(|renderer| app.draw(renderer));
-    let _ = crossterm::execute!(std::io::stdout(), EndSynchronizedUpdate);
-    result?;
+    std::io::stdout().sync_update(|_| terminal.draw(|renderer| app.draw(renderer)))??;
     crate::pointer::sync(app);
     crate::terminal_notifier::flush(&mut app.terminal_notifier);
     Ok(())
@@ -274,6 +286,11 @@ fn dispatch_key(
         false
     } else if app.config_screen.open {
         config::handle_key(app, client, config_tx, key);
+        false
+    } else if app.vibe_code_project.open
+        || (app.vibe_code_project.pending && key.code == crossterm::event::KeyCode::Esc)
+    {
+        crate::vibe_code_project::input::handle_key(app, client, key);
         false
     } else if app.resume_picker.open {
         crate::resume_picker::handle_key(app, client, key);

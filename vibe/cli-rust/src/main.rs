@@ -15,7 +15,6 @@ use vibe_rs::event_loop::{
 };
 use vibe_rs::headless;
 use vibe_rs::headless_prompt;
-use vibe_rs::input_thread::InputThread;
 use vibe_rs::message_queue::QueueEvent;
 use vibe_rs::observability::logging;
 use vibe_rs::paste_image::CHANNEL_CAP as PASTE_IMAGE_CHANNEL_CAP;
@@ -58,6 +57,10 @@ async fn run() -> Result<std::process::ExitCode> {
     timings.record("cli_parsed");
     logging::init_file_logging(logging::log_file().as_deref());
     observability::sentry::install_panic_hook();
+
+    if let Some(vibe_rs::cli::CliCommand::Mcp { command }) = &cli.command {
+        return Ok(vibe_rs::mcp_command::run(command, launch).await);
+    }
 
     // Python reads piped stdin once, before choosing interactive vs headless, so
     // `echo hi | vibe` feeds the TUI initial prompt while /dev/tty (which
@@ -109,7 +112,7 @@ async fn run() -> Result<std::process::ExitCode> {
     ui::theme::prepare_active(&startup_config.theme, resolved_auto);
     // Install before the TUI owns the terminal, so a failure exits cleanly.
     let shutdown = vibe_rs::server::signal::install().context("install signal handlers")?;
-    let (mut terminal, terminal_guard) = terminal::init();
+    let (mut terminal, terminal_guard) = terminal::init()?;
     timings.record("terminal_ready");
 
     let (files, file_changes) = utils::file_index::FileIndex::start(cwd.clone());
@@ -241,7 +244,7 @@ async fn run() -> Result<std::process::ExitCode> {
         client,
         config_tx,
         sources,
-        input: InputThread::spawn(),
+        input: vibe_rs::terminal_events::spawn(),
         crash_rx,
         shutdown,
     }

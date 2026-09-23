@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Annotated, Any, Literal, Self, assert_never
 
 from pydantic import (
@@ -24,11 +26,7 @@ type RustHookPoint = Literal[
     "post_tool_call",
 ]
 
-_RESERVED_DIRECT_TOOL_NAMES = {
-    "search_tool_functions",
-    "run_typescript",
-    "skill",
-}
+_RESERVED_DIRECT_TOOL_NAMES = {"search_tool_functions", "run_typescript", "skill"}
 
 RustRuntimeBuiltinToolName = Literal[
     "self.sleep",
@@ -177,8 +175,7 @@ class RustToolKeysHookSelector(RustProtocolModel):
 
 
 type RustHarnessHookSelector = Annotated[
-    RustAlwaysHookSelector | RustToolKeysHookSelector,
-    Field(discriminator="type"),
+    RustAlwaysHookSelector | RustToolKeysHookSelector, Field(discriminator="type")
 ]
 
 
@@ -201,7 +198,9 @@ class RustPluginContextDefinition(RustProtocolModel):
     name: str
     description: str
     path: str
-    capabilities: RustHarnessCapabilitySet = Field(default_factory=RustHarnessCapabilitySet)
+    capabilities: RustHarnessCapabilitySet = Field(
+        default_factory=RustHarnessCapabilitySet
+    )
 
 
 class RustDisabledRuntimeToolFeature(RustProtocolModel):
@@ -225,12 +224,10 @@ class RustDisabledLargeOutputPolicy(RustProtocolModel):
 class RustFilesystemLargeOutputPolicy(RustProtocolModel):
     mode: Literal["filesystem"] = "filesystem"
     max_output_tokens: Annotated[int, Field(gt=0)] | SkipJsonSchema[None] = Field(
-        default_factory=lambda: None,
-        exclude_if=lambda value: value is None,
+        default_factory=lambda: None, exclude_if=lambda value: value is None
     )
-    model_visible_output_tokens: Annotated[int, Field(gt=0)] | SkipJsonSchema[None] = Field(
-        default_factory=lambda: None,
-        exclude_if=lambda value: value is None,
+    model_visible_output_tokens: Annotated[int, Field(gt=0)] | SkipJsonSchema[None] = (
+        Field(default_factory=lambda: None, exclude_if=lambda value: value is None)
     )
 
     @field_validator("max_output_tokens", "model_visible_output_tokens", mode="before")
@@ -315,7 +312,9 @@ class RustTurnSettings(RustProtocolModel):
 
 class RustContextSettings(RustProtocolModel):
     compaction: RustCompactionPolicy
-    image_delivery: RustImageDeliverySettings = Field(default_factory=RustImageDeliverySettings)
+    image_delivery: RustImageDeliverySettings = Field(
+        default_factory=RustImageDeliverySettings
+    )
 
 
 class RustProgrammaticToolSettings(RustProtocolModel):
@@ -325,7 +324,9 @@ class RustProgrammaticToolSettings(RustProtocolModel):
     @model_validator(mode="after")
     def validate_limits(self) -> Self:
         if self.max_operations < self.max_effects:
-            raise ValueError("max_operations must be greater than or equal to max_effects")
+            raise ValueError(
+                "max_operations must be greater than or equal to max_effects"
+            )
         return self
 
 
@@ -347,7 +348,9 @@ class RustHarnessConfig(RustProtocolModel):
     task_id: str
     system_instructions: str = ""
     settings: RustHarnessSettings
-    capabilities: RustHarnessCapabilitySet = Field(default_factory=RustHarnessCapabilitySet)
+    capabilities: RustHarnessCapabilitySet = Field(
+        default_factory=RustHarnessCapabilitySet
+    )
     plugins: list[RustPluginContextDefinition] = Field(default_factory=list)
 
     @field_validator("task_id")
@@ -364,9 +367,13 @@ class RustHarnessConfig(RustProtocolModel):
             *(plugin.capabilities for plugin in self.plugins),
         ]
         tool_groups = [
-            group for capabilities in capability_sets for group in capabilities.tool_groups
+            group
+            for capabilities in capability_sets
+            for group in capabilities.tool_groups
         ]
-        skills = [skill for capabilities in capability_sets for skill in capabilities.skills]
+        skills = [
+            skill for capabilities in capability_sets for skill in capabilities.skills
+        ]
         _reject_duplicates("tool group name", [group.name for group in tool_groups])
         direct_names = [
             tool.name
@@ -517,8 +524,7 @@ class RustInvalidJsonToolArguments(RustProtocolModel):
 
 
 RustToolArguments = Annotated[
-    RustJsonToolArguments | RustInvalidJsonToolArguments,
-    Field(discriminator="type"),
+    RustJsonToolArguments | RustInvalidJsonToolArguments, Field(discriminator="type")
 ]
 
 EMPTY_TOOL_ARGUMENTS = "{}"
@@ -529,7 +535,9 @@ def tool_call_wire_arguments(arguments: RustToolArguments) -> str:
     for good, because the assistant message is replayed from committed history every turn.
     """
     if isinstance(arguments, RustJsonToolArguments):
-        return arguments.raw if isinstance(arguments.value, dict) else EMPTY_TOOL_ARGUMENTS
+        return (
+            arguments.raw if isinstance(arguments.value, dict) else EMPTY_TOOL_ARGUMENTS
+        )
     if isinstance(arguments, RustInvalidJsonToolArguments):
         return EMPTY_TOOL_ARGUMENTS
     assert_never(arguments)
@@ -551,7 +559,9 @@ class RustReasoningRedactedContent(RustProtocolModel):
 
 
 RustReasoningContent = Annotated[
-    RustReasoningTextContent | RustReasoningSummaryContent | RustReasoningRedactedContent,
+    RustReasoningTextContent
+    | RustReasoningSummaryContent
+    | RustReasoningRedactedContent,
     Field(discriminator="type"),
 ]
 
@@ -613,7 +623,9 @@ RustMessage = Annotated[
 
 RustHarnessConfig.model_rebuild()
 
-type RustCompletionFinishReason = Literal["stop", "tool_call", "length", "content_filter", "other"]
+type RustCompletionFinishReason = Literal[
+    "stop", "tool_call", "length", "content_filter", "other"
+]
 
 
 class RustProtocolError(RustProtocolModel):
@@ -653,8 +665,7 @@ class RustToolFailureResult(RustProtocolModel):
 
 
 RustToolResult = Annotated[
-    RustToolSuccessResult | RustToolFailureResult,
-    Field(discriminator="type"),
+    RustToolSuccessResult | RustToolFailureResult, Field(discriminator="type")
 ]
 
 
@@ -719,8 +730,7 @@ class RustReplaceAssistantContent(RustProtocolModel):
 
 
 RustAgentCompletionAcceptance = Annotated[
-    RustAcceptCandidate | RustReplaceAssistantContent,
-    Field(discriminator="type"),
+    RustAcceptCandidate | RustReplaceAssistantContent, Field(discriminator="type")
 ]
 
 
@@ -750,8 +760,7 @@ class RustModelMessageReplace(RustProtocolModel):
 
 
 RustModelMessageUpdate = Annotated[
-    RustModelMessageAppend | RustModelMessageReplace,
-    Field(discriminator="type"),
+    RustModelMessageAppend | RustModelMessageReplace, Field(discriminator="type")
 ]
 
 
@@ -767,8 +776,7 @@ class RustModelToolCatalogReplace(RustProtocolModel):
 
 
 RustModelToolCatalogUpdate = Annotated[
-    RustModelToolCatalogKeep | RustModelToolCatalogReplace,
-    Field(discriminator="type"),
+    RustModelToolCatalogKeep | RustModelToolCatalogReplace, Field(discriminator="type")
 ]
 
 
@@ -791,8 +799,7 @@ class RustProvidedToolCall(RustProtocolModel):
 
 
 RustExternalToolCall = Annotated[
-    RustRuntimeBuiltinToolCall | RustProvidedToolCall,
-    Field(discriminator="type"),
+    RustRuntimeBuiltinToolCall | RustProvidedToolCall, Field(discriminator="type")
 ]
 
 
@@ -821,7 +828,9 @@ class RustLLMCallAction(RustProtocolModel):
                 raise ValueError("agent LLM calls cannot have compaction fields")
             return self
         if self.compaction_id is None or self.attempt is None:
-            raise ValueError("compaction LLM calls require compaction identity and attempt")
+            raise ValueError(
+                "compaction LLM calls require compaction identity and attempt"
+            )
         if self.trigger == "automatic" and self.turn_id is not None:
             return self
         if self.trigger == "manual" and self.turn_id is None:
@@ -1075,7 +1084,9 @@ RustCompletionDiscardCause = Annotated[
 
 
 class RustAgentCompletionCandidateDiscardedObservation(RustProtocolModel):
-    type: Literal["agent_completion_candidate_discarded"] = "agent_completion_candidate_discarded"
+    type: Literal["agent_completion_candidate_discarded"] = (
+        "agent_completion_candidate_discarded"
+    )
     turn_id: str
     action_id: str
     cause: RustCompletionDiscardCause
@@ -1250,8 +1261,7 @@ class RustActionsNextAction(RustProtocolModel):
 
 
 RustNextAction = Annotated[
-    RustNoNextAction | RustActionsNextAction,
-    Field(discriminator="type"),
+    RustNoNextAction | RustActionsNextAction, Field(discriminator="type")
 ]
 
 
@@ -1264,7 +1274,7 @@ class RustTransition(RustProtocolModel):
     def validate_next_for_turn(self) -> Self:
         if isinstance(self.turn, RustCompactingTurn):
             if isinstance(self.next, RustNoNextAction):
-                raise ValueError("compacting transitions require a pending next action")  # noqa: TRY004
+                raise ValueError("compacting transitions require a pending next action")
             if any(
                 not isinstance(action, RustLLMCallAction)
                 or action.purpose != "compaction"
@@ -1275,15 +1285,15 @@ class RustTransition(RustProtocolModel):
             return self
         if isinstance(self.turn, RustRunningTurn):
             if isinstance(self.next, RustNoNextAction):
-                raise ValueError(  # noqa: TRY004
-                    "running transitions require a pending next action"
-                )
+                raise ValueError("running transitions require a pending next action")
             for action in self.actions:
                 if action.turn_id != self.turn.turn_id:
-                    raise ValueError("dispatched action turn_id must match the running turn")
+                    raise ValueError(
+                        "dispatched action turn_id must match the running turn"
+                    )
             return self
         if not isinstance(self.next, RustNoNextAction):
-            raise ValueError("terminal transitions require next none")  # noqa: TRY004
+            raise ValueError("terminal transitions require next none")
         return self
 
     @property
@@ -1294,8 +1304,7 @@ class RustTransition(RustProtocolModel):
             directive.action
             for directive in self.next.directives
             if isinstance(
-                directive,
-                RustDispatchActionDirective | RustRefreshActionDirective,
+                directive, RustDispatchActionDirective | RustRefreshActionDirective
             )
         ]
 
@@ -1338,7 +1347,10 @@ class RustPluginsChange(RustProtocolModel):
 
 
 RustHarnessConfigurationChange = Annotated[
-    RustSystemInstructionsChange | RustSettingsChange | RustCapabilitiesChange | RustPluginsChange,
+    RustSystemInstructionsChange
+    | RustSettingsChange
+    | RustCapabilitiesChange
+    | RustPluginsChange,
     Field(discriminator="type"),
 ]
 
@@ -1414,7 +1426,9 @@ class RustPreToolCallContinue(RustProtocolModel):
 
 class RustPreAgentTurnHookResult(RustProtocolModel):
     hook: Literal["pre_agent_turn"] = "pre_agent_turn"
-    output: Annotated[RustPreAgentTurnContinue | RustHookSkip, Field(discriminator="type")]
+    output: Annotated[
+        RustPreAgentTurnContinue | RustHookSkip, Field(discriminator="type")
+    ]
 
 
 class RustPreLlmCallHookResult(RustProtocolModel):
@@ -1434,7 +1448,9 @@ class RustPostAgentTurnHookResult(RustProtocolModel):
 
 class RustPreToolCallHookResult(RustProtocolModel):
     hook: Literal["pre_tool_call"] = "pre_tool_call"
-    output: Annotated[RustPreToolCallContinue | RustHookSkip, Field(discriminator="type")]
+    output: Annotated[
+        RustPreToolCallContinue | RustHookSkip, Field(discriminator="type")
+    ]
 
 
 class RustPostToolCallOutput(RustProtocolModel):
@@ -1474,8 +1490,7 @@ class RustToolResultEvent(RustProtocolModel):
     action_id: str
     output: JsonValue = None
     content: list[RustContentBlock] = Field(
-        default_factory=list,
-        exclude_if=lambda value: not value,
+        default_factory=list, exclude_if=lambda value: not value
     )
     error: str | None = None
     result: RustToolResult | None = None
@@ -1629,7 +1644,9 @@ class RustSessionInspection(RustProtocolModel):
             return self
         if self.status == "running":
             if self.active_turn_id is None or not self.pending_actions:
-                raise ValueError("running inspection requires active_turn_id and pending_actions")
+                raise ValueError(
+                    "running inspection requires active_turn_id and pending_actions"
+                )
             return self
         if self.active_turn_id is not None or self.pending_actions:
             raise ValueError(
@@ -1711,8 +1728,7 @@ class RustRejectedApplyResult(RustProtocolModel):
 
 
 RustApplyResult = Annotated[
-    RustAcceptedApplyResult | RustRejectedApplyResult,
-    Field(discriminator="type"),
+    RustAcceptedApplyResult | RustRejectedApplyResult, Field(discriminator="type")
 ]
 
 _RUST_APPLY_RESULT_ADAPTER: TypeAdapter[RustApplyResult] = TypeAdapter(RustApplyResult)
@@ -1727,7 +1743,8 @@ def _is_programmatic_identifier(value: str) -> bool:
         return False
     first, *rest = value
     return (first in "_$" or first.isascii() and first.isalpha()) and all(
-        character in "_$" or character.isascii() and character.isalnum() for character in rest
+        character in "_$" or character.isascii() and character.isalnum()
+        for character in rest
     )
 
 
@@ -1744,7 +1761,8 @@ def _is_skill_name(value: str) -> bool:
 
 def _is_unqualified_skill_name(value: str) -> bool:
     return bool(value) and all(
-        segment and all(character.isascii() and character.isalnum() for character in segment)
+        segment
+        and all(character.isascii() and character.isalnum() for character in segment)
         for segment in value.split("-")
     )
 
@@ -1764,19 +1782,19 @@ def json_schema_object(schema: JsonSchema) -> JsonObject:
 
 
 __all__ = [
+    "RUNTIME_BUILTIN_TOOL_NAMES",
     "JsonObject",
     "JsonSchema",
-    "RUNTIME_BUILTIN_TOOL_NAMES",
     "RustAcceptCandidate",
     "RustAcceptedApplyResult",
     "RustAction",
     "RustActionAbandonedObservation",
     "RustActionDirective",
     "RustActionsNextAction",
-    "RustAlwaysHookSelector",
     "RustAgentCompletionAcceptance",
     "RustAgentCompletionCandidateDiscardedObservation",
     "RustAgentTypeDefinition",
+    "RustAlwaysHookSelector",
     "RustApplyResult",
     "RustAssistantMessage",
     "RustAssistantMessageCommittedObservation",
@@ -1788,19 +1806,21 @@ __all__ = [
     "RustBlobResourceContents",
     "RustCandidateMessage",
     "RustCapabilitiesChange",
-    "RustCommandRejection",
     "RustCommandEnvironment",
+    "RustCommandRejection",
+    "RustCompactEvent",
     "RustCompactEvent",
     "RustCompactingTurn",
-    "RustCompletedTurn",
     "RustCompactingTurn",
+    "RustCompactionPolicy",
+    "RustCompletedTurn",
     "RustCompletionCandidate",
-    "RustCompletionModelInputResyncRequestedEvent",
     "RustCompletionFailedEvent",
     "RustCompletionFinishReason",
     "RustCompletionHookAccept",
     "RustCompletionHookReject",
     "RustCompletionHookRetry",
+    "RustCompletionModelInputResyncRequestedEvent",
     "RustCompletionResult",
     "RustCompletionResultPart",
     "RustCompletionResultToolCallPart",
@@ -1810,11 +1830,10 @@ __all__ = [
     "RustContentBlock",
     "RustContentBlockMetadata",
     "RustContentIcon",
-    "RustContextSettings",
     "RustContextCompactedObservation",
     "RustContextCompactionFailedObservation",
     "RustContextMessageEvent",
-    "RustCompactEvent",
+    "RustContextSettings",
     "RustDeterminismContext",
     "RustDisabledCommandEnvironment",
     "RustDisabledCompactionPolicy",
@@ -1822,28 +1841,30 @@ __all__ = [
     "RustDisabledRuntimeToolFeature",
     "RustDispatchActionDirective",
     "RustEmbeddedResourceContentBlock",
+    "RustEnabledRuntimeToolFeature",
     "RustEvent",
+    "RustExternalToolCall",
+    "RustFailTurnEvent",
     "RustFailedTurn",
-    "RustFilesystemLargeOutputPolicy",
     "RustFilesystemAction",
     "RustFilesystemFailedEvent",
+    "RustFilesystemLargeOutputPolicy",
     "RustFilesystemOperation",
     "RustFilesystemResult",
     "RustFilesystemSucceededEvent",
     "RustFilesystemWriteOperation",
     "RustFilesystemWriteResult",
-    "RustFailTurnEvent",
-    "RustExternalToolCall",
+    "RustGitBashCommandEnvironment",
     "RustHarnessCapabilitySet",
     "RustHarnessConfig",
     "RustHarnessConfigUpdate",
     "RustHarnessConfigurationChange",
-    "RustHarnessSettings",
-    "RustHarnessInput",
-    "RustHarnessNotification",
     "RustHarnessHookBinding",
     "RustHarnessHookSelector",
     "RustHarnessHookToolKey",
+    "RustHarnessInput",
+    "RustHarnessNotification",
+    "RustHarnessSettings",
     "RustHookCallAction",
     "RustHookCompletedEvent",
     "RustHookContinue",
@@ -1853,8 +1874,8 @@ __all__ = [
     "RustHookSkip",
     "RustHookToolCall",
     "RustIdleTurn",
-    "RustImageDeliverySettings",
     "RustImageContentBlock",
+    "RustImageDeliverySettings",
     "RustInMemoryBashCommandEnvironment",
     "RustInputConflictRejection",
     "RustInterruptEvent",
@@ -1863,40 +1884,38 @@ __all__ = [
     "RustInvalidCorrelationRejection",
     "RustInvalidJsonToolArguments",
     "RustInvalidStateRejection",
-    "RustGitBashCommandEnvironment",
     "RustJsonToolArguments",
     "RustKeepActionDirective",
     "RustKnowledgeFolderDefinition",
+    "RustLLMCallAction",
     "RustLargeOutputPolicy",
     "RustLargeOutputSerializedObservation",
-    "RustLLMCallAction",
+    "RustMessage",
     "RustModelInputUpdate",
     "RustModelMessageAppend",
     "RustModelMessageReplace",
     "RustModelMessageUpdate",
+    "RustModelToolCallPart",
     "RustModelToolCatalogKeep",
     "RustModelToolCatalogReplace",
     "RustModelToolCatalogUpdate",
-    "RustMessage",
-    "RustModelToolCallPart",
     "RustNextAction",
     "RustNoNextAction",
-    "RustNotificationEvent",
     "RustNotificationDeliveredObservation",
+    "RustNotificationEvent",
     "RustNotificationReceivedObservation",
     "RustNotificationSource",
     "RustObservation",
     "RustOutOfOrderInputRejection",
     "RustPendingAction",
     "RustPendingCompletionAction",
-    "RustPendingHookCallAction",
     "RustPendingFilesystemAction",
     "RustPendingFilesystemOperation",
     "RustPendingFilesystemWriteOperation",
+    "RustPendingHookCallAction",
     "RustPendingProvidedToolCallAction",
     "RustPendingRuntimeBuiltinToolCallAction",
     "RustPluginContextDefinition",
-    "RustPowerShellCommandEnvironment",
     "RustPluginsChange",
     "RustPostAgentTurnHookAction",
     "RustPostAgentTurnHookResult",
@@ -1905,6 +1924,7 @@ __all__ = [
     "RustPostToolCallHookAction",
     "RustPostToolCallHookResult",
     "RustPostToolCallOutput",
+    "RustPowerShellCommandEnvironment",
     "RustPreAgentTurnContinue",
     "RustPreAgentTurnHookAction",
     "RustPreAgentTurnHookResult",
@@ -1913,9 +1933,9 @@ __all__ = [
     "RustPreToolCallContinue",
     "RustPreToolCallHookAction",
     "RustPreToolCallHookResult",
+    "RustProgrammaticToolSettings",
     "RustProtocolError",
     "RustProtocolModel",
-    "RustProgrammaticToolSettings",
     "RustProvidedToolCall",
     "RustProvidedToolCallAction",
     "RustProvidedToolDefinition",
@@ -1931,6 +1951,10 @@ __all__ = [
     "RustResourceContents",
     "RustResourceLinkContentBlock",
     "RustRunningTurn",
+    "RustRuntimeBuiltinToolCall",
+    "RustRuntimeBuiltinToolCallAction",
+    "RustRuntimeBuiltinToolName",
+    "RustRuntimeToolFeature",
     "RustSessionInspection",
     "RustSessionTransition",
     "RustSettingsChange",
@@ -1953,33 +1977,27 @@ __all__ = [
     "RustToolFailedEvent",
     "RustToolFailureResult",
     "RustToolGroupDefinition",
-    "RustToolSettings",
     "RustToolKeysHookSelector",
     "RustToolMessage",
     "RustToolResult",
     "RustToolResultCommittedObservation",
     "RustToolResultEvent",
-    "RustRuntimeBuiltinToolCall",
-    "RustRuntimeBuiltinToolCallAction",
-    "RustRuntimeBuiltinToolName",
-    "RustRuntimeToolFeature",
+    "RustToolSettings",
     "RustToolSucceededEvent",
     "RustToolSuccessResult",
     "RustTransition",
     "RustTurn",
-    "RustTurnSettings",
-    "RustUnixCommandEnvironment",
     "RustTurnCompletedObservation",
-    "RustTurnStopReason",
     "RustTurnFailedObservation",
     "RustTurnInterruptedObservation",
+    "RustTurnSettings",
     "RustTurnStartedObservation",
-    "RustTurnSteeringReceivedObservation",
     "RustTurnSteeredObservation",
+    "RustTurnSteeringReceivedObservation",
+    "RustTurnStopReason",
+    "RustUnixCommandEnvironment",
     "RustUserMessage",
     "RustUserMessageEvent",
-    "RustCompactionPolicy",
-    "RustEnabledRuntimeToolFeature",
     "json_schema_object",
     "parse_apply_result",
     "tool_call_wire_arguments",

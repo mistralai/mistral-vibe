@@ -1,5 +1,7 @@
 """Runtime-facing child Session Host contract."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -71,32 +73,21 @@ class ChildSessionHost(Protocol):
     ) -> ChildCommandAdmission: ...
 
     async def wait_for_child_generation(
-        self,
-        child: ChildSessionHandle,
-        generation: int,
-        timeout_ms: int,
+        self, child: ChildSessionHandle, generation: int, timeout_ms: int
     ) -> ChildTurnOutcome: ...
 
     async def acknowledge_child_command(
-        self,
-        child: ChildSessionHandle,
-        *,
-        operation_key: str,
+        self, child: ChildSessionHandle, *, operation_key: str
     ) -> None: ...
 
     async def child_command_admission(
-        self,
-        child_session_id: str,
-        *,
-        operation_key: str,
+        self, child_session_id: str, *, operation_key: str
     ) -> ChildCommandAdmission | None: ...
 
     async def unload_child(self, child: ChildSessionHandle) -> None: ...
 
     async def reconfigure_child(
-        self,
-        child: ChildSessionHandle,
-        binding: ResolvedChildSessionBinding,
+        self, child: ChildSessionHandle, binding: ResolvedChildSessionBinding
     ) -> bool: ...
 
     async def delete_child(self, child_session_id: str) -> None: ...

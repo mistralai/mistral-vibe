@@ -155,7 +155,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             }
             app.resume_picker.open = false;
             app.resume_picker.transcript = None;
-            app.session.session_id = Some(state.session.id.clone());
+            app.set_session_id(state.session.id.clone());
             app.terminal_notifier
                 .set_default_title(state.session.title.as_deref().unwrap_or(""));
             app.session.resumed = true;
@@ -176,6 +176,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             // Python remounts every history widget fresh on resume, so manual
             // expansion state resets to the fold flag.
             app.view.expanded.clear();
+            app.todo_tracker.seed_from_history(state.history.as_ref());
             app.view.transcript.load_snapshot(&state);
             app.expand_rebuilt_tools();
             // Python rebuilds the transcript on resume and re-decides the

@@ -1,16 +1,18 @@
 """Session-scoped ownership of terminals, readers, and operation receipts."""
 
+from __future__ import annotations
+
 import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 import logging
+from pathlib import Path
 import queue
 import secrets
 import subprocess
 import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import Literal, cast
 
 from mistralai_vibe_local_harness.vibe._processes._backend import (
@@ -19,7 +21,10 @@ from mistralai_vibe_local_harness.vibe._processes._backend import (
     TerminalBackend,
     TerminalBackendError,
 )
-from mistralai_vibe_local_harness.vibe._processes._output import OutputPage, ProcessOutputStore
+from mistralai_vibe_local_harness.vibe._processes._output import (
+    OutputPage,
+    ProcessOutputStore,
+)
 
 logger = logging.getLogger("vibe.unified_harness.processes")
 
@@ -196,7 +201,9 @@ class SessionProcessManager:
             lambda: self._stop(process_id),
             queue=self._terminations,
             before_enqueue=(
-                (lambda: self._mark_stopping(entry)) if self._terminations is not None else None
+                (lambda: self._mark_stopping(entry))
+                if self._terminations is not None
+                else None
             ),
         )
         return cast(ProcessStopResult, result)
@@ -231,10 +238,7 @@ class SessionProcessManager:
         while True:
             entry = self._get_entry(process_id)
             page = await asyncio.to_thread(
-                entry.output.read,
-                from_end=from_end,
-                cursor=cursor,
-                max_bytes=max_bytes,
+                entry.output.read, from_end=from_end, cursor=cursor, max_bytes=max_bytes
             )
             with entry.condition:
                 snapshot = entry.terminal_snapshot
@@ -348,7 +352,10 @@ class SessionProcessManager:
         with self._lock:
             receipt = self._receipts.get(operation_id)
             if receipt is not None:
-                if receipt.operation != operation or receipt.request_sha256 != request_sha256:
+                if (
+                    receipt.operation != operation
+                    or receipt.request_sha256 != request_sha256
+                ):
                     raise ProcessManagerError(
                         "process_identity_conflict",
                         "Process operation identity conflicts with an earlier request",
@@ -393,7 +400,9 @@ class SessionProcessManager:
                 if receipt.error is None:
                     receipt.error = error
             logger.warning("background_process.operation_failed")
-            self._loop.call_soon_threadsafe(_set_future_exception, receipt.future, error)
+            self._loop.call_soon_threadsafe(
+                _set_future_exception, receipt.future, error
+            )
         except BaseException:
             error = ProcessManagerError(
                 "process_io_failed",
@@ -404,7 +413,9 @@ class SessionProcessManager:
                 if receipt.error is None:
                     receipt.error = error
             logger.warning("background_process.operation_failed")
-            self._loop.call_soon_threadsafe(_set_future_exception, receipt.future, error)
+            self._loop.call_soon_threadsafe(
+                _set_future_exception, receipt.future, error
+            )
         else:
             shutdown_error: ProcessManagerError | None = None
             with self._lock:
@@ -419,7 +430,9 @@ class SessionProcessManager:
                     _set_future_exception, receipt.future, shutdown_error
                 )
             else:
-                self._loop.call_soon_threadsafe(_set_future_result, receipt.future, result)
+                self._loop.call_soon_threadsafe(
+                    _set_future_result, receipt.future, result
+                )
         finally:
             if receipt.operation == "write":
                 with self._lock:
@@ -548,12 +561,16 @@ class SessionProcessManager:
         with entry.condition:
             if entry.terminal_snapshot is not None:
                 snapshot = entry.terminal_snapshot
-                return ProcessStopResult(process_id, snapshot.status, snapshot.exit_code)
+                return ProcessStopResult(
+                    process_id, snapshot.status, snapshot.exit_code
+                )
             if entry.finishing:
                 while entry.terminal_snapshot is None:
                     entry.condition.wait()
                 snapshot = entry.terminal_snapshot
-                return ProcessStopResult(process_id, snapshot.status, snapshot.exit_code)
+                return ProcessStopResult(
+                    process_id, snapshot.status, snapshot.exit_code
+                )
             entry.stopping = True
         try:
             self._backend.request_termination(entry.terminal)
@@ -587,7 +604,9 @@ class SessionProcessManager:
 
     def _shutdown_all(self) -> None:
         with self._lock:
-            entries = [self._entries[process_id] for process_id in sorted(self._entries)]
+            entries = [
+                self._entries[process_id] for process_id in sorted(self._entries)
+            ]
         if self._backend.command_environment == "unix":
             self._shutdown_posix(entries)
             return
@@ -623,7 +642,8 @@ class SessionProcessManager:
             except Exception:
                 logger.warning("background_process.operation_failed")
         uncontrolled = {
-            id(entry) for entry in _wait_for_live_roots(live, _TERMINATION_TIMEOUT_SECONDS)
+            id(entry)
+            for entry in _wait_for_live_roots(live, _TERMINATION_TIMEOUT_SECONDS)
         }
 
         drain_deadline = time.monotonic() + _READER_DRAIN_TIMEOUT_SECONDS
@@ -640,7 +660,9 @@ class SessionProcessManager:
                     entry,
                     "orphaned"
                     if id(entry) in uncontrolled
-                    else ("stopped" if _root_is_terminal(entry.terminal) else "orphaned"),
+                    else (
+                        "stopped" if _root_is_terminal(entry.terminal) else "orphaned"
+                    ),
                 )
 
     def _read_process(self, entry: _ProcessEntry, generation: int) -> None:
@@ -669,7 +691,10 @@ class SessionProcessManager:
             except Exception:
                 pass
         with entry.condition:
-            if generation != entry.reader_generation or entry.terminal_snapshot is not None:
+            if (
+                generation != entry.reader_generation
+                or entry.terminal_snapshot is not None
+            ):
                 return
         if status == "failed" and not _root_is_terminal(entry.terminal):
             try:
@@ -709,7 +734,10 @@ class SessionProcessManager:
         with entry.condition:
             if entry.terminal_snapshot is not None:
                 return entry.terminal_snapshot
-            if reader_generation is not None and reader_generation != entry.reader_generation:
+            if (
+                reader_generation is not None
+                and reader_generation != entry.reader_generation
+            ):
                 while entry.terminal_snapshot is None:
                     entry.condition.wait()
                 return entry.terminal_snapshot
@@ -811,7 +839,9 @@ def _set_future_result(future: asyncio.Future[object], result: object) -> None:
         future.set_result(result)
 
 
-def _set_future_exception(future: asyncio.Future[object], error: ProcessManagerError) -> None:
+def _set_future_exception(
+    future: asyncio.Future[object], error: ProcessManagerError
+) -> None:
     if not future.done():
         future.set_exception(error)
 

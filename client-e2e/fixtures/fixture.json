@@ -1031,7 +1031,7 @@
         {
           "name": "default_agent",
           "kind": "str",
-          "description": "Agent profile to use when no --agent flag is passed. Builtin: ask, plan, accept-edits, auto-approve. Applies in both interactive and programmatic (-p/--prompt) mode.",
+          "description": "Agent profile to use when no --agent flag is passed. Builtin: ask, plan, accept-edits, smart-approve, auto-approve. Applies in both interactive and programmatic (-p/--prompt) mode.",
           "value": "accept-edits",
           "path": "/default_agent",
           "popular": true,

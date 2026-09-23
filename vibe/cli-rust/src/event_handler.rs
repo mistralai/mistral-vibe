@@ -20,7 +20,7 @@ use crate::utils::startup_cache;
 use crate::{
     agents, approval, completion_manager, config, config_issues, feedback, mcp, message_queue,
     model_picker, observability, post_ready, question_app, resume_picker, session_exit, startup,
-    turn_summary, ui,
+    todo_tracker, turn_summary, ui,
 };
 
 /// Seconds a server warning/error toast stays up (Python `App.notify` default).
@@ -39,7 +39,7 @@ pub fn apply_startup_event(
             false
         }
         StartupEvent::Attached(session_id) => {
-            app.session.session_id = Some(session_id.clone());
+            app.set_session_id(session_id.clone());
             if app.config_screen.open {
                 config::load(session_id, client, config_tx);
             }
@@ -158,10 +158,11 @@ fn apply_ready(
     // The picker can resume before the handshake finishes, and that session
     // wins: the one started here is only what Esc would fall back to.
     if !app.session.resumed {
-        app.session.session_id = Some(state.session.id.clone());
+        app.set_session_id(state.session.id.clone());
         match app.resume_picker.open {
             true => resume_picker::rebase(app, &state),
             false => {
+                app.todo_tracker.seed_from_history(state.history.as_ref());
                 app.view.transcript.load_snapshot(&state);
                 app.expand_rebuilt_tools();
             }
@@ -322,6 +323,23 @@ fn expand_live_reasoning(app: &mut App, params: &Value) {
         app.view.expanded.insert(id.to_owned());
         app.view.transcript_cache.invalidate_layouts();
     }
+}
+
+/// Python `_record_todos`: a settled todo effect replaces the pinned list.
+fn record_todos(app: &mut App, raw: Option<&Value>) {
+    let Some(todos) = raw.and_then(todo_tracker::todos_from_entry) else {
+        return;
+    };
+    app.todo_tracker.record(todos);
+}
+
+/// The stored entry an update points at, cloned out before `record_todos` takes `&mut app`.
+fn updated_entry_raw(app: &App, params: &Value) -> Option<Value> {
+    params
+        .get("entryId")
+        .and_then(Value::as_str)
+        .and_then(|id| app.view.transcript.entry_raw(id))
+        .cloned()
 }
 
 fn sync_loading_label(app: &mut App, params: &Value) {
@@ -492,6 +510,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             message_queue::steering_history_added(app, client, &event.params);
             retry::on_entry_added(app, &event.params);
             app.view.transcript.add(&event.params);
+            record_todos(app, event.params.get("entry"));
             retry_continuation::merge_continuation(app);
             // Python sets `_turn_assistant_message` inside the resolve, so a
             // continuation's hidden entry maps to the merged row it feeds.
@@ -502,6 +521,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         }
         notification::HISTORY_ENTRY_UPDATED => {
             app.view.transcript.update(&event.params);
+            record_todos(app, updated_entry_raw(app, &event.params).as_ref());
             retry_continuation::merge_continuation(app);
             sync_loading_label(app, &event.params);
             turn_summary::track_narrator_updated(app, &event.params);
@@ -525,7 +545,11 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                         app.session.session_id.as_deref() == Some(state.session.id.as_str());
                     match same_session {
                         true => app.view.transcript.load_live_snapshot(&state),
-                        false => app.view.transcript.load_snapshot(&state),
+                        false => {
+                            // A handoff or resync adopts another harness session.
+                            app.todo_tracker.seed_from_history(state.history.as_ref());
+                            app.view.transcript.load_snapshot(&state);
+                        }
                     }
                     retry_continuation::reconcile_snapshot(app, same_session);
                     sync_retrying_label(app, &state);

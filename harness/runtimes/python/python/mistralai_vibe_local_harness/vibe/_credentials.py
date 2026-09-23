@@ -13,6 +13,8 @@ that carries the revision the caller actually used so a concurrent refresh is
 not discarded by a stale report.
 """
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -68,10 +70,7 @@ class ProviderCredentialProvider(Protocol):
     async def resolve(self) -> ProviderCredentialResult: ...
 
     async def reject(
-        self,
-        *,
-        observed_revision: str,
-        reason: ProviderRejectionReason,
+        self, *, observed_revision: str, reason: ProviderRejectionReason
     ) -> None: ...
 
 
@@ -94,10 +93,7 @@ class StaticProviderCredentials:
         )
 
     async def reject(
-        self,
-        *,
-        observed_revision: str,
-        reason: ProviderRejectionReason,
+        self, *, observed_revision: str, reason: ProviderRejectionReason
     ) -> None:
         # A static key has nowhere to be invalidated to: the next resolution
         # would produce the same material, so recording the rejection would

@@ -412,6 +412,10 @@ class MCPCatalogService:
                 name=params.name, tool_name=None, reason="remove"
             )
         try:
+            if context.control is None:
+                await self._authentication.bind_catalog(
+                    context.orchestrator.config.mcp_servers, owner=context.catalog_owner
+                )
             result = await _remove_server_with_credentials(
                 self._authentication,
                 context.orchestrator,

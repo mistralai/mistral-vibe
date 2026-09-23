@@ -1,12 +1,14 @@
 """SDK-independent contracts for Unified Harness MCP execution."""
 
-import re
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from fnmatch import fnmatch
 from functools import lru_cache
 from pathlib import Path
+import re
 from types import MappingProxyType
 from typing import Literal, Protocol
 
@@ -49,7 +51,9 @@ type MCPAuthorizationResult = MCPAuthorizationSnapshot | MCPAuthorizationRequire
 
 
 class MCPAuthorizationProvider(Protocol):
-    async def resolve(self, reference: MCPAuthorizationRef) -> MCPAuthorizationResult: ...
+    async def resolve(
+        self, reference: MCPAuthorizationRef
+    ) -> MCPAuthorizationResult: ...
 
     async def reject(
         self,
@@ -96,11 +100,15 @@ class MCPToolFilter:
     disabled_globs: tuple[str, ...] = ()
 
     def allows(self, display_name: str) -> bool:
-        if self.enabled_globs and not _pattern_matches(display_name, self.enabled_globs):
+        if self.enabled_globs and not _pattern_matches(
+            display_name, self.enabled_globs
+        ):
             return False
         return not (
             self.disabled_globs
-            and _pattern_matches(display_name, self.disabled_globs, unparseable_matches=True)
+            and _pattern_matches(
+                display_name, self.disabled_globs, unparseable_matches=True
+            )
         )
 
 
@@ -245,7 +253,9 @@ class MCPAuthorizationRequiredSignal:
     observed_connection_revision: str | None = None
 
 
-type MCPRuntimeEventSink = Callable[[MCPAuthorizationRequiredSignal], Awaitable[None] | None]
+type MCPRuntimeEventSink = Callable[
+    [MCPAuthorizationRequiredSignal], Awaitable[None] | None
+]
 
 
 class MCPRuntimeFailure(Exception):
@@ -257,10 +267,7 @@ class MCPRuntimeFailure(Exception):
 
 class MCPAuthorizationRejected(MCPRuntimeFailure):
     def __init__(
-        self,
-        message: str,
-        *,
-        reason: Literal["http_unauthorized", "mcp_unauthorized"],
+        self, message: str, *, reason: Literal["http_unauthorized", "mcp_unauthorized"]
     ) -> None:
         self.reason: Literal["http_unauthorized", "mcp_unauthorized"] = reason
         super().__init__("mcp_authorization_required", message)
@@ -310,7 +317,9 @@ class MCPSamplingResponse:
     model: str
 
 
-type MCPSamplingCompletion = Callable[[MCPSamplingRequest], Awaitable[MCPSamplingResponse]]
+type MCPSamplingCompletion = Callable[
+    [MCPSamplingRequest], Awaitable[MCPSamplingResponse]
+]
 
 
 class MCPTransportFactory(Protocol):

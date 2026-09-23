@@ -17,9 +17,9 @@ The glob dialect is :mod:`fnmatch`, case-insensitive and anchored, so ``*``, ``?
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from fnmatch import fnmatch
+import re
 
 from mistralai_vibe_local_harness.protocol import (
     RustAlwaysHookSelector,
@@ -31,9 +31,12 @@ from mistralai_vibe_local_harness.protocol import (
 )
 
 # The Core rejects a ``tool_keys`` selector at these points, so they cannot be scoped.
-_LIFECYCLE_POINTS: frozenset[RustHookPoint] = frozenset(
-    {"pre_agent_turn", "pre_llm_call", "post_llm_call", "post_agent_turn"}
-)
+_LIFECYCLE_POINTS: frozenset[RustHookPoint] = frozenset({
+    "pre_agent_turn",
+    "pre_llm_call",
+    "post_llm_call",
+    "post_agent_turn",
+})
 
 _MATCH_ALL = "*"
 _REGEX_PREFIX = "re:"
@@ -112,7 +115,9 @@ def selects_tool(predicate: Callable[[str], bool], qualified_name: str) -> bool:
     return any(predicate(name) for name in candidate_names(qualified_name))
 
 
-def compile_selector(point: RustHookPoint, match: str | None) -> RustHarnessHookSelector:
+def compile_selector(
+    point: RustHookPoint, match: str | None
+) -> RustHarnessHookSelector:
     if point in _LIFECYCLE_POINTS and match is not None:
         raise ValueError(f"lifecycle hook point {point!r} cannot declare a match")
     return RustAlwaysHookSelector()

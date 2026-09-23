@@ -178,7 +178,9 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/history/list",
     "session/list",
     "session/log/read",
+    "session/markAsSeen",
     "session/pin",
+    "session/archive",
     "session/read",
     "session/ready/read",
     "session/ready/wait",
@@ -234,6 +236,8 @@ SERVER_METHODS: tuple[str, ...] = (
     "workspace/git/worktrees/limit/update",
     "workspace/git/worktrees/list",
     "workspace/git/worktrees/prune",
+    "workspace/git/worktrees/reap",
+    "workspace/git/worktrees/reap/cancel",
     "workspace/git/worktrees/remove",
     "workspace/prompt/prepare",
     "workspace/trust/decision",
@@ -491,6 +495,7 @@ class SessionListParams(ProtocolModel):
     # ``True`` keeps only pinned sessions, ``False`` only unpinned ones, and
     # ``None`` asks for both.
     pinned: bool | None = None
+    include_archived: bool = False
 
 
 class SessionListResponse(ProtocolModel):
@@ -509,6 +514,15 @@ class SessionListResponse(ProtocolModel):
 
 class SessionDeleteParams(ProtocolModel):
     session_id: str
+
+
+class SessionArchiveParams(ProtocolModel):
+    session_id: str
+    archived: bool
+
+
+class SessionArchiveResponse(ProtocolModel):
+    archived_at: int | None = None
 
 
 class SessionTitleUpdateParams(ProtocolModel):
@@ -532,6 +546,10 @@ class SessionPinResponse(ProtocolModel):
     # the session is pinned and, when it is, how it should sort against the
     # rest of the shelf.
     pinned_at: int | None = None
+
+
+class SessionMarkAsSeenParams(ProtocolModel):
+    session_id: str
 
 
 class SessionHistoryListParams(ProtocolModel):
@@ -1572,6 +1590,7 @@ type WorktreeRemoveOutcome = Literal[
     "kept_error",
     "not_found",
 ]
+type WorktreeReapOutcome = WorktreeRemoveOutcome | Literal["kept_cancelled"]
 
 
 class WorkspaceWorktreeRemoveResponse(ProtocolModel):
@@ -1582,6 +1601,36 @@ class WorkspaceWorktreeRemoveResponse(ProtocolModel):
     branch: str | None = None
     branch_deleted: bool = False
     reasons: list[str] = Field(default_factory=list)
+
+
+class WorkspaceWorktreeReapParams(WorkspaceWorktreeRemoveParams):
+    requester_id: str | None = Field(default=None, min_length=1)
+    request_id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_request_identity(self) -> Self:
+        if (self.requester_id is None) != (self.request_id is None):
+            raise ValueError("requesterId and requestId must be provided together")
+        return self
+
+
+class WorkspaceWorktreeReapResponse(ProtocolModel):
+    outcome: WorktreeReapOutcome
+    root: str | None = None
+    branch: str | None = None
+    branch_deleted: bool = False
+    reasons: list[str] = Field(default_factory=list)
+
+
+class WorkspaceWorktreeReapCancelParams(WorkspaceWorktreeRemoveParams):
+    requester_id: str | None = Field(default=None, min_length=1)
+    request_id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_request_identity(self) -> Self:
+        if self.requester_id is None and self.request_id is not None:
+            raise ValueError("requestId requires requesterId")
+        return self
 
 
 class WorkspaceGitCheckoutsParams(ProtocolModel):

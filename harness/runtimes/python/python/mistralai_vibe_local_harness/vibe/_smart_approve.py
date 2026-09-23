@@ -16,14 +16,16 @@ The module is dependency-neutral (harness ADR 0004): it imports only the harness
 protocol and the Runtime completion adapter. It never imports ``vibe``/``vibe.core``.
 """
 
+from __future__ import annotations
+
 import asyncio
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
+from enum import StrEnum, auto
 import hashlib
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import replace
-from enum import StrEnum, auto
 from typing import Protocol
 
 from pydantic import BaseModel, Field
@@ -49,8 +51,12 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
     LocalModelRoute,
     LocalRuntimeAdapterConfig,
 )
-from mistralai_vibe_local_harness.vibe.adapters.generic import execute_generic_completion
-from mistralai_vibe_local_harness.vibe.adapters.mistral import execute_mistral_completion
+from mistralai_vibe_local_harness.vibe.adapters.generic import (
+    execute_generic_completion,
+)
+from mistralai_vibe_local_harness.vibe.adapters.mistral import (
+    execute_mistral_completion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +157,9 @@ class ToolRiskClassifierPort(Protocol):
     swapped for a dedicated classifier without changing the hook.
     """
 
-    async def classify(self, request: RiskClassificationRequest) -> RiskClassificationResult: ...
+    async def classify(
+        self, request: RiskClassificationRequest
+    ) -> RiskClassificationResult: ...
 
 
 # ---------------------------------------------------------------------------
@@ -218,8 +226,7 @@ async def classify_tool_call(
 
 
 async def _classify_safely(
-    classifier: ToolRiskClassifierPort,
-    request: RiskClassificationRequest,
+    classifier: ToolRiskClassifierPort, request: RiskClassificationRequest
 ) -> RiskClassificationResult:
     """Run the classifier, mapping any failure to an ``ERROR`` verdict (which denies).
 
@@ -235,8 +242,10 @@ async def _classify_safely(
     """
     try:
         result = await classifier.classify(request)
-    except Exception as error:  # noqa: BLE001 - any failure denies, never auto-approves
-        logger.warning("smart_approve classifier error tool=%s: %s", request.tool_name, error)
+    except Exception as error:
+        logger.warning(
+            "smart_approve classifier error tool=%s: %s", request.tool_name, error
+        )
         return RiskClassificationResult(
             verdict=ClassificationVerdict.ERROR,
             tier=ClassificationTier.FAST,
@@ -323,10 +332,14 @@ class ModelRiskClassifier:
         # overlaid) backend so the classifier can run on its own provider route.
         self._complete = complete
 
-    async def classify(self, request: RiskClassificationRequest) -> RiskClassificationResult:
+    async def classify(
+        self, request: RiskClassificationRequest
+    ) -> RiskClassificationResult:
         messages: list[RustMessage] = [
             RustSystemMessage(content=[RustTextContentBlock(text=self._prompt)]),
-            RustUserMessage(content=[RustTextContentBlock(text=_build_user_message(request))]),
+            RustUserMessage(
+                content=[RustTextContentBlock(text=_build_user_message(request))]
+            ),
         ]
         run_config = _classifier_completion_config(self._config)
         route = run_config.active_model
@@ -334,7 +347,9 @@ class ModelRiskClassifier:
         if isinstance(credential, ProviderAuthRequired):
             # Fail closed: no usable credential means the call cannot be judged,
             # so _classify_safely maps this to an ERROR verdict (which denies).
-            raise RuntimeError(f"classifier credential unavailable: {credential.reason}")
+            raise RuntimeError(
+                f"classifier credential unavailable: {credential.reason}"
+            )
         complete = self._complete or _completion_for_backend(run_config.backend)
         start = time.perf_counter()
         completion = await asyncio.wait_for(
@@ -345,7 +360,9 @@ class ModelRiskClassifier:
         return _parse_result(completion, model=route.model, latency_ms=latency_ms)
 
 
-def default_tool_risk_classifier(config: LocalRuntimeAdapterConfig) -> ToolRiskClassifierPort:
+def default_tool_risk_classifier(
+    config: LocalRuntimeAdapterConfig,
+) -> ToolRiskClassifierPort:
     return ModelRiskClassifier(config)
 
 
@@ -360,7 +377,9 @@ def _parse_result(
     if not isinstance(safe, bool):
         raise TypeError("classifier 'safe' field must be a JSON boolean")
     risk_level = _taxonomy_value(parsed.get("risk_level"), _RISK_LEVELS)
-    user_authorization = _taxonomy_value(parsed.get("user_authorization"), _AUTHORIZATION_LEVELS)
+    user_authorization = _taxonomy_value(
+        parsed.get("user_authorization"), _AUTHORIZATION_LEVELS
+    )
     return RiskClassificationResult(
         verdict=_verdict(safe, risk_level, user_authorization),
         tier=ClassificationTier.FAST,
@@ -394,7 +413,9 @@ def _verdict(
 
 
 def _completion_text(completion: RustCompletionResult) -> str:
-    return "".join(part.text for part in completion.parts if isinstance(part, RustTextContentBlock))
+    return "".join(
+        part.text for part in completion.parts if isinstance(part, RustTextContentBlock)
+    )
 
 
 def _strip_code_fences(content: str) -> str:
@@ -462,14 +483,19 @@ def _recent_clarifications(messages: Sequence[RustMessage]) -> list[str]:
     for message in messages:
         if isinstance(message, RustUserMessage):
             answers = []
-        elif isinstance(message, RustToolMessage) and message.name == _CLARIFICATION_TOOL_NAME:
+        elif (
+            isinstance(message, RustToolMessage)
+            and message.name == _CLARIFICATION_TOOL_NAME
+        ):
             if text := _content_text(message.content):
                 answers.append(text)
     return answers
 
 
 def _content_text(content: Sequence[object]) -> str:
-    return "\n".join(block.text for block in content if isinstance(block, RustTextContentBlock))
+    return "\n".join(
+        block.text for block in content if isinstance(block, RustTextContentBlock)
+    )
 
 
 def _taxonomy_value(value: object, allowed: frozenset[str]) -> str | None:
@@ -570,7 +596,9 @@ Do not include any other fields.
 # A content hash of the prompt, carried on the classification telemetry so verdict
 # quality in the datalake can be attributed to a specific prompt revision. It changes
 # automatically whenever the prompt above is edited -- no manual bump.
-CLASSIFIER_PROMPT_VERSION = hashlib.sha256(_CLASSIFIER_PROMPT.encode("utf-8")).hexdigest()[:12]
+CLASSIFIER_PROMPT_VERSION = hashlib.sha256(
+    _CLASSIFIER_PROMPT.encode("utf-8")
+).hexdigest()[:12]
 
 
 __all__ = [

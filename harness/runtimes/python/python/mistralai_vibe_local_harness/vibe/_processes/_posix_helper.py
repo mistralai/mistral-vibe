@@ -1,5 +1,7 @@
 """Exec trampoline that creates a POSIX controlling terminal without preexec_fn."""
 
+from __future__ import annotations
+
 import fcntl
 import json
 import os
@@ -34,7 +36,7 @@ def run(request_fd: int, status_fd: int, slave_fd: int) -> None:
         stage = "stdio"
         for descriptor in (0, 1, 2):
             os.dup2(slave_fd, descriptor)
-        if slave_fd > 2:
+        if slave_fd > 2:  # noqa: PLR2004 - stdio descriptors
             os.close(slave_fd)
         if hasattr(signal, "pthread_sigmask"):
             signal.pthread_sigmask(signal.SIG_SETMASK, [])
@@ -56,7 +58,13 @@ def _read_request(descriptor: int) -> PosixLaunchRequest:
     if size == 0 or size > _MAX_REQUEST_BYTES:
         raise ValueError("invalid launch request size")
     raw = json.loads(_read_exact(descriptor, size))
-    if not isinstance(raw, dict) or set(raw) != {"version", "shell", "argv", "cwd", "env"}:
+    if not isinstance(raw, dict) or set(raw) != {
+        "version",
+        "shell",
+        "argv",
+        "cwd",
+        "env",
+    }:
         raise ValueError("invalid launch request fields")
     if raw.get("version") != 1:
         raise ValueError("unsupported launch request version")
@@ -66,7 +74,11 @@ def _read_request(descriptor: int) -> PosixLaunchRequest:
     env = raw.get("env")
     if not isinstance(shell, str) or not shell:
         raise ValueError("invalid launch shell")
-    if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(item, str) for item in argv)
+    ):
         raise ValueError("invalid launch argv")
     if argv[0] != shell:
         raise ValueError("launch argv does not begin with shell")
@@ -94,8 +106,7 @@ def _read_exact(descriptor: int, size: int) -> bytes:
 def _write_error(descriptor: int, stage: str, error_number: int | None) -> None:
     try:
         payload = json.dumps(
-            {"version": 1, "stage": stage, "errno": error_number},
-            separators=(",", ":"),
+            {"version": 1, "stage": stage, "errno": error_number}, separators=(",", ":")
         ).encode()
         os.write(descriptor, b"E" + struct.pack(">I", len(payload)) + payload)
     except BaseException:
@@ -104,7 +115,7 @@ def _write_error(descriptor: int, stage: str, error_number: int | None) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
-    if len(arguments) != 3:
+    if len(arguments) != 3:  # noqa: PLR2004 - argv arity
         return 2
     try:
         descriptors = [int(value) for value in arguments]

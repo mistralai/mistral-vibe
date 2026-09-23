@@ -1,7 +1,11 @@
 """POSIX pseudo-terminal backend for local background processes."""
 
+from __future__ import annotations
+
+import errno
 import json
 import os
+from pathlib import Path
 import pty
 import select
 import shutil
@@ -10,7 +14,6 @@ import struct
 import subprocess
 import sys
 import time
-from pathlib import Path
 from typing import BinaryIO
 
 from mistralai_vibe_local_harness.vibe._processes._backend import (
@@ -29,6 +32,7 @@ _HELPER_FAILURE_STAGES = {
     "exec",
 }
 _WRITE_TIMEOUT_SECONDS = 1.0
+_ERROR_FRAME_HEADER = 5
 
 
 class PosixTerminal:
@@ -67,7 +71,7 @@ class PosixTerminal:
         try:
             return os.read(self._master_fd, size)
         except OSError as error:
-            if error.errno == 5:
+            if error.errno == errno.EIO:
                 return b""
             raise
 
@@ -177,7 +181,13 @@ class PosixTerminalBackend:
                 process.wait()
             raise
         finally:
-            for descriptor in (request_read, request_write, status_read, status_write, slave_fd):
+            for descriptor in (
+                request_read,
+                request_write,
+                status_read,
+                status_write,
+                slave_fd,
+            ):
                 if descriptor >= 0:
                     os.close(descriptor)
 
@@ -203,7 +213,11 @@ def _helper_argv(request_fd: int, status_fd: int, slave_fd: int) -> list[str]:
 def _resolve_executable(candidate: str, env: dict[str, str]) -> str | None:
     expanded = Path(candidate).expanduser()
     if os.sep in candidate or (os.altsep is not None and os.altsep in candidate):
-        return str(expanded) if expanded.is_file() and os.access(expanded, os.X_OK) else None
+        return (
+            str(expanded)
+            if expanded.is_file() and os.access(expanded, os.X_OK)
+            else None
+        )
     return shutil.which(candidate, path=env.get("PATH", ""))
 
 
@@ -245,16 +259,20 @@ def _launch_failure_stage(frame: bytes) -> str:
     ready = frame.startswith(b"R")
     if ready:
         frame = frame[1:]
-    if not frame.startswith(b"E") or len(frame) < 5:
+    if not frame.startswith(b"E") or len(frame) < _ERROR_FRAME_HEADER:
         return "POSIX helper failed during spawn"
-    size = struct.unpack(">I", frame[1:5])[0]
-    if len(frame) != size + 5:
+    size = struct.unpack(">I", frame[1:_ERROR_FRAME_HEADER])[0]
+    if len(frame) != size + _ERROR_FRAME_HEADER:
         return "POSIX helper returned an invalid spawn status"
     try:
-        value = json.loads(frame[5:])
+        value = json.loads(frame[_ERROR_FRAME_HEADER:])
     except (UnicodeDecodeError, json.JSONDecodeError):
         return "POSIX helper returned an invalid spawn status"
-    stage = value.get("stage") if isinstance(value, dict) and value.get("version") == 1 else None
+    stage = (
+        value.get("stage")
+        if isinstance(value, dict) and value.get("version") == 1
+        else None
+    )
     return (
         f"POSIX helper failed during {stage}"
         if stage in _HELPER_FAILURE_STAGES and (not ready or stage == "exec")

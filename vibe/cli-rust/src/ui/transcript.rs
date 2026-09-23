@@ -21,6 +21,7 @@ use ratatui::Frame;
 use self::viewport::{document_height, measure, Hitmaps, Viewport};
 use super::{markdown, scrollbar, theme};
 use crate::app::App;
+use crate::selection::ScrollTarget;
 use crate::utils::scroll::{absorb_growth, scroll_view};
 
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
@@ -46,6 +47,8 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     };
     let view = &mut app.view;
     view.selection_region.area = area;
+    view.selection_region.scroll_target = ScrollTarget::Transcript;
+    view.selection_region.scroll_area = area;
     // Only the transcript can re-render rows scrolled out of the viewport.
     view.selection_region.document = true;
     view.transcript_cache
@@ -75,7 +78,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         // `align-vertical: bottom`: push short content down, no scrollbar.
         view.scroll_to_entry = None;
         view.selection_region.scrollbar = false;
-        view.transcript_scrollbar.clear();
+        view.selection_scrollbar.clear();
         view.scroll = 0;
         view.scroll_target = 0;
         let top = area.y as i32 + area.height as i32 - total_full as i32;
@@ -158,7 +161,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         width: 1,
         ..area
     };
-    view.transcript_scrollbar
+    view.selection_scrollbar
         .update(scrollbar_area, total, area.height, scroll.position);
     let top = area.y as i32 - scroll.position as i32;
     view.selection_region.top = top;

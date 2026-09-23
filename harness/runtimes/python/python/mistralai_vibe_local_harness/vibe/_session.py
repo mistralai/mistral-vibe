@@ -1,14 +1,16 @@
 """One Harness Session lifecycle and Session Protocol operations."""
 
+from __future__ import annotations
+
 import asyncio
 import base64
-import json
-import logging
-import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
+import json
+import logging
 from pathlib import Path
+import secrets
 from typing import Any, Never, cast
 from urllib.parse import urlparse
 
@@ -37,9 +39,13 @@ from mistralai_vibe_local_harness.protocol import (
 )
 from mistralai_vibe_local_harness.session_protocol import (
     BlockedSessionStatus,
+    ContentBlock as SessionContentBlock,
+    EmbeddedResourceContentBlock as SessionEmbeddedResourceContentBlock,
+    Event as SessionEvent,
     FailedPublicTurn,
     FailedSessionStatus,
     IdleSessionStatus,
+    ImageContentBlock as SessionImageContentBlock,
     InProgressPublicTurn,
     InterruptedPublicTurn,
     JsonObject,
@@ -49,10 +55,12 @@ from mistralai_vibe_local_harness.session_protocol import (
     PublicRetryState,
     PublicSession,
     PublicSessionState,
+    ResourceLinkContentBlock as SessionResourceLinkContentBlock,
     RunningSessionStatus,
     SessionReadParams,
     SessionReadResult,
     SessionSnapshot,
+    TextContentBlock as SessionTextContentBlock,
     TurnEnqueueParams,
     TurnEnqueueResponse,
     TurnInputEntry,
@@ -68,24 +76,6 @@ from mistralai_vibe_local_harness.session_protocol import (
     TurnQueueSteerParams,
     TurnQueueSteerResponse,
     TurnQueueUpdatedEvent,
-)
-from mistralai_vibe_local_harness.session_protocol import (
-    ContentBlock as SessionContentBlock,
-)
-from mistralai_vibe_local_harness.session_protocol import (
-    EmbeddedResourceContentBlock as SessionEmbeddedResourceContentBlock,
-)
-from mistralai_vibe_local_harness.session_protocol import (
-    Event as SessionEvent,
-)
-from mistralai_vibe_local_harness.session_protocol import (
-    ImageContentBlock as SessionImageContentBlock,
-)
-from mistralai_vibe_local_harness.session_protocol import (
-    ResourceLinkContentBlock as SessionResourceLinkContentBlock,
-)
-from mistralai_vibe_local_harness.session_protocol import (
-    TextContentBlock as SessionTextContentBlock,
 )
 from mistralai_vibe_local_harness.vibe._connector_models import (
     ConnectorRouteSnapshot,
@@ -174,7 +164,10 @@ from mistralai_vibe_local_harness.vibe._turn_queue import (
     QueuedTurnRecord,
     SessionTurnQueue,
 )
-from mistralai_vibe_local_harness.vibe.plugins import SessionPluginBinding, empty_plugin_binding
+from mistralai_vibe_local_harness.vibe.plugins import (
+    SessionPluginBinding,
+    empty_plugin_binding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,8 +188,8 @@ class HarnessSessionSubscription:
     events: AsyncIterator[JsonObject]
 
 
-class UnifiedHarnessSessionBackend:
-    def __init__(
+class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server session procedures
+    def __init__(  # noqa: PLR0913, PLR0915 - explicit session dependencies
         self,
         session_id: str,
         created_at: int,
@@ -215,9 +208,11 @@ class UnifiedHarnessSessionBackend:
         image_source_roots: tuple[Path, ...] | None = None,
         attachments_root: Path | None = None,
         discard_on_shutdown: Callable[[str], None] | None = None,
-        promote_on_start: Callable[[SessionPluginBinding], DurableSessionRuntime] | None = None,
+        promote_on_start: Callable[[SessionPluginBinding], DurableSessionRuntime]
+        | None = None,
         initialize_subagents_on_promote: (
-            Callable[[DurableSessionRuntime, SessionPluginBinding], Awaitable[None]] | None
+            Callable[[DurableSessionRuntime, SessionPluginBinding], Awaitable[None]]
+            | None
         ) = None,
         pending_plugin_binding: SessionPluginBinding | None = None,
         session_metadata: SessionMetadataV1 | None = None,
@@ -241,7 +236,9 @@ class UnifiedHarnessSessionBackend:
         # survive every ``apply_adapter_config``, which only carries the
         # workspace roots.
         self._attachments_root = (
-            attachments_root.expanduser().resolve() if attachments_root is not None else None
+            attachments_root.expanduser().resolve()
+            if attachments_root is not None
+            else None
         )
         self._image_source_roots = self._resolve_image_source_roots(image_source_roots)
         self._turn_queue = SessionTurnQueue()
@@ -297,7 +294,9 @@ class UnifiedHarnessSessionBackend:
         self._title_config = adapter_config
         # What the transcript reflects. A resumed session reopens on the model it
         # was left on, which must not read as a change.
-        self._active_model = None if adapter_config is None else adapter_config.active_model.model
+        self._active_model = (
+            None if adapter_config is None else adapter_config.active_model.model
+        )
         self._title_cadence = TitleCadence()
         self._title_cadence_seeded = False
         self._approval_waiters: dict[str, asyncio.Future[ApprovalGrant]] = {}
@@ -470,7 +469,9 @@ class UnifiedHarnessSessionBackend:
             adapter_config.workspace_roots or None
         )
 
-    async def reconfigure_subagents(self, adapter_config: LocalRuntimeAdapterConfig) -> None:
+    async def reconfigure_subagents(
+        self, adapter_config: LocalRuntimeAdapterConfig
+    ) -> None:
         """Propagate an adapter config change to subagent bindings and children.
 
         Safe to call mid-turn: this only touches subagent state, not the
@@ -511,7 +512,10 @@ class UnifiedHarnessSessionBackend:
     ) -> None:
         async with self._lifecycle_lock:
             self._reject_compaction()
-            if not allow_reserved_turn or self._running_or_scheduled_turn_id() is not None:
+            if (
+                not allow_reserved_turn
+                or self._running_or_scheduled_turn_id() is not None
+            ):
                 self._reject_active_turn()
             runtime = self._runtime
             if runtime is None:
@@ -557,7 +561,9 @@ class UnifiedHarnessSessionBackend:
                         exc_info=True,
                     )
 
-    def _resolve_image_source_roots(self, roots: tuple[Path, ...] | None) -> tuple[Path, ...]:
+    def _resolve_image_source_roots(
+        self, roots: tuple[Path, ...] | None
+    ) -> tuple[Path, ...]:
         workspace = _image_source_roots(self._cwd, roots)
         if self._attachments_root is None or self._attachments_root in workspace:
             return workspace
@@ -571,8 +577,7 @@ class UnifiedHarnessSessionBackend:
         # Runtime event cannot land between them on the Session event loop.
         snapshot = self._snapshot(params.history_limit)
         return HarnessSessionSubscription(
-            snapshot=snapshot,
-            events=self._event_subscriptions.subscribe(),
+            snapshot=snapshot, events=self._event_subscriptions.subscribe()
         )
 
     async def rename(self, title: str) -> SessionSnapshot:
@@ -582,7 +587,9 @@ class UnifiedHarnessSessionBackend:
             await self._cancel_title_task()
             observed_at = _now_milliseconds()
             if self._runtime is None:
-                self._state = renamed_session_state(self._state, title, observed_at=observed_at)
+                self._state = renamed_session_state(
+                    self._state, title, observed_at=observed_at
+                )
                 self._publish_session_state_update()
             else:
                 await self._runtime.rename_session(title, observed_at=observed_at)
@@ -600,22 +607,20 @@ class UnifiedHarnessSessionBackend:
 
     def publish_child_event(self, child_session_id: str, event: JsonObject) -> None:
         """Publish a child event on the already-bound parent subscription."""
-        self._publish_event(
-            {
-                "type": "child_session_event",
-                "sessionId": child_session_id,
-                "event": event,
-            }
-        )
+        self._publish_event({
+            "type": "child_session_event",
+            "sessionId": child_session_id,
+            "event": event,
+        })
 
-    def publish_child_registration(self, child_session_id: str, snapshot: SessionSnapshot) -> None:
-        self._publish_event(
-            {
-                "type": "child_session_registered",
-                "sessionId": child_session_id,
-                "snapshot": snapshot.model_dump(mode="json", by_alias=True),
-            }
-        )
+    def publish_child_registration(
+        self, child_session_id: str, snapshot: SessionSnapshot
+    ) -> None:
+        self._publish_event({
+            "type": "child_session_registered",
+            "sessionId": child_session_id,
+            "snapshot": snapshot.model_dump(mode="json", by_alias=True),
+        })
 
     def guard_request(self) -> None:
         # Requests perform their own operation-specific conflict checks. In
@@ -686,7 +691,9 @@ class UnifiedHarnessSessionBackend:
             name=name, descriptor_revision=descriptor_revision
         )
 
-    async def suspend_mcp(self, *, name: str, tool_name: str | None) -> MCPRouteSnapshot:
+    async def suspend_mcp(
+        self, *, name: str, tool_name: str | None
+    ) -> MCPRouteSnapshot:
         self._reject_active_turn()
         return await self._require_mcp_runtime().suspend(name=name, tool_name=tool_name)
 
@@ -712,7 +719,9 @@ class UnifiedHarnessSessionBackend:
         self, *, alias: str, tool_name: str | None
     ) -> ConnectorRouteSnapshot:
         self._reject_active_turn()
-        return await self._require_connector_runtime().suspend(alias=alias, tool_name=tool_name)
+        return await self._require_connector_runtime().suspend(
+            alias=alias, tool_name=tool_name
+        )
 
     async def switch_agent(self, params: object) -> Never:
         self._raise_not_implemented("switch_agent")
@@ -732,8 +741,7 @@ class UnifiedHarnessSessionBackend:
             return await self._start_turn(params)
 
     async def start_deferred_turn(
-        self,
-        params: DeferredTurnStartParams,
+        self, params: DeferredTurnStartParams
     ) -> DeferredTurnStartResult:
         """Accept a turn before slow workspace preparation finishes.
 
@@ -752,7 +760,9 @@ class UnifiedHarnessSessionBackend:
             if self._turn_queue:
                 raise HarnessTurnQueuePendingError()
             if self._runtime is not None:
-                raise RuntimeError("Deferred turn preparation requires an ephemeral session")
+                raise RuntimeError(
+                    "Deferred turn preparation requires an ephemeral session"
+                )
             payload = _deferred_turn_start_payload(
                 params.turn, image_source_roots=self._image_source_roots
             )
@@ -805,13 +815,19 @@ class UnifiedHarnessSessionBackend:
         async with self._lifecycle_lock:
             return await self._start_turn(params, scheduled_loop_id=loop_id)
 
-    async def _start_turn(self, params: object, *, scheduled_loop_id: str | None = None) -> object:
+    async def _start_turn(
+        self, params: object, *, scheduled_loop_id: str | None = None
+    ) -> object:
         self._reject_compaction()
         self._reject_active_turn()
         if self._turn_queue:
             raise HarnessTurnQueuePendingError()
-        payload = _turn_start_payload(params, image_source_roots=self._image_source_roots)
-        runtime = await self._runtime_for_turn_locked(promotion_conflict_id=payload.turn_id)
+        payload = _turn_start_payload(
+            params, image_source_roots=self._image_source_roots
+        )
+        runtime = await self._runtime_for_turn_locked(
+            promotion_conflict_id=payload.turn_id
+        )
         started_at = _now_milliseconds()
         self._reserved_turn_id = payload.turn_id
         self._reserved_turn_started_at = started_at
@@ -856,15 +872,13 @@ class UnifiedHarnessSessionBackend:
 
     def _publish_reserved_turn_started(
         self,
-        payload: "_TurnStartPayload",
+        payload: _TurnStartPayload,
         *,
         started_at: int,
         pending_history_entries: tuple[PublicHistoryEntry, ...],
     ) -> tuple[JsonObject, ...]:
         pending = self._bind_turn_history_entries(
-            pending_history_entries,
-            turn_id=payload.turn_id,
-            observed_at=started_at,
+            pending_history_entries, turn_id=payload.turn_id, observed_at=started_at
         )
         # A host-injected Turn stays model-visible but never public. Its user
         # entry is dropped here rather than only in the projection, because
@@ -886,7 +900,9 @@ class UnifiedHarnessSessionBackend:
         history = self._state.history.model_copy(
             update={"entries": [*self._state.history.entries, *accepted_entries]}
         )
-        preview = self._state.session.preview or first_user_message_preview(history.entries)
+        preview = self._state.session.preview or first_user_message_preview(
+            history.entries
+        )
         self._state = self._state.model_copy(
             update={
                 "session": self._state.session.model_copy(
@@ -907,9 +923,9 @@ class UnifiedHarnessSessionBackend:
         self._publish_session_state_update()
         return accepted_entries
 
-    async def _finish_deferred_turn(
+    async def _finish_deferred_turn(  # noqa: PLR0911 - one return per deferred-turn outcome
         self,
-        reserved_payload: "_TurnStartPayload",
+        reserved_payload: _TurnStartPayload,
         *,
         preparation: DeferredTurnPreparation,
         preparation_context: DeferredTurnPreparationContext,
@@ -924,8 +940,7 @@ class UnifiedHarnessSessionBackend:
                 if self._reserved_turn_id != reserved_payload.turn_id:
                     return
                 self._replace_turn_history_entries(
-                    exc.history_entries,
-                    turn_id=reserved_payload.turn_id,
+                    exc.history_entries, turn_id=reserved_payload.turn_id
                 )
                 self._reserved_turn_id = None
                 self._reserved_turn_started_at = None
@@ -956,8 +971,7 @@ class UnifiedHarnessSessionBackend:
                 )
                 if result.history_entries:
                     replacements = self._replace_turn_history_entries(
-                        result.history_entries,
-                        turn_id=payload.turn_id,
+                        result.history_entries, turn_id=payload.turn_id
                     )
                     replacement_by_id = {
                         cast(str, entry.get("id")): entry for entry in replacements
@@ -967,7 +981,9 @@ class UnifiedHarnessSessionBackend:
                             replacement_by_id.get(cast(str, entry.get("id")), entry)
                             for entry in accepted_history_entries
                         )
-                runtime = await self._runtime_for_turn_locked(promotion_conflict_id=payload.turn_id)
+                runtime = await self._runtime_for_turn_locked(
+                    promotion_conflict_id=payload.turn_id
+                )
                 if result.after_promotion is not None:
                     await result.after_promotion()
             except Exception as exc:
@@ -984,11 +1000,7 @@ class UnifiedHarnessSessionBackend:
             )
 
     def _bind_turn_history_entries(
-        self,
-        entries: tuple[PublicHistoryEntry, ...],
-        *,
-        turn_id: str,
-        observed_at: int,
+        self, entries: tuple[PublicHistoryEntry, ...], *, turn_id: str, observed_at: int
     ) -> tuple[JsonObject, ...]:
         return tuple(
             cast(
@@ -1011,7 +1023,9 @@ class UnifiedHarnessSessionBackend:
         if not entries:
             return ()
         now = _now_milliseconds()
-        replacements = self._bind_turn_history_entries(entries, turn_id=turn_id, observed_at=now)
+        replacements = self._bind_turn_history_entries(
+            entries, turn_id=turn_id, observed_at=now
+        )
         by_id = {
             cast(str, entry.get("id")): entry
             for entry in replacements
@@ -1019,10 +1033,7 @@ class UnifiedHarnessSessionBackend:
         }
         history_entries = [
             (
-                {
-                    **by_id[entry_id],
-                    "createdAt": entry.get("createdAt", now),
-                }
+                {**by_id[entry_id], "createdAt": entry.get("createdAt", now)}
                 if isinstance(entry_id := entry.get("id"), str) and entry_id in by_id
                 else entry
             )
@@ -1031,7 +1042,9 @@ class UnifiedHarnessSessionBackend:
         self._state = self._state.model_copy(
             update={
                 "session": self._state.session.model_copy(update={"updated_at": now}),
-                "history": self._state.history.model_copy(update={"entries": history_entries}),
+                "history": self._state.history.model_copy(
+                    update={"entries": history_entries}
+                ),
             }
         )
         self._publish_session_state_update()
@@ -1053,9 +1066,7 @@ class UnifiedHarnessSessionBackend:
             if self._reserved_turn_id is None:
                 await self._runtime_for_turn_locked()
             result = self._turn_queue.enqueue(
-                params,
-                prepared_entries,
-                created_at=_now_milliseconds(),
+                params, prepared_entries, created_at=_now_milliseconds()
             )
 
         def after_response() -> None:
@@ -1090,14 +1101,18 @@ class UnifiedHarnessSessionBackend:
             self._schedule_turn_queue_drain()
 
         return _SessionBackendResult(
-            response=TurnQueueReplaceResponse(queue_item_id=result.record.queued_turn.id),
+            response=TurnQueueReplaceResponse(
+                queue_item_id=result.record.queued_turn.id
+            ),
             after_response=None if result.duplicate else after_response,
         )
 
     async def read_turn_queue(self, params: TurnQueueReadParams) -> object:
         self._require_session(params.session_id)
         async with self._lifecycle_lock:
-            return _SessionBackendResult(response=TurnQueueReadResponse(queue=self.turn_queue))
+            return _SessionBackendResult(
+                response=TurnQueueReadResponse(queue=self.turn_queue)
+            )
 
     async def steer_queued_turn(self, params: TurnQueueSteerParams) -> object:
         self._require_session(params.session_id)
@@ -1109,8 +1124,7 @@ class UnifiedHarnessSessionBackend:
                     raise HarnessCommandConflictError(command_id)
                 return _SessionBackendResult(
                     response=TurnQueueSteerResponse(
-                        queue_item_id=receipt.queue_item_id,
-                        turn_id=receipt.turn_id,
+                        queue_item_id=receipt.queue_item_id, turn_id=receipt.turn_id
                     )
                 )
 
@@ -1124,9 +1138,7 @@ class UnifiedHarnessSessionBackend:
             record = self._turn_queue.require_record(params.queue_item_id)
             content = _queued_steer_content(record)
             command = RustUserMessageEvent(
-                turn_id=params.expected_turn_id,
-                content=content,
-                mode="steer",
+                turn_id=params.expected_turn_id, content=content, mode="steer"
             )
             dumped = params.model_dump(mode="json", by_alias=True)
             # Once submission starts, finish its durable outcome even if the RPC
@@ -1153,14 +1165,12 @@ class UnifiedHarnessSessionBackend:
             submission.result()
 
             receipt = self._turn_queue.retire_steered(
-                record,
-                turn_id=params.expected_turn_id,
+                record, turn_id=params.expected_turn_id
             )
             self._publish_turn_queue_updated()
             response = _SessionBackendResult(
                 response=TurnQueueSteerResponse(
-                    queue_item_id=receipt.queue_item_id,
-                    turn_id=receipt.turn_id,
+                    queue_item_id=receipt.queue_item_id, turn_id=receipt.turn_id
                 )
             )
             if cancellation is not None:
@@ -1198,10 +1208,7 @@ class UnifiedHarnessSessionBackend:
         )
 
     async def _runtime_for_turn_locked(
-        self,
-        *,
-        promotion_conflict_id: str | None = None,
-        operation: str = "start_turn",
+        self, *, promotion_conflict_id: str | None = None, operation: str = "start_turn"
     ) -> DurableSessionRuntime:
         runtime = self._runtime
         if runtime is None and self._promote_on_start is not None:
@@ -1211,7 +1218,9 @@ class UnifiedHarnessSessionBackend:
                 runtime = await asyncio.to_thread(self._promote_on_start, binding)
                 self._runtime = runtime
                 if self._on_work_state_changed is not None:
-                    runtime.configure_work_state_callback(self._notify_work_state_changed)
+                    runtime.configure_work_state_callback(
+                        self._notify_work_state_changed
+                    )
                 self._promote_on_start = None
                 self._pending_plugin_binding = None
                 pending, self._pending_capabilities = self._pending_capabilities, None
@@ -1262,11 +1271,11 @@ class UnifiedHarnessSessionBackend:
                 },
             )
         if not content:
-            raise ValueError("Unified Harness turn/steer currently supports text input only")
+            raise ValueError(
+                "Unified Harness turn/steer currently supports text input only"
+            )
         command = RustUserMessageEvent(
-            turn_id=expected_turn_id,
-            content=content,
-            mode="steer",
+            turn_id=expected_turn_id, content=content, mode="steer"
         )
         dumped = raw.model_dump(mode="json", by_alias=True, exclude_none=True)
         result = await runtime.command_without_driving_actions(
@@ -1311,15 +1320,17 @@ class UnifiedHarnessSessionBackend:
                         return
                     response_settled = True
                     self._publish_reserved_turn_interrupted(
-                        expected_turn_id,
-                        started_at=started_at,
+                        expected_turn_id, started_at=started_at
                     )
                     if self._turn_queue.resume():
                         self._publish_turn_queue_updated()
                     self._schedule_turn_queue_drain()
 
                 return _SessionBackendResult(
-                    response={"accepted": True, "last_event_id": self._current_event_id()},
+                    response={
+                        "accepted": True,
+                        "last_event_id": self._current_event_id(),
+                    },
                     after_response=settle_response,
                     on_response_abandoned=settle_response,
                 )
@@ -1327,7 +1338,9 @@ class UnifiedHarnessSessionBackend:
             if runtime is None:
                 self._raise_not_implemented("interrupt_turn")
             await self._cancel_active_work()
-            await runtime.interrupt(expected_turn_id=expected_turn_id, reason="client interrupt")
+            await runtime.interrupt(
+                expected_turn_id=expected_turn_id, reason="client interrupt"
+            )
         return _SessionBackendResult(
             response={"accepted": True, "last_event_id": self._current_event_id()}
         )
@@ -1349,8 +1362,7 @@ class UnifiedHarnessSessionBackend:
         if not content:
             raise ValueError("Unified Harness context injection requires content")
         runtime = await self._runtime_for_turn_locked(
-            promotion_conflict_id="context-injection",
-            operation="inject_context",
+            promotion_conflict_id="context-injection", operation="inject_context"
         )
         dumped = raw.model_dump(mode="json", by_alias=True, exclude_none=True)
         await runtime.command_without_driving_actions(
@@ -1375,7 +1387,7 @@ class UnifiedHarnessSessionBackend:
             entries.append(entry)
         return _SessionBackendResult(response={"entries": entries})
 
-    async def respond_to_callback(self, params: object) -> object:
+    async def respond_to_callback(self, params: object) -> object:  # noqa: PLR0914 - one cohesive callback dispatch
         raw = cast(Any, params)
         result = _field(raw, "result")
         callback_id = _required_str(result, "callback_id")
@@ -1429,11 +1441,16 @@ class UnifiedHarnessSessionBackend:
                 user_input_waiter.set_result((False, _json_value(error)))
             else:
                 output = _field(result, "output")
-                user_input_waiter.set_result((True, _json_value(_field(output, "result"))))
+                user_input_waiter.set_result((
+                    True,
+                    _json_value(_field(output, "result")),
+                ))
         if decision_type == "cancel_turn":
             await self._interrupt_active_turn_from_callback(callback)
         last_event_id = self._current_event_id()
-        return _SessionBackendResult(response={"accepted": True, "last_event_id": last_event_id})
+        return _SessionBackendResult(
+            response={"accepted": True, "last_event_id": last_event_id}
+        )
 
     async def compact(self, params: object) -> object:
         async with self._lifecycle_lock:
@@ -1533,7 +1550,9 @@ class UnifiedHarnessSessionBackend:
             return
         if self._active_turn_task is not None and not self._active_turn_task.done():
             return
-        event = self._turn_terminal_events.setdefault(inspection.active_turn_id, asyncio.Event())
+        event = self._turn_terminal_events.setdefault(
+            inspection.active_turn_id, asyncio.Event()
+        )
         if not start_new_actions:
             return
 
@@ -1572,7 +1591,9 @@ class UnifiedHarnessSessionBackend:
         )
         await self._record_parent_command(parent_session_id, operation_key, target)
         if result.transition is not None and result.transition.actions:
-            event = self._turn_terminal_events.setdefault(target.command.turn_id, asyncio.Event())
+            event = self._turn_terminal_events.setdefault(
+                target.command.turn_id, asyncio.Event()
+            )
             self._track_turn_task(
                 target.command.turn_id,
                 runtime.drive_transition(result.transition),
@@ -1593,8 +1614,7 @@ class UnifiedHarnessSessionBackend:
             if inspection.active_turn_id != known_generation.turn_id:
                 raise HarnessStaleTurnError(inspection.active_turn_id)
             target: SendStartTarget | SendSteerTarget = SendSteerTarget(
-                command=known_generation,
-                child_command_id=f"{operation_key}:steer",
+                command=known_generation, child_command_id=f"{operation_key}:steer"
             )
             command = RustUserMessageEvent(
                 turn_id=known_generation.turn_id,
@@ -1605,12 +1625,10 @@ class UnifiedHarnessSessionBackend:
         else:
             generation = known_generation.generation + 1
             command_ref = ChildGenerationRef(
-                generation=generation,
-                turn_id=f"{self._session_id}:turn:{generation}",
+                generation=generation, turn_id=f"{self._session_id}:turn:{generation}"
             )
             target = SendStartTarget(
-                command=command_ref,
-                child_command_id=f"{operation_key}:start",
+                command=command_ref, child_command_id=f"{operation_key}:start"
             )
             command = RustUserMessageEvent(
                 turn_id=command_ref.turn_id,
@@ -1627,7 +1645,9 @@ class UnifiedHarnessSessionBackend:
         )
         await self._record_parent_command(parent_session_id, operation_key, target)
         if result.transition is not None and result.transition.actions:
-            event = self._turn_terminal_events.setdefault(target.command.turn_id, asyncio.Event())
+            event = self._turn_terminal_events.setdefault(
+                target.command.turn_id, asyncio.Event()
+            )
             self._track_turn_task(
                 target.command.turn_id,
                 runtime.drive_transition(result.transition),
@@ -1649,13 +1669,14 @@ class UnifiedHarnessSessionBackend:
                 raise HarnessStaleTurnError(inspection.active_turn_id)
             await self._cancel_active_work()
             await runtime.interrupt(
-                expected_turn_id=target.command.turn_id,
-                reason="interrupted by parent",
+                expected_turn_id=target.command.turn_id, reason="interrupted by parent"
             )
         elif inspection.last_turn_id != target.command.turn_id:
             raise HarnessStaleTurnError(inspection.active_turn_id)
         await self._record_parent_command(parent_session_id, operation_key, target)
-        self._turn_terminal_events.setdefault(target.command.turn_id, asyncio.Event()).set()
+        self._turn_terminal_events.setdefault(
+            target.command.turn_id, asyncio.Event()
+        ).set()
 
     async def _acknowledge_parent_command(self, operation_key: str) -> None:
         runtime = self._runtime_for_host()
@@ -1781,7 +1802,7 @@ class UnifiedHarnessSessionBackend:
             plugin_lock=plugins.lock, config=config, subagents=subagents
         )
 
-    async def shutdown(self) -> None:
+    async def shutdown(self) -> None:  # noqa: PLR0912, PLR0915 - tears every subsystem down in order
         if self._closed:
             return
         self._closed = True
@@ -1858,9 +1879,13 @@ class UnifiedHarnessSessionBackend:
         if len(errors) == 1:
             raise errors[0]
         if errors:
-            raise BaseExceptionGroup("Failed to shut down Unified Harness session", errors)
+            raise BaseExceptionGroup(
+                "Failed to shut down Unified Harness session", errors
+            )
 
-    def _publish_event(self, event: JsonObject, *, settles_turn_task: bool = True) -> None:
+    def _publish_event(
+        self, event: JsonObject, *, settles_turn_task: bool = True
+    ) -> None:
         terminal = _terminal_turn(event)
         if terminal is not None and settles_turn_task:
             turn_id, _status = terminal
@@ -1878,12 +1903,14 @@ class UnifiedHarnessSessionBackend:
             self._handle_terminal_turn(*terminal)
 
     def _publish_sequenced_event(self, event: JsonObject) -> None:
-        self._emit_event(self._with_harness_owned_state(self._with_next_event_id(event)))
+        self._emit_event(
+            self._with_harness_owned_state(self._with_next_event_id(event))
+        )
 
     def _schedule_turn(
         self,
         runtime: DurableSessionRuntime,
-        payload: "_TurnStartPayload",
+        payload: _TurnStartPayload,
         *,
         queue_item_id: str | None = None,
         context_entries: tuple[PreparedTurnEntry, ...] = (),
@@ -1905,9 +1932,7 @@ class UnifiedHarnessSessionBackend:
                 method="turn/start",
                 params=payload.params,
                 command=RustUserMessageEvent(
-                    turn_id=payload.turn_id,
-                    content=payload.content,
-                    mode="queue",
+                    turn_id=payload.turn_id, content=payload.content, mode="queue"
                 ),
                 response_factory=lambda _transition: {},
                 accepted_public_history_entries=accepted_public_history_entries,
@@ -1922,7 +1947,11 @@ class UnifiedHarnessSessionBackend:
         task.add_done_callback(self._clear_finished_turn_task)
 
     def _schedule_turn_queue_drain(self) -> None:
-        if self._closed or self._reserved_turn_id is not None or self.active_turn_id is not None:
+        if (
+            self._closed
+            or self._reserved_turn_id is not None
+            or self.active_turn_id is not None
+        ):
             return
         existing = self._queue_drain_task
         if existing is not None and not existing.done():
@@ -1964,15 +1993,16 @@ class UnifiedHarnessSessionBackend:
             self._publish_turn_queue_updated()
             self._start_queued_turn(runtime, record)
 
-    def _start_queued_turn(self, runtime: DurableSessionRuntime, record: QueuedTurnRecord) -> None:
+    def _start_queued_turn(
+        self, runtime: DurableSessionRuntime, record: QueuedTurnRecord
+    ) -> None:
         queue_item_id = record.queued_turn.id
         turn_id = f"turn-{secrets.token_hex(16)}"
         context_entries = tuple(
             entry for entry in record.prepared_entries if entry.role == "context"
         )
         user_entry = next(
-            (entry for entry in record.prepared_entries if entry.role == "user"),
-            None,
+            (entry for entry in record.prepared_entries if entry.role == "user"), None
         )
         content = list(user_entry.content) if user_entry is not None else []
         if content:
@@ -1997,13 +2027,11 @@ class UnifiedHarnessSessionBackend:
         if task.cancelled():
             return
         if error := task.exception():
-            asyncio.get_running_loop().call_exception_handler(
-                {
-                    "message": "Unified Harness turn queue drain failed",
-                    "exception": error,
-                    "task": task,
-                }
-            )
+            asyncio.get_running_loop().call_exception_handler({
+                "message": "Unified Harness turn queue drain failed",
+                "exception": error,
+                "task": task,
+            })
 
     def _publish_turn_queue_updated(self) -> None:
         state, _watermark = self._current_state_and_watermark()
@@ -2067,7 +2095,9 @@ class UnifiedHarnessSessionBackend:
             if self._open_callbacks.pop(callback_id, None) is not None:
                 self._publish_session_state_update()
 
-    async def _request_process_approval(self, action: RustRuntimeBuiltinToolCallAction) -> bool:
+    async def _request_process_approval(
+        self, action: RustRuntimeBuiltinToolCallAction
+    ) -> bool:
         """Adapt the grant-returning requester to the process runtime's boolean port.
 
         Smart approve's ``_request_approval`` returns an ``ApprovalGrant`` (once /
@@ -2082,7 +2112,9 @@ class UnifiedHarnessSessionBackend:
         callback_id = f"user-input-{action.call_id}"
         if callback_id in self._user_input_waiters:
             callback_id = f"{callback_id}-{secrets.token_hex(4)}"
-        future: asyncio.Future[tuple[bool, JsonValue]] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[tuple[bool, JsonValue]] = (
+            asyncio.get_running_loop().create_future()
+        )
         callback = _user_input_callback(
             session_id=self._session_id,
             callback_id=callback_id,
@@ -2122,7 +2154,9 @@ class UnifiedHarnessSessionBackend:
             if self._open_callbacks.pop(callback_id, None) is not None:
                 self._publish_session_state_update()
 
-    async def _interrupt_active_turn_from_callback(self, callback: JsonObject | None) -> None:
+    async def _interrupt_active_turn_from_callback(
+        self, callback: JsonObject | None
+    ) -> None:
         async with self._lifecycle_lock:
             runtime = self._runtime
             if runtime is None:
@@ -2138,7 +2172,11 @@ class UnifiedHarnessSessionBackend:
     async def _cancel_active_work(self) -> None:
         await self._close_open_callbacks("Turn interrupted")
         task = self._active_turn_task
-        if task is not None and not task.done() and self._task_has_terminal_projection(task):
+        if (
+            task is not None
+            and not task.done()
+            and self._task_has_terminal_projection(task)
+        ):
             self._settling_turn_tasks.add(task)
             self._active_turn_task = None
             self._reserved_turn_id = None
@@ -2247,7 +2285,11 @@ class UnifiedHarnessSessionBackend:
             state = event.get("state")
             session = state.get("session") if isinstance(state, dict) else None
             status = session.get("status") if isinstance(session, dict) else None
-            if isinstance(status, dict) and status.get("type") in {"idle", "failed", "archived"}:
+            if isinstance(status, dict) and status.get("type") in {
+                "idle",
+                "failed",
+                "archived",
+            }:
                 # A provider retry only exists while a completion is in flight, so
                 # any terminal status retires it, even one that does not end a turn
                 # this backend is tracking.
@@ -2302,11 +2344,7 @@ class UnifiedHarnessSessionBackend:
         self._reserved_turn_id = None
         self._active_queue_item_id = None
         if exception is not None:
-            self._publish_failed_turn(
-                turn_id,
-                exception,
-                queue_item_id=queue_item_id,
-            )
+            self._publish_failed_turn(turn_id, exception, queue_item_id=queue_item_id)
         elif not cancelled:
             self._schedule_turn_queue_drain()
         self._notify_work_state_changed()
@@ -2359,8 +2397,7 @@ class UnifiedHarnessSessionBackend:
         ):
             return
         self._title_task = asyncio.create_task(
-            self._generate_title(runtime),
-            name=f"harness-title:{self._session_id}",
+            self._generate_title(runtime), name=f"harness-title:{self._session_id}"
         )
         self._title_task.add_done_callback(self._title_generation_finished)
 
@@ -2380,7 +2417,9 @@ class UnifiedHarnessSessionBackend:
         self._title_cadence_seeded = True
         session = runtime.projection.session
         if session.title is not None and session.title_source == "auto":
-            self._title_cadence.restore(title=session.title, step=step, compaction_id=compaction_id)
+            self._title_cadence.restore(
+                title=session.title, step=step, compaction_id=compaction_id
+            )
 
     async def _cancel_title_task(self) -> None:
         task = self._title_task
@@ -2453,7 +2492,8 @@ class UnifiedHarnessSessionBackend:
                 "latest_turn": FailedPublicTurn(
                     id=turn_id,
                     session_id=self._session_id,
-                    queue_item_id=queue_item_id or _turn_queue_item_id(state.latest_turn, turn_id),
+                    queue_item_id=queue_item_id
+                    or _turn_queue_item_id(state.latest_turn, turn_id),
                     started_at=started_at,
                     completed_at=now,
                     error=PublicError(code=type(exception).__name__, message=message),
@@ -2475,7 +2515,9 @@ class UnifiedHarnessSessionBackend:
         else:
             self._publish_sequenced_event(event)
 
-    def _publish_reserved_turn_interrupted(self, turn_id: str, *, started_at: int) -> None:
+    def _publish_reserved_turn_interrupted(
+        self, turn_id: str, *, started_at: int
+    ) -> None:
         # See _publish_failed_turn: an interrupt ends the turn, so the retry it
         # was waiting on is retired before the terminal state is composed.
         self._retrying = None
@@ -2491,10 +2533,7 @@ class UnifiedHarnessSessionBackend:
                         "status": "cancelled",
                         "reason": "client interrupt",
                         "outputText": "",
-                        "display": {
-                            "success": False,
-                            "message": "Cancelled",
-                        },
+                        "display": {"success": False, "message": "Cancelled"},
                     },
                 }
                 if entry.get("type") == "effect"
@@ -2516,7 +2555,9 @@ class UnifiedHarnessSessionBackend:
                     completed_at=now,
                     reason="client interrupt",
                 ),
-                "history": state.history.model_copy(update={"entries": history_entries}),
+                "history": state.history.model_copy(
+                    update={"entries": history_entries}
+                ),
             }
         )
         self._state = interrupted
@@ -2540,7 +2581,9 @@ class UnifiedHarnessSessionBackend:
         return SessionSnapshot(
             state=state.model_copy(
                 update={
-                    "history": LatestPublicHistoryPage(entries=entries, cursor=history.cursor),
+                    "history": LatestPublicHistoryPage(
+                        entries=entries, cursor=history.cursor
+                    ),
                     "turn_queue": self.turn_queue,
                 }
             ),
@@ -2583,9 +2626,13 @@ class UnifiedHarnessSessionBackend:
             # retrying almost always, so the common case must not pay for a copy
             # of a state that grows with the session.
             return state, self._current_event_id()
-        return state.model_copy(update={"retrying": self._retrying}), self._current_event_id()
+        return state.model_copy(
+            update={"retrying": self._retrying}
+        ), self._current_event_id()
 
-    async def _set_provider_retry(self, turn_id: str, retry: ProviderRetry | None) -> None:
+    async def _set_provider_retry(
+        self, turn_id: str, retry: ProviderRetry | None
+    ) -> None:
         # The live turn is a property over Core's inspection and the scheduled
         # task, not a field. Reading a private one raised AttributeError, which
         # the completion's retry observer swallowed, so nothing ever retried.
@@ -2613,7 +2660,9 @@ class UnifiedHarnessSessionBackend:
         session = state.session
         if active_turn_id is not None:
             detail = _field(callback, "detail", default={})
-            callback_kind = (detail.get("kind") if isinstance(detail, dict) else None) or "approval"
+            callback_kind = (
+                detail.get("kind") if isinstance(detail, dict) else None
+            ) or "approval"
             session = session.model_copy(
                 update={
                     "status": BlockedSessionStatus(
@@ -2621,9 +2670,11 @@ class UnifiedHarnessSessionBackend:
                         callback_id=_required_str(callback, "callbackId"),
                         callback_kind=callback_kind,
                     )
-                },
+                }
             )
-        return state.model_copy(update={"active_callbacks": callbacks, "session": session})
+        return state.model_copy(
+            update={"active_callbacks": callbacks, "session": session}
+        )
 
     def publish_notice(self, message: str, *, level: str = "warning") -> None:
         """Emit an out-of-band remark that changes nothing about the session.
@@ -2644,7 +2695,8 @@ class UnifiedHarnessSessionBackend:
                 {
                     "type": "session_state_updated",
                     "sessionId": self._session_id,
-                    "state": self._with_open_callbacks(state)
+                    "state": self
+                    ._with_open_callbacks(state)
                     .model_copy(update={"turn_queue": self.turn_queue})
                     .model_dump(mode="json", by_alias=True),
                 },
@@ -2737,8 +2789,7 @@ def _deferred_turn_start_payload(
     )
     if request.client_user_message_id is not None:
         content = _with_content_meta(
-            content,
-            {"vibe_client_message_id": request.client_user_message_id},
+            content, {"vibe_client_message_id": request.client_user_message_id}
         )
     if request.user_display_content is not None:
         content = _with_content_meta(
@@ -2790,7 +2841,9 @@ def _turn_start_payload(
     if getattr(raw, "injected", False):
         content = _with_content_meta(content, {"vibe.injected": True})
     if not content:
-        raise ValueError("Unified Harness turn/start currently supports text input only")
+        raise ValueError(
+            "Unified Harness turn/start currently supports text input only"
+        )
     turn_id = f"turn-{secrets.token_hex(16)}"
     dumped = raw.model_dump(mode="json", by_alias=True, exclude_none=True)
     return _TurnStartPayload(
@@ -2806,7 +2859,9 @@ def _prepare_turn_entries(
 ) -> tuple[PreparedTurnEntry, ...]:
     prepared: list[PreparedTurnEntry] = []
     for entry in entries:
-        content = _rust_session_content_blocks(entry.content, image_source_roots=image_source_roots)
+        content = _rust_session_content_blocks(
+            entry.content, image_source_roots=image_source_roots
+        )
         user_display_content = entry.annotations.vibe_user_display_content
         if user_display_content is not None:
             content = _with_content_meta(
@@ -2818,17 +2873,20 @@ def _prepare_turn_entries(
                 },
             )
         if entry.entry_id is not None:
-            content = _with_content_meta(content, {"vibe_client_message_id": entry.entry_id})
+            content = _with_content_meta(
+                content, {"vibe_client_message_id": entry.entry_id}
+            )
         prepared.append(PreparedTurnEntry(role=entry.role, content=tuple(content)))
     return tuple(prepared)
 
 
 def _queued_steer_content(record: QueuedTurnRecord) -> list[RustContentBlock]:
     if any(entry.role == "context" for entry in record.prepared_entries):
-        raise ValueError("Unified Harness queued steering does not support context entries")
+        raise ValueError(
+            "Unified Harness queued steering does not support context entries"
+        )
     user_entry = next(
-        (entry for entry in record.prepared_entries if entry.role == "user"),
-        None,
+        (entry for entry in record.prepared_entries if entry.role == "user"), None
     )
     if user_entry is None or not user_entry.content:
         raise ValueError("Unified Harness queued steering requires user content")
@@ -2845,7 +2903,9 @@ def _rust_session_content_blocks(
             continue
         if isinstance(block, SessionImageContentBlock):
             blocks.append(
-                _session_image_content_block(block, image_source_roots=image_source_roots)
+                _session_image_content_block(
+                    block, image_source_roots=image_source_roots
+                )
             )
             continue
         if isinstance(block, SessionResourceLinkContentBlock):
@@ -2864,17 +2924,13 @@ def _rust_session_content_blocks(
             resource: RustTextResourceContents | RustBlobResourceContents
             if block.text is not None:
                 resource = RustTextResourceContents(
-                    uri=block.uri,
-                    mime_type=block.media_type,
-                    text=block.text,
+                    uri=block.uri, mime_type=block.media_type, text=block.text
                 )
             else:
                 if block.blob is None:
                     raise RuntimeError("validated embedded resource has no content")
                 resource = RustBlobResourceContents(
-                    uri=block.uri,
-                    mime_type=block.media_type,
-                    blob=block.blob,
+                    uri=block.uri, mime_type=block.media_type, blob=block.blob
                 )
             blocks.append(RustEmbeddedResourceContentBlock(resource=resource))
             continue
@@ -2892,12 +2948,20 @@ def _session_image_content_block(
         media_type = block.media_type or header[5:-7]
         if not media_type:
             raise ValueError("Unified Harness image URI has no media type")
-        return RustImageContentBlock(data=_validated_inline_image_data(data), mime_type=media_type)
+        return RustImageContentBlock(
+            data=_validated_inline_image_data(data), mime_type=media_type
+        )
 
     parsed = urlparse(block.uri)
     if parsed.scheme not in {"", "file"}:
-        raise ValueError(f"Unified Harness queued image URI is not local: {block.uri!r}")
-    path = Path(file_uri_to_path(block.uri)) if parsed.scheme == "file" else Path(block.uri)
+        raise ValueError(
+            f"Unified Harness queued image URI is not local: {block.uri!r}"
+        )
+    path = (
+        Path(file_uri_to_path(block.uri))
+        if parsed.scheme == "file"
+        else Path(block.uri)
+    )
     media_type = block.media_type
     if media_type is None:
         raise ValueError("Unified Harness queued image has no media type")
@@ -2952,15 +3016,17 @@ def _rust_content_blocks(
         block_type = getattr(block, "type", None)
         match block_type:
             case "text":
-                meta = {"vibe_client_message_id": client_message_id} if client_message_id else None
+                meta = (
+                    {"vibe_client_message_id": client_message_id}
+                    if client_message_id
+                    else None
+                )
                 blocks.append(
-                    RustTextContentBlock.model_validate(
-                        {
-                            "type": "text",
-                            "text": block.text,
-                            **({"_meta": meta} if meta is not None else {}),
-                        }
-                    )
+                    RustTextContentBlock.model_validate({
+                        "type": "text",
+                        "text": block.text,
+                        **({"_meta": meta} if meta is not None else {}),
+                    })
                 )
             case "image":
                 attachment = block.attachment
@@ -3063,7 +3129,9 @@ def _read_image_file_source(
 ) -> _EncodedImageFile:
     source = path.expanduser().resolve()
     if not any(source.is_relative_to(root) for root in image_source_roots):
-        raise ValueError(f"Image file is outside the workspace or session attachments: {source}")
+        raise ValueError(
+            f"Image file is outside the workspace or session attachments: {source}"
+        )
     try:
         size = source.stat().st_size
     except OSError as exc:
@@ -3074,10 +3142,7 @@ def _read_image_file_source(
     except OSError as exc:
         raise ValueError(f"Failed to read image file {source}: {exc}") from exc
     _check_image_size(len(raw))
-    return _EncodedImageFile(
-        data=base64.b64encode(raw).decode("ascii"),
-        size=len(raw),
-    )
+    return _EncodedImageFile(data=base64.b64encode(raw).decode("ascii"), size=len(raw))
 
 
 def _check_image_size(size: int) -> None:

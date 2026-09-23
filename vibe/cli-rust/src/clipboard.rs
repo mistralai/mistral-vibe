@@ -67,10 +67,15 @@ fn copy_native(text: &str) -> bool {
 /// Wrapped in tmux passthrough when running inside tmux, matching Python.
 #[cfg(unix)]
 fn copy_osc52(text: &str) {
+    use base64::Engine as _;
+
     if text.is_empty() {
         return;
     }
-    let mut seq = format!("\x1b]52;c;{}\x07", base64(text.as_bytes()));
+    let mut seq = format!(
+        "\x1b]52;c;{}\x07",
+        base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
+    );
     if std::env::var_os("TMUX").is_some() {
         seq = format!("\x1bPtmux;\x1b{seq}\x1b\\");
     }
@@ -82,27 +87,3 @@ fn copy_osc52(text: &str) {
 
 #[cfg(not(unix))]
 fn copy_osc52(_text: &str) {}
-
-/// Minimal standard base64 with padding; avoids pulling in a crate for one use.
-fn base64(input: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        out.push(T[((n >> 18) & 63) as usize] as char);
-        out.push(T[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            T[((n >> 6) & 63) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            T[(n & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
-}

@@ -4,6 +4,8 @@ The Host owns worktree administration. Harness Core receives only the prepared
 Turn input after this Runtime capability completes.
 """
 
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
@@ -142,7 +144,9 @@ class FailedWorktreeHistoryEntry(_WorktreeHistoryEntry):
 
 
 type PublicHistoryEntry = (
-    RunningWorktreeHistoryEntry | CompletedWorktreeHistoryEntry | FailedWorktreeHistoryEntry
+    RunningWorktreeHistoryEntry
+    | CompletedWorktreeHistoryEntry
+    | FailedWorktreeHistoryEntry
 )
 
 
@@ -167,9 +171,7 @@ class DeferredTurnPreparationResult:
 
 class DeferredTurnPreparationError(Exception):
     def __init__(
-        self,
-        error: Exception,
-        history_entries: tuple[PublicHistoryEntry, ...] = (),
+        self, error: Exception, history_entries: tuple[PublicHistoryEntry, ...] = ()
     ) -> None:
         super().__init__(str(error))
         self.error = error
@@ -180,8 +182,7 @@ class DeferredTurnPreparationError(Exception):
 class DeferredTurnPreparation:
     pending_history_entries: tuple[PublicHistoryEntry, ...]
     run: Callable[
-        [DeferredTurnPreparationContext],
-        Awaitable[DeferredTurnPreparationResult],
+        [DeferredTurnPreparationContext], Awaitable[DeferredTurnPreparationResult]
     ]
 
 
@@ -204,8 +205,7 @@ class DeferredTurnStartResult:
 
 class DeferredTurnStartCapability(Protocol):
     async def start_deferred_turn(
-        self,
-        params: DeferredTurnStartParams,
+        self, params: DeferredTurnStartParams
     ) -> DeferredTurnStartResult: ...
 
 

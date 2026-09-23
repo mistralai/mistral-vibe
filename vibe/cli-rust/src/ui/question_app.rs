@@ -2,25 +2,33 @@
 //! title, the option rows, a free-text row, an optional submit row, an optional
 //! footer note and a hint. Mirrors Python's `QuestionApp` and its TCSS.
 
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use ratatui::Frame;
 
-use super::question_layout::{draw_box, Row};
-use super::{bottom_bar, loading, theme, transcript};
+use super::question_layout::{draw_box, prefix_gaps, Row};
+use super::question_rows::{help_row, option_prefix, other_row, submit_row};
+use super::{bottom_bar, theme, transcript};
 use crate::app::App;
 use crate::question_app::{
-    current_question, is_other_selected, is_submit_selected, other_option_idx, other_text,
-    reconcile_scroll, submit_option_idx, visible_option_rows,
+    current_question, other_option_idx, reconcile_scroll, submit_option_idx, visible_option_rows,
 };
 use crate::utils::text::wrap_hard;
 
 /// Textual's `max-height: 70vh` on `#question-app`.
 const MAX_HEIGHT_RATIO: (u16, u16) = (7, 10);
 
-/// The two border columns plus the `padding: 0 1` of `#question-app`.
+/// The `(row offset, option index)` hit map of the selectable rows.
+type OptionRows = Vec<(u16, usize)>;
+/// The `(row offset, prefix width)` chrome of every option row's prefix.
+type PrefixRows = Vec<(u16, u16)>;
+
+/// The two border columns plus the `padding: 0 1` of `#question-app`, split
+/// evenly left/right of the content.
+const BORDER_WIDTH: u16 = 4;
+
 fn content_width(area: Rect) -> usize {
-    area.width.saturating_sub(4) as usize
+    area.width.saturating_sub(BORDER_WIDTH) as usize
 }
 
 /// Draw the whole screen with the question app replacing the input box.
@@ -29,17 +37,11 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         .set_style(area, Style::default().bg(theme::background()));
 
     let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
-    let (rows, option_rows) = rows(app, content_width(area));
+    let (rows, option_rows, prefixes) = rows(app, content_width(area));
     let max_height = (area.height * MAX_HEIGHT_RATIO.0 / MAX_HEIGHT_RATIO.1).max(2);
     let total_rows = rows.len().min(u16::MAX as usize) as u16;
     let box_height = total_rows.saturating_add(2).min(max_height);
-    let chunks = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(loading_height),
-        Constraint::Length(box_height),
-        Constraint::Length(1),
-    ])
-    .split(area);
+    let chunks = super::bottom_app_chunks(app, area, loading_height, box_height);
 
     let visible_rows = box_height.saturating_sub(2);
     let scroll = reconcile_scroll(
@@ -54,20 +56,40 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     app.question_app.option_rows = visible_option_rows(&option_rows, box_y, scroll, visible_rows);
 
     transcript::draw(app, f, chunks[0]);
-    loading::draw(app, f, chunks[1]);
+    super::selection::overlay(app, f);
+    super::draw_loading_area(app, f, chunks[1]);
+    super::selection::loading_region(app, f, chunks[1]);
     crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Question);
+    let content = box_content(chunks[2]);
+    app.view.question_selection_region = super::selection::frame_region(content);
+    app.view.question_selection_chrome = prefix_gaps(&prefixes, content, scroll, visible_rows);
     draw_box(app, f, chunks[2], &rows, scroll, total_rows);
+    super::todo::draw_row(app, f, chunks[4]);
+    super::selection::overlay_region(app, f, crate::selection::RegionId::Question);
     bottom_bar::draw(app, f, chunks[3]);
 }
 
-/// Every content row of the box, in Textual compose order with its margins, plus
-/// the `(row offset, option index)` hit map of the selectable rows.
-fn rows(app: &App, width: usize) -> (Vec<Row>, Vec<(u16, usize)>) {
+/// The text rectangle inside a box border plus `0 1` padding (Python selects
+/// everything its widgets paint, but never the container's border).
+fn box_content(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(BORDER_WIDTH / 2),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(BORDER_WIDTH),
+        height: area.height.saturating_sub(2),
+    }
+}
+
+/// Every content row of the box, in Textual compose order with its margins, the
+/// `(row offset, option index)` hit map of the selectable rows, and the
+/// `(row offset, prefix width)` chrome of every option row's prefix.
+fn rows(app: &App, width: usize) -> (Vec<Row>, OptionRows, PrefixRows) {
     let state = &app.question_app;
     let question = current_question(app);
     let multi_selected = state.multi_selections.get(&state.current_question_idx);
     let mut rows: Vec<Row> = Vec::new();
-    let mut option_rows: Vec<(u16, usize)> = Vec::new();
+    let mut option_rows: OptionRows = Vec::new();
+    let mut prefixes: PrefixRows = Vec::new();
 
     if state.questions.len() > 1 {
         rows.push(vec![(tabs(app), theme::text(theme::primary()))]);
@@ -85,18 +107,22 @@ fn rows(app: &App, width: usize) -> (Vec<Row>, Vec<(u16, usize)>) {
             question.multi_select,
             multi_selected.is_some_and(|selections| selections.contains(&index)),
         );
+        let prefix_width = text.chars().count() as u16;
         text.push_str(&option.label);
         if !option.description.is_empty() {
             text.push_str(" - ");
             text.push_str(&option.description);
         }
         let start = rows.len() as u16;
+        prefixes.push((start, prefix_width));
         push_wrapped(&mut rows, &text, option_style(focused), width);
         option_rows.extend((start..rows.len() as u16).map(|row| (row, index)));
     }
     if let Some(other_idx) = other_option_idx(app) {
+        let row = other_row(app, other_idx);
+        prefixes.push((rows.len() as u16, row[0].0.chars().count() as u16));
         option_rows.push((rows.len() as u16, other_idx));
-        rows.push(other_row(app, other_idx));
+        rows.push(row);
     }
     if let Some(submit_idx) = submit_option_idx(app) {
         rows.push(Vec::new());
@@ -109,7 +135,7 @@ fn rows(app: &App, width: usize) -> (Vec<Row>, Vec<(u16, usize)>) {
     }
     rows.push(Vec::new());
     rows.push(help_row(app));
-    (rows, option_rows)
+    (rows, option_rows, prefixes)
 }
 
 /// Push `text` word-wrapped to `width`, one row per line, as a Textual `Static` does.
@@ -119,17 +145,6 @@ fn push_wrapped(rows: &mut Vec<Row>, text: &str, style: Style, width: usize) {
             .into_iter()
             .map(|line| vec![(line, style)]),
     );
-}
-
-/// `› 1. ` / `  1. [x] ` (Python `_format_option_prefix`).
-fn option_prefix(index: usize, focused: bool, multi: bool, selected: bool) -> String {
-    let cursor = if focused { "› " } else { "  " };
-    let number = index + 1;
-    if multi {
-        let check = if selected { "[x]" } else { "[ ]" };
-        return format!("{cursor}{number}. {check} ");
-    }
-    format!("{cursor}{number}. ")
 }
 
 /// `.question-footer-note`: italic on truecolor themes, plain dim under `:ansi`.
@@ -147,79 +162,6 @@ fn option_style(focused: bool) -> Style {
     } else {
         theme::text(theme::foreground())
     }
-}
-
-/// The free-text row: prefix, then the typed answer with its caret, or the
-/// placeholder. `.question-other-prefix` keeps `$foreground` and only takes the
-/// bold of `.question-option-selected` (it is the later TCSS rule).
-fn other_row(app: &App, other_idx: usize) -> Row {
-    let question = current_question(app);
-    let focused = is_other_selected(app);
-    let selected = app
-        .question_app
-        .multi_selections
-        .get(&app.question_app.current_question_idx)
-        .is_some_and(|selections| selections.contains(&other_idx));
-    let mut prefix_style = theme::text(theme::foreground());
-    if focused {
-        prefix_style = prefix_style.add_modifier(Modifier::BOLD);
-    }
-    let mut row = vec![(
-        option_prefix(other_idx, focused, question.multi_select, selected),
-        prefix_style,
-    )];
-
-    // Empty means the placeholder, whether from the static or the focused `Input`.
-    let text = other_text(app, app.question_app.current_question_idx);
-    let (body, body_style) = match text.is_empty() {
-        true => ("Type your answer...", theme::muted_style()),
-        false => (text, theme::text(theme::foreground())),
-    };
-    let caret = (focused && app.view.cursor_on).then_some(app.question_app.other_cursor);
-    for (offset, ch) in body.char_indices() {
-        let style = if caret == Some(offset) {
-            caret_style(body_style)
-        } else {
-            body_style
-        };
-        row.push((ch.to_string(), style));
-    }
-    if caret.is_some_and(|caret| caret >= body.len()) {
-        row.push((" ".into(), caret_style(body_style)));
-    }
-    row
-}
-
-/// The Textual `Input` caret: `$input-cursor-foreground` on
-/// `$input-cursor-background`, which ANSI themes resolve to black on white.
-/// Unlike the `TextArea` block this keeps the character under it readable.
-fn caret_style(base: Style) -> Style {
-    if theme::is_ansi() {
-        return base.fg(Color::Black).bg(Color::Gray);
-    }
-    base.fg(theme::background()).bg(theme::input_cursor_bg())
-}
-
-/// `›   Submit →`, reading `Next` while other questions are still unanswered.
-fn submit_row(app: &App) -> Row {
-    let focused = is_submit_selected(app);
-    let cursor = if focused { "› " } else { "  " };
-    let answered: usize = (0..app.question_app.questions.len())
-        .filter(|idx| {
-            *idx == app.question_app.current_question_idx
-                || app.question_app.answers.contains_key(idx)
-        })
-        .count();
-    let text = if answered == app.question_app.questions.len() {
-        "Submit"
-    } else {
-        "Next"
-    };
-    let mut style = theme::text(theme::foreground());
-    if focused {
-        style = style.add_modifier(Modifier::BOLD);
-    }
-    vec![(format!("{cursor}   {text} →"), style)]
 }
 
 /// ` DB ✓   [Framework]` (Python `_update_tabs`).
@@ -244,27 +186,4 @@ fn tabs(app: &App) -> String {
         })
         .collect::<Vec<_>>()
         .join("  ")
-}
-
-/// The hint line: keys bold $primary, labels $text-muted.
-fn help_row(app: &App) -> Row {
-    let key = theme::text(theme::primary()).add_modifier(Modifier::BOLD);
-    let label = theme::muted_style();
-    let select = if current_question(app).multi_select {
-        " toggle  "
-    } else {
-        " select  "
-    };
-    let mut row = Vec::new();
-    if app.question_app.questions.len() > 1 {
-        row.push(("←→".to_string(), key));
-        row.push((" questions  ".to_string(), label));
-    }
-    row.push(("↑↓/jk".to_string(), key));
-    row.push((" navigate  ".to_string(), label));
-    row.push(("Enter".to_string(), key));
-    row.push((select.to_string(), label));
-    row.push(("Esc".to_string(), key));
-    row.push((" cancel".to_string(), label));
-    row
 }

@@ -721,7 +721,7 @@ async def test_approval_callback_opens_from_public_protocol() -> None:
     await VibeApp._show_callback(app, callback)
 
     assert app._active_callback is callback
-    app._switch_to_approval_app.assert_awaited_once_with(effect, [], None)
+    app._switch_to_approval_app.assert_awaited_once_with(effect, [], [], None)
 
 
 @pytest.mark.asyncio

@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import asyncio
 import contextlib
+from dataclasses import dataclass
 import os
 import signal
 import sys
-from dataclasses import dataclass
 from typing import cast
 
 from pydantic import BaseModel, Field, JsonValue, ValidationError
@@ -65,7 +67,9 @@ async def run_bash(args: BashArgs, config: LocalRuntimeAdapterConfig) -> BashRes
                 stdout_truncated,
                 stderr_bytes,
                 stderr_truncated,
-            ) = await asyncio.wait_for(_communicate_bounded(process), timeout=args.timeout_seconds)
+            ) = await asyncio.wait_for(
+                _communicate_bounded(process), timeout=args.timeout_seconds
+            )
         except TimeoutError as exc:
             await _kill(process)
             raise TimeoutError(
@@ -90,7 +94,9 @@ async def run_bash(args: BashArgs, config: LocalRuntimeAdapterConfig) -> BashRes
             await _kill(process)
 
 
-async def _spawn_bash_command(command: str, config: LocalRuntimeAdapterConfig) -> SpawnedShell:
+async def _spawn_bash_command(
+    command: str, config: LocalRuntimeAdapterConfig
+) -> SpawnedShell:
     env = _shell_env(config.env)
     argv = _shell_argv(command, config, env)
     process = await asyncio.create_subprocess_exec(
@@ -105,7 +111,9 @@ async def _spawn_bash_command(command: str, config: LocalRuntimeAdapterConfig) -
     return SpawnedShell(process=process, output_encoding="utf-8")
 
 
-def _shell_argv(command: str, config: LocalRuntimeAdapterConfig, env: dict[str, str]) -> list[str]:
+def _shell_argv(
+    command: str, config: LocalRuntimeAdapterConfig, env: dict[str, str]
+) -> list[str]:
     match config.command_environment:
         case "unix" if sys.platform != "win32":
             from mistralai_vibe_local_harness.vibe._processes._posix import (
@@ -125,11 +133,7 @@ def _shell_argv(command: str, config: LocalRuntimeAdapterConfig, env: dict[str, 
             flags = (
                 ["-c"]
                 if config.command_environment == "git_bash"
-                else [
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-Command",
-                ]
+                else ["-NoLogo", "-NoProfile", "-Command"]
             )
             return [shell, *flags, command]
         case _:
@@ -142,16 +146,12 @@ async def _communicate_bounded(
     process: asyncio.subprocess.Process,
 ) -> tuple[bytes, bool, bytes, bool]:
     stdout, stderr, _ = await asyncio.gather(
-        _read_bounded(process.stdout),
-        _read_bounded(process.stderr),
-        process.wait(),
+        _read_bounded(process.stdout), _read_bounded(process.stderr), process.wait()
     )
     return *stdout, *stderr
 
 
-async def _read_bounded(
-    reader: asyncio.StreamReader | None,
-) -> tuple[bytes, bool]:
+async def _read_bounded(reader: asyncio.StreamReader | None) -> tuple[bytes, bool]:
     if reader is None:
         return b"", False
     chunks: list[bytes] = []
@@ -217,28 +217,26 @@ async def _kill(process: asyncio.subprocess.Process) -> None:
 
 
 def _succeeded(
-    action: RustRuntimeBuiltinToolCallAction,
-    structured_content: dict[str, JsonValue],
+    action: RustRuntimeBuiltinToolCallAction, structured_content: dict[str, JsonValue]
 ) -> RustToolSucceededEvent:
     return RustToolSucceededEvent(
         action_id=action.action_id,
         call_id=action.call_id,
-        result=RustToolSuccessResult.model_validate(
-            {"structured_content": cast(JsonValue, structured_content)}
-        ),
+        result=RustToolSuccessResult.model_validate({
+            "structured_content": cast(JsonValue, structured_content)
+        }),
     )
 
 
-def _failed(action: RustRuntimeBuiltinToolCallAction, message: str) -> RustToolFailedEvent:
+def _failed(
+    action: RustRuntimeBuiltinToolCallAction, message: str
+) -> RustToolFailedEvent:
     return RustToolFailedEvent(
         action_id=action.action_id,
         call_id=action.call_id,
         result=RustToolFailureResult(
             error=RustProtocolError(
-                code="tool_failed",
-                message=message,
-                retryable=False,
-                details=None,
+                code="tool_failed", message=message, retryable=False, details=None
             )
         ),
     )

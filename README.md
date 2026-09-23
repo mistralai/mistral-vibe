@@ -277,7 +277,7 @@ vibe "Refactor the main function in cli/main.py to be more modular."
 
 Vibe includes a trust folder system to ensure you only run the agent in directories you trust. When you first run Vibe in a new directory which contains a `.vibe` subfolder, it may ask you to confirm whether you trust the folder.
 
-Trusted folders are remembered for future sessions. You can manage trusted folders through its configuration file `~/.vibe/trusted_folders.toml`.
+Trusted folders are remembered for future sessions. You can manage trusted folders through its configuration file `~/.vibe/trusted_folders.toml`. In the trust prompt, use Up/Down or the mouse wheel to scroll the detected-file list. Text is selectable there too: double-click selects a word, triple-click selects a paragraph, and dragging near the list edges scrolls while extending the selection.
 
 This safety feature helps prevent accidental execution in sensitive directories.
 
@@ -702,6 +702,13 @@ also supports repeatable `--header`, `--api-key-header`, `--api-key-format`,
 for the complete command reference. `vibe mcp remove <name>` removes the server
 from the user configuration. Removing an OAuth server also deletes its stored
 tokens, client information, and configuration fingerprint when available.
+
+With `VIBE_CLI=rust`, shell `mcp add` uses the OAuth-only `/mcp add` syntax:
+`vibe mcp add https://mcp.linear.app/mcp --name linear --no-login`.
+It accepts `--scope` (repeatable), `--transport`, and `--allow-insecure-http`;
+without `--no-login`, it starts browser login. Both `add` and `remove NAME`
+update the user configuration without opening a chat session. For stdio or
+static-auth additions, use `VIBE_CLI=python vibe mcp add` with the flags above.
 
 Hosted OAuth MCP servers can also be added from inside Vibe:
 

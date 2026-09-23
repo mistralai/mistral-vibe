@@ -13,10 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from mistralai_vibe_local_harness.protocol import (
-    RustHarnessHookBinding,
-    RustHookPoint,
-)
+from mistralai_vibe_local_harness.protocol import RustHarnessHookBinding, RustHookPoint
 from mistralai_vibe_local_harness.vibe._foreign_hooks import (
     build_post_agent_turn_handler,
     build_post_tool_call_handler,
@@ -39,11 +36,7 @@ _AUTHORABLE_POINTS: dict[str, RustHookPoint] = {
 
 _DEFAULT_TIMEOUT_S = 60.0
 
-__all__ = [
-    "CompiledHooks",
-    "ForeignHookDefinition",
-    "compile_foreign_hooks",
-]
+__all__ = ["CompiledHooks", "ForeignHookDefinition", "compile_foreign_hooks"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,8 +129,6 @@ def compile_foreign_hooks(
     return CompiledHooks(
         bindings=tuple(bindings),
         handlers=HookHandlers(
-            pre_tool_call=pre_tool,
-            post_tool_call=post_tool,
-            post_agent_turn=post_agent,
+            pre_tool_call=pre_tool, post_tool_call=post_tool, post_agent_turn=post_agent
         ),
     )

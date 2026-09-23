@@ -254,6 +254,7 @@ def _stage_rust_cli() -> None:
 def _maturin_environment(*, portable_linux_wheel: bool = False) -> Iterator[None]:
     original_arguments = os.environ.get("MATURIN_PEP517_ARGS")
     original_target = os.environ.get("CARGO_TARGET_DIR")
+    original_strip = os.environ.get("CARGO_PROFILE_RELEASE_STRIP")
     arguments = shlex.split(original_arguments or "")
     if "--locked" not in arguments and "--frozen" not in arguments:
         arguments.append("--locked")
@@ -275,6 +276,13 @@ def _maturin_environment(*, portable_linux_wheel: bool = False) -> Iterator[None
         arguments.append("--zig")
     os.environ["MATURIN_PEP517_ARGS"] = shlex.join(arguments)
     os.environ["CARGO_TARGET_DIR"] = str(_HARNESS_TARGET)
+    # rustc strips Mach-O in-process instead of calling Apple's strip(1), and its
+    # writer puts the symbol string table straight after an odd-sized indirect
+    # symbol table, leaving it 4-byte aligned. dyld on macOS 26+ requires 8 and
+    # refuses the image, so the built extension cannot be imported at all.
+    # rust-lang/rust#157750. Drop this once the pinned toolchain carries the fix.
+    if sys.platform == "darwin" and original_strip is None:
+        os.environ["CARGO_PROFILE_RELEASE_STRIP"] = "none"
     try:
         yield
     finally:
@@ -286,3 +294,7 @@ def _maturin_environment(*, portable_linux_wheel: bool = False) -> Iterator[None
             os.environ.pop("CARGO_TARGET_DIR", None)
         else:
             os.environ["CARGO_TARGET_DIR"] = original_target
+        if original_strip is None:
+            os.environ.pop("CARGO_PROFILE_RELEASE_STRIP", None)
+        else:
+            os.environ["CARGO_PROFILE_RELEASE_STRIP"] = original_strip

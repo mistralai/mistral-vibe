@@ -34,6 +34,7 @@ from vibe.app_server._workspace import (
     read_untrusted_config_dirs,
     read_workspace_trust,
 )
+from vibe.app_server._worktree_session import SessionWorktrees
 from vibe.app_server.models import ConfigIssue, IdleSessionStatus, PublicSession
 from vibe.app_server.protocol import (
     AgentsListParams,
@@ -87,6 +88,9 @@ from vibe.app_server.protocol import (
     WorkspaceWorktreeListResponse,
     WorkspaceWorktreePruneParams,
     WorkspaceWorktreePruneResponse,
+    WorkspaceWorktreeReapCancelParams,
+    WorkspaceWorktreeReapParams,
+    WorkspaceWorktreeReapResponse,
     WorkspaceWorktreeRemoveParams,
     WorkspaceWorktreeRemoveResponse,
     WorktreeRemoveOutcome,
@@ -154,6 +158,8 @@ _HOST_METHODS = frozenset({
     "workspace/git/worktrees/limit/update",
     "workspace/git/worktrees/list",
     "workspace/git/worktrees/prune",
+    "workspace/git/worktrees/reap",
+    "workspace/git/worktrees/reap/cancel",
     "workspace/git/worktrees/remove",
 })
 
@@ -468,6 +474,23 @@ class HostRequestHandler:
                     ManagedWorktree.prune, orchestrator.config.worktree_limit
                 )
                 response = WorkspaceWorktreePruneResponse(removed=removed)
+            case "workspace/git/worktrees/reap":
+                params = validate_wire(WorkspaceWorktreeReapParams, raw_params)
+                response = await asyncio.to_thread(
+                    worktree_reap_response,
+                    self._cwd(params.cwd),
+                    params.requester_id,
+                    params.request_id,
+                )
+            case "workspace/git/worktrees/reap/cancel":
+                params = validate_wire(WorkspaceWorktreeReapCancelParams, raw_params)
+                await asyncio.to_thread(
+                    SessionWorktrees.cancel_reap,
+                    self._cwd(params.cwd),
+                    params.requester_id,
+                    params.request_id,
+                )
+                response = EmptyResponse()
             case "workspace/git/checkouts":
                 checkouts = validate_wire(WorkspaceGitCheckoutsParams, raw_params)
                 response = await asyncio.to_thread(
@@ -905,6 +928,31 @@ def worktree_remove_response(cwd: Path) -> WorkspaceWorktreeRemoveResponse:
 
     return WorkspaceWorktreeRemoveResponse(
         outcome=_WORKTREE_REMOVE_OUTCOMES[release.outcome],
+        root=None if release.root is None else str(release.root),
+        branch=release.branch,
+        branch_deleted=release.branch_deleted,
+        reasons=list(release.reasons),
+    )
+
+
+def worktree_reap_response(
+    cwd: Path, requester_id: str | None = None, request_id: str | None = None
+) -> WorkspaceWorktreeReapResponse:
+    managed = ManagedWorktree.at(cwd)
+    if managed is None:
+        return WorkspaceWorktreeReapResponse(outcome="kept_unmanaged")
+    try:
+        release = managed.reap(requester_id=requester_id, request_id=request_id)
+    except (GitError, OSError) as exc:
+        logger.warning("Failed to reap worktree cwd=%s: %s", cwd, exc)
+        return WorkspaceWorktreeReapResponse(outcome="kept_error", reasons=[str(exc)])
+
+    return WorkspaceWorktreeReapResponse(
+        outcome=(
+            "kept_cancelled"
+            if release.outcome is WorktreeReleaseOutcome.KEPT_CANCELLED
+            else _WORKTREE_REMOVE_OUTCOMES[release.outcome]
+        ),
         root=None if release.root is None else str(release.root),
         branch=release.branch,
         branch_deleted=release.branch_deleted,

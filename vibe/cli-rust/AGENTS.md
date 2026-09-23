@@ -19,7 +19,7 @@ proto  ── serde types for the SUBSET of methods/notifications we use
 - Aim for very good performance, this is a PoC to see how fast we can be
 - Aim for simplicity and low number of lines, this is very important
 - Inspire yourself from codex/ folder, it is a good architecture and it is working well !
-- Keep pure-logic unit tests (serde, parsers, helpers) in `tests/<name>.rs` as separate binaries. Cover Rust rendering and interaction behavior with `client-e2e` scenarios and goldens -- see the `migrate-cli-to-rust` skill.
+- Keep pure-logic tests in `tests/units/<name>.rs` and register them in `tests/units.rs` so they share one integration-test binary. Keep tests that need process-global isolation in separate `tests/<name>.rs` binaries. Cover Rust rendering and interaction behavior with `client-e2e` scenarios and goldens -- see the `migrate-cli-to-rust` skill.
 - No files with >300 lines of code allowed, simplicity is very important, keep things in separate modules.
 - This is the rewrite of the python code, when naming things, try to keep the same names as in the python code.
 - Care about bijection principle, you must respect it at all costs

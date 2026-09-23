@@ -6,7 +6,7 @@ pub(crate) const AUTONOMY_ACTIVITY: &str = "loading skills";
 pub(crate) fn rules_prompt_section() -> &'static str {
     r#"## Available Skills
 
-Skills contain task-specific instructions. When a request matches a skill description, proactively call the `skill` tool with its exact name before starting the task, then follow the loaded instructions. Load every skill that materially applies.
+Skills contain task-specific instructions. When a request matches a skill description, proactively call the `skill` tool with its exact name before starting the task, then follow the loaded instructions. If that skill's full instructions are already present in the current context, follow them without calling `skill` again. Load every skill that materially applies.
 
 Call `skill` only with a name listed in `<available-skills>`. Connector names and unlisted names in skill instructions are not skills.
 

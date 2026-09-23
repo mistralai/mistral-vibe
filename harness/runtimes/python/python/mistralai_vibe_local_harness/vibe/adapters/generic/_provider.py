@@ -4,6 +4,8 @@ The view carries the subset built from ``LocalRuntimeAdapterConfig`` that
 provider adapters need.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 

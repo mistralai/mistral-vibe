@@ -1,5 +1,7 @@
 """Translate Runtime-owned MCP calls into generic Harness tool events."""
 
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable
 
 from mistralai_vibe_local_harness.protocol import (
@@ -7,7 +9,10 @@ from mistralai_vibe_local_harness.protocol import (
     RustToolFailedEvent,
     RustToolSucceededEvent,
 )
-from mistralai_vibe_local_harness.vibe._mcp_models import MCPRuntimeFailure
+from mistralai_vibe_local_harness.vibe._mcp_models import (
+    MCPNormalizedResult,
+    MCPRuntimeFailure,
+)
 from mistralai_vibe_local_harness.vibe._mcp_runtime import MCPRuntime
 from mistralai_vibe_local_harness.vibe._provided_tool_actions import (
     execute_provided_tool_action,
@@ -23,11 +28,11 @@ def build_mcp_action_executor(runtime: MCPRuntime) -> MCPActionExecutor:
     async def execute(
         action: RustProvidedToolCallAction,
     ) -> RustToolSucceededEvent | RustToolFailedEvent:
-        async def call(group_name: str, tool_name: str, arguments: dict):
+        async def call(
+            group_name: str, tool_name: str, arguments: dict
+        ) -> MCPNormalizedResult:
             return await runtime.execute(
-                group_name=group_name,
-                tool_name=tool_name,
-                arguments=arguments,
+                group_name=group_name, tool_name=tool_name, arguments=arguments
             )
 
         return await execute_provided_tool_action(

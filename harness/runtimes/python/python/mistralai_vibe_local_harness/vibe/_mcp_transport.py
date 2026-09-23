@@ -1,12 +1,14 @@
 """MCP SDK and HTTPX boundary for Unified Harness transports."""
 
+from __future__ import annotations
+
 import asyncio
+from contextlib import AsyncExitStack
+from datetime import timedelta
 import importlib.metadata
 import ipaddress
 import logging
 import tempfile
-from contextlib import AsyncExitStack
-from datetime import timedelta
 from typing import Any, Self, cast
 from urllib.parse import urlparse
 from urllib.request import getproxies
@@ -81,7 +83,9 @@ async def discover_http(
     sampling_callback: MCPSamplingCallback | None = None,
 ) -> tuple[MCPRemoteToolDescriptor, ...]:
     if not server.url:
-        raise MCPRuntimeFailure("mcp_invalid_configuration", "MCP HTTP server has no URL")
+        raise MCPRuntimeFailure(
+            "mcp_invalid_configuration", "MCP HTTP server has no URL"
+        )
     try:
         async with _http_session(
             server,
@@ -106,7 +110,9 @@ async def call_http(
     sampling_callback: MCPSamplingCallback | None = None,
 ) -> MCPNormalizedResult:
     if not server.url:
-        raise MCPRuntimeFailure("mcp_invalid_configuration", "MCP HTTP server has no URL")
+        raise MCPRuntimeFailure(
+            "mcp_invalid_configuration", "MCP HTTP server has no URL"
+        )
     try:
         async with _http_session(
             server,
@@ -149,7 +155,9 @@ class _HttpSessionContext:
                     authorized_url=cast(str, server.url),
                     follow_redirects=True,
                     headers=dict(self._authorization.headers),
-                    timeout=httpx.Timeout(server.startup_timeout_s, read=server.tool_timeout_s),
+                    timeout=httpx.Timeout(
+                        server.startup_timeout_s, read=server.tool_timeout_s
+                    ),
                     policy=self._http_transport_policy,
                 )
             )
@@ -199,12 +207,16 @@ class _HttpSessionContext:
     async def _aclose_after_failed_entry(self) -> BaseException | None:
         try:
             await self._stack.aclose()
-        except BaseException as exc:  # noqa: BLE001 - surfaced to the caller as the cause
+        except BaseException as exc:
             return exc
         return None
 
-    async def __aexit__(self, exception_type: object, exception: object, traceback: object) -> None:
-        logger.debug("Closing MCP HTTP session for %r (%s)", self._server.name, self._server.url)
+    async def __aexit__(
+        self, exception_type: object, exception: object, traceback: object
+    ) -> None:
+        logger.debug(
+            "Closing MCP HTTP session for %r (%s)", self._server.name, self._server.url
+        )
         await self._stack.aclose()
 
 
@@ -215,15 +227,14 @@ def _http_session(
     *,
     sampling_callback: MCPSamplingCallback | None,
 ) -> _HttpSessionContext:
-    return _HttpSessionContext(server, authorization, http_transport_policy, sampling_callback)
+    return _HttpSessionContext(
+        server, authorization, http_transport_policy, sampling_callback
+    )
 
 
 class _StdioConnection(MCPClientConnection):
     def __init__(
-        self,
-        stack: AsyncExitStack,
-        session: ClientSession,
-        stderr: Any,
+        self, stack: AsyncExitStack, session: ClientSession, stderr: Any
     ) -> None:
         self._stack = stack
         self._session = session
@@ -238,7 +249,9 @@ class _StdioConnection(MCPClientConnection):
         sampling_callback: MCPSamplingCallback | None,
     ) -> Self:
         if not server.command:
-            raise MCPRuntimeFailure("mcp_invalid_configuration", "MCP stdio server has no command")
+            raise MCPRuntimeFailure(
+                "mcp_invalid_configuration", "MCP stdio server has no command"
+            )
         stack = AsyncExitStack()
         stderr = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         try:
@@ -321,12 +334,16 @@ async def _list_all_tools(
         page = await session.list_tools(cursor)
         descriptors.extend(_normalize_descriptor(tool) for tool in page.tools)
         if len(descriptors) > _MAX_DISCOVERED_TOOLS:
-            raise MCPRuntimeFailure("mcp_descriptor_limit", "MCP server returned too many tools")
+            raise MCPRuntimeFailure(
+                "mcp_descriptor_limit", "MCP server returned too many tools"
+            )
         next_cursor = page.nextCursor
         if next_cursor is None:
             return tuple(descriptors)
         if next_cursor in seen_cursors:
-            raise MCPRuntimeFailure("mcp_invalid_pagination", "MCP tools/list repeated a cursor")
+            raise MCPRuntimeFailure(
+                "mcp_invalid_pagination", "MCP tools/list repeated a cursor"
+            )
         seen_cursors.add(next_cursor)
         cursor = next_cursor
 
@@ -335,11 +352,15 @@ def _normalize_descriptor(value: object) -> MCPRemoteToolDescriptor:
     raw = _model_dump(value)
     name = raw.get("name")
     if not isinstance(name, str) or not name:
-        raise MCPRuntimeFailure("mcp_invalid_descriptor", "MCP tool descriptor has no name")
+        raise MCPRuntimeFailure(
+            "mcp_invalid_descriptor", "MCP tool descriptor has no name"
+        )
     description = raw.get("description")
     input_schema = _JSON_SCHEMA.validate_python(raw.get("inputSchema", {}))
     output_raw = raw.get("outputSchema")
-    output_schema = None if output_raw is None else _JSON_SCHEMA.validate_python(output_raw)
+    output_schema = (
+        None if output_raw is None else _JSON_SCHEMA.validate_python(output_raw)
+    )
     return MCPRemoteToolDescriptor(
         remote_name=name,
         description=description if isinstance(description, str) else "",
@@ -353,12 +374,16 @@ def _normalize_result(value: object) -> MCPNormalizedResult:
     raw = _model_dump(value)
     raw_content = raw.get("content", [])
     if not isinstance(raw_content, list):
-        raise MCPRuntimeFailure("mcp_invalid_result", "MCP tool result content is not a list")
+        raise MCPRuntimeFailure(
+            "mcp_invalid_result", "MCP tool result content is not a list"
+        )
     content: list[JsonObject] = []
     for block in raw_content:
         normalized = _JSON_VALUE.validate_python(block)
         if not isinstance(normalized, dict):
-            raise MCPRuntimeFailure("mcp_invalid_result", "MCP tool result block is not an object")
+            raise MCPRuntimeFailure(
+                "mcp_invalid_result", "MCP tool result block is not an object"
+            )
         block_type = normalized.get("type")
         if block_type not in {"text", "image", "audio", "resource_link", "resource"}:
             raise MCPRuntimeFailure(
@@ -383,14 +408,18 @@ def _normalize_result(value: object) -> MCPNormalizedResult:
 def _model_dump(value: object) -> dict[str, Any]:
     dump = getattr(value, "model_dump", None)
     if not callable(dump):
-        raise MCPRuntimeFailure("mcp_invalid_payload", "MCP SDK returned an invalid value")
+        raise MCPRuntimeFailure(
+            "mcp_invalid_payload", "MCP SDK returned an invalid value"
+        )
     raw = dump(mode="json", by_alias=True, exclude_none=False)
     if not isinstance(raw, dict):
-        raise MCPRuntimeFailure("mcp_invalid_payload", "MCP SDK returned an invalid object")
+        raise MCPRuntimeFailure(
+            "mcp_invalid_payload", "MCP SDK returned an invalid object"
+        )
     return cast(dict[str, Any], raw)
 
 
-def _translate_failure(exc: BaseException, *, operation: str) -> MCPRuntimeFailure:
+def _translate_failure(exc: BaseException, *, operation: str) -> MCPRuntimeFailure:  # noqa: PLR0911 - one return per failure kind
     flattened = _flatten_exceptions(exc)
     for nested in flattened:
         if (
@@ -398,13 +427,11 @@ def _translate_failure(exc: BaseException, *, operation: str) -> MCPRuntimeFailu
             and nested.response.status_code == httpx.codes.UNAUTHORIZED
         ):
             return MCPAuthorizationRejected(
-                f"MCP {operation} requires authorization",
-                reason="http_unauthorized",
+                f"MCP {operation} requires authorization", reason="http_unauthorized"
             )
         if isinstance(nested, OAuthFlowError):
             return MCPAuthorizationRejected(
-                f"MCP {operation} requires authorization",
-                reason="mcp_unauthorized",
+                f"MCP {operation} requires authorization", reason="mcp_unauthorized"
             )
         if isinstance(nested, httpx.HTTPStatusError):
             return MCPHTTPStatusFailure(
@@ -414,7 +441,9 @@ def _translate_failure(exc: BaseException, *, operation: str) -> MCPRuntimeFailu
         if isinstance(nested, MCPRuntimeFailure):
             return nested
         if isinstance(nested, TimeoutError | httpx.TimeoutException):
-            return MCPRuntimeFailure("mcp_timeout", f"MCP {operation} timed out", retryable=True)
+            return MCPRuntimeFailure(
+                "mcp_timeout", f"MCP {operation} timed out", retryable=True
+            )
         if isinstance(nested, _TRANSPORT_FAILURES):
             return MCPTransportDisconnected(f"MCP {operation} transport disconnected")
     return MCPRuntimeFailure("mcp_transport_failed", f"MCP {operation} failed")
@@ -422,7 +451,9 @@ def _translate_failure(exc: BaseException, *, operation: str) -> MCPRuntimeFailu
 
 def _flatten_exceptions(exc: BaseException) -> tuple[BaseException, ...]:
     if isinstance(exc, BaseExceptionGroup):
-        return tuple(nested for child in exc.exceptions for nested in _flatten_exceptions(child))
+        return tuple(
+            nested for child in exc.exceptions for nested in _flatten_exceptions(child)
+        )
     return (exc,)
 
 
@@ -433,7 +464,10 @@ def _is_cancellation(exc: BaseException) -> bool:
     which is not cancellation and should be preferred over the SDK's internal scope
     CancelledError.
     """
-    return all(isinstance(nested, asyncio.CancelledError) for nested in _flatten_exceptions(exc))
+    return all(
+        isinstance(nested, asyncio.CancelledError)
+        for nested in _flatten_exceptions(exc)
+    )
 
 
 def _timeout(seconds: float) -> timedelta:
@@ -461,7 +495,11 @@ def _build_http_client(
     if proxies:
         transport = _EnvProxyTransport(
             proxies,
-            tuple(part.strip() for part in proxy_info.get("no", "").split(",") if part.strip()),
+            tuple(
+                part.strip()
+                for part in proxy_info.get("no", "").split(",")
+                if part.strip()
+            ),
             trust_env=False,
             verify=verify,
         )
@@ -513,7 +551,9 @@ def _url_origin(url: httpx.URL) -> tuple[str, str, int | None]:
 
 
 class _EnvProxyTransport(httpx.AsyncBaseTransport):
-    def __init__(self, proxies: dict[str, str], no_proxy: tuple[str, ...], **kwargs: Any) -> None:
+    def __init__(
+        self, proxies: dict[str, str], no_proxy: tuple[str, ...], **kwargs: Any
+    ) -> None:
         self._no_proxy = no_proxy
         self._direct = httpx.AsyncHTTPTransport(**kwargs)
         self._proxies = {
@@ -547,7 +587,10 @@ def _should_bypass_proxy(url: httpx.URL, no_proxy: tuple[str, ...]) -> bool:
         return False
     host = host.strip("[]").lower()
     port = url.port or {"http": 80, "https": 443}.get(url.scheme)
-    return any(_no_proxy_rule_matches(rule.lower(), host, url.scheme, port) for rule in no_proxy)
+    return any(
+        _no_proxy_rule_matches(rule.lower(), host, url.scheme, port)
+        for rule in no_proxy
+    )
 
 
 def _no_proxy_rule_matches(rule: str, host: str, scheme: str, port: int | None) -> bool:

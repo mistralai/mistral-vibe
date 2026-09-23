@@ -173,7 +173,7 @@ impl EffectEntry {
         if self.kind() != Some("file_edit") {
             return None;
         }
-        serde_json::from_value(self.output()?.clone()).ok()
+        FileEditEffectOutput::deserialize(self.output()?).ok()
     }
 
     /// The settled todo rows, or none when the effect is not a todo.

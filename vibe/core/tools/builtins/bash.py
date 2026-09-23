@@ -40,11 +40,17 @@ from vibe.core.tools.utils import (
     ambient_workspace,
     is_path_within_workdir,
     resolve_tool_path,
+    shell_path_scope_root,
 )
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows, kill_async_subprocess
 from vibe.core.utils.shell import spawn_shell_command, uses_posix_shell
 from vibe.core.workspace import Workspace
+from vibe.permissions import (
+    PathGrantScope,
+    path_grant_pattern,
+    path_grant_pattern_matches,
+)
 from vibe.utils.io import decode_console_safe
 from vibe.utils.paths import normalize_windows_path
 from vibe.utils.tool_presentation import ToolEffectKind
@@ -276,20 +282,17 @@ def _git_repository_permission_pattern(
     return f"{command} [git repositories: {' | '.join(sorted(identities))}]"
 
 
-def _collect_outside_dirs(
+def _collect_outside_paths(
     command_parts: list[str],
     *,
     workspace: Workspace | None = None,
     scratchpad_dir: Path | None = None,
 ) -> set[str]:
-    """Collect parent directories referenced outside the workdir.
+    """Collect canonical paths referenced outside the workdir.
 
     Iterates file-manipulating commands (see _PATH_COMMANDS) and inspects
     their arguments as candidate paths. Skips flags (-r, --recursive) and
-    chmod mode strings (+x). For any argument that resolves outside the current
-    working directory, adds the parent directory (or the path itself when it is
-    a directory) to the result set — suitable for building an OUTSIDE_DIRECTORY
-    RequiredPermission.
+    chmod mode strings (+x).
 
     Only invoked under POSIX-shell semantics (see resolve_permission), where "/"
     is a valid path separator — including Git Bash on Windows, whose paths can
@@ -302,7 +305,7 @@ def _collect_outside_dirs(
     def is_within_workdir(path: str) -> bool:
         return is_path_within_workdir(path, workspace=workspace)
 
-    dirs: set[str] = set()
+    paths: set[str] = set()
     for part in command_parts:
         tokens = _split_command_tokens(part)
         command = tokens[0] if tokens else None
@@ -326,9 +329,23 @@ def _collect_outside_dirs(
             if is_scratchpad_path(path_token, scratchpad_dir=scratchpad_dir):
                 continue
             resolved = resolve_tool_path(path_token, resolved_cwd)
-            parent = str(resolved) if resolved.is_dir() else str(resolved.parent)
-            dirs.add(parent)
-    return dirs
+            paths.add(str(resolved))
+    return paths
+
+
+def _collect_outside_dirs(
+    command_parts: list[str],
+    *,
+    workspace: Workspace | None = None,
+    scratchpad_dir: Path | None = None,
+) -> set[str]:
+    """Compatibility helper returning parents for outside paths."""
+    paths = _collect_outside_paths(
+        command_parts, workspace=workspace, scratchpad_dir=scratchpad_dir
+    )
+    return {
+        str(Path(path) if Path(path).is_dir() else Path(path).parent) for path in paths
+    }
 
 
 def _matches_pattern(command: str, pattern: str) -> bool:
@@ -462,10 +479,10 @@ class Bash(
 ):
     effect_kind = ToolEffectKind.SHELL
     shell_rollout: ClassVar[str | None] = "legacy"
-    # A shell reads its allowlist as command prefixes, so an outside-workdir
-    # glob persisted there would match no command at all.
+    # Command prefixes and typed path grants are what a shell reads back.
     allowlist_scopes: ClassVar[frozenset[PermissionScope]] = frozenset({
-        PermissionScope.COMMAND_PATTERN
+        PermissionScope.COMMAND_PATTERN,
+        PermissionScope.OUTSIDE_DIRECTORY,
     })
 
     @classmethod
@@ -508,12 +525,13 @@ class Bash(
         )
 
     @staticmethod
-    def _build_outside_directory_permission(glob: str) -> RequiredPermission:
+    def _build_outside_directory_permission(path: str) -> RequiredPermission:
         return RequiredPermission(
             scope=PermissionScope.OUTSIDE_DIRECTORY,
-            invocation_pattern=glob,
-            session_pattern=glob,
-            label=f"outside workdir ({glob})",
+            invocation_pattern=path,
+            session_pattern=path_grant_pattern(path, PathGrantScope.EXACT),
+            label=f"outside workdir ({path})",
+            path_scope_root=shell_path_scope_root(path),
         )
 
     def _find_denylist_match(self, command: str) -> str | None:
@@ -597,7 +615,7 @@ class Bash(
         )
 
     def _is_unconditionally_allowed(
-        self, command_parts: list[str], outside_dirs: set[str]
+        self, command_parts: list[str], outside_paths: set[str]
     ) -> bool:
         if any(self._is_sensitive(part) for part in command_parts):
             return False
@@ -606,13 +624,13 @@ class Bash(
             return True
 
         return all(self._is_allowlisted(part) for part in command_parts) and (
-            not outside_dirs
+            not outside_paths
         )
 
     def _build_required_permissions(
         self,
         command_parts: list[str],
-        outside_dirs: set[str],
+        outside_paths: set[str],
         *,
         include_allowlisted: bool = False,
     ) -> list[RequiredPermission]:
@@ -658,8 +676,8 @@ class Bash(
                 )
             )
 
-        for glob in sorted(str(Path(d) / "*") for d in outside_dirs):
-            required.append(self._build_outside_directory_permission(glob))
+        for path in sorted(outside_paths):
+            required.append(self._build_outside_directory_permission(path))
 
         return required
 
@@ -680,11 +698,19 @@ class Bash(
             and guardrail_permission.permission == ToolPermission.NEVER
         ):
             return guardrail_permission
-        outside_dirs = _collect_outside_dirs(
+        outside_paths = _collect_outside_paths(
             command_parts, workspace=self.workspace, scratchpad_dir=self.scratchpad_dir
         )
+        outside_paths = {
+            path
+            for path in outside_paths
+            if not any(
+                path_grant_pattern_matches(path, pattern)
+                for pattern in self.config.allowlist
+            )
+        }
         if (
-            self._is_unconditionally_allowed(command_parts, outside_dirs)
+            self._is_unconditionally_allowed(command_parts, outside_paths)
             and not guardrail_permission
             and not analysis.requires_approval
         ):
@@ -694,7 +720,7 @@ class Bash(
             analysis, command_parts
         )
         required = self._build_required_permissions(
-            scoped_parts, outside_dirs, include_allowlisted=include_allowlisted
+            scoped_parts, outside_paths, include_allowlisted=include_allowlisted
         )
         if guardrail_permission:
             required.extend(guardrail_permission.required_permissions)

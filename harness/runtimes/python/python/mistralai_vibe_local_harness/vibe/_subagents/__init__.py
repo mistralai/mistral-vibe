@@ -1,5 +1,7 @@
 """Private stateful-subagent Runtime implementation."""
 
+from __future__ import annotations
+
 from mistralai_vibe_local_harness.vibe._subagents._models import (
     MAX_DECLARED_AGENT_TYPES,
     ActiveSessionLifecycle,

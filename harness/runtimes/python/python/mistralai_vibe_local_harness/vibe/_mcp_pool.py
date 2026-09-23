@@ -1,5 +1,7 @@
 """Host-scoped MCP stdio pool without MCP SDK imports."""
 
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
 import hashlib
@@ -48,7 +50,9 @@ class _PooledConnection:
         return result
 
     async def call_tool(self, name: str, arguments: JsonObject) -> MCPNormalizedResult:
-        result = await self._request("call", name, arguments, self._server.tool_timeout_s)
+        result = await self._request(
+            "call", name, arguments, self._server.tool_timeout_s
+        )
         if not isinstance(result, MCPNormalizedResult):
             raise TypeError("MCP call request returned an invalid result")
         return result
@@ -67,7 +71,9 @@ class _PooledConnection:
 
     def _ensure_worker(self) -> None:
         if self._worker is None or self._worker.done():
-            self._worker = asyncio.create_task(self._run(), name=f"mcp-stdio-{self._server.name}")
+            self._worker = asyncio.create_task(
+                self._run(), name=f"mcp-stdio-{self._server.name}"
+            )
 
     async def _run(self) -> None:
         try:
@@ -163,15 +169,15 @@ class MCPStdioPool:
         self._factory = factory
         self._sampling_completion = sampling_completion
         self._connections: dict[str, _PooledConnection] = {}
-        self._holders: dict[str, set["MCPStdioPoolLease"]] = {}
+        self._holders: dict[str, set[MCPStdioPoolLease]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
 
-    def lease(self) -> "MCPStdioPoolLease":
+    def lease(self) -> MCPStdioPoolLease:
         return MCPStdioPoolLease(self)
 
     async def acquire(
-        self, lease: "MCPStdioPoolLease", server: ResolvedMCPServerConfig
+        self, lease: MCPStdioPoolLease, server: ResolvedMCPServerConfig
     ) -> _PooledConnection:
         key = _stdio_key(server)
         async with self._lock:
@@ -188,13 +194,15 @@ class MCPStdioPool:
             self._holders.setdefault(key, set()).add(lease)
             return connection
 
-    async def release(self, lease: "MCPStdioPoolLease", server: ResolvedMCPServerConfig) -> None:
+    async def release(
+        self, lease: MCPStdioPoolLease, server: ResolvedMCPServerConfig
+    ) -> None:
         async with self._lock:
             connection = self._release_locked(lease, _stdio_key(server))
         if connection is not None:
             await connection.aclose()
 
-    async def release_all(self, lease: "MCPStdioPoolLease") -> None:
+    async def release_all(self, lease: MCPStdioPoolLease) -> None:
         async with self._lock:
             released = [
                 connection
@@ -213,7 +221,9 @@ class MCPStdioPool:
             self._holders.clear()
         await _close_all(connections, "Failed to close MCP stdio pool")
 
-    def _release_locked(self, lease: "MCPStdioPoolLease", key: str) -> _PooledConnection | None:
+    def _release_locked(
+        self, lease: MCPStdioPoolLease, key: str
+    ) -> _PooledConnection | None:
         holders = self._holders.get(key)
         if holders is None:
             return None
@@ -232,7 +242,9 @@ class MCPStdioPool:
             self._factory = UnifiedMCPTransportFactory()
         return self._factory
 
-    def _sampling_callback(self, server: ResolvedMCPServerConfig) -> MCPSamplingCallback | None:
+    def _sampling_callback(
+        self, server: ResolvedMCPServerConfig
+    ) -> MCPSamplingCallback | None:
         # Derived here rather than accepted per call: a connection outlives the request
         # that opened it, so a caller-supplied callback would answer sampling requests
         # raised by another Session's tool call. Deriving it from Host configuration
@@ -240,7 +252,9 @@ class MCPStdioPool:
         # wiring a Session-scoped ``sampling_completion`` would break that.
         if not server.sampling_enabled or self._sampling_completion is None:
             return None
-        from mistralai_vibe_local_harness.vibe._mcp_sampling import build_sampling_callback
+        from mistralai_vibe_local_harness.vibe._mcp_sampling import (
+            build_sampling_callback,
+        )
 
         return build_sampling_callback(self._sampling_completion)
 
@@ -252,10 +266,7 @@ class MCPStdioPoolLease:
         self._pool = pool
 
     async def list_tools(
-        self,
-        server: ResolvedMCPServerConfig,
-        *,
-        persistent: bool = False,
+        self, server: ResolvedMCPServerConfig, *, persistent: bool = False
     ) -> tuple[MCPRemoteToolDescriptor, ...]:
         connection = await self._pool.acquire(self, server)
         try:
@@ -265,11 +276,7 @@ class MCPStdioPoolLease:
                 await self.close_server(server)
 
     async def call_tool(
-        self,
-        server: ResolvedMCPServerConfig,
-        *,
-        name: str,
-        arguments: JsonObject,
+        self, server: ResolvedMCPServerConfig, *, name: str, arguments: JsonObject
     ) -> MCPNormalizedResult:
         connection = await self._pool.acquire(self, server)
         return await connection.call_tool(name, arguments)
@@ -278,9 +285,7 @@ class MCPStdioPoolLease:
         await self._pool.release(self, server)
 
     async def close_replaced_server(
-        self,
-        previous: ResolvedMCPServerConfig,
-        replacement: ResolvedMCPServerConfig,
+        self, previous: ResolvedMCPServerConfig, replacement: ResolvedMCPServerConfig
     ) -> None:
         """Release a process when the pool's complete connection identity changes."""
         if _stdio_key(previous) == _stdio_key(replacement):
@@ -295,8 +300,7 @@ async def _close_all(connections: list[_PooledConnection], message: str) -> None
     if not connections:
         return
     results = await asyncio.gather(
-        *(connection.aclose() for connection in connections),
-        return_exceptions=True,
+        *(connection.aclose() for connection in connections), return_exceptions=True
     )
     errors = [result for result in results if isinstance(result, BaseException)]
     if len(errors) == 1:
@@ -306,20 +310,18 @@ async def _close_all(connections: list[_PooledConnection], message: str) -> None
 
 
 def _stdio_key(server: ResolvedMCPServerConfig) -> str:
-    raw = "\0".join(
-        (
-            server.authorization.server_fingerprint,
-            server.command or "",
-            *server.args,
-            "\x01",
-            *(f"{key}={value}" for key, value in sorted(server.env.items())),
-            "\x01",
-            str(server.cwd or ""),
-            # A connection is opened with a sampling callback or without one, so the flag
-            # that decides it belongs to the identity two leases have to agree on.
-            f"sampling={server.sampling_enabled}",
-        )
-    )
+    raw = "\0".join((
+        server.authorization.server_fingerprint,
+        server.command or "",
+        *server.args,
+        "\x01",
+        *(f"{key}={value}" for key, value in sorted(server.env.items())),
+        "\x01",
+        str(server.cwd or ""),
+        # A connection is opened with a sampling callback or without one, so the flag
+        # that decides it belongs to the identity two leases have to agree on.
+        f"sampling={server.sampling_enabled}",
+    ))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

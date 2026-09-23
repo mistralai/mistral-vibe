@@ -8,6 +8,8 @@ completion dispatcher calls for every non-Mistral (``Backend.GENERIC``)
 provider.
 """
 
+from __future__ import annotations
+
 from mistralai_vibe_local_harness.vibe.adapters.generic._execute import (
     execute_generic_completion,
 )

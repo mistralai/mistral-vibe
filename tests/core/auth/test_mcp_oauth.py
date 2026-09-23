@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import suppress
 import json
@@ -16,7 +17,12 @@ from keyring.backend import KeyringBackend
 import keyring.backends.fail
 import keyring.errors
 from mcp.client.auth import OAuthFlowError
-from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from mcp.shared.auth import (
+    OAuthClientInformationFull,
+    OAuthClientMetadata,
+    OAuthMetadata,
+    OAuthToken,
+)
 from pydantic import AnyUrl
 import pytest
 import respx
@@ -25,6 +31,7 @@ from vibe.core.auth.mcp_oauth import (
     Fingerprint,
     KeyringTokenStorage,
     LoopbackCallbackHandler,
+    MCPOAuthCallbackTimeout,
     MCPOAuthCredentialCleanupFailed,
     MCPOAuthError,
     MCPOAuthHeadlessError,
@@ -33,6 +40,7 @@ from vibe.core.auth.mcp_oauth import (
     MCPOAuthPortInUse,
     MCPOAuthTransientRefreshError,
     RefreshAwareOAuthClientProvider,
+    _ServerIssuedSecretContext,
     build_oauth_provider,
     delete_oauth_credentials,
     perform_oauth_login,
@@ -226,6 +234,29 @@ class TestKeyringTokenStorage:
             _KEYRING_SERVICE,
             "mcp-oauth:linear:client_info",
         ) in memory_keyring.store
+
+    @pytest.mark.asyncio
+    async def test_server_issued_secret_is_stored_verbatim(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        # Supabase-style DCR response: registration asked for "none", the server
+        # issued a confidential client with a client_secret and omitted the
+        # token_endpoint_auth_method. The storage keeps the server's literal
+        # response; the provider derives the auth method per token request.
+        storage = KeyringTokenStorage(alias="linear")
+        info = OAuthClientInformationFull(
+            client_id="confidential",
+            client_secret="issued-secret",
+            redirect_uris=["http://127.0.0.1:47823/callback"],  # type: ignore[list-item]
+            token_endpoint_auth_method=None,
+        )
+        await storage.set_client_info(info)
+
+        loaded = await storage.get_client_info()
+
+        assert loaded is not None
+        assert loaded.token_endpoint_auth_method is None
+        assert loaded.client_secret == "issued-secret"
 
     @pytest.mark.asyncio
     async def test_per_alias_isolation(self, memory_keyring: _MemoryKeyring) -> None:
@@ -441,6 +472,165 @@ class TestLoopbackCallbackHandler:
             await serve_task
         response = await driver_task
         assert b"400 Bad Request" in response
+
+    @pytest.mark.asyncio
+    async def test_callback_wait_times_out_and_releases_port(self) -> None:
+        port = _free_port()
+        handler = LoopbackCallbackHandler(port=port, server_alias="demo")
+
+        with patch("vibe.core.auth.mcp_oauth._CALLBACK_TIMEOUT_SECONDS", 0.2):
+            with pytest.raises(MCPOAuthCallbackTimeout, match="has been released"):
+                await handler.serve_once()
+
+        # The port must be immediately reusable by the next login attempt.
+        retry = LoopbackCallbackHandler(port=port, server_alias="demo")
+        serve_task = asyncio.create_task(retry.serve_once())
+        driver_task = asyncio.create_task(
+            _send_callback(port, "code=AUTH_CODE_123&state=STATE_XYZ")
+        )
+        code, state = await serve_task
+        await driver_task
+        assert code == "AUTH_CODE_123"
+        assert state == "STATE_XYZ"
+
+    @pytest.mark.asyncio
+    async def test_cancelling_the_callback_wait_releases_port(self) -> None:
+        port = _free_port()
+        handler = LoopbackCallbackHandler(port=port, server_alias="demo")
+        serve_task = asyncio.create_task(handler.serve_once())
+
+        # Give the loopback server a moment to bind before cancelling the wait,
+        # exactly like a user interrupting a login in progress.
+        await asyncio.sleep(0.05)
+        serve_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await serve_task
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", port))
+
+
+class TestServerIssuedSecretContext:
+    def _context(self, memory_keyring: _MemoryKeyring) -> _ServerIssuedSecretContext:
+        context = _ServerIssuedSecretContext(
+            server_url="https://mcp.example.com/mcp",
+            client_metadata=OAuthClientMetadata(
+                redirect_uris=["http://127.0.0.1:47823/callback"],  # type: ignore[list-item]
+                token_endpoint_auth_method="none",
+            ),
+            storage=KeyringTokenStorage(alias="demo"),
+            redirect_handler=None,
+            callback_handler=None,
+        )
+        context.client_info = OAuthClientInformationFull(
+            client_id="confidential",
+            client_secret="issued-secret",
+            redirect_uris=["http://127.0.0.1:47823/callback"],  # type: ignore[list-item]
+            token_endpoint_auth_method=None,
+        )
+        return context
+
+    def _metadata(self, methods: list[str] | None) -> OAuthMetadata | None:
+        if methods is None:
+            return None
+        return OAuthMetadata(
+            issuer="https://as.example.com",  # type: ignore[arg-type]
+            authorization_endpoint="https://as.example.com/authorize",  # type: ignore[arg-type]
+            token_endpoint="https://as.example.com/token",  # type: ignore[arg-type]
+            token_endpoint_auth_methods_supported=methods,
+        )
+
+    @pytest.mark.parametrize(
+        ("advertised", "expected_method"),
+        [
+            (None, "client_secret_basic"),  # no metadata: RFC 7591 §2 default
+            ([], "client_secret_basic"),
+            (["client_secret_basic"], "client_secret_basic"),
+            (["client_secret_basic", "client_secret_post"], "client_secret_basic"),
+            (["client_secret_post"], "client_secret_post"),
+            (["private_key_jwt"], "client_secret_basic"),  # best effort
+        ],
+    )
+    def test_derives_method_from_advertised_support(
+        self,
+        memory_keyring: _MemoryKeyring,
+        advertised: list[str] | None,
+        expected_method: str,
+    ) -> None:
+        context = self._context(memory_keyring)
+        context.oauth_metadata = self._metadata(advertised)
+
+        data, headers = context.prepare_token_auth({"grant_type": "refresh_token"})
+
+        assert context.client_info is not None
+        assert context.client_info.token_endpoint_auth_method == expected_method
+        expected_credentials = base64.b64encode(b"confidential:issued-secret").decode()
+        if expected_method == "client_secret_basic":
+            assert headers["Authorization"] == f"Basic {expected_credentials}"
+            assert "client_secret" not in data
+        else:
+            assert "Authorization" not in headers
+            assert data["client_secret"] == "issued-secret"
+
+    def test_public_client_stays_unauthenticated(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        context = self._context(memory_keyring)
+        assert context.client_info is not None
+        context.client_info.client_secret = None
+        context.client_info.token_endpoint_auth_method = "none"
+        context.oauth_metadata = self._metadata(["client_secret_basic"])
+
+        data, headers = context.prepare_token_auth({"grant_type": "refresh_token"})
+
+        assert "Authorization" not in headers
+        assert "client_secret" not in data
+        assert context.client_info.token_endpoint_auth_method == "none"
+
+    def test_explicit_method_is_not_overridden(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        # A registration that already declares how it authenticates is used as is.
+        context = self._context(memory_keyring)
+        assert context.client_info is not None
+        context.client_info.token_endpoint_auth_method = "client_secret_post"
+        context.oauth_metadata = self._metadata(["client_secret_basic"])
+
+        data, _headers = context.prepare_token_auth({"grant_type": "refresh_token"})
+
+        assert context.client_info.token_endpoint_auth_method == "client_secret_post"
+        assert data["client_secret"] == "issued-secret"
+
+    @pytest.mark.asyncio
+    async def test_registration_saved_before_the_fix_self_heals(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        # Byte-for-byte the shape a Supabase login produced before the fix:
+        # client_secret present, token_endpoint_auth_method key absent.
+        raw = json.dumps({
+            "client_id": "legacy-client",
+            "client_secret": "legacy-secret",
+            "redirect_uris": ["http://127.0.0.1:47823/callback"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+        })
+        memory_keyring.store[(_KEYRING_SERVICE, "mcp-oauth:demo:client_info")] = raw
+
+        context = self._context(memory_keyring)
+        context.client_info = await KeyringTokenStorage(alias="demo").get_client_info()
+        context.oauth_metadata = self._metadata(["client_secret_basic"])
+
+        data, headers = context.prepare_token_auth({"grant_type": "refresh_token"})
+
+        assert "client_secret" not in data
+        expected = base64.b64encode(b"legacy-client:legacy-secret").decode()
+        assert headers["Authorization"] == f"Basic {expected}"
+        # The stored entry keeps the server's literal response; the derived
+        # method lives only in the in-memory copy.
+        stored_raw = memory_keyring.store[
+            (_KEYRING_SERVICE, "mcp-oauth:demo:client_info")
+        ]
+        assert "token_endpoint_auth_method" not in json.loads(stored_raw)
 
 
 class TestBuildOAuthProvider:
@@ -1122,6 +1312,130 @@ class TestPerformOAuthLogin:
         fp = await Fingerprint.load("demo")
         assert fp is not None
         assert fp == Fingerprint.compute(srv)
+
+    @pytest.mark.asyncio
+    async def test_confidential_dcr_registration_authenticates_with_basic(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        # Supabase-style server: DCR accepts the public-client request but the
+        # response issues a client_secret and omits token_endpoint_auth_method.
+        # The exchange must authenticate with that secret, using HTTP Basic
+        # because the server advertises it (RFC 7591 §2 default; RFC 6749
+        # §2.3.1 makes Basic the method every AS must support).
+        exchange_request = await self._run_login_with_secret_issuing_server(
+            memory_keyring,
+            token_endpoint_auth_methods_supported=[
+                "client_secret_basic",
+                "client_secret_post",
+            ],
+        )
+        storage = KeyringTokenStorage(alias="demo")
+        stored = await storage.get_client_info()
+        assert stored is not None
+        # The stored registration stays verbatim; the method is derived per request.
+        assert stored.token_endpoint_auth_method is None
+        exchange = urllib.parse.parse_qs(exchange_request.content.decode())
+        assert "client_secret" not in exchange
+        expected = base64.b64encode(b"confidential-client-id:issued-secret").decode()
+        assert exchange_request.headers["authorization"] == f"Basic {expected}"
+
+    @pytest.mark.asyncio
+    async def test_confidential_dcr_registration_falls_back_to_secret_post(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        # A server that only advertises client_secret_post still gets its
+        # server-issued secret honored, just in the POST body.
+        exchange_request = await self._run_login_with_secret_issuing_server(
+            memory_keyring, token_endpoint_auth_methods_supported=["client_secret_post"]
+        )
+        exchange = urllib.parse.parse_qs(exchange_request.content.decode())
+        assert exchange["client_id"] == ["confidential-client-id"]
+        assert exchange["client_secret"] == ["issued-secret"]
+        assert "authorization" not in exchange_request.headers
+
+    async def _run_login_with_secret_issuing_server(
+        self,
+        memory_keyring: _MemoryKeyring,
+        *,
+        token_endpoint_auth_methods_supported: list[str],
+    ) -> httpx.Request:
+        port = _free_port()
+        server_url = "https://mcp.example.com/mcp"
+        as_url = "https://as.example.com"
+        srv = _oauth_server(
+            name="demo", url=server_url, scopes=["read"], redirect_port=port
+        )
+
+        async def on_url(url: str) -> None:
+            qs = urllib.parse.urlparse(url).query
+            state = urllib.parse.parse_qs(qs)["state"][0]
+
+            async def fire() -> None:
+                await _send_callback(port, f"code=THE_CODE&state={state}")
+
+            asyncio.get_event_loop().create_task(fire())
+
+        async with respx.mock(assert_all_called=False) as router:
+            router.post(server_url).mock(side_effect=_mcp_responses())
+            router.get(
+                "https://mcp.example.com/.well-known/oauth-protected-resource"
+            ).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={"resource": server_url, "authorization_servers": [as_url]},
+                )
+            )
+            router.get(
+                "https://as.example.com/.well-known/oauth-authorization-server"
+            ).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "issuer": as_url,
+                        "authorization_endpoint": f"{as_url}/authorize",
+                        "token_endpoint": f"{as_url}/token",
+                        "registration_endpoint": f"{as_url}/register",
+                        "response_types_supported": ["code"],
+                        "code_challenge_methods_supported": ["S256"],
+                        "grant_types_supported": [
+                            "authorization_code",
+                            "refresh_token",
+                        ],
+                        "token_endpoint_auth_methods_supported": (
+                            token_endpoint_auth_methods_supported
+                        ),
+                    },
+                )
+            )
+            router.post(f"{as_url}/register").mock(
+                return_value=httpx.Response(
+                    201,
+                    json={
+                        "client_id": "confidential-client-id",
+                        "client_secret": "issued-secret",
+                        "redirect_uris": [f"http://127.0.0.1:{port}/callback"],
+                        "grant_types": ["authorization_code", "refresh_token"],
+                        "response_types": ["code"],
+                    },
+                )
+            )
+            token_route = router.post(f"{as_url}/token").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "access_token": "ACCESS_TOKEN",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "refresh_token": "REFRESH_TOKEN",
+                        "scope": "read",
+                    },
+                )
+            )
+            router.route(host="127.0.0.1").pass_through()
+
+            await perform_oauth_login(srv, on_url=on_url)
+
+        return token_route.calls.last.request
 
     @pytest.mark.asyncio
     async def test_a_server_that_refuses_get_is_still_challenged_into_oauth(

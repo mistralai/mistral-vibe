@@ -112,7 +112,7 @@ class TestSelectUtilityModel:
                 )
             ],
             active_model="devstral-latest",
-            allowed_models=["devstral-latest"],
+            allowed_models=["mistral-vibe-cli-latest"],
         )
 
         model, provider = select_utility_model(config)

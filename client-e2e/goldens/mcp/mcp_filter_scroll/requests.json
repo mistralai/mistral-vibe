@@ -1,0 +1,16 @@
+[
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.mcp_search_used",
+   "properties": {
+    "metadata": {
+     "call_source": "vibe_code",
+     "session_id": "00000000-0000-4000-8000-000000000001"
+    }
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

@@ -43,13 +43,13 @@ pub fn format_effect_output(kind: Option<&str>, output: Option<&Value>) -> Vec<S
         return Vec::new();
     };
     match kind {
-        Some("file_read") => output_text(output, "content")
+        Some("file_read") => cleaned_text(output, "content")
             .into_iter()
             .map(|line| strip_line_number(&line))
             .collect(),
         // Rendered as a diff, so there is no text body.
         Some("file_edit") => Vec::new(),
-        Some("file_write") => output_text(output, "content"),
+        Some("file_write") => cleaned_text(output, "content"),
         // Python renders these through `_yield_text`, which sanitizes first.
         Some("web_fetch") => cleaned_text(output, "content"),
         Some("file_search") => cleaned_text(output, "matches"),
@@ -128,14 +128,6 @@ pub fn todo_rows(output: &Value) -> Vec<TodoRow<'_>> {
         }
     }
     rows
-}
-
-fn output_text(output: &Value, key: &str) -> Vec<String> {
-    output
-        .get(key)
-        .and_then(Value::as_str)
-        .map(lines)
-        .unwrap_or_default()
 }
 
 /// The `_yield_text` path: sanitized before splitting into body rows.

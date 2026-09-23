@@ -9,7 +9,6 @@ use tokio::sync::{mpsc, watch};
 use crate::app::App;
 use crate::commands::CommandEvent;
 use crate::config;
-use crate::input_thread::InputThread;
 use crate::resume_picker::Event as ResumeEvent;
 use crate::server::{method, Client, Notification, SHUTDOWN_GRACE};
 use crate::session_exit;
@@ -42,8 +41,6 @@ pub const NARRATOR_CHANNEL_CAP: usize = 2;
 // are ordered against the keys they bracket without any timing assumption.
 const HOLD_KEY: u8 = 23;
 const RELEASE_KEY: u8 = 24;
-/// Bounded event channel shared by the three runtime parties (input/server/main).
-pub use crate::input_thread::EVENT_CHANNEL_CAP;
 
 pub struct EventLoop {
     pub terminal: ratatui::DefaultTerminal,
@@ -52,7 +49,7 @@ pub struct EventLoop {
     pub client: Arc<Client>,
     pub config_tx: mpsc::Sender<config::Loaded>,
     pub sources: EventSources,
-    pub input: InputThread,
+    pub input: mpsc::Receiver<crossterm::event::Event>,
     pub crash_rx: watch::Receiver<bool>,
     pub shutdown: crate::server::signal::ShutdownSignal,
 }
@@ -86,10 +83,10 @@ impl EventLoop {
     /// resume block only when `run_textual_ui` returned a summary).
     pub async fn run(mut self) -> (Result<()>, Option<session_exit::SessionExitSummary>) {
         let result = self.steady().await;
-        // Stop input and restore the terminal before any server wait, so a hung
-        // stop can never leave the shell in raw mode.
-        self.input.shutdown();
+        // Closing input cancels the stream without joining an OS reader thread.
+        self.input.close();
         drop(self.terminal_guard);
+        crate::terminal::release(self.terminal);
         // Read the exit summary while the server is still alive, before the
         // session/stop drain; only a clean exit prints the resume block.
         let summary = match &result {

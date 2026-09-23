@@ -1,5 +1,7 @@
 """Live event delivery for one loaded Harness Session."""
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import AsyncIterator
 

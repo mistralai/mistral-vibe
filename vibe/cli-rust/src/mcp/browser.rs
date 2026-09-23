@@ -13,6 +13,7 @@ use crate::app::App;
 /// Esc: close the browser and mount the closed message (Python `MCPClosed`).
 pub fn close(app: &mut App) {
     app.mcp.open = false;
+    app.mcp.search = super::search::Search::default();
     app.mcp.viewing_name = None;
     app.mcp.viewing_kind = None;
     add_result(app, "MCP and connectors closed.");
@@ -46,6 +47,7 @@ pub fn select(app: &mut App, client: &Arc<Client>) {
         }
         return;
     }
+    app.mcp.search.focused = false;
     app.mcp.viewing_name = Some(row.name);
     app.mcp.viewing_kind = Some(row.kind);
     app.mcp.selected = 0;
@@ -67,6 +69,8 @@ pub fn navigate(app: &mut App, down: bool) {
     };
     if let Some(index) = next {
         app.mcp.selected = index;
+    } else {
+        super::search::focus(app);
     }
 }
 
@@ -86,7 +90,12 @@ pub fn wheel(app: &mut App, down: bool) {
 
 /// Mouse press: highlight the option under the cursor (Textual `OptionList`).
 pub fn press(app: &mut App, at: (u16, u16)) {
+    if app.mcp.viewing_name.is_none() && app.mcp.search.area.contains(at.into()) {
+        super::search::focus(app);
+        return;
+    }
     if let Some(row) = row_at(app, at) {
+        app.mcp.search.focused = false;
         app.mcp.selected = row;
     }
 }

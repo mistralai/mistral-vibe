@@ -80,13 +80,18 @@ fn mount_whats_new(app: &mut App, promo_eligible: bool) {
         body.push_str(&promo_whats_new_suffix());
         record_promo_shown();
     }
-    local::add_whats_new(
-        &mut app.view.transcript,
-        &new_message_id(),
-        &body,
-        after_history,
-    );
+    let id = new_message_id();
+    local::add_whats_new(&mut app.view.transcript, &id, &body, after_history);
+    app.session.whats_new_id = Some(id);
     whats_new_cache::mark_seen(env!("CARGO_PKG_VERSION"));
+}
+
+/// Python `_dispatch_submitted_value`: the first submit removes the what's-new
+/// body, so it does not stay pinned below the conversation it started.
+pub fn dismiss_whats_new(app: &mut App) {
+    if let Some(id) = app.session.whats_new_id.take() {
+        app.view.transcript.remove(&id);
+    }
 }
 
 /// Python `_show_custom_tools_deprecation_warning`: once per session, whenever

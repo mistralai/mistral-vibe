@@ -229,6 +229,8 @@ def _run_interactive_mode(
     args: argparse.Namespace,
     stdin_prompt: str | None,
     update_cache_repository: UpdateCacheRepository,
+    *,
+    autocopy_to_clipboard: bool,
 ) -> None:
     from vibe.app_server.local import (
         ClientDescriptor,
@@ -293,6 +295,7 @@ def _run_interactive_mode(
                     args.continue_session or isinstance(args.resume, str)
                 ),
                 prompt_for_workspace_trust=not trust_workspace,
+                autocopy_to_clipboard=autocopy_to_clipboard,
                 resume_session_id=(
                     args.resume if isinstance(args.resume, str) else None
                 ),
@@ -457,6 +460,7 @@ def run_cli(args: argparse.Namespace) -> None:
                 args=args,
                 stdin_prompt=stdin_prompt,
                 update_cache_repository=update_cache_repository,
+                autocopy_to_clipboard=config.autocopy_to_clipboard,
             )
         else:
             _run_programmatic_mode(args=args, stdin_prompt=stdin_prompt)

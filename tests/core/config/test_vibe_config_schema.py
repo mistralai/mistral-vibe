@@ -483,7 +483,7 @@ def test_known_active_model_is_not_overridden(caplog: pytest.LogCaptureFixture) 
     assert "is not in your configured models" not in caplog.text
 
 
-def test_allowed_models_filters_available_models() -> None:
+def test_allowed_model_names_filter_available_models() -> None:
     models = [
         ModelConfig(name="model-a", provider="mistral", alias="a"),
         ModelConfig(name="model-b", provider="mistral", alias="b"),
@@ -491,21 +491,21 @@ def test_allowed_models_filters_available_models() -> None:
     ]
     config = VibeConfigSchema.model_validate({
         "models": models,
-        "allowed_models": ["a", "c"],
+        "allowed_models": ["model-a", "model-c"],
     })
 
     assert set(config.available_models()) == {"a", "c"}
     assert set(config.models) == {"a", "b", "c"}
 
 
-def test_unmatched_allowed_model_emits_validation_warning() -> None:
+def test_unmatched_allowed_model_name_emits_validation_warning() -> None:
     models = [
         ModelConfig(name="model-a", provider="mistral", alias="a"),
         ModelConfig(name="model-b", provider="mistral", alias="b"),
     ]
     config = VibeConfigSchema.model_validate({
         "models": models,
-        "allowed_models": ["a", "does-not-exist"],
+        "allowed_models": ["model-a", "does-not-exist"],
     })
 
     assert len(config.validation_warnings) == 1
@@ -519,28 +519,33 @@ def test_matched_allowed_models_emit_no_warning() -> None:
     ]
     config = VibeConfigSchema.model_validate({
         "models": models,
-        "allowed_models": ["a", "b*"],
+        "allowed_models": ["model-a", "model-b*"],
     })
 
     assert config.validation_warnings == ()
 
 
-def test_disallowed_active_model_pin_falls_back_to_allowed_model() -> None:
+def test_disallowed_active_model_pin_falls_back_to_allowed_model(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     models = [
         ModelConfig(name="model-a", provider="mistral", alias="a"),
         ModelConfig(name="model-b", provider="mistral", alias="b"),
     ]
     # "b" is configured but excluded by the allowlist, so it must never resolve
     # as the active model even though it is pinned.
-    config = VibeConfigSchema.model_validate({
-        "active_model": "b",
-        "models": models,
-        "allowed_models": ["a"],
-    })
+    with caplog.at_level("WARNING"):
+        config = VibeConfigSchema.model_validate({
+            "active_model": "b",
+            "models": models,
+            "allowed_models": ["model-a"],
+        })
 
     active = config.get_active_model()
     assert active.alias == "a"
     assert active.alias in config.available_models()
+    assert len(config.validation_warnings) == 1
+    assert "Active model 'b' is excluded by allowed_models" in caplog.text
 
 
 def test_allowed_active_model_pin_is_respected() -> None:
@@ -551,7 +556,7 @@ def test_allowed_active_model_pin_is_respected() -> None:
     config = VibeConfigSchema.model_validate({
         "active_model": "b",
         "models": models,
-        "allowed_models": ["a", "b"],
+        "allowed_models": ["model-a", "model-b"],
     })
 
     assert config.get_active_model().alias == "b"
@@ -565,11 +570,25 @@ def test_default_alias_resolves_within_allowed_models() -> None:
     config = VibeConfigSchema.model_validate({
         "active_model": "",
         "models": models,
-        "allowed_models": ["b"],
+        "allowed_models": ["model-b"],
     })
 
     assert config.resolve_default_model_alias() == "b"
     assert config.get_active_model().alias == "b"
+
+
+def test_allowed_model_names_cannot_be_matched_by_an_alias() -> None:
+    config = VibeConfigSchema.model_validate({
+        "models": [
+            ModelConfig(name="approved-model", provider="mistral", alias="approved"),
+            ModelConfig(
+                name="blocked-model", provider="mistral", alias="approved-model"
+            ),
+        ],
+        "allowed_models": ["approved-model"],
+    })
+
+    assert set(config.available_models()) == {"approved"}
 
 
 def test_allowed_models_matching_nothing_falls_back_to_all() -> None:
@@ -587,6 +606,21 @@ def test_allowed_models_matching_nothing_falls_back_to_all() -> None:
     assert config.get_active_model().alias == "a"
     assert len(config.validation_warnings) == 1
     assert "does-not-exist" in config.validation_warnings[0]
+
+
+def test_admin_allowed_models_matching_nothing_are_rejected() -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+
+    with pytest.raises(
+        ValueError, match="Admin allowed_models matches none of the configured models"
+    ):
+        VibeConfigSchema.validate_merged(
+            {"models": models, "allowed_models": ["does-not-exist"]},
+            origins={"allowed_models": "admin"},
+        )
 
 
 def test_no_models_raises() -> None:
@@ -704,7 +738,7 @@ def test_vision_fallback_skips_models_the_allowlist_excludes() -> None:
     config = VibeConfigSchema.model_validate({
         "active_model": "blind",
         "models": models,
-        "allowed_models": ["blind"],
+        "allowed_models": ["blind-model"],
     })
 
     assert config.get_vision_fallback_model() is None

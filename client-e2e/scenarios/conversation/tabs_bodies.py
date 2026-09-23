@@ -20,7 +20,10 @@ timeline: Timeline = [
     f"{_PROMPT}\r",
     turn_started(),
     user_msg(_PROMPT),
-    write_file("Makefile", "run:\n\tcargo run\n\techo done\n"),
+    write_file(
+        "Makefile",
+        "old\r\x1b[31mrun:\x1b[0m\r\n\tcargo run\n\t\x1b]0;hidden\x07echo done\x00\x08\x7f\n",
+    ),
     bash("make -n run", "cargo run\n\techo done\n\tdone\n"),
     turn_completed(),
     _CLICK,

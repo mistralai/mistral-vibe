@@ -14,6 +14,13 @@ const DEFAULT_COUNT: u64 = 100;
 const MAX_COUNT: u64 = 100_000;
 const RATE: f64 = 10_000.0;
 
+/// Whether the firehose is still emitting; it keeps the pulse ticking so in-progress rows repaint.
+pub fn running(app: &App) -> bool {
+    app.stress
+        .as_ref()
+        .is_some_and(|handle| !handle.is_finished())
+}
+
 /// Stop the firehose if it is running. Returns whether it was running, so the
 /// caller can treat the keypress as consumed (e.g. Ctrl+C).
 pub fn stop(app: &mut App) -> bool {
@@ -60,9 +67,9 @@ pub fn toggle(app: &mut App, client: &Arc<Client>, args: &str) {
 fn entries() -> Vec<Value> {
     let mut entries: Vec<Value> = serde_json::from_str(HISTORY).expect("valid stress history JSON");
     assert!(!entries.is_empty(), "stress history must not be empty");
+    // Local-but-not-historical entries never fold into a tool group, so bodies stay expanded.
     for entry in &mut entries {
         entry["local"] = Value::Bool(true);
-        entry["historical"] = Value::Bool(true);
     }
     entries
 }

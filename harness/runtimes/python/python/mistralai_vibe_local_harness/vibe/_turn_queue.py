@@ -1,5 +1,7 @@
 """Process-local FIFO queue for future Harness Turns."""
 
+from __future__ import annotations
+
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -137,7 +139,10 @@ class SessionTurnQueue:
         if key is not None:
             existing = self._idempotency.get(key)
             if existing is not None:
-                if existing.params != stored_params or existing.queued_turn.id != queue_item_id:
+                if (
+                    existing.params != stored_params
+                    or existing.queued_turn.id != queue_item_id
+                ):
                     raise HarnessTurnQueueIdempotencyConflictError(key)
                 return TurnQueueEnqueueResult(existing, duplicate=True)
 
@@ -150,7 +155,11 @@ class SessionTurnQueue:
         )
         previous = self._items[index]
         queued_turn = previous.queued_turn.model_copy(
-            update={"entries": [entry.model_copy(deep=True) for entry in stored_params.entries]},
+            update={
+                "entries": [
+                    entry.model_copy(deep=True) for entry in stored_params.entries
+                ]
+            },
             deep=True,
         )
         record = QueuedTurnRecord(
@@ -165,7 +174,11 @@ class SessionTurnQueue:
 
     def require_record(self, queue_item_id: str) -> QueuedTurnRecord:
         record = next(
-            (record for record in self._items if record.queued_turn.id == queue_item_id),
+            (
+                record
+                for record in self._items
+                if record.queued_turn.id == queue_item_id
+            ),
             None,
         )
         if record is None:
@@ -176,10 +189,7 @@ class SessionTurnQueue:
         return self._steer_receipts.get(queue_item_id)
 
     def retire_steered(
-        self,
-        record: QueuedTurnRecord,
-        *,
-        turn_id: str,
+        self, record: QueuedTurnRecord, *, turn_id: str
     ) -> TurnQueueSteerReceipt:
         queue_item_id = record.queued_turn.id
         index = next(
@@ -193,7 +203,9 @@ class SessionTurnQueue:
         if index is None:
             raise HarnessTurnQueueItemNotFoundError(queue_item_id)
         if self._items[index] is not record:
-            raise RuntimeError(f"Queued turn changed before steering completed: {queue_item_id}")
+            raise RuntimeError(
+                f"Queued turn changed before steering completed: {queue_item_id}"
+            )
 
         self._items.pop(index)
         self._reset_pause_if_empty()

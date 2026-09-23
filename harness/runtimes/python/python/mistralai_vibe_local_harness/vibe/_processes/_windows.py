@@ -1,11 +1,13 @@
 """Native Windows pseudo-terminal backend using pywinpty."""
 
+from __future__ import annotations
+
 import importlib
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import time
-from pathlib import Path
 from typing import cast
 
 from mistralai_vibe_local_harness.vibe._processes._backend import (
@@ -111,14 +113,18 @@ class WindowsTerminalBackend:
         if configured is not None:
             resolved = _resolve_executable(configured, env)
             if resolved is None or _shell_family(resolved) != self.command_environment:
-                raise TerminalBackendError("configured shell is missing or has the wrong family")
+                raise TerminalBackendError(
+                    "configured shell is missing or has the wrong family"
+                )
             return resolved
         if self.command_environment == "git_bash":
             if resolved := _find_git_bash(env):
                 return resolved
             raise TerminalBackendError("no Git Bash shell found")
         for candidate in _POWERSHELL_SHELLS:
-            if resolved := shutil.which(candidate, path=_windows_env(env, "PATH") or ""):
+            if resolved := shutil.which(
+                candidate, path=_windows_env(env, "PATH") or ""
+            ):
                 return resolved
         raise TerminalBackendError("no PowerShell shell found")
 
@@ -171,7 +177,9 @@ class WindowsTerminalBackend:
             timeout=2,
         )
         if result.returncode != 0 and terminal.poll() is None:
-            raise TerminalBackendError("taskkill did not terminate the Windows PTY root")
+            raise TerminalBackendError(
+                "taskkill did not terminate the Windows PTY root"
+            )
 
 
 def _resolve_executable(candidate: str, env: dict[str, str]) -> str | None:
@@ -190,7 +198,10 @@ def _find_git_bash(env: dict[str, str]) -> str | None:
     search_path = _windows_env(env, "PATH") or ""
     if candidate := shutil.which("bash.exe", path=search_path):
         normalized = candidate.replace("\\", "/").lower()
-        if "/system32/bash.exe" not in normalized and "/windowsapps/bash.exe" not in normalized:
+        if (
+            "/system32/bash.exe" not in normalized
+            and "/windowsapps/bash.exe" not in normalized
+        ):
             return candidate
     git = shutil.which("git.exe", path=search_path)
     if git is not None:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pydantic import BaseModel, Field, ValidationError
 
 from mistralai_vibe_local_harness.protocol import (
@@ -37,27 +39,27 @@ async def execute_skill_tool(
     return _succeeded(action, body)
 
 
-def _succeeded(action: RustRuntimeBuiltinToolCallAction, body: str) -> RustToolSucceededEvent:
+def _succeeded(
+    action: RustRuntimeBuiltinToolCallAction, body: str
+) -> RustToolSucceededEvent:
     return RustToolSucceededEvent(
         action_id=action.action_id,
         call_id=action.call_id,
         result=RustToolSuccessResult(
-            content=[RustTextContentBlock(text=body)],
-            structured_content=body,
+            content=[RustTextContentBlock(text=body)], structured_content=body
         ),
     )
 
 
-def _failed(action: RustRuntimeBuiltinToolCallAction, message: str) -> RustToolFailedEvent:
+def _failed(
+    action: RustRuntimeBuiltinToolCallAction, message: str
+) -> RustToolFailedEvent:
     return RustToolFailedEvent(
         action_id=action.action_id,
         call_id=action.call_id,
         result=RustToolFailureResult(
             error=RustProtocolError(
-                code="tool_failed",
-                message=message,
-                retryable=False,
-                details=None,
+                code="tool_failed", message=message, retryable=False, details=None
             )
         ),
     )

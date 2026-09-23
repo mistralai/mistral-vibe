@@ -7,18 +7,25 @@ than stalling the loop for every other session in the process.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 import hashlib
 import os
+from pathlib import Path, PurePosixPath
 import secrets
 import shutil
 import time
-import unicodedata
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Self
+import unicodedata
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    model_validator,
+)
 
 from mistralai_vibe_local_harness.vibe._storage import Sha256, canonical_json
 
@@ -55,7 +62,9 @@ class PluginPackageMismatch(PluginPackageError):
     def __init__(self, expected: str, actual: str) -> None:
         self.expected = expected
         self.actual = actual
-        super().__init__(f"Plugin package digests to {actual}, not the requested {expected}")
+        super().__init__(
+            f"Plugin package digests to {actual}, not the requested {expected}"
+        )
 
 
 class PluginPackageUnavailable(PluginPackageError):
@@ -96,7 +105,9 @@ def _validate_entry_path(value: str) -> str:
         or pure.is_absolute()
         or ".." in pure.parts
     ):
-        raise ValueError("package entry path must be a relative POSIX path inside the tree")
+        raise ValueError(
+            "package entry path must be a relative POSIX path inside the tree"
+        )
     return value
 
 
@@ -115,7 +126,9 @@ class PackageSymlinkV1(_StoredModel):
     target: str = Field(min_length=1)
 
 
-PackageEntryV1 = Annotated[PackageFileV1 | PackageSymlinkV1, Field(discriminator="kind")]
+PackageEntryV1 = Annotated[
+    PackageFileV1 | PackageSymlinkV1, Field(discriminator="kind")
+]
 
 
 class PackageManifestV1(_StoredModel):
@@ -157,7 +170,9 @@ class _ScannedEntry:
     payload: str
 
 
-def digest_plugin_tree(root: Path, *, ignored_names: IgnoredNames = frozenset()) -> Sha256:
+def digest_plugin_tree(
+    root: Path, *, ignored_names: IgnoredNames = frozenset()
+) -> Sha256:
     """Digest a plugin tree without a store.
 
     Public because the Host computes ``AgentConfig.plugins[].contentDigest``
@@ -212,7 +227,9 @@ class PluginPackageStore:
             if entry.kind != "file" or self.has(entry.payload):
                 continue
             source = root / PurePosixPath(entry.path)
-            self._publish_blob(entry.payload, lambda path, source=source: _copy_file(source, path))
+            self._publish_blob(
+                entry.payload, lambda path, source=source: _copy_file(source, path)
+            )
             shards.add(self._blob_path(entry.payload).parent)
         for shard in sorted(shards):
             _fsync_directory(shard)
@@ -245,7 +262,9 @@ class PluginPackageStore:
             staging.mkdir(mode=_WRITABLE_DIRECTORY_MODE, parents=True)
             for entry in manifest.entries:
                 target = staging / PurePosixPath(entry.path)
-                target.parent.mkdir(mode=_WRITABLE_DIRECTORY_MODE, parents=True, exist_ok=True)
+                target.parent.mkdir(
+                    mode=_WRITABLE_DIRECTORY_MODE, parents=True, exist_ok=True
+                )
                 if isinstance(entry, PackageSymlinkV1):
                     os.symlink(entry.target, target)
                     continue
@@ -257,8 +276,12 @@ class PluginPackageStore:
                 _link_or_copy(blob, target)
             rebuilt = _digest_entries(_scan_tree(staging))
             if rebuilt != content_digest:
-                raise PluginPackageCorrupt(content_digest, f"the rebuilt tree digests to {rebuilt}")
-            final.parent.mkdir(mode=_WRITABLE_DIRECTORY_MODE, parents=True, exist_ok=True)
+                raise PluginPackageCorrupt(
+                    content_digest, f"the rebuilt tree digests to {rebuilt}"
+                )
+            final.parent.mkdir(
+                mode=_WRITABLE_DIRECTORY_MODE, parents=True, exist_ok=True
+            )
             try:
                 os.rename(staging, final)
             except OSError:
@@ -285,7 +308,9 @@ class PluginPackageStore:
             raise PluginBlobUnavailable(digest)
         payload = path.read_bytes()
         if hashlib.sha256(payload).hexdigest() != digest:
-            raise PluginPackageCorrupt(digest, "the stored blob does not digest to its key")
+            raise PluginPackageCorrupt(
+                digest, "the stored blob does not digest to its key"
+            )
         return payload
 
     def has(self, digest: Sha256) -> bool:
@@ -349,13 +374,19 @@ class PluginPackageStore:
         try:
             manifest = _MANIFEST_ADAPTER.validate_json(path.read_bytes())
         except Exception as exc:
-            raise PluginPackageCorrupt(content_digest, f"unreadable manifest: {exc}") from exc
+            raise PluginPackageCorrupt(
+                content_digest, f"unreadable manifest: {exc}"
+            ) from exc
         # A manifest naming entries that hash elsewhere would rebuild a tree
         # nobody pinned, so the key is re-derived rather than trusted.
         if manifest.content_digest != content_digest:
-            raise PluginPackageCorrupt(content_digest, "the manifest names another package")
+            raise PluginPackageCorrupt(
+                content_digest, "the manifest names another package"
+            )
         if _digest_entries(_manifest_entries(manifest)) != content_digest:
-            raise PluginPackageCorrupt(content_digest, "the manifest entries do not digest to it")
+            raise PluginPackageCorrupt(
+                content_digest, "the manifest entries do not digest to it"
+            )
         return manifest
 
     def _sweep_temporaries(self) -> None:
@@ -410,10 +441,14 @@ def _digest_entries(entries: Sequence[_ScannedEntry]) -> str:
     return digest.hexdigest()
 
 
-def _scan_tree(root: Path, ignored_names: IgnoredNames = frozenset()) -> list[_ScannedEntry]:
+def _scan_tree(
+    root: Path, ignored_names: IgnoredNames = frozenset()
+) -> list[_ScannedEntry]:
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
-        raise PluginPackageInvalidTree(f"plugin package root is not a directory: {root}")
+        raise PluginPackageInvalidTree(
+            f"plugin package root is not a directory: {root}"
+        )
     entries: list[_ScannedEntry] = []
     total_bytes = 0
     pending: list[tuple[Path, str]] = [(root, "")]
@@ -425,13 +460,17 @@ def _scan_tree(root: Path, ignored_names: IgnoredNames = frozenset()) -> list[_S
                     continue
                 path = _entry_path(prefix, child.name)
                 if child.is_symlink():
-                    entries.append(_ScannedEntry("symlink", path, os.readlink(child.path)))
+                    entries.append(
+                        _ScannedEntry("symlink", path, os.readlink(child.path))
+                    )
                 elif child.is_dir():
                     pending.append((Path(child.path), path))
                     continue
                 elif child.is_file():
                     total_bytes += child.stat().st_size
-                    entries.append(_ScannedEntry("file", path, _digest_file(Path(child.path))))
+                    entries.append(
+                        _ScannedEntry("file", path, _digest_file(Path(child.path)))
+                    )
                 else:
                     entries.append(_ScannedEntry("unsupported", path, ""))
                 if len(entries) > MAX_PACKAGE_ENTRIES:
@@ -538,6 +577,7 @@ def _fsync_directory(path: Path) -> None:
 __all__ = [
     "MAX_PACKAGE_BYTES",
     "MAX_PACKAGE_ENTRIES",
+    "TEMPORARY_TTL_SECONDS",
     "IgnoredNames",
     "PackageFileV1",
     "PackageManifestV1",
@@ -550,6 +590,5 @@ __all__ = [
     "PluginPackageStore",
     "PluginPackageTooLarge",
     "PluginPackageUnavailable",
-    "TEMPORARY_TTL_SECONDS",
     "digest_plugin_tree",
 ]

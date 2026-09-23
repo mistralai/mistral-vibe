@@ -82,7 +82,7 @@ pub fn settle_compact(app: &mut App) {
 /// Settle and adopt the session a compaction handed off to (Python `replace_state`).
 pub fn apply_compacted(app: &mut App, session_id: String) {
     settle_compact(app);
-    app.session.session_id = Some(session_id);
+    app.set_session_id(session_id);
 }
 
 /// Read the replacement session a `session/compacted` handoff carries.

@@ -109,8 +109,9 @@ pub fn print_session_resume_message(summary: Option<&SessionExitSummary>) {
     if text.is_empty() {
         return;
     }
-    print!("{text}");
-    let _ = std::io::stdout().flush();
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(text.as_bytes());
+    let _ = stdout.flush();
 }
 
 /// Python's fatal `AppServerResponseError` line: red `Error:` prefix on stdout
@@ -122,7 +123,8 @@ pub fn print_error(message: &str) {
     } else {
         color_span(std::io::stdout().is_terminal(), RED, RED)
     };
-    println!(
+    let _ = writeln!(
+        std::io::stdout(),
         "{}",
         match red {
             Some(code) => format!("{code}Error:{RESET} {message}"),

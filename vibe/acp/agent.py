@@ -153,6 +153,7 @@ from vibe.app_server.models import (
     ApprovalDecisionType,
     ImageAttachment,
     MentionStats,
+    PathGrantScope,
     PublicCallbackEntry,
     PublicRetryCategory,
     PublicTurnStatus,
@@ -867,9 +868,12 @@ class VibeAcpAgent(AcpAgent):
             tool_call=ToolCallUpdate(
                 tool_call_id=detail.related_entry_id or detail.effect.tool_name
             ),
-            options=build_permission_options(detail.required_permissions),
+            options=build_permission_options(
+                detail.required_permissions, detail.path_scope_choices
+            ),
         )
         decision = ApprovalDecisionType.DENY
+        path_scope: PathGrantScope | None = None
         feedback: str | None = None
         if isinstance(response.outcome, AllowedOutcome):
             match response.outcome.option_id:
@@ -879,6 +883,24 @@ class VibeAcpAgent(AcpAgent):
                     decision = ApprovalDecisionType.APPROVE_FOR_SESSION
                 case ToolOption.ALLOW_ALWAYS_PERMANENT:
                     decision = ApprovalDecisionType.APPROVE_PERMANENTLY
+                case (
+                    ToolOption.ALLOW_SESSION_EXACT
+                    | ToolOption.ALLOW_SESSION_DIRECTORY_RECURSIVE
+                ):
+                    decision = ApprovalDecisionType.APPROVE_FOR_SESSION
+                    path_scope = {
+                        ToolOption.ALLOW_SESSION_EXACT: PathGrantScope.EXACT,
+                        ToolOption.ALLOW_SESSION_DIRECTORY_RECURSIVE: PathGrantScope.DIRECTORY_RECURSIVE,
+                    }[ToolOption(response.outcome.option_id)]
+                case (
+                    ToolOption.ALLOW_PERMANENT_EXACT
+                    | ToolOption.ALLOW_PERMANENT_DIRECTORY_RECURSIVE
+                ):
+                    decision = ApprovalDecisionType.APPROVE_PERMANENTLY
+                    path_scope = {
+                        ToolOption.ALLOW_PERMANENT_EXACT: PathGrantScope.EXACT,
+                        ToolOption.ALLOW_PERMANENT_DIRECTORY_RECURSIVE: PathGrantScope.DIRECTORY_RECURSIVE,
+                    }[ToolOption(response.outcome.option_id)]
                 case ToolOption.REJECT_ONCE:
                     session.app_server.resources.telemetry.record(
                         "vibe.user_cancelled_action", {"action": "reject_approval"}
@@ -889,7 +911,8 @@ class VibeAcpAgent(AcpAgent):
         await session.app_server.respond_to_callback(
             callback.callback_id,
             ApprovalCallbackOutput(
-                decision=ApprovalDecision(type=decision), feedback=feedback
+                decision=ApprovalDecision(type=decision, path_scope=path_scope),
+                feedback=feedback,
             ),
         )
 

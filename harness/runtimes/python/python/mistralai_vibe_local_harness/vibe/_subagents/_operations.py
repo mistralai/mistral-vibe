@@ -1,10 +1,12 @@
 """Pure subagent request parsing, identities, limits, and model results."""
 
+from __future__ import annotations
+
 import hashlib
 from typing import Literal, cast
 
-import rfc8785
 from pydantic import Field, JsonValue
+import rfc8785
 
 from mistralai_vibe_local_harness.protocol import RustRuntimeBuiltinToolCallAction
 from mistralai_vibe_local_harness.vibe._subagents._models import (
@@ -22,16 +24,14 @@ from mistralai_vibe_local_harness.vibe._subagents._models import (
     TurnFailedChild,
 )
 
-SUBAGENT_TOOL_NAMES = frozenset(
-    {
-        "subagent.list",
-        "subagent.spawn",
-        "subagent.wait",
-        "subagent.send_message",
-        "subagent.interrupt",
-        "subagent.stop",
-    }
-)
+SUBAGENT_TOOL_NAMES = frozenset({
+    "subagent.list",
+    "subagent.spawn",
+    "subagent.wait",
+    "subagent.send_message",
+    "subagent.interrupt",
+    "subagent.stop",
+})
 
 
 class ListInput(SubagentModel):
@@ -113,16 +113,22 @@ def running_child_count(state: SubagentRuntimeState) -> int:
 def child_unavailable_failure(child: ChildSessionRecord) -> SubagentFailure:
     state = child.state
     if isinstance(state, ChildTombstone):
-        return failure("subagent_stopped", "Subagent is permanently closed", retryable=False)
+        return failure(
+            "subagent_stopped", "Subagent is permanently closed", retryable=False
+        )
     if isinstance(state, DeletingRunningChild | DeletingIdleChild):
         return failure("subagent_closing", "Subagent is closing", retryable=True)
     if isinstance(state, CreationCleanupPendingChild):
-        return failure("subagent_closing", "Subagent cleanup is pending", retryable=True)
+        return failure(
+            "subagent_closing", "Subagent cleanup is pending", retryable=True
+        )
     if isinstance(state, CreationFailedChild):
         return state.failure
     if isinstance(state, TurnFailedChild):
         return state.outcome.failure
-    return failure("subagent_not_ready", "Subagent has no available generation", retryable=True)
+    return failure(
+        "subagent_not_ready", "Subagent has no available generation", retryable=True
+    )
 
 
 def child_is_sendable(child: ChildSessionRecord) -> bool:
@@ -132,10 +138,10 @@ def child_is_sendable(child: ChildSessionRecord) -> bool:
 
 
 __all__ = [
+    "SUBAGENT_TOOL_NAMES",
     "AgentInput",
     "ListInput",
     "MessageInput",
-    "SUBAGENT_TOOL_NAMES",
     "SpawnInput",
     "WaitInput",
     "child_is_sendable",

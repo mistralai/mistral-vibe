@@ -1,5 +1,7 @@
 [default]
-extend-ignore-re = ["(?m)^.*(#|//)\\s*typos:disable-line$", "datas"]
+# "mis-aligned LINKEDIT string pool" is a verbatim macOS dyld error message
+# quoted in CHANGELOG.md, not a misspelling of "miss".
+extend-ignore-re = ["(?m)^.*(#|//)\\s*typos:disable-line$", "datas", "mis-aligned LINKEDIT string pool"]
 
 [default.extend-words]
 # Rust TUI crate (vibe/cli-rust/); not the dish "ratatouille".

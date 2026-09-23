@@ -1,11 +1,13 @@
 """Deterministic Core identities for Runtime-owned MCP descriptors."""
 
+from __future__ import annotations
+
+from collections import defaultdict
+from collections.abc import Callable, Iterable
 import hashlib
 import json
 import re
 from types import MappingProxyType
-from collections import defaultdict
-from collections.abc import Callable, Iterable
 
 from mistralai_vibe_local_harness.vibe._mcp_models import (
     MCPRemoteToolDescriptor,
@@ -26,21 +28,27 @@ _IDENTIFIER_CHARACTER = re.compile(r"[A-Za-z0-9_$]")
 def build_route_snapshot(
     *,
     catalog_revision: str,
-    resolved: Iterable[tuple[ResolvedMCPServerConfig, tuple[MCPRemoteToolDescriptor, ...]]],
+    resolved: Iterable[
+        tuple[ResolvedMCPServerConfig, tuple[MCPRemoteToolDescriptor, ...]]
+    ],
     sources: tuple[MCPSourceState, ...],
     claimed_groups: Iterable[str] = (),
     tool_filter: MCPToolFilter | None = None,
 ) -> MCPRouteSnapshot:
     entries = sorted(resolved, key=lambda item: item[0].name)
     group_names = _group_names([server for server, _ in entries], set(claimed_groups))
-    programmatic_names = {server.name: _tool_names(descriptors) for server, descriptors in entries}
+    programmatic_names = {
+        server.name: _tool_names(descriptors) for server, descriptors in entries
+    }
     display_names = _display_names(entries)
     groups: list[MCPToolGroup] = []
     routes: dict[tuple[str, str], MCPToolRoute] = {}
     for server, descriptors in entries:
         group_name = group_names[server.name]
         tools: list[MCPToolDescriptor] = []
-        for remote in sorted(descriptors, key=lambda descriptor: descriptor.remote_name):
+        for remote in sorted(
+            descriptors, key=lambda descriptor: descriptor.remote_name
+        ):
             programmatic_name = programmatic_names[server.name][remote.remote_name]
             display_name = display_names[(server.name, remote.remote_name)]
             enabled = remote.remote_name not in server.disabled_tools and (
@@ -72,7 +80,8 @@ def build_route_snapshot(
             groups.append(
                 MCPToolGroup(
                     name=group_name,
-                    description=server.prompt or f"Tools provided by MCP server {server.name}.",
+                    description=server.prompt
+                    or f"Tools provided by MCP server {server.name}.",
                     tools=enabled_tools,
                 )
             )
@@ -86,7 +95,9 @@ def build_route_snapshot(
     )
 
 
-def _group_names(servers: list[ResolvedMCPServerConfig], claimed: set[str]) -> dict[str, str]:
+def _group_names(
+    servers: list[ResolvedMCPServerConfig], claimed: set[str]
+) -> dict[str, str]:
     candidates: dict[str, str] = {
         server.name: f"mcp_{_normalize_segment(server.name)}" for server in servers
     }
@@ -97,20 +108,24 @@ def _group_names(servers: list[ResolvedMCPServerConfig], claimed: set[str]) -> d
     used = set(claimed)
     for server in sorted(servers, key=lambda item: item.name):
         candidate = candidates[server.name]
-        if candidate not in claimed and len(owners[candidate]) == 1 and candidate not in used:
+        if (
+            candidate not in claimed
+            and len(owners[candidate]) == 1
+            and candidate not in used
+        ):
             result[server.name] = candidate
             used.add(candidate)
             continue
-        digest = hashlib.sha256(b"configured\0" + server.name.encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(
+            b"configured\0" + server.name.encode("utf-8")
+        ).hexdigest()
         suffixed = _unique_digest_name(candidate, digest, used | claimed)
         result[server.name] = suffixed
         used.add(suffixed)
     return result
 
 
-def _tool_names(
-    descriptors: tuple[MCPRemoteToolDescriptor, ...],
-) -> dict[str, str]:
+def _tool_names(descriptors: tuple[MCPRemoteToolDescriptor, ...]) -> dict[str, str]:
     raw_names = sorted({descriptor.remote_name for descriptor in descriptors})
     return _resolve_normalized_names(
         raw_names,
@@ -128,7 +143,8 @@ def _display_names(
         for descriptor in descriptors
     ]
     candidates = {
-        identity: _normalize_identifier(f"{identity[0]}_{identity[1]}") for identity in identities
+        identity: _normalize_identifier(f"{identity[0]}_{identity[1]}")
+        for identity in identities
     }
     owners: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for identity, candidate in candidates.items():
@@ -185,7 +201,8 @@ def _resolve_normalized_names(
 
 def _normalize_segment(value: str) -> str:
     normalized = "".join(
-        character if _IDENTIFIER_CHARACTER.fullmatch(character) else "_" for character in value
+        character if _IDENTIFIER_CHARACTER.fullmatch(character) else "_"
+        for character in value
     )
     return normalized or "_"
 
@@ -238,7 +255,9 @@ def _route_revision(
         ],
         "routes": sorted(f"{group}\0{tool}" for group, tool in routes),
     }
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 

@@ -22,7 +22,7 @@ QUIET ?=
 QUIET_FLAGS = $(if $(QUIET),-q,)
 CARGO_QUIET = $(if $(QUIET),-- --quiet,)
 
-.PHONY: start run build build_test release fmt lint check clean test test_rust test_golden store_golden profile-stress view-stress
+.PHONY: start run build build_test release fmt lint check clean sweep test test_rust test_golden store_golden profile-stress view-stress
 
 # The golden snapshot pytest run (Rust-only), shared by `test` and `test_golden`.
 GOLDEN_CMD = uv run --no-project --with "pyte==0.8.2" --with "rich==15.0.0" --with pytest --with pytest-timeout --with pytest-xdist \
@@ -63,7 +63,10 @@ check: fmt lint ## Format + lint
 clean:
 	cargo clean $(M)
 
-test_rust:      ## Rust pure-logic tests (crates/*/tests), fast gate before client-e2e
+sweep:          ## Delete incremental sessions older than 7 days
+	[ ! -d vibe/cli-rust/target/debug/incremental ] || find vibe/cli-rust/target/debug/incremental -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} +
+
+test_rust:      ## Rust tests, fast gate before client-e2e
 	cargo test $(M) $(TEST_CARGO_FLAGS) $(CARGO_QUIET)
 
 test: build_test test_rust  ## Rust tests, then golden snapshots

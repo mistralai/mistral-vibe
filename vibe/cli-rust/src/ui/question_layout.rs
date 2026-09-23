@@ -10,6 +10,24 @@ use crate::app::App;
 
 pub(super) type Row = Vec<(String, Style)>;
 
+/// The prefix cells of every visible option row, as selection-chrome gaps.
+pub(super) fn prefix_gaps(
+    prefixes: &[(u16, u16)],
+    content: Rect,
+    scroll: u16,
+    visible: u16,
+) -> Vec<crate::selection::RowSpan> {
+    let mut gaps = Vec::new();
+    for &(row, width) in prefixes {
+        if row < scroll || row >= scroll + visible {
+            continue;
+        }
+        let x1 = content.x.saturating_add(width).saturating_sub(1);
+        gaps.push((content.y + row - scroll, content.x, x1));
+    }
+    gaps
+}
+
 pub(super) fn draw_box(
     app: &mut App,
     f: &mut Frame,

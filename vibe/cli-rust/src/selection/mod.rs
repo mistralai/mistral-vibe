@@ -11,7 +11,7 @@ mod table;
 pub use bottom_bar::BottomBarSelection;
 pub use composer::{in_input, offset_at};
 pub use gesture::{ClickChain, Granularity};
-pub use region::{Region, RegionId};
+pub use region::{Region, RegionId, RowSpan, ScrollTarget};
 pub use table::{TableCellHit, TableCellKey, TableCellSelection, TableCellSpan};
 
 use std::time::Instant;
@@ -50,6 +50,12 @@ pub fn press_including_padding(app: &mut App, at: (u16, u16)) {
     press_with_padding(app, at, RegionId::Main, true, true);
 }
 
+/// Start a gesture in a region that paints all its own text (the question box,
+/// the loading row), so the copy comes from the frame like a toast's.
+pub fn press_owned(app: &mut App, at: (u16, u16), owner: RegionId) {
+    press_with_padding(app, at, owner, false, false);
+}
+
 fn press_with_padding(
     app: &mut App,
     at: (u16, u16),
@@ -74,7 +80,9 @@ fn press_with_padding(
     if selectable {
         app.chat_input.anchor = None;
         app.selection.drag = Some(Surface::Region(owner));
-        let point = region::get(app, owner).point(at);
+        let region = region::get(app, owner);
+        let scroll_target = region.scroll_target_at(at);
+        let point = region.point(at, scroll_target);
         let table_cell = (owner == RegionId::Main)
             .then(|| table::selection_at(app, at))
             .flatten();
@@ -84,6 +92,7 @@ fn press_with_padding(
             head: point,
             pending_copy: false,
             edge_scroll: 0,
+            scroll_target,
             table_cell,
             text: String::new(),
         });
@@ -99,28 +108,29 @@ pub fn drag(app: &mut App, at: (u16, u16)) {
         app.selection.dragged = true;
     }
     match app.selection.drag {
-        Some(Surface::Composer) => composer::drag(app, at),
+        Some(Surface::Composer) => {
+            composer::drag(app, at);
+            crate::completion_manager::refresh(app);
+        }
         // The overlay clips a cross-boundary screen drag to the region's text.
         Some(Surface::Region(owner)) => {
-            let region = region::get(app, owner);
-            let head = region.point(at);
-            let in_table = app
+            let (in_table, scroll_target) = app
                 .selection
                 .region
                 .as_ref()
-                .is_some_and(|selection| selection.table_cell.is_some());
-            // Only the main region scrolls under a drag; the toast has no viewport.
-            let edge_scroll = if owner != RegionId::Main {
-                0
+                .map(|selection| (selection.table_cell.is_some(), selection.scroll_target))
+                .unwrap_or_default();
+            let head = region::get(app, owner).point(at, scroll_target);
+            let edge_row = if in_table {
+                table::drag(app, at)
             } else {
-                let edge_row = if in_table {
-                    table::drag(app, at)
-                } else {
-                    Some(i32::from(at.1))
-                };
-                edge_row.map_or(0, |row| {
-                    app.view.transcript_scrollbar.selection_edge_scroll(row)
-                })
+                Some(i32::from(at.1))
+            };
+            let edge_scroll = match scroll_target {
+                ScrollTarget::None => 0,
+                _ => edge_row.map_or(0, |row| {
+                    app.view.selection_scrollbar.selection_edge_scroll(row)
+                }),
             };
             if let Some(selection) = app.selection.region.as_mut() {
                 selection.head = head;
@@ -201,17 +211,20 @@ pub fn is_auto_scrolling(app: &App) -> bool {
 }
 
 pub fn auto_scroll(app: &mut App) -> bool {
-    let Some((stored_edge_scroll, in_table)) = app
-        .selection
-        .region
-        .as_ref()
-        .map(|selection| (selection.edge_scroll, selection.table_cell.is_some()))
+    let Some((stored_edge_scroll, in_table, scroll_target)) =
+        app.selection.region.as_ref().map(|selection| {
+            (
+                selection.edge_scroll,
+                selection.table_cell.is_some(),
+                selection.scroll_target,
+            )
+        })
     else {
         return false;
     };
     let edge_scroll = if in_table {
         table::head_screen_row(app).map_or(0, |row| {
-            app.view.transcript_scrollbar.selection_edge_scroll(row)
+            app.view.selection_scrollbar.selection_edge_scroll(row)
         })
     } else {
         stored_edge_scroll
@@ -220,26 +233,32 @@ pub fn auto_scroll(app: &mut App) -> bool {
         stop_auto_scroll(app);
         return false;
     }
-    let Some(max_scroll) = app.view.transcript_scrollbar.max_scroll() else {
-        stop_auto_scroll(app);
-        return false;
-    };
-    let old_scroll = app.view.scroll;
     let amount = u16::from(edge_scroll.unsigned_abs());
-    let scroll = if edge_scroll < 0 {
-        old_scroll.saturating_add(amount).min(max_scroll)
-    } else {
-        old_scroll.saturating_sub(amount)
+    let delta = match scroll_target {
+        ScrollTarget::None => 0,
+        ScrollTarget::Transcript => {
+            let Some(max_scroll) = app.view.selection_scrollbar.max_scroll() else {
+                stop_auto_scroll(app);
+                return false;
+            };
+            let old_scroll = app.view.scroll;
+            let scroll = if edge_scroll < 0 {
+                old_scroll.saturating_add(amount).min(max_scroll)
+            } else {
+                old_scroll.saturating_sub(amount)
+            };
+            app.view.scroll = scroll;
+            app.view.scroll_target = scroll;
+            -(i32::from(scroll) - i32::from(old_scroll))
+        }
+        ScrollTarget::Trust => crate::trust_folders::scroll_by(app, i16::from(edge_scroll)),
     };
-    let delta = i32::from(scroll) - i32::from(old_scroll);
     if delta == 0 {
         stop_auto_scroll(app);
         return false;
     }
-    app.view.scroll = scroll;
-    app.view.scroll_target = scroll;
     if let Some(selection) = app.selection.region.as_mut() {
-        selection.head.1 -= delta;
+        selection.head.1 += delta;
     }
     if in_table {
         table::follow_scroll(app);

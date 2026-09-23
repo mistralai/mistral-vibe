@@ -68,6 +68,7 @@ from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 from vibe.core.utils import is_windows
 from vibe.core.workspace import Workspace
+from vibe.permissions import PathGrantScope, path_grant_pattern
 from vibe.utils import paths
 
 
@@ -946,8 +947,44 @@ def test_windows_shell_file_command_requires_approval_for_outside_path(
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ASK
     assert any(
-        str(outside) in required.label for required in permission.required_permissions
+        required.invocation_pattern == str(outside_file.resolve())
+        for required in permission.required_permissions
     )
+
+
+def test_windows_shell_honors_an_exact_persisted_outside_path_grant(
+    tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside"
+    approved_file = outside / "approved.txt"
+    sibling_file = outside / "sibling.txt"
+    workdir.mkdir()
+    outside.mkdir()
+    approved_file.write_text("approved", encoding="utf-8")
+    sibling_file.write_text("sibling", encoding="utf-8")
+    monkeypatch.chdir(workdir)
+    approved_pattern = path_grant_pattern(
+        str(approved_file.resolve()), PathGrantScope.EXACT
+    )
+    tool = WindowsShell(
+        config_getter=lambda: WindowsShellToolConfig(
+            allowlist=["type", approved_pattern]
+        ),
+        state=BaseToolState(),
+    )
+
+    approved = tool.resolve_permission(
+        WindowsShellArgs(command=f'type "{approved_file}"')
+    )
+    sibling = tool.resolve_permission(
+        WindowsShellArgs(command=f'type "{sibling_file}"')
+    )
+
+    assert isinstance(approved, PermissionContext)
+    assert approved.permission is ToolPermission.ALWAYS
+    assert isinstance(sibling, PermissionContext)
+    assert sibling.permission is ToolPermission.ASK
 
 
 def test_windows_shell_path_qualified_executable_does_not_match_basename_allowlist():

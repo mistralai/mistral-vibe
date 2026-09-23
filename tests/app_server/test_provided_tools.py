@@ -80,8 +80,9 @@ def test_the_vibe_group_declares_todo_when_the_legacy_tool_is_available() -> Non
     assert groups[0].name == VIBE_TOOL_GROUP
     assert [tool.name for tool in groups[0].tools] == ["todo", SCRATCHPAD_TOOL_NAME]
     todo = groups[0].tools[0]
-    assert todo.exposure == "direct"
-    assert todo.description
+    assert todo.exposure == "direct_and_programmatic"
+    assert "tools.vibe.todo" in todo.description
+    assert "after each step" in todo.description
     # The Literal reaches the model as an enum, which is the point of tightening it.
     assert _schema_property(todo.input_schema, "action")["enum"] == ["read", "write"]
 

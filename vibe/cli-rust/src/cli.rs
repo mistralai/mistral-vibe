@@ -25,8 +25,11 @@ pub enum OutputFormat {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "vibe", version = env!("CARGO_PKG_VERSION"), disable_version_flag = true, about = "Rust TUI for Vibe (PoC)")]
+#[command(name = "vibe", bin_name = "vibe", version = env!("CARGO_PKG_VERSION"), disable_version_flag = true, about = "Rust TUI for Vibe (PoC)")]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+
     /// Show version and exit.
     #[arg(short = 'v', long = "version", action = ArgAction::Version)]
     _version: Option<bool>,
@@ -101,6 +104,15 @@ pub struct Cli {
     /// Feature flag for teleport (hidden).
     #[arg(long = "teleport", action = ArgAction::SetTrue, hide = true, conflicts_with = "prompt")]
     pub teleport: bool,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum CliCommand {
+    /// Manage MCP server configuration without starting a session.
+    Mcp {
+        #[command(subcommand)]
+        command: crate::mcp_command::McpCommand,
+    },
 }
 
 #[derive(Debug)]

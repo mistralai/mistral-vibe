@@ -9,7 +9,11 @@ handshake = {"session/shellCommand": {"accepted": True, "lastEventId": 0}}
 
 on_request = {
     "session/shellCommand": [
-        manual_shell("printf hello", "hello", entry_id="$operationId")
+        manual_shell(
+            "printf hello",
+            "old\r\x1b[31mhello\x1b[0m\x1b]0;hidden\x07\x00\x08\x7f",
+            entry_id="$operationId",
+        )
     ]
 }
 

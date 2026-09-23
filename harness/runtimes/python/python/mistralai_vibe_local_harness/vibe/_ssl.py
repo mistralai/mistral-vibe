@@ -4,10 +4,12 @@ Model APIs, MCP servers and connector gateways resolve trust through this one
 function, so a root that works for one of them works for all of them.
 """
 
+from __future__ import annotations
+
+from functools import cache
 import logging
 import os
 import ssl
-from functools import lru_cache
 
 import certifi
 import truststore
@@ -15,7 +17,7 @@ import truststore
 logger = logging.getLogger(__name__)
 
 
-@lru_cache(maxsize=None)
+@cache
 def build_ssl_context(*, use_system_trust_store: bool = False) -> ssl.SSLContext:
     if use_system_trust_store:
         return _add_custom_roots(truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))

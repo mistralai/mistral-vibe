@@ -18,6 +18,7 @@ pub(super) fn clear_history(app: &mut App, client: &Arc<Client>, value: &str) {
         .map(|(_, prompt)| prompt.trim().to_owned())
         .filter(|prompt| !prompt.is_empty());
     app.view.transcript.clear();
+    app.todo_tracker.clear();
     app.queue.clear();
     app.view.transcript_cache.invalidate_layouts();
     app.view.scroll = 0;
@@ -78,7 +79,7 @@ fn cleared(result: Value, seed: Option<QueuedPrompt>) -> CommandEvent {
 /// Adopt the session `session/history/clear` created, on the main thread.
 pub fn apply_cleared(app: &mut App, session_id: String, usage: Option<TokenUsage>) {
     app.terminal_notifier.set_default_title("");
-    app.session.session_id = Some(session_id);
+    app.set_session_id(session_id);
     app.session.active_turn_id = None;
     // Python `reset_usage_baseline` on the clear adopt, falling back to the
     // stats still held when the fresh state carries no usage.

@@ -1,17 +1,19 @@
 """Process lifetime and Harness Session registry ownership."""
 
+from __future__ import annotations
+
 import asyncio
 import builtins
-import json
-import logging
-import os
-import threading
-import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
+import json
+import logging
+import os
 from pathlib import Path
+import threading
+import time
 from typing import Any, Literal, cast
 
 from pydantic import JsonValue, TypeAdapter
@@ -23,6 +25,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustDisabledLargeOutputPolicy,
     RustDisabledRuntimeToolFeature,
     RustEnabledRuntimeToolFeature,
+    RustEvent,
     RustHarnessCapabilitySet,
     RustHarnessConfig,
     RustHarnessHookBinding,
@@ -126,9 +129,7 @@ from mistralai_vibe_local_harness.vibe._projection import (
     settle_stalled_projection,
     with_session_preview,
 )
-from mistralai_vibe_local_harness.vibe._runtime import (
-    DurableSessionRuntime,
-)
+from mistralai_vibe_local_harness.vibe._runtime import DurableSessionRuntime
 from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
 from mistralai_vibe_local_harness.vibe._session import UnifiedHarnessSessionBackend
 from mistralai_vibe_local_harness.vibe._session_catalog import (
@@ -332,12 +333,17 @@ def _extend_subagent_bindings(
     # Takes its inputs rather than reading ``self``: the ephemeral path resolves
     # against the configuration it captured at creation, and a promoted config built
     # from one ceiling with bindings resolved under another will not open.
-    if configured is None or adapter is None or plugins is None or not plugins.agent_profiles:
+    if (
+        configured is None
+        or adapter is None
+        or plugins is None
+        or not plugins.agent_profiles
+    ):
         return configured
     return resolve_declared_agent_types(configured, adapter, plugins.agent_profiles)
 
 
-class UnifiedHarnessSessionBackendHost:
+class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-server host surface
     def __init__(self, storage_root: Path | None = None) -> None:
         self._storage_root = storage_root or _default_storage_root()
         self._sessions: dict[str, _LoadedSessionEntry] = {}
@@ -561,7 +567,9 @@ class UnifiedHarnessSessionBackendHost:
         self._guard_open()
         self._bind_loop()
         session_id = generate_session_id()
-        lease = await asyncio.to_thread(SessionLease(self._storage_root, session_id).acquire)
+        lease = await asyncio.to_thread(
+            SessionLease(self._storage_root, session_id).acquire
+        )
         session: UnifiedHarnessSessionBackend | None = None
         metadata = SessionMetadataV1(
             cwd=str(Path(cwd or Path.cwd()).expanduser().resolve()),
@@ -593,9 +601,7 @@ class UnifiedHarnessSessionBackendHost:
                 await self._initialize_subagents(session, plugins)
         except BaseException as exc:
             record_session_operation(
-                time.perf_counter() - started_at,
-                operation="open",
-                outcome="failure",
+                time.perf_counter() - started_at, operation="open", outcome="failure"
             )
             logger.warning(
                 "Unified session open failed",
@@ -616,9 +622,7 @@ class UnifiedHarnessSessionBackendHost:
             raise
         attachment = await self._register(session)
         record_session_operation(
-            time.perf_counter() - started_at,
-            operation="open",
-            outcome="success",
+            time.perf_counter() - started_at, operation="open", outcome="success"
         )
         logger.info(
             "Unified session opened",
@@ -631,7 +635,7 @@ class UnifiedHarnessSessionBackendHost:
         )
         return attachment
 
-    async def resume(
+    async def resume(  # noqa: PLR0912, PLR0914, PLR0915 - one cohesive resume path
         self,
         session_id: str,
         *,
@@ -658,8 +662,7 @@ class UnifiedHarnessSessionBackendHost:
         while True:
             if attachment := await self._attach_live_session(session_id):
                 if not attachment.ephemeral and isinstance(
-                    attachment._runtime_for_host().identity,
-                    SubagentSessionIdentity,
+                    attachment._runtime_for_host().identity, SubagentSessionIdentity
                 ):
                     await attachment.shutdown()
                     raise HarnessChildSessionRequiresParentError(session_id, "resumed")
@@ -701,7 +704,9 @@ class UnifiedHarnessSessionBackendHost:
                 break
             await asyncio.to_thread(lease.release)
             if load is not None:
-                await self._finish_session_load(session_id, loaded_session_id=imported_session_id)
+                await self._finish_session_load(
+                    session_id, loaded_session_id=imported_session_id
+                )
             session_id = imported_session_id
         operation: Literal["restore", "import"] = "restore"
         source_backend: Literal["legacy", "unified"] = "unified"
@@ -727,7 +732,9 @@ class UnifiedHarnessSessionBackendHost:
                     raise HarnessSessionDeleteError(
                         session_id, "Session tree deletion is incomplete"
                     )
-                plugins = await self._restore_plugins(session_id, stored.runtime_state.plugin_lock)
+                plugins = await self._restore_plugins(
+                    session_id, stored.runtime_state.plugin_lock
+                )
                 try:
                     stored = await asyncio.to_thread(
                         self._preflight_restore, store, stored, plugins
@@ -760,10 +767,7 @@ class UnifiedHarnessSessionBackendHost:
                 await self._initialize_subagents(session)
         except BaseException as exc:
             failure_code = getattr(exc, "code", type(exc).__name__)
-            add_recovery_failure(
-                failure_code=failure_code,
-                phase=operation,
-            )
+            add_recovery_failure(failure_code=failure_code, phase=operation)
             record_session_operation(
                 time.perf_counter() - started_at,
                 operation=operation,
@@ -779,7 +783,9 @@ class UnifiedHarnessSessionBackendHost:
                     "store_format": "mistral.vibe.unified-session-store/v1",
                     "restore_phase": operation,
                     "source_backend": source_backend,
-                    "import_outcome": "failure" if operation == "import" else "not_applicable",
+                    "import_outcome": "failure"
+                    if operation == "import"
+                    else "not_applicable",
                     "failure_code": failure_code,
                 },
                 exc_info=exc,
@@ -813,7 +819,9 @@ class UnifiedHarnessSessionBackendHost:
                 "store_format": "mistral.vibe.unified-session-store/v1",
                 "generation": stored.manifest.generation,
                 "restore_phase": operation,
-                "import_outcome": "success" if operation == "import" else "not_applicable",
+                "import_outcome": "success"
+                if operation == "import"
+                else "not_applicable",
             },
         )
         if operation == "restore":
@@ -838,7 +846,7 @@ class UnifiedHarnessSessionBackendHost:
             hook_handlers=hook_handlers,
         )
 
-    async def fork(
+    async def fork(  # noqa: PLR0914 - one cohesive fork path
         self,
         source_session_id: str,
         *,
@@ -855,7 +863,9 @@ class UnifiedHarnessSessionBackendHost:
         """
         self._guard_open()
         self._bind_loop()
-        source_session_id = self._resolve_unified_session_id(source_session_id) or source_session_id
+        source_session_id = (
+            self._resolve_unified_session_id(source_session_id) or source_session_id
+        )
         source_session = self._live_session(source_session_id)
         if source_session is not None:
             await source_session._wait_for_pending_turns()
@@ -872,7 +882,9 @@ class UnifiedHarnessSessionBackendHost:
                     hook_handlers=hook_handlers,
                 )
         source = (
-            await asyncio.to_thread(UnifiedSessionStore(self._storage_root, source_session_id).load)
+            await asyncio.to_thread(
+                UnifiedSessionStore(self._storage_root, source_session_id).load
+            )
             if source_session is not None
             else None
         )
@@ -888,7 +900,9 @@ class UnifiedHarnessSessionBackendHost:
                 raise
         try:
             if isinstance(source.runtime_state.identity, SubagentSessionIdentity):
-                raise HarnessChildSessionRequiresParentError(source_session_id, "forked")
+                raise HarnessChildSessionRequiresParentError(
+                    source_session_id, "forked"
+                )
             history = _history_for_fork(
                 self._importable_history(source), entry_id, include_entry=include_entry
             )
@@ -939,12 +953,16 @@ class UnifiedHarnessSessionBackendHost:
                 await asyncio.to_thread(target_lease.release)
                 raise
             attachment = await self._register(session)
-            return HarnessSessionForkResult(source_session_id=source_session_id, session=attachment)
+            return HarnessSessionForkResult(
+                source_session_id=source_session_id, session=attachment
+            )
         finally:
             if temporary_lease is not None:
                 await asyncio.to_thread(temporary_lease.release)
 
-    async def rewind(self, session_id: str, entry_id: str) -> UnifiedHarnessSessionBackend:
+    async def rewind(
+        self, session_id: str, entry_id: str
+    ) -> UnifiedHarnessSessionBackend:
         self._guard_open()
         session_id = self._resolve_unified_session_id(session_id) or session_id
         session = self._live_session(session_id)
@@ -952,7 +970,9 @@ class UnifiedHarnessSessionBackendHost:
             raise HarnessSessionNotFoundError(session_id)
         await session._wait_for_pending_turns()
         runtime = session._runtime_for_host()
-        stored = await asyncio.to_thread(UnifiedSessionStore(self._storage_root, session_id).load)
+        stored = await asyncio.to_thread(
+            UnifiedSessionStore(self._storage_root, session_id).load
+        )
         if isinstance(stored.runtime_state.identity, SubagentSessionIdentity):
             raise HarnessChildSessionRequiresParentError(session_id, "rewound")
         history = self._importable_history(stored)
@@ -971,21 +991,19 @@ class UnifiedHarnessSessionBackendHost:
             raise ValueError(f"Cannot rewind from unknown user entry: {entry_id}")
         now = _now_milliseconds()
         entries = list(public.history.entries[:public_anchor])
-        entries.append(
-            {
-                "type": "checkpoint",
-                "id": f"checkpoint-rewind-{entry_id}",
-                "sessionId": session_id,
-                "turnId": None,
-                "createdAt": now,
-                "updatedAt": now,
-                "generationStatus": "completed",
-                "relatedEntryId": None,
-                "kind": "rewind",
-                "message": "Conversation rewound",
-                "details": {"entryId": entry_id, "restoreFiles": False, "inplace": True},
-            }
-        )
+        entries.append({
+            "type": "checkpoint",
+            "id": f"checkpoint-rewind-{entry_id}",
+            "sessionId": session_id,
+            "turnId": None,
+            "createdAt": now,
+            "updatedAt": now,
+            "generationStatus": "completed",
+            "relatedEntryId": None,
+            "kind": "rewind",
+            "message": "Conversation rewound",
+            "details": {"entryId": entry_id, "restoreFiles": False, "inplace": True},
+        })
         projection = public.model_copy(
             update={
                 "session": public.session.model_copy(
@@ -1003,8 +1021,7 @@ class UnifiedHarnessSessionBackendHost:
             keep_interop_metadata=True,
         )
         await runtime.replace_quiescent_context(
-            checkpoint=checkpoint,
-            projection=projection,
+            checkpoint=checkpoint, projection=projection
         )
         return session
 
@@ -1017,7 +1034,9 @@ class UnifiedHarnessSessionBackendHost:
         hook_handlers: HookHandlers | None,
     ) -> HarnessSessionForkResult:
         session_id = generate_session_id()
-        target_lease = await asyncio.to_thread(SessionLease(self._storage_root, session_id).acquire)
+        target_lease = await asyncio.to_thread(
+            SessionLease(self._storage_root, session_id).acquire
+        )
         target_metadata = SessionMetadataV1(
             cwd=metadata.cwd,
             root_session_id=metadata.root_session_id,
@@ -1040,7 +1059,9 @@ class UnifiedHarnessSessionBackendHost:
             await asyncio.to_thread(target_lease.release)
             raise
         attachment = await self._register(session)
-        return HarnessSessionForkResult(source_session_id=source_session_id, session=attachment)
+        return HarnessSessionForkResult(
+            source_session_id=source_session_id, session=attachment
+        )
 
     async def rewrite_session_plugins(
         self, session_id: str, requested: Sequence[ResolvedPluginDefinition]
@@ -1064,21 +1085,19 @@ class UnifiedHarnessSessionBackendHost:
         if binder is None:
             if not requested:
                 return empty_plugin_binding()
-            raise PluginRestoreError(
-                [
-                    PluginRestoreDiagnostic(
-                        code=PluginRestoreDiagnosticCode.LOCK_INVALID,
-                        plugin_name=definition.name,
-                        content_digest=definition.content_digest,
-                        message="the config requests plugins but no plugin provider is configured",
-                    )
-                    for definition in requested
-                ]
-            )
-        previous_lock = await session._guard_plugin_rewrite()  # noqa: SLF001
+            raise PluginRestoreError([
+                PluginRestoreDiagnostic(
+                    code=PluginRestoreDiagnosticCode.LOCK_INVALID,
+                    plugin_name=definition.name,
+                    content_digest=definition.content_digest,
+                    message="the config requests plugins but no plugin provider is configured",
+                )
+                for definition in requested
+            ])
+        previous_lock = await session._guard_plugin_rewrite()
         plugins = await binder.create(requested, session_id=session_id)
         try:
-            await session._rewrite_plugins(  # noqa: SLF001
+            await session._rewrite_plugins(
                 plugins=plugins,
                 config=self._runtime_config(session_id, plugins=plugins),
                 subagents=self._session_subagents(plugins),
@@ -1115,10 +1134,7 @@ class UnifiedHarnessSessionBackendHost:
     async def read(self, params: SessionReadParams) -> HarnessSessionReadResult:
         if session := self._live_session(params.session_id):
             result = await session.read(params)
-            return HarnessSessionReadResult(
-                snapshot=result.snapshot,
-                cwd=session.cwd,
-            )
+            return HarnessSessionReadResult(snapshot=result.snapshot, cwd=session.cwd)
         store = UnifiedSessionStore(self._storage_root, params.session_id)
         if not store.exists:
             raise HarnessSessionNotFoundError(params.session_id)
@@ -1126,8 +1142,12 @@ class UnifiedHarnessSessionBackendHost:
         # No live runtime here, and if no process holds the lease the session is
         # not executing anywhere: settle its stalled projection.
         snapshot = stored.projection_state.snapshot
-        if not await asyncio.to_thread(session_is_live, self._storage_root, params.session_id):
-            snapshot = settle_stalled_projection(snapshot, observed_at=_now_milliseconds())
+        if not await asyncio.to_thread(
+            session_is_live, self._storage_root, params.session_id
+        ):
+            snapshot = settle_stalled_projection(
+                snapshot, observed_at=_now_milliseconds()
+            )
         projection = stored.projection_state.model_copy(update={"snapshot": snapshot})
         return HarnessSessionReadResult(
             snapshot=_snapshot(projection, params.history_limit),
@@ -1145,16 +1165,14 @@ class UnifiedHarnessSessionBackendHost:
         store = UnifiedSessionStore(self._storage_root, session_id)
         if not store.exists:
             raise HarnessSessionNotFoundError(session_id)
-        lease = await asyncio.to_thread(SessionLease(self._storage_root, session_id).acquire)
+        lease = await asyncio.to_thread(
+            SessionLease(self._storage_root, session_id).acquire
+        )
         try:
             stored = await asyncio.to_thread(store.load)
             observed_at = _now_milliseconds()
             prior = stored.projection_state.snapshot
-            state = renamed_session_state(
-                prior,
-                normalized,
-                observed_at=observed_at,
-            )
+            state = renamed_session_state(prior, normalized, observed_at=observed_at)
             # Offline rename bypasses SessionProjector, so it builds its own
             # delta (a single envelope change, entries untouched) to keep the
             # journal on the delta path.
@@ -1174,7 +1192,8 @@ class UnifiedHarnessSessionBackendHost:
             return False
         subagents = root._runtime_for_host().runtime_state.subagents
         return subagents is not None and any(
-            child.child_session_id == child_session_id for child in subagents.children.values()
+            child.child_session_id == child_session_id
+            for child in subagents.children.values()
         )
 
     def open_callbacks(self, root_session_id: str) -> tuple[JsonObject, ...]:
@@ -1260,7 +1279,6 @@ class UnifiedHarnessSessionBackendHost:
         require_existing: bool,
     ) -> ChildSessionHandle:
         """Bind one parent-owned child while retaining its exclusive store lease."""
-
         self._guard_open()
         core_config, adapter_config = child_config(binding, identity.session_id)
         if not isinstance(binding, LocalChildSessionBinding):
@@ -1297,7 +1315,9 @@ class UnifiedHarnessSessionBackendHost:
                     core_config = core_config.model_copy(
                         update={"plugins": list(plugins.definitions)}, deep=True
                     )
-                    restored_core = await asyncio.to_thread(stored.restore_core, core_config)
+                    restored_core = await asyncio.to_thread(
+                        stored.restore_core, core_config
+                    )
                     restored_core.close()
                 else:
                     if require_existing:
@@ -1307,7 +1327,9 @@ class UnifiedHarnessSessionBackendHost:
                     if binding.integrations_enabled:
                         parent = self._live_session(identity.parent_session_id)
                         if parent is None:
-                            raise HarnessSessionNotFoundError(identity.parent_session_id)
+                            raise HarnessSessionNotFoundError(
+                                identity.parent_session_id
+                            )
                         plugins = await self._restore_plugins(
                             identity.session_id,
                             parent._runtime_for_host().runtime_state.plugin_lock,
@@ -1444,10 +1466,7 @@ class UnifiedHarnessSessionBackendHost:
         return ChildCommandAdmission(target=target, turn_id=target.command.turn_id)
 
     async def wait_for_child_generation(
-        self,
-        child: ChildSessionHandle,
-        generation: int,
-        timeout_ms: int,
+        self, child: ChildSessionHandle, generation: int, timeout_ms: int
     ) -> ChildTurnOutcome:
         session = self._require_live_child(child)
         turn_id = f"{child.session_id}:turn:{generation}"
@@ -1458,32 +1477,27 @@ class UnifiedHarnessSessionBackendHost:
             if timeout_ms <= 0:
                 raise TimeoutError
             state = await asyncio.wait_for(
-                session._wait_for_parent_turn(turn_id),
-                timeout=timeout_ms / 1000,
+                session._wait_for_parent_turn(turn_id), timeout=timeout_ms / 1000
             )
         return _child_turn_outcome(
             state,
             generation,
             turn_id,
             retryable_failure=_terminal_failure_retryability(
-                UnifiedSessionStore(self._storage_root, child.session_id).load().checkpoint,
+                UnifiedSessionStore(self._storage_root, child.session_id)
+                .load()
+                .checkpoint,
                 turn_id,
             ),
         )
 
     async def acknowledge_child_command(
-        self,
-        child: ChildSessionHandle,
-        *,
-        operation_key: str,
+        self, child: ChildSessionHandle, *, operation_key: str
     ) -> None:
         await self._require_live_child(child)._acknowledge_parent_command(operation_key)
 
     async def child_command_admission(
-        self,
-        child_session_id: str,
-        *,
-        operation_key: str,
+        self, child_session_id: str, *, operation_key: str
     ) -> ChildCommandAdmission | None:
         session = self._live_session(child_session_id)
         state = (
@@ -1491,7 +1505,9 @@ class UnifiedHarnessSessionBackendHost:
             if session is not None
             else await asyncio.to_thread(
                 lambda: (
-                    UnifiedSessionStore(self._storage_root, child_session_id).load().runtime_state
+                    UnifiedSessionStore(self._storage_root, child_session_id)
+                    .load()
+                    .runtime_state
                 )
             )
             if UnifiedSessionStore(self._storage_root, child_session_id).exists
@@ -1503,8 +1519,7 @@ class UnifiedHarnessSessionBackendHost:
         if receipt is None:
             return None
         return ChildCommandAdmission(
-            target=receipt.target,
-            turn_id=receipt.result.turn_id,
+            target=receipt.target, turn_id=receipt.result.turn_id
         )
 
     async def unload_child(self, child: ChildSessionHandle) -> None:
@@ -1529,9 +1544,7 @@ class UnifiedHarnessSessionBackendHost:
                 await asyncio.to_thread(lease.release)
 
     async def reconfigure_child(
-        self,
-        child: ChildSessionHandle,
-        binding: ResolvedChildSessionBinding,
+        self, child: ChildSessionHandle, binding: ResolvedChildSessionBinding
     ) -> bool:
         """Push a binding's live adapter config into a child session.
 
@@ -1546,7 +1559,9 @@ class UnifiedHarnessSessionBackendHost:
         Returns ``True`` if the child was updated, ``False`` if it could not
         be found (neither live nor in storage).
         """
-        from mistralai_vibe_local_harness.vibe._subagents._configuration import child_config
+        from mistralai_vibe_local_harness.vibe._subagents._configuration import (
+            child_config,
+        )
 
         session = self._live_session(child.session_id)
         if session is not None:
@@ -1592,9 +1607,7 @@ class UnifiedHarnessSessionBackendHost:
         return True
 
     async def reconfigure_subagents(
-        self,
-        session_id: str,
-        adapter_config: LocalRuntimeAdapterConfig,
+        self, session_id: str, adapter_config: LocalRuntimeAdapterConfig
     ) -> None:
         """Refresh the subagent configuration and propagate to children.
 
@@ -1633,21 +1646,17 @@ class UnifiedHarnessSessionBackendHost:
         if resolved is None:
             return
         await controller.update_policy_ceiling(resolved.policy_ceiling)
-        await controller.rebind_agent_types(
-            resolved.bindings,
-            resolved.policy_ceiling,
-        )
+        await controller.rebind_agent_types(resolved.bindings, resolved.policy_ceiling)
         await controller.reconfigure_children()
 
-    async def delete(self, session_id: str) -> HarnessSessionDeleteResult:
+    async def delete(self, session_id: str) -> HarnessSessionDeleteResult:  # noqa: PLR0912, PLR0914, PLR0915 - one cohesive delete path
         """Delete one root and every durable child, with the root removed last."""
         self._guard_open()
         live = self._live_session(session_id)
         if live is not None and live.ephemeral:
             await self._close_session(live)
             return HarnessSessionDeleteResult(
-                root_session_id=session_id,
-                deleted_session_ids=(session_id,),
+                root_session_id=session_id, deleted_session_ids=(session_id,)
             )
 
         retained = self._tree_deletion_leases.get(session_id)
@@ -1686,7 +1695,9 @@ class UnifiedHarnessSessionBackendHost:
             stored = await asyncio.to_thread(store.load)
             if isinstance(stored.runtime_state.identity, SubagentSessionIdentity):
                 raise HarnessChildSessionRequiresParentError(session_id, "deleted")
-            stored = await asyncio.to_thread(self._prepare_stored_tree_delete, store, stored)
+            stored = await asyncio.to_thread(
+                self._prepare_stored_tree_delete, store, stored
+            )
             lifecycle = stored.runtime_state.lifecycle
             if isinstance(lifecycle, DeletingSessionTree):
                 planned = tuple(lifecycle.ordered_child_session_ids)
@@ -1735,18 +1746,14 @@ class UnifiedHarnessSessionBackendHost:
                     }
                 )
                 stored = await asyncio.to_thread(
-                    self._write_stored_lifecycle,
-                    store,
-                    stored,
-                    updated_lifecycle,
+                    self._write_stored_lifecycle, store, stored, updated_lifecycle
                 )
 
             deleted = (*planned, session_id)
             await asyncio.to_thread(store.delete)
             succeeded = True
             return HarnessSessionDeleteResult(
-                root_session_id=session_id,
-                deleted_session_ids=deleted,
+                root_session_id=session_id, deleted_session_ids=deleted
             )
         except (HarnessChildSessionRequiresParentError, HarnessSessionNotFoundError):
             raise
@@ -1761,7 +1768,9 @@ class UnifiedHarnessSessionBackendHost:
                     await asyncio.to_thread(leases.children[child_session_id].release)
                 await asyncio.to_thread(leases.root.release)
 
-    async def _prepare_live_tree_delete(self, session: UnifiedHarnessSessionBackend) -> None:
+    async def _prepare_live_tree_delete(
+        self, session: UnifiedHarnessSessionBackend
+    ) -> None:
         runtime = session._runtime_for_host()
 
         def prepare(state: RuntimeStateV3) -> RuntimeStateV3:
@@ -1779,7 +1788,9 @@ class UnifiedHarnessSessionBackendHost:
         plan = _tree_deletion_plan(stored.runtime_state)
         if plan is None:
             return stored
-        return UnifiedHarnessSessionBackendHost._write_stored_lifecycle(store, stored, plan)
+        return UnifiedHarnessSessionBackendHost._write_stored_lifecycle(
+            store, stored, plan
+        )
 
     @staticmethod
     def _write_stored_lifecycle(
@@ -1807,7 +1818,7 @@ class UnifiedHarnessSessionBackendHost:
         )
         return store.load()
 
-    async def shutdown(self) -> None:
+    async def shutdown(self) -> None:  # noqa: PLR0912 - tears every subsystem down in order
         if self._closed:
             return
         self._closed = True
@@ -1877,13 +1888,15 @@ class UnifiedHarnessSessionBackendHost:
         plugins: SessionPluginBinding,
         hook_handlers: HookHandlers | None = None,
     ) -> tuple[UnifiedHarnessSessionBackend, StoredSession]:
-        stored = self._write_initial_store(session_id, [], None, metadata, plugins=plugins)
+        stored = self._write_initial_store(
+            session_id, [], None, metadata, plugins=plugins
+        )
         return self._bind(stored, lease, plugins, hook_handlers), stored
 
     def _write_initial_store(
         self,
         session_id: str,
-        history: "list[InteropHistoryMessageV1]",
+        history: list[InteropHistoryMessageV1],
         provenance: ImportProvenanceV1 | None,
         metadata: SessionMetadataV1,
         *,
@@ -1898,7 +1911,10 @@ class UnifiedHarnessSessionBackendHost:
         checkpoint = _create_checkpoint(
             session_id,
             history,
-            config or self._runtime_config(session_id, metadata.hook_bindings, plugins=plugins),
+            config
+            or self._runtime_config(
+                session_id, metadata.hook_bindings, plugins=plugins
+            ),
             attachments_root=self._attachments_root(session_id),
         )
         state = public_state or _public_state(session_id, created_at, history, metadata)
@@ -1917,10 +1933,7 @@ class UnifiedHarnessSessionBackendHost:
             subagent_policy_ceiling_digest=metadata.subagent_policy_ceiling_digest,
         ).model_copy(update={"import_provenance": provenance})
         projection_state = ProjectionStateV1(
-            session_id=session_id,
-            snapshot_sequence=0,
-            watermark=0,
-            snapshot=state,
+            session_id=session_id, snapshot_sequence=0, watermark=0, snapshot=state
         )
         store = UnifiedSessionStore(self._storage_root, session_id)
         store.write_generation(
@@ -1930,7 +1943,7 @@ class UnifiedHarnessSessionBackendHost:
         )
         return store.load()
 
-    def _create_ephemeral(
+    def _create_ephemeral(  # noqa: PLR0914, PLR0915 - composition root
         self,
         session_id: str,
         metadata: SessionMetadataV1,
@@ -1961,7 +1974,9 @@ class UnifiedHarnessSessionBackendHost:
         )
         # Only foreign hooks surface public notices (see _emits_run_notices).
         foreign_ids = (
-            foreign_binding_ids(hook_handlers) if hook_handlers is not None else frozenset()
+            foreign_binding_ids(hook_handlers)
+            if hook_handlers is not None
+            else frozenset()
         )
 
         def publish_event(event: JsonObject) -> None:
@@ -1970,33 +1985,33 @@ class UnifiedHarnessSessionBackendHost:
             session._publish_event(event)
 
         def publish_mcp_event(signal: MCPAuthorizationRequiredSignal) -> None:
-            publish_event(
-                {
-                    "type": "mcp_authorization_required",
-                    "serverName": signal.server_name,
-                    "reason": signal.reason,
-                    "descriptorRevision": signal.descriptor_revision,
-                    "observedConnectionRevision": signal.observed_connection_revision,
-                }
-            )
+            publish_event({
+                "type": "mcp_authorization_required",
+                "serverName": signal.server_name,
+                "reason": signal.reason,
+                "descriptorRevision": signal.descriptor_revision,
+                "observedConnectionRevision": signal.observed_connection_revision,
+            })
 
         def publish_connector_event(
             signal: ConnectorAuthorizationRequiredSignal,
         ) -> None:
-            publish_event(
-                {
-                    "type": "connector_authorization_required",
-                    "rawConnectorId": signal.raw_connector_id,
-                    "alias": signal.alias,
-                    "acceptedCatalogRevision": signal.accepted_catalog_revision,
-                    "action": signal.action,
-                    "reason": signal.reason,
-                }
-            )
+            publish_event({
+                "type": "connector_authorization_required",
+                "rawConnectorId": signal.raw_connector_id,
+                "alias": signal.alias,
+                "acceptedCatalogRevision": signal.accepted_catalog_revision,
+                "action": signal.action,
+                "reason": signal.reason,
+            })
 
         mcp_runtime = self._new_mcp_runtime(event_sink=publish_mcp_event)
-        connector_runtime = self._new_connector_runtime(event_sink=publish_connector_event)
-        mcp_executor = build_mcp_action_executor(mcp_runtime) if mcp_runtime is not None else None
+        connector_runtime = self._new_connector_runtime(
+            event_sink=publish_connector_event
+        )
+        mcp_executor = (
+            build_mcp_action_executor(mcp_runtime) if mcp_runtime is not None else None
+        )
         connector_executor = (
             build_connector_action_executor(connector_runtime)
             if connector_runtime is not None
@@ -2010,15 +2025,22 @@ class UnifiedHarnessSessionBackendHost:
             self._provided_tool_groups, registered_groups, session_id
         )
 
-        async def execute_provided_tool(action: RustProvidedToolCallAction):
-            if action.call.group_name == "ui" and action.call.tool_name == "ask_user_question":
+        async def execute_provided_tool(
+            action: RustProvidedToolCallAction,
+        ) -> RustEvent:
+            if (
+                action.call.group_name == "ui"
+                and action.call.tool_name == "ask_user_question"
+            ):
                 if session is None:
                     raise RuntimeError("Session is not ready for user input")
                 return await session._request_user_input(action)
             registered = registered_executors.get(action.call.group_name)
             if registered is not None:
                 return await registered(action)
-            if connector_executor is not None and action.call.group_name.startswith("connector_"):
+            if connector_executor is not None and action.call.group_name.startswith(
+                "connector_"
+            ):
                 return await connector_executor(action)
             if mcp_executor is not None:
                 return await mcp_executor(action)
@@ -2064,7 +2086,7 @@ class UnifiedHarnessSessionBackendHost:
 
         base_capabilities = self._capabilities_with_hooks(metadata.hook_bindings)
 
-        def promote(plugins: SessionPluginBinding) -> DurableSessionRuntime:
+        def promote(plugins: SessionPluginBinding) -> DurableSessionRuntime:  # noqa: PLR0914 - composition root
             assert session is not None
             nonlocal runtime_config_template, subagent_configuration, subagent_adapter
             # A session can be told to run somewhere else between creation and
@@ -2151,7 +2173,9 @@ class UnifiedHarnessSessionBackendHost:
                 process_manager=process_manager,
                 process_config=adapter_config,
                 request_process_approval=(
-                    session._request_process_approval if process_manager is not None else None
+                    session._request_process_approval
+                    if process_manager is not None
+                    else None
                 ),
             )
             runtime_holder.append(runtime)
@@ -2159,7 +2183,9 @@ class UnifiedHarnessSessionBackendHost:
 
                 async def accept_mcp_snapshot(snapshot: MCPRouteSnapshot) -> None:
                     current_connector_snapshot = (
-                        connector_runtime.snapshot if connector_runtime is not None else None
+                        connector_runtime.snapshot
+                        if connector_runtime is not None
+                        else None
                     )
                     await runtime.reconfigure_capability_dimension(
                         _integration_capability_update(
@@ -2175,7 +2201,9 @@ class UnifiedHarnessSessionBackendHost:
                 async def accept_connector_snapshot(
                     snapshot: ConnectorRouteSnapshot,
                 ) -> None:
-                    current_mcp_snapshot = mcp_runtime.snapshot if mcp_runtime is not None else None
+                    current_mcp_snapshot = (
+                        mcp_runtime.snapshot if mcp_runtime is not None else None
+                    )
                     await runtime.reconfigure_capability_dimension(
                         _integration_capability_update(
                             base_capabilities,
@@ -2206,7 +2234,9 @@ class UnifiedHarnessSessionBackendHost:
                         tool_name=action.call.tool_name,
                     )
 
-                runtime.configure_action_applied_sink(publish_connector_authorization_after_action)
+                runtime.configure_action_applied_sink(
+                    publish_connector_authorization_after_action
+                )
             return runtime
 
         async def initialize_subagents_on_promote(
@@ -2214,7 +2244,9 @@ class UnifiedHarnessSessionBackendHost:
         ) -> None:
             await self._initialize_subagent_runtime(
                 runtime,
-                _extend_subagent_bindings(subagent_configuration, subagent_adapter, plugins),
+                _extend_subagent_bindings(
+                    subagent_configuration, subagent_adapter, plugins
+                ),
             )
 
         session = UnifiedHarnessSessionBackend(
@@ -2226,7 +2258,9 @@ class UnifiedHarnessSessionBackendHost:
             state=_public_state(session_id, created_at, [], metadata).model_copy(
                 update={
                     "history": LatestPublicHistoryPage(
-                        entries=_rehome_public_history(initial_public_history, session_id),
+                        entries=_rehome_public_history(
+                            initial_public_history, session_id
+                        ),
                         cursor=HistoryCursor(),
                     )
                 }
@@ -2244,8 +2278,8 @@ class UnifiedHarnessSessionBackendHost:
             adapter_config=adapter_config,
             release_plugins=self._release_plugins(session_id),
             read_plugin_info=self._read_plugin_info(session_id),
-            on_reconfigure_subagents=lambda cfg, sid=session_id: self.reconfigure_subagents(
-                sid, cfg
+            on_reconfigure_subagents=lambda cfg, sid=session_id: (
+                self.reconfigure_subagents(sid, cfg)
             ),
         )
         if action_adapter is not None:
@@ -2283,17 +2317,18 @@ class UnifiedHarnessSessionBackendHost:
             )
         source_reference = source.reference or reference
         if source_reference is None:
-            source_reference = LegacySessionReference(
-                session_id=session_id,
-                cwd="",
-            )
+            source_reference = LegacySessionReference(session_id=session_id, cwd="")
         if source_reference.session_id != session_id:
             raise HarnessInvalidMigrationSourceError(
                 session_id,
                 "legacy",
                 "Legacy source resolver and exporter returned different session IDs",
             )
-        if source.store_revision is None or source.history is None or source.error is not None:
+        if (
+            source.store_revision is None
+            or source.history is None
+            or source.error is not None
+        ):
             raise HarnessInvalidMigrationSourceError(
                 session_id,
                 "legacy",
@@ -2373,7 +2408,9 @@ class UnifiedHarnessSessionBackendHost:
         if not stored.runtime_state.quiescent or stored.journal:
             return stored
         updated_state = stored.runtime_state.model_copy(
-            update={"session_metadata": metadata.model_copy(update={"hook_bindings": fresh})}
+            update={
+                "session_metadata": metadata.model_copy(update={"hook_bindings": fresh})
+            }
         )
         store.write_generation(
             checkpoint=stored.checkpoint,
@@ -2382,7 +2419,7 @@ class UnifiedHarnessSessionBackendHost:
         )
         return store.load()
 
-    def _bind(
+    def _bind(  # noqa: PLR0914, PLR0915 - composition root
         self,
         stored: StoredSession,
         lease: SessionLease,
@@ -2406,39 +2443,39 @@ class UnifiedHarnessSessionBackendHost:
         adapter_config = adapter_config_override or self._adapter_config()
 
         def publish_mcp_event(signal: MCPAuthorizationRequiredSignal) -> None:
-            publish_event(
-                {
-                    "type": "mcp_authorization_required",
-                    "serverName": signal.server_name,
-                    "reason": signal.reason,
-                    "descriptorRevision": signal.descriptor_revision,
-                    "observedConnectionRevision": signal.observed_connection_revision,
-                }
-            )
+            publish_event({
+                "type": "mcp_authorization_required",
+                "serverName": signal.server_name,
+                "reason": signal.reason,
+                "descriptorRevision": signal.descriptor_revision,
+                "observedConnectionRevision": signal.observed_connection_revision,
+            })
 
         def publish_connector_event(
             signal: ConnectorAuthorizationRequiredSignal,
         ) -> None:
-            publish_event(
-                {
-                    "type": "connector_authorization_required",
-                    "rawConnectorId": signal.raw_connector_id,
-                    "alias": signal.alias,
-                    "acceptedCatalogRevision": signal.accepted_catalog_revision,
-                    "action": signal.action,
-                    "reason": signal.reason,
-                }
-            )
+            publish_event({
+                "type": "connector_authorization_required",
+                "rawConnectorId": signal.raw_connector_id,
+                "alias": signal.alias,
+                "acceptedCatalogRevision": signal.accepted_catalog_revision,
+                "action": signal.action,
+                "reason": signal.reason,
+            })
 
         mcp_runtime = (
-            self._new_mcp_runtime(event_sink=publish_mcp_event) if integrations_enabled else None
+            self._new_mcp_runtime(event_sink=publish_mcp_event)
+            if integrations_enabled
+            else None
         )
         connector_runtime = (
             self._new_connector_runtime(event_sink=publish_connector_event)
             if integrations_enabled
             else None
         )
-        mcp_executor = build_mcp_action_executor(mcp_runtime) if mcp_runtime is not None else None
+        mcp_executor = (
+            build_mcp_action_executor(mcp_runtime) if mcp_runtime is not None else None
+        )
         connector_executor = (
             build_connector_action_executor(connector_runtime)
             if connector_runtime is not None
@@ -2457,15 +2494,22 @@ class UnifiedHarnessSessionBackendHost:
             self._provided_tool_groups, registered_groups, stored.manifest.session_id
         )
 
-        async def execute_provided_tool(action: RustProvidedToolCallAction):
-            if action.call.group_name == "ui" and action.call.tool_name == "ask_user_question":
+        async def execute_provided_tool(
+            action: RustProvidedToolCallAction,
+        ) -> RustEvent:
+            if (
+                action.call.group_name == "ui"
+                and action.call.tool_name == "ask_user_question"
+            ):
                 if session is None:
                     raise RuntimeError("Session is not ready for user input")
                 return await session._request_user_input(action)
             registered = registered_executors.get(action.call.group_name)
             if registered is not None:
                 return await registered(action)
-            if connector_executor is not None and action.call.group_name.startswith("connector_"):
+            if connector_executor is not None and action.call.group_name.startswith(
+                "connector_"
+            ):
                 return await connector_executor(action)
             if mcp_executor is not None:
                 return await mcp_executor(action)
@@ -2511,13 +2555,17 @@ class UnifiedHarnessSessionBackendHost:
         base_capabilities = (
             runtime_config.capabilities
             if runtime_config_override is not None
-            else self._capabilities_with_hooks(stored.runtime_state.session_metadata.hook_bindings)
+            else self._capabilities_with_hooks(
+                stored.runtime_state.session_metadata.hook_bindings
+            )
         )
         if mcp_runtime is not None:
 
             async def accept_mcp_snapshot(snapshot: MCPRouteSnapshot) -> None:
                 connector_snapshot = (
-                    connector_runtime.snapshot if connector_runtime is not None else None
+                    connector_runtime.snapshot
+                    if connector_runtime is not None
+                    else None
                 )
                 await runtime.reconfigure_capability_dimension(
                     _integration_capability_update(
@@ -2557,7 +2605,9 @@ class UnifiedHarnessSessionBackendHost:
         )
         # Only foreign hooks surface public notices (see _emits_run_notices).
         foreign_ids = (
-            foreign_binding_ids(hook_handlers) if hook_handlers is not None else frozenset()
+            foreign_binding_ids(hook_handlers)
+            if hook_handlers is not None
+            else frozenset()
         )
         action_adapter = (
             _LocalActionState(
@@ -2615,9 +2665,7 @@ class UnifiedHarnessSessionBackendHost:
                 )
         if process_manager is not None and adapter_config is not None:
             runtime.configure_process_runtime(
-                process_manager,
-                adapter_config,
-                session._request_process_approval,
+                process_manager, adapter_config, session._request_process_approval
             )
         if connector_runtime is not None:
             bound_connector_runtime = connector_runtime
@@ -2628,11 +2676,12 @@ class UnifiedHarnessSessionBackendHost:
                 if not isinstance(action, RustProvidedToolCallAction):
                     return
                 await bound_connector_runtime.publish_pending_authorization(
-                    group_name=action.call.group_name,
-                    tool_name=action.call.tool_name,
+                    group_name=action.call.group_name, tool_name=action.call.tool_name
                 )
 
-            runtime.configure_action_applied_sink(publish_connector_authorization_after_action)
+            runtime.configure_action_applied_sink(
+                publish_connector_authorization_after_action
+            )
         return session
 
     async def _initialize_integrations(
@@ -2653,21 +2702,32 @@ class UnifiedHarnessSessionBackendHost:
                 len(self._mcp_catalog.servers),
             )
             await session.reconfigure_mcp(
-                self._mcp_catalog, force_remote_discovery=False, push_to_core=push_to_core
+                self._mcp_catalog,
+                force_remote_discovery=False,
+                push_to_core=push_to_core,
             )
             logger.debug("MCP integrations initialized for %s", session.session_id)
-        if self._connector_catalog is not None and self._connector_selection is not None:
+        if (
+            self._connector_catalog is not None
+            and self._connector_selection is not None
+        ):
             logger.debug(
                 "Initializing connector integrations for %s (%d connectors)",
                 session.session_id,
                 len(self._connector_catalog.connectors),
             )
             await session.reconfigure_connectors(
-                self._connector_catalog, self._connector_selection, push_to_core=push_to_core
+                self._connector_catalog,
+                self._connector_selection,
+                push_to_core=push_to_core,
             )
-            logger.debug("Connector integrations initialized for %s", session.session_id)
+            logger.debug(
+                "Connector integrations initialized for %s", session.session_id
+            )
 
-    async def _push_integration_capabilities(self, session: UnifiedHarnessSessionBackend) -> None:
+    async def _push_integration_capabilities(
+        self, session: UnifiedHarnessSessionBackend
+    ) -> None:
         """Publish the readied MCP and connector routes to an idle Core.
 
         Pairs with ``_initialize_integrations(push_to_core=False)`` after an
@@ -2676,11 +2736,16 @@ class UnifiedHarnessSessionBackendHost:
         """
         if self._mcp_catalog is not None and self._mcp_catalog.servers:
             await session.push_mcp_capabilities()
-        if self._connector_catalog is not None and self._connector_selection is not None:
+        if (
+            self._connector_catalog is not None
+            and self._connector_selection is not None
+        ):
             await session.push_connector_capabilities()
 
     async def _initialize_subagents(
-        self, session: UnifiedHarnessSessionBackend, plugins: SessionPluginBinding | None = None
+        self,
+        session: UnifiedHarnessSessionBackend,
+        plugins: SessionPluginBinding | None = None,
     ) -> None:
         await self._initialize_subagent_runtime(
             session._runtime_for_host(), self._session_subagents(plugins)
@@ -2772,7 +2837,8 @@ class UnifiedHarnessSessionBackendHost:
     def _new_connector_runtime(
         self,
         *,
-        event_sink: Callable[[ConnectorAuthorizationRequiredSignal], None] | None = None,
+        event_sink: Callable[[ConnectorAuthorizationRequiredSignal], None]
+        | None = None,
     ) -> ConnectorRuntime | None:
         gateway_factory = self._connector_gateway_factory
         if gateway_factory is None:
@@ -2787,9 +2853,7 @@ class UnifiedHarnessSessionBackendHost:
             for group in capability_set.tool_groups
         )
         return ConnectorRuntime(
-            gateway_factory(),
-            event_sink=event_sink,
-            claimed_groups=claimed_groups,
+            gateway_factory(), event_sink=event_sink, claimed_groups=claimed_groups
         )
 
     def _plugin_binder(self) -> SessionPluginBinder | None:
@@ -2805,7 +2869,9 @@ class UnifiedHarnessSessionBackendHost:
             return empty_plugin_binding()
         return await binder.create(self._requested_plugins, session_id=session_id)
 
-    async def _restore_plugins(self, session_id: str, lock: PluginLockV1) -> SessionPluginBinding:
+    async def _restore_plugins(
+        self, session_id: str, lock: PluginLockV1
+    ) -> SessionPluginBinding:
         """Restore path: rebuild the recorded pin, whatever is installed now.
 
         A lock naming packages with no provider configured is a dead session
@@ -2816,20 +2882,20 @@ class UnifiedHarnessSessionBackendHost:
         if binder is None:
             if not lock.plugins:
                 return empty_plugin_binding()
-            raise PluginRestoreError(
-                [
-                    PluginRestoreDiagnostic(
-                        code=PluginRestoreDiagnosticCode.LOCK_INVALID,
-                        plugin_name=entry.name,
-                        content_digest=entry.content_digest,
-                        message="the session pinned plugins but no plugin provider is configured",
-                    )
-                    for entry in lock.plugins
-                ]
-            )
+            raise PluginRestoreError([
+                PluginRestoreDiagnostic(
+                    code=PluginRestoreDiagnosticCode.LOCK_INVALID,
+                    plugin_name=entry.name,
+                    content_digest=entry.content_digest,
+                    message="the session pinned plugins but no plugin provider is configured",
+                )
+                for entry in lock.plugins
+            ])
         return await binder.restore(lock, session_id=session_id)
 
-    def _read_plugin_info(self, session_id: str) -> Callable[[], Awaitable[PluginInfo]] | None:
+    def _read_plugin_info(
+        self, session_id: str
+    ) -> Callable[[], Awaitable[PluginInfo]] | None:
         """The read half of the seam, bound to one session.
 
         A binder is built per call for the same reason ``_release_plugins``
@@ -2852,7 +2918,9 @@ class UnifiedHarnessSessionBackendHost:
         if release := self._release_plugins(session_id):
             await release()
 
-    async def _rebind_recorded_plugins(self, session_id: str, lock: PluginLockV1) -> None:
+    async def _rebind_recorded_plugins(
+        self, session_id: str, lock: PluginLockV1
+    ) -> None:
         """Undo a re-pin that bound its new set but failed to record it."""
         binder = self._plugin_binder()
         if binder is None:
@@ -2924,41 +2992,31 @@ class UnifiedHarnessSessionBackendHost:
             return
         task = asyncio.create_task(
             self._run_orphan_diagnostic(
-                parent_session_id,
-                frozenset(_tree_child_session_ids(parent_state)),
+                parent_session_id, frozenset(_tree_child_session_ids(parent_state))
             ),
             name=f"subagent-orphan-diagnostic:{parent_session_id}",
         )
         self._orphan_diagnostic_tasks[parent_session_id] = task
         task.add_done_callback(
             lambda completed: self._orphan_diagnostic_finished(
-                parent_session_id,
-                completed,
+                parent_session_id, completed
             )
         )
 
     async def _run_orphan_diagnostic(
-        self,
-        parent_session_id: str,
-        referenced_child_session_ids: frozenset[str],
+        self, parent_session_id: str, referenced_child_session_ids: frozenset[str]
     ) -> None:
         orphan_count = await self._report_orphan_children(
-            parent_session_id,
-            referenced_child_session_ids,
+            parent_session_id, referenced_child_session_ids
         )
         if orphan_count:
             logger.warning(
                 "Unified subagent orphans detected",
-                extra={
-                    "harness_backend": "unified",
-                    "orphan_count": orphan_count,
-                },
+                extra={"harness_backend": "unified", "orphan_count": orphan_count},
             )
 
     def _orphan_diagnostic_finished(
-        self,
-        parent_session_id: str,
-        task: asyncio.Task[None],
+        self, parent_session_id: str, task: asyncio.Task[None]
     ) -> None:
         if self._orphan_diagnostic_tasks.get(parent_session_id) is task:
             del self._orphan_diagnostic_tasks[parent_session_id]
@@ -2969,19 +3027,16 @@ class UnifiedHarnessSessionBackendHost:
         except Exception:
             logger.warning(
                 "Unified subagent orphan diagnostic failed",
-                extra={
-                    "harness_backend": "unified",
-                    "session_id": parent_session_id,
-                },
+                extra={"harness_backend": "unified", "session_id": parent_session_id},
                 exc_info=True,
             )
 
     async def _report_orphan_children(
-        self,
-        parent_session_id: str,
-        referenced_child_session_ids: frozenset[str],
+        self, parent_session_id: str, referenced_child_session_ids: frozenset[str]
     ) -> int:
-        entries = await asyncio.to_thread(UnifiedSessionCatalog(self._storage_root).entries)
+        entries = await asyncio.to_thread(
+            UnifiedSessionCatalog(self._storage_root).entries
+        )
         orphan_count = 0
         for entry in entries:
             if entry.session_id in referenced_child_session_ids:
@@ -2997,7 +3052,6 @@ class UnifiedHarnessSessionBackendHost:
 
     async def _acquire_session_lease(self, session_id: str) -> SessionLease:
         """Acquire a lease without racing an output-maintenance pass."""
-
         lease = SessionLease(self._storage_root, session_id)
         try:
             return await asyncio.to_thread(lease.acquire)
@@ -3031,8 +3085,7 @@ class UnifiedHarnessSessionBackendHost:
         if not hook_bindings:
             return base
         return base.model_copy(
-            update={"hook_bindings": [*base.hook_bindings, *hook_bindings]},
-            deep=True,
+            update={"hook_bindings": [*base.hook_bindings, *hook_bindings]}, deep=True
         )
 
     def _session_subagents(
@@ -3078,15 +3131,12 @@ class UnifiedHarnessSessionBackendHost:
                 catalog, selection, claimed_groups=claimed_groups
             )
             capabilities = _merge_integration_capabilities(
-                capabilities,
-                mcp_snapshot=None,
-                connector_snapshot=connector_snapshot,
+                capabilities, mcp_snapshot=None, connector_snapshot=connector_snapshot
             )
         config = config.model_copy(update={"capabilities": capabilities}, deep=True)
         configured = self._session_subagents(plugins)
         return advertise_bound_agent_types(
-            config,
-            configured.bindings if configured is not None else {},
+            config, configured.bindings if configured is not None else {}
         )
 
     def _adapter_config(self) -> LocalRuntimeAdapterConfig | None:
@@ -3095,7 +3145,9 @@ class UnifiedHarnessSessionBackendHost:
     def _bind_loop(self) -> None:
         loop = asyncio.get_running_loop()
         if self._loop is not None and self._loop is not loop:
-            raise RuntimeError("The Unified Harness Host cannot move between event loops")
+            raise RuntimeError(
+                "The Unified Harness Host cannot move between event loops"
+            )
         self._loop = loop
         self._request_process_output_cleanup()
 
@@ -3108,21 +3160,29 @@ class UnifiedHarnessSessionBackendHost:
         if (
             adapter_config is None
             or adapter_config.process_authority != "host_shell"
-            or self._runtime_config_template.settings.tools.background_processes.mode != "enabled"
+            or self._runtime_config_template.settings.tools.background_processes.mode
+            != "enabled"
         ):
             return None
         if adapter_config.command_environment == "unix":
-            from mistralai_vibe_local_harness.vibe._processes._posix import PosixTerminalBackend
+            from mistralai_vibe_local_harness.vibe._processes._posix import (
+                PosixTerminalBackend,
+            )
 
             backend: TerminalBackend = PosixTerminalBackend()
         elif adapter_config.command_environment in {"git_bash", "powershell"}:
-            from mistralai_vibe_local_harness.vibe._processes._windows import WindowsTerminalBackend
+            from mistralai_vibe_local_harness.vibe._processes._windows import (
+                WindowsTerminalBackend,
+            )
 
             backend = cast(
-                TerminalBackend, WindowsTerminalBackend(adapter_config.command_environment)
+                TerminalBackend,
+                WindowsTerminalBackend(adapter_config.command_environment),
             )
         else:
-            raise ValueError("host-shell process authority requires a native shell profile")
+            raise ValueError(
+                "host-shell process authority requires a native shell profile"
+            )
         if self._loop is None:
             raise RuntimeError("The Unified Harness Host has no event loop")
         return SessionProcessManager(
@@ -3133,9 +3193,7 @@ class UnifiedHarnessSessionBackendHost:
         )
 
     def _image_source_roots(
-        self,
-        cwd: str | None,
-        adapter_config: LocalRuntimeAdapterConfig | None,
+        self, cwd: str | None, adapter_config: LocalRuntimeAdapterConfig | None
     ) -> tuple[Path, ...]:
         workspace_roots = (
             adapter_config.workspace_roots
@@ -3180,13 +3238,21 @@ class UnifiedHarnessSessionBackendHost:
                 ) and not session_is_live(self._storage_root, session_id):
                     public = public.model_copy(update={"status": IdleSessionStatus()})
             metadata = entry.metadata
-            if parent_session_id is None and isinstance(entry.identity, SubagentSessionIdentity):
+            if parent_session_id is None and isinstance(
+                entry.identity, SubagentSessionIdentity
+            ):
                 continue
             if cwd is not None and metadata.cwd != cwd:
                 continue
-            if root_session_id is not None and metadata.root_session_id != root_session_id:
+            if (
+                root_session_id is not None
+                and metadata.root_session_id != root_session_id
+            ):
                 continue
-            if parent_session_id is not None and metadata.parent_session_id != parent_session_id:
+            if (
+                parent_session_id is not None
+                and metadata.parent_session_id != parent_session_id
+            ):
                 continue
             stored_sessions.append((public.updated_at, session_id, public, metadata))
         stored_sessions.sort(key=lambda item: (item[0], item[1]), reverse=True)
@@ -3208,9 +3274,14 @@ class UnifiedHarnessSessionBackendHost:
         page = stored_sessions[start : start + limit]
         next_cursor = page[-1][1] if start + limit < len(stored_sessions) else None
         previous_start = max(0, start - limit)
-        previous_cursor = stored_sessions[previous_start - 1][1] if previous_start > 0 else None
+        previous_cursor = (
+            stored_sessions[previous_start - 1][1] if previous_start > 0 else None
+        )
         return HarnessSessionListResult(
-            items=tuple(HarnessSessionListItem(session=item[2], cwd=item[3].cwd) for item in page),
+            items=tuple(
+                HarnessSessionListItem(session=item[2], cwd=item[3].cwd)
+                for item in page
+            ),
             continue_session_id=stored_sessions[0][1] if stored_sessions else None,
             next_cursor=next_cursor,
             previous_cursor=previous_cursor,
@@ -3250,7 +3321,7 @@ class UnifiedHarnessSessionBackendHost:
         return UnifiedSessionCatalog(self._storage_root).entry(session_id)
 
     @staticmethod
-    def _importable_history(stored: StoredSession) -> "list[InteropHistoryMessageV1]":
+    def _importable_history(stored: StoredSession) -> list[InteropHistoryMessageV1]:
         export = stored.interop_export
         if not stored.runtime_state.quiescent or stored.journal or export is None:
             raise ValueError("source session is not at an exported quiescent boundary")
@@ -3262,8 +3333,12 @@ class UnifiedHarnessSessionBackendHost:
         async with self._registry_lock:
             previous = self._sessions.get(session.session_id)
             if previous is not None and previous.session is not session:
-                raise RuntimeError(f"session is already registered: {session.session_id}")
-            self._sessions[session.session_id] = _LoadedSessionEntry(session=session, attachments=1)
+                raise RuntimeError(
+                    f"session is already registered: {session.session_id}"
+                )
+            self._sessions[session.session_id] = _LoadedSessionEntry(
+                session=session, attachments=1
+            )
         session._configure_work_state_callback(self._session_work_state_changed)
         if not session.ephemeral:
             self._connect_child_events(session)
@@ -3297,7 +3372,9 @@ class UnifiedHarnessSessionBackendHost:
         )
         parent.publish_child_registration(identity.session_id, snapshot)
 
-    async def _attach_live_session(self, session_id: str) -> UnifiedHarnessSessionBackend | None:
+    async def _attach_live_session(
+        self, session_id: str
+    ) -> UnifiedHarnessSessionBackend | None:
         while True:
             async with self._registry_lock:
                 self._guard_open()
@@ -3310,7 +3387,9 @@ class UnifiedHarnessSessionBackendHost:
                 closed = entry.closed
             await closed.wait()
 
-    async def _claim_session_load(self, session_id: str) -> tuple[bool, _LoadingSession]:
+    async def _claim_session_load(
+        self, session_id: str
+    ) -> tuple[bool, _LoadingSession]:
         identity = self._bind_identity()
         while True:
             async with self._registry_lock:
@@ -3323,7 +3402,9 @@ class UnifiedHarnessSessionBackendHost:
                                 f"session is already loading with different settings: {session_id}"
                             )
                         return False, existing
-                    load = _LoadingSession(identity, asyncio.get_running_loop().create_future())
+                    load = _LoadingSession(
+                        identity, asyncio.get_running_loop().create_future()
+                    )
                     self._loading_sessions[session_id] = load
                     return True, load
             await maintenance.wait()
@@ -3343,7 +3424,10 @@ class UnifiedHarnessSessionBackendHost:
     def _bind_identity(self) -> tuple[object, ...]:
         return (
             self._runtime_config_template.model_dump_json(exclude_none=False),
-            tuple(plugin.model_dump_json(exclude_none=False) for plugin in self._requested_plugins),
+            tuple(
+                plugin.model_dump_json(exclude_none=False)
+                for plugin in self._requested_plugins
+            ),
             self._adapter_config_template,
             id(self._legacy_source_loader),
             id(self._legacy_source_resolver),
@@ -3353,7 +3437,9 @@ class UnifiedHarnessSessionBackendHost:
         entry = self._sessions.get(session_id)
         return entry.session if entry is not None and entry.state == "open" else None
 
-    def _require_live_child(self, child: ChildSessionHandle) -> UnifiedHarnessSessionBackend:
+    def _require_live_child(
+        self, child: ChildSessionHandle
+    ) -> UnifiedHarnessSessionBackend:
         session = self._live_session(child.session_id)
         if session is None:
             raise KeyError(f"child Session is not loaded: {child.session_id}")
@@ -3364,7 +3450,9 @@ class UnifiedHarnessSessionBackendHost:
 
     def _ephemeral_session_ids(self) -> frozenset[str]:
         return frozenset(
-            session_id for session_id, entry in self._sessions.items() if entry.session.ephemeral
+            session_id
+            for session_id, entry in self._sessions.items()
+            if entry.session.ephemeral
         )
 
     def _live_listed_sessions(self) -> dict[str, PublicSession]:
@@ -3374,7 +3462,9 @@ class UnifiedHarnessSessionBackendHost:
             if entry.state == "open" and not entry.session.ephemeral
         }
 
-    def _attachment(self, session: UnifiedHarnessSessionBackend) -> UnifiedHarnessSessionBackend:
+    def _attachment(
+        self, session: UnifiedHarnessSessionBackend
+    ) -> UnifiedHarnessSessionBackend:
         return cast(
             UnifiedHarnessSessionBackend,
             _SessionAttachment(session, self._detach_session),
@@ -3392,14 +3482,15 @@ class UnifiedHarnessSessionBackendHost:
 
     async def _close_session(self, session: UnifiedHarnessSessionBackend) -> None:
         """Close a Session once and retire its Host registry entry."""
-
         async with self._registry_lock:
             entry = self._sessions.get(session.session_id)
             if entry is None:
                 owner = True
                 closed = None
             elif entry.session is not session:
-                raise RuntimeError(f"session registration changed: {session.session_id}")
+                raise RuntimeError(
+                    f"session registration changed: {session.session_id}"
+                )
             elif entry.state == "open":
                 entry.state = "closing"
                 owner = True
@@ -3481,7 +3572,9 @@ class UnifiedHarnessSessionBackendHost:
         finished_at = self._cleanup_finished_at
         if finished_at is None:
             return
-        remaining = _PROCESS_OUTPUT_CLEANUP_DEBOUNCE_SECONDS - (time.monotonic() - finished_at)
+        remaining = _PROCESS_OUTPUT_CLEANUP_DEBOUNCE_SECONDS - (
+            time.monotonic() - finished_at
+        )
         if remaining > 0:
             await asyncio.sleep(remaining)
 
@@ -3504,7 +3597,7 @@ class UnifiedHarnessSessionBackendHost:
                 # returned early or raised.
                 self._cleanup_finished_at = time.monotonic()
 
-    async def _cleanup_process_output_once(self) -> None:
+    async def _cleanup_process_output_once(self) -> None:  # noqa: PLR0912, PLR0914, PLR0915 - one cohesive sweep
         cleanup_lease = SessionLease(self._storage_root, "process-output-cleanup")
         owned: list[tuple[str, asyncio.Event, SessionLease]] = []
         pinned: list[tuple[str, _LoadedSessionEntry]] = []
@@ -3564,7 +3657,8 @@ class UnifiedHarnessSessionBackendHost:
                     try:
                         stored = await _maintenance_io(store.load)
                         process_ids = {
-                            process.process_id for process in stored.runtime_state.processes
+                            process.process_id
+                            for process in stored.runtime_state.processes
                         }
                         protected_process_ids = process_ids | {
                             prepared.process_id
@@ -3584,7 +3678,9 @@ class UnifiedHarnessSessionBackendHost:
                                 store.session_root,
                                 process_id,
                             )
-                        reconciled = await _maintenance_io(store.reconcile_orphaned_processes)
+                        reconciled = await _maintenance_io(
+                            store.reconcile_orphaned_processes
+                        )
                         for _process in reconciled:
                             logging.getLogger("vibe.unified_harness.processes").warning(
                                 "background_process.orphaned"
@@ -3625,14 +3721,12 @@ class UnifiedHarnessSessionBackendHost:
                     except (OSError, ValueError):
                         continue
                     total += size
-                    candidates.append(
-                        (
-                            process.finished_at or process.created_at,
-                            process.process_id,
-                            output,
-                            size,
-                        )
-                    )
+                    candidates.append((
+                        process.finished_at or process.created_at,
+                        process.process_id,
+                        output,
+                        size,
+                    ))
             for _finished_at, _process_id, output, size in sorted(candidates):
                 if total <= _PROCESS_OUTPUT_TARGET_BYTES:
                     break
@@ -3684,9 +3778,13 @@ class UnifiedHarnessSessionBackendHost:
         if len(errors) == 1:
             raise errors[0]
         if errors:
-            raise BaseExceptionGroup("Failed to release process output cleanup ownership", errors)
+            raise BaseExceptionGroup(
+                "Failed to release process output cleanup ownership", errors
+            )
 
-    async def _release_maintenance(self, session_id: str, maintenance: asyncio.Event) -> None:
+    async def _release_maintenance(
+        self, session_id: str, maintenance: asyncio.Event
+    ) -> None:
         async with self._registry_lock:
             if self._maintenance_sessions.get(session_id) is maintenance:
                 del self._maintenance_sessions[session_id]
@@ -3708,7 +3806,9 @@ def create_harness_host(
     )
 
 
-async def _maintenance_io[ResultT](call: Callable[..., ResultT], *args: object) -> ResultT:
+async def _maintenance_io[ResultT](
+    call: Callable[..., ResultT], *args: object
+) -> ResultT:
     task = asyncio.create_task(asyncio.to_thread(call, *args))
     try:
         return await asyncio.shield(task)
@@ -3724,7 +3824,11 @@ def _snapshot(projection: ProjectionStateV1, history_limit: int) -> SessionSnaps
     entries = history.entries[-history_limit:] if history_limit else []
     return SessionSnapshot(
         state=state.model_copy(
-            update={"history": LatestPublicHistoryPage(entries=entries, cursor=history.cursor)}
+            update={
+                "history": LatestPublicHistoryPage(
+                    entries=entries, cursor=history.cursor
+                )
+            }
         ),
         history_limit=history_limit,
         watermark=projection.watermark,
@@ -3753,7 +3857,9 @@ def _validate_child_runtime_state(
 def _tree_child_session_ids(state: RuntimeStateV3) -> list[str]:
     if state.subagents is None:
         return []
-    return sorted({child.child_session_id for child in state.subagents.children.values()})
+    return sorted({
+        child.child_session_id for child in state.subagents.children.values()
+    })
 
 
 def _tree_deletion_plan(state: RuntimeStateV3) -> DeletingSessionTree | None:
@@ -3772,8 +3878,7 @@ def _tree_deletion_plan(state: RuntimeStateV3) -> DeletingSessionTree | None:
     if not children:
         return None
     return DeletingSessionTree(
-        ordered_child_session_ids=children,
-        deleted_child_session_ids=[],
+        ordered_child_session_ids=children, deleted_child_session_ids=[]
     )
 
 
@@ -3817,7 +3922,9 @@ def _child_turn_outcome(
     raise RuntimeError("child Turn is still running")
 
 
-def _terminal_failure_retryability(checkpoint: dict[str, JsonValue], turn_id: str) -> bool | None:
+def _terminal_failure_retryability(
+    checkpoint: dict[str, JsonValue], turn_id: str
+) -> bool | None:
     turn = checkpoint.get("turn")
     if not isinstance(turn, dict):
         return None
@@ -3833,7 +3940,9 @@ def _terminal_failure_retryability(checkpoint: dict[str, JsonValue], turn_id: st
     return retryable if isinstance(retryable, bool) else None
 
 
-def _assistant_output(state: PublicSessionState, turn_id: str) -> tuple[list[JsonValue], str]:
+def _assistant_output(
+    state: PublicSessionState, turn_id: str
+) -> tuple[list[JsonValue], str]:
     for entry in reversed(state.history.entries):
         if entry.get("type") != "message":
             continue
@@ -3871,7 +3980,9 @@ def _public_state(
                     _without_file_image_fallback(
                         cast(
                             JsonValue,
-                            part.content.model_dump(mode="json", by_alias=True, exclude_none=True),
+                            part.content.model_dump(
+                                mode="json", by_alias=True, exclude_none=True
+                            ),
                         )
                     ),
                 )
@@ -3888,7 +3999,9 @@ def _public_state(
                             _without_file_image_fallback(
                                 cast(
                                     JsonValue,
-                                    part.model_dump(mode="json", by_alias=True, exclude_none=True),
+                                    part.model_dump(
+                                        mode="json", by_alias=True, exclude_none=True
+                                    ),
                                 )
                             ),
                         )
@@ -3898,22 +4011,24 @@ def _public_state(
             ]
         if not content:
             continue
-        entries.append(
-            {
-                "type": "message",
-                "id": _imported_entry_id(index),
-                "sessionId": session_id,
-                "turnId": None,
-                "createdAt": created_at,
-                "updatedAt": created_at,
-                "generationStatus": "completed",
-                "relatedEntryId": None,
-                "role": message.role,
-                "content": content,
-                "source": "harness",
-                **({"outcome": {"type": "committed"}} if message.role == "assistant" else {}),
-            }
-        )
+        entries.append({
+            "type": "message",
+            "id": _imported_entry_id(index),
+            "sessionId": session_id,
+            "turnId": None,
+            "createdAt": created_at,
+            "updatedAt": created_at,
+            "generationStatus": "completed",
+            "relatedEntryId": None,
+            "role": message.role,
+            "content": content,
+            "source": "harness",
+            **(
+                {"outcome": {"type": "committed"}}
+                if message.role == "assistant"
+                else {}
+            ),
+        })
     return PublicSessionState(
         session=PublicSession(
             id=session_id,
@@ -3923,15 +4038,14 @@ def _public_state(
             created_at=created_at,
             updated_at=created_at,
         ),
-        history=LatestPublicHistoryPage(
-            entries=entries,
-            cursor=HistoryCursor(),
-        ),
+        history=LatestPublicHistoryPage(entries=entries, cursor=HistoryCursor()),
         turn_queue=TurnQueue(items=[], paused=False, max_items=TURN_QUEUE_MAX_ITEMS),
     )
 
 
-def _rehome_public_history(history: Sequence[JsonObject], session_id: str) -> list[JsonObject]:
+def _rehome_public_history(
+    history: Sequence[JsonObject], session_id: str
+) -> list[JsonObject]:
     return [cast(JsonObject, {**entry, "sessionId": session_id}) for entry in history]
 
 
@@ -3955,7 +4069,9 @@ def _create_checkpoint(
     """
     core_history: list[JsonValue] = []
     for message in history:
-        value = message.model_dump(mode="json", by_alias=True, exclude={"content", "parts"})
+        value = message.model_dump(
+            mode="json", by_alias=True, exclude={"content", "parts"}
+        )
         if isinstance(message, InteropAssistantMessageV1):
             value["content"] = [
                 (
@@ -4007,10 +4123,7 @@ def _create_checkpoint(
 
 
 def _core_content_block(
-    block: object,
-    *,
-    attachments_root: Path | None,
-    keep_interop_metadata: bool,
+    block: object, *, attachments_root: Path | None, keep_interop_metadata: bool
 ) -> dict[str, JsonValue]:
     if isinstance(block, InteropImageContentBlockV1):
         image = RustImageContentBlock(
@@ -4021,7 +4134,9 @@ def _core_content_block(
         )
         if block.file_fallback is not None:
             if attachments_root is None:
-                raise ValueError("Imported file image has no destination attachments directory")
+                raise ValueError(
+                    "Imported file image has no destination attachments directory"
+                )
             image = materialize_file_image_fallback(
                 image,
                 name=block.file_fallback.name,
@@ -4062,14 +4177,17 @@ def _history_for_fork(
     return list(history[:end])
 
 
-def _history_user_anchor(history: Sequence[InteropHistoryMessageV1], entry_id: str) -> int:
+def _history_user_anchor(
+    history: Sequence[InteropHistoryMessageV1], entry_id: str
+) -> int:
     anchor = next(
         (
             index
             for index, message in enumerate(history)
             if message.role == "user"
             and any(
-                part.meta is not None and part.meta.get("vibe_client_message_id") == entry_id
+                part.meta is not None
+                and part.meta.get("vibe_client_message_id") == entry_id
                 for part in message.content
             )
         ),
@@ -4112,7 +4230,9 @@ def _without_interop_metadata(value: JsonValue) -> JsonValue:
         return [_without_interop_metadata(item) for item in value]
     if isinstance(value, dict):
         return {
-            key: _without_interop_metadata(item) for key, item in value.items() if key != "_meta"
+            key: _without_interop_metadata(item)
+            for key, item in value.items()
+            if key != "_meta"
         }
     return value
 
@@ -4207,10 +4327,7 @@ def _integration_capability_update(
 
 
 def _has_provided_tool(
-    capabilities: RustHarnessCapabilitySet,
-    *,
-    group_name: str,
-    tool_name: str,
+    capabilities: RustHarnessCapabilitySet, *, group_name: str, tool_name: str
 ) -> bool:
     return any(
         group.name == group_name and any(tool.name == tool_name for tool in group.tools)
@@ -4228,7 +4345,9 @@ class _ProvidedToolGroup:
 def _registered_group_names(
     groups: Mapping[str, _ProvidedToolGroup], capabilities: RustHarnessCapabilitySet
 ) -> frozenset[str]:
-    return frozenset(group.name for group in capabilities.tool_groups if group.name in groups)
+    return frozenset(
+        group.name for group in capabilities.tool_groups if group.name in groups
+    )
 
 
 def _session_provided_tool_modes(
@@ -4261,7 +4380,9 @@ def _core_config(session_id: str) -> RustHarnessConfig:
             turn=RustTurnSettings(max_iterations=25),
             context=RustContextSettings(compaction=RustDisabledCompactionPolicy()),
             tools=RustToolSettings(
-                programmatic=RustProgrammaticToolSettings(max_effects=128, max_operations=1024),
+                programmatic=RustProgrammaticToolSettings(
+                    max_effects=128, max_operations=1024
+                ),
                 subagents=RustDisabledRuntimeToolFeature(),
                 background_processes=RustDisabledRuntimeToolFeature(),
                 command_environment=RustUnixCommandEnvironment(),

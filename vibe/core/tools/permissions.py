@@ -10,6 +10,7 @@ from vibe.core.tools.models import (
     RequiredPermission,
     ToolPermission,
 )
+from vibe.permissions import path_pattern_matches
 
 
 def wildcard_match(text: str, pattern: str) -> bool:
@@ -37,6 +38,8 @@ class PermissionStore:
 
     def covers(self, tool_name: str, rp: RequiredPermission) -> bool:
         def matches(rule: ApprovedRule) -> bool:
+            if rp.scope is PermissionScope.OUTSIDE_DIRECTORY:
+                return path_pattern_matches(rp.invocation_pattern, rule.session_pattern)
             if rp.literal:
                 return rule.session_pattern == rp.invocation_pattern
             return wildcard_match(rp.invocation_pattern, rule.session_pattern)

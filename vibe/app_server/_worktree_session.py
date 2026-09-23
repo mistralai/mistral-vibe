@@ -202,6 +202,20 @@ class SessionWorktrees:
     def release(cwd: Path, session_id: str) -> None:
         WorktreeLifecycle.release(cwd, session_id)
 
+    @staticmethod
+    def reap_if_requested(cwd: Path) -> None:
+        managed = ManagedWorktree.at(cwd)
+        if managed is not None:
+            managed.reap_if_requested()
+
+    @staticmethod
+    def cancel_reap(
+        cwd: Path, requester_id: str | None = None, request_id: str | None = None
+    ) -> None:
+        managed = ManagedWorktree.at(cwd)
+        if managed is not None:
+            managed.cancel_reap(requester_id=requester_id, request_id=request_id)
+
 
 def _requested(options: SessionOptions) -> WorktreeRequest | None:
     """The wire's `worktree` in the lifecycle's vocabulary, or None for neither.

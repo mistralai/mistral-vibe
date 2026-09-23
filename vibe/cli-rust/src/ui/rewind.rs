@@ -1,7 +1,7 @@
 //! Rewind bottom-app: a bordered box with the message preview, the numbered
 //! options of the current step, and a hint. Mirrors Python's `RewindApp`.
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
@@ -24,18 +24,13 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
     let rows = rows(app);
     let box_height = (rows.len() as u16 + 2).min(area.height);
-    let chunks = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(loading_height),
-        Constraint::Length(box_height),
-        Constraint::Length(1),
-    ])
-    .split(area);
+    let chunks = super::bottom_app_chunks(app, area, loading_height, box_height);
 
     transcript::draw(app, f, chunks[0]);
     loading::draw(app, f, chunks[1]);
     crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Rewind);
     draw_box(f, chunks[2], &rows);
+    super::todo::draw_row(app, f, chunks[4]);
     bottom_bar::draw(app, f, chunks[3]);
 }
 

@@ -7,7 +7,6 @@ use serde_json::Value;
 #[derive(Clone)]
 pub struct ConfigField {
     pub name: String,
-    pub value: String,
     pub popular: bool,
     pub path: String,
     pub raw_value: Value,
@@ -17,7 +16,23 @@ pub struct ConfigField {
     pub enum_choices: Vec<String>,
     pub description: String,
     pub value_labels: BTreeMap<String, String>,
-    pub layers: Vec<(String, String)>,
+    pub layers: Vec<(String, Value)>,
+}
+
+impl ConfigField {
+    /// The effective value as shown to the user, preferring its human label.
+    pub fn display_value(&self) -> String {
+        self.labeled(&self.raw_value)
+    }
+
+    /// One layer's value as shown to the user, preferring its human label.
+    pub fn labeled(&self, value: &Value) -> String {
+        value
+            .as_str()
+            .and_then(|text| self.value_labels.get(text))
+            .cloned()
+            .unwrap_or_else(|| format_value(value))
+    }
 }
 
 pub struct Loaded {
@@ -42,7 +57,6 @@ fn field(wire: &Value) -> ConfigField {
     let layers = wire.get("layerValues").and_then(Value::as_array);
     ConfigField {
         name: string(wire.get("name")),
-        value: format_value(wire.get("value").unwrap_or(&Value::Null)),
         popular: wire
             .get("popular")
             .and_then(Value::as_bool)
@@ -81,7 +95,7 @@ fn field(wire: &Value) -> ConfigField {
                     .filter_map(|item| {
                         Some((
                             item.get("layer")?.as_str()?.to_owned(),
-                            format_value(item.get("value").unwrap_or(&Value::Null)),
+                            item.get("value").cloned().unwrap_or(Value::Null),
                         ))
                     })
                     .collect()

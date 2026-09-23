@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import io
+from itertools import groupby
+from xml.etree import ElementTree
 
 from rich.color_triplet import ColorTriplet
 from rich.console import Console
@@ -29,6 +31,8 @@ _NAME_MAP = {
 _HEX = set("0123456789abcdefABCDEF")
 _HEX_LEN = 6
 
+ElementTree.register_namespace("", "http://www.w3.org/2000/svg")
+
 
 def _rich_color(token: str) -> str | None:
     """Map a pyte color token to a Rich color, or None for the terminal default."""
@@ -39,22 +43,45 @@ def _rich_color(token: str) -> str | None:
     return _NAME_MAP.get(token, token)
 
 
+def _groupable(character: str) -> bool:
+    return len(character) == 1 and (
+        " " <= character <= "~" or "\u2500" <= character <= "\u259f"
+    )
+
+
+def _run_key(
+    item: tuple[int, Cell],
+) -> tuple[str, str, frozenset[Attr], int | None, bool]:
+    """Keep complex glyphs and decorated spaces isolated to preserve glyph shaping."""
+    index, cell = item
+    decorated = Attr.UNDERSCORE in cell.attrs or Attr.STRIKETHROUGH in cell.attrs
+    return (
+        cell.foreground,
+        cell.background,
+        cell.attrs,
+        None if _groupable(cell.character) else index,
+        decorated and cell.character == " ",
+    )
+
+
 def _row_text(cells: tuple[Cell, ...]) -> Text:
     """Build a Rich Text for one grid row, carrying each cell's fg/bg/attrs."""
     text = Text()
-    for cell in cells:
+    for (foreground, background, attrs, _, _), run in groupby(
+        enumerate(cells), key=_run_key
+    ):
         style = Style(
-            color=_rich_color(cell.foreground),
-            bgcolor=_rich_color(cell.background),
-            bold=Attr.BOLD in cell.attrs,
-            italic=Attr.ITALICS in cell.attrs,
-            underline=Attr.UNDERSCORE in cell.attrs,
-            strike=Attr.STRIKETHROUGH in cell.attrs,
-            blink=Attr.BLINK in cell.attrs,
-            reverse=Attr.REVERSE in cell.attrs,
-            dim=Attr.DIM in cell.attrs,
+            color=_rich_color(foreground),
+            bgcolor=_rich_color(background),
+            bold=Attr.BOLD in attrs,
+            italic=Attr.ITALICS in attrs,
+            underline=Attr.UNDERSCORE in attrs,
+            strike=Attr.STRIKETHROUGH in attrs,
+            blink=Attr.BLINK in attrs,
+            reverse=Attr.REVERSE in attrs,
+            dim=Attr.DIM in attrs,
         )
-        text.append(cell.character or " ", style=style)
+        text.append("".join(cell.character or " " for _, cell in run), style=style)
     return text
 
 
@@ -104,4 +131,18 @@ def to_svg(snapshot: Snapshot, title: str) -> str:
     )
     for row in cells:
         console.print(_row_text(row), no_wrap=True, crop=True)
-    return console.export_svg(title=title, unique_id="vibe", theme=theme)
+    svg = ElementTree.fromstring(
+        console.export_svg(title=title, unique_id="vibe", theme=theme)
+    )
+    # Explicit positions prevent run-level kerning and ligature reshaping.
+    for node in svg.findall(".//{*}g[@class='vibe-matrix']/{*}text"):
+        text = node.text or ""
+        if len(text) <= 1 or not all(_groupable(ch) or ch == "\u00a0" for ch in text):
+            continue
+        start = float(node.attrib["x"])
+        width = float(node.attrib.pop("textLength")) / len(text)
+        node.set(
+            "x", " ".join(f"{round(start + i * width, 2):g}" for i in range(len(text)))
+        )
+        node.set("style", "font-variant-ligatures:none;font-kerning:none")
+    return ElementTree.tostring(svg, encoding="unicode")

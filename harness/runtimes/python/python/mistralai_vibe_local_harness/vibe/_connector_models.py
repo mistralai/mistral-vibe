@@ -1,5 +1,7 @@
 """SDK-independent contracts for Runtime-owned connector execution."""
 
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -22,7 +24,9 @@ class ResolvedConnectorTool:
     input_schema: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "input_schema", MappingProxyType(dict(self.input_schema)))
+        object.__setattr__(
+            self, "input_schema", MappingProxyType(dict(self.input_schema))
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,11 +144,7 @@ class ConnectorRuntimeFailure(Exception):
 
 class ConnectorGateway(Protocol):
     async def call(
-        self,
-        *,
-        raw_connector_id: str,
-        remote_tool_name: str,
-        arguments: JsonObject,
+        self, *, raw_connector_id: str, remote_tool_name: str, arguments: JsonObject
     ) -> ConnectorNormalizedResult: ...
 
     async def aclose(self) -> None: ...
@@ -172,8 +172,8 @@ __all__ = [
     "ConnectorRuntimeEventSink",
     "ConnectorRuntimeFailure",
     "ConnectorSnapshotAcceptor",
-    "ConnectorSourceStatus",
     "ConnectorSourceState",
+    "ConnectorSourceStatus",
     "ConnectorToolDescriptor",
     "ConnectorToolGroup",
     "ConnectorToolRoute",

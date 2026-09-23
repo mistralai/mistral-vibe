@@ -5,9 +5,18 @@ The Session Protocol is distinct from the Core-facing Step Protocol in
 Runtime only needs to preserve and project their wire representation.
 """
 
+from __future__ import annotations
+
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    field_validator,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
 
 type JsonObject = dict[str, JsonValue]
@@ -112,7 +121,10 @@ class EmbeddedResourceContentBlock(SessionProtocolModel):
 
 
 ContentBlock = Annotated[
-    TextContentBlock | ImageContentBlock | ResourceLinkContentBlock | EmbeddedResourceContentBlock,
+    TextContentBlock
+    | ImageContentBlock
+    | ResourceLinkContentBlock
+    | EmbeddedResourceContentBlock,
     Field(discriminator="type"),
 ]
 
@@ -132,13 +144,14 @@ class TurnUserInputEntry(SessionProtocolModel):
 
 
 TurnInputEntry = Annotated[
-    TurnContextInputEntry | TurnUserInputEntry,
-    Field(discriminator="role"),
+    TurnContextInputEntry | TurnUserInputEntry, Field(discriminator="role")
 ]
 
 
 def _validate_turn_input_entries(entries: list[TurnInputEntry]) -> None:
-    user_positions = [index for index, entry in enumerate(entries) if entry.role == "user"]
+    user_positions = [
+        index for index, entry in enumerate(entries) if entry.role == "user"
+    ]
     if len(user_positions) > 1:
         raise ValueError("Turn input accepts at most one user entry")
     if user_positions and user_positions[0] != len(entries) - 1:
@@ -361,8 +374,7 @@ class PagedPublicHistoryPage(PublicHistoryPageBase):
 
 
 PublicHistoryPage = Annotated[
-    LatestPublicHistoryPage | PagedPublicHistoryPage,
-    Field(discriminator="range"),
+    LatestPublicHistoryPage | PagedPublicHistoryPage, Field(discriminator="range")
 ]
 
 
@@ -405,7 +417,10 @@ class InterruptedPublicTurn(SessionProtocolModel):
 
 
 PublicTurn = Annotated[
-    InProgressPublicTurn | CompletedPublicTurn | FailedPublicTurn | InterruptedPublicTurn,
+    InProgressPublicTurn
+    | CompletedPublicTurn
+    | FailedPublicTurn
+    | InterruptedPublicTurn,
     Field(discriminator="status"),
 ]
 
@@ -434,13 +449,17 @@ class PublicRetryState(SessionProtocolModel):
 
 
 class PublicSessionState(SessionProtocolModel):
-    format: Literal["harness.public-session-state/v1"] = "harness.public-session-state/v1"
+    format: Literal["harness.public-session-state/v1"] = (
+        "harness.public-session-state/v1"
+    )
     session: PublicSession
     history: LatestPublicHistoryPage = Field(default_factory=LatestPublicHistoryPage)
     active_callbacks: list[JsonObject] = Field(default_factory=list)
     latest_turn: PublicTurn | None = None
     turn_queue: TurnQueue
-    retrying: PublicRetryState | None = Field(default=None, exclude_if=lambda value: value is None)
+    retrying: PublicRetryState | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class SessionSnapshot(SessionProtocolModel):
@@ -471,7 +490,9 @@ class ClientSessionExtensions(SessionProtocolModel):
 
 
 class SessionStartParams(SessionProtocolModel):
-    client_extensions: ClientSessionExtensions = Field(default_factory=ClientSessionExtensions)
+    client_extensions: ClientSessionExtensions = Field(
+        default_factory=ClientSessionExtensions
+    )
     history_limit: int = Field(ge=0)
 
 

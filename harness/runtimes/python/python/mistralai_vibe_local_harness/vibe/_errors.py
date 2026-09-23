@@ -1,5 +1,7 @@
 """Errors shared by the Vibe Harness Host and its Sessions."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from typing import Any
 
@@ -7,7 +9,9 @@ from typing import Any
 class HarnessSessionError(RuntimeError):
     """Dependency-neutral failure exposed by the Harness Runtime boundary."""
 
-    def __init__(self, code: str, message: str, *, details: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, code: str, message: str, *, details: dict[str, Any] | None = None
+    ) -> None:
         self.code = code
         self.details = details
         super().__init__(message)
@@ -37,9 +41,7 @@ class HarnessChildSessionRequiresParentError(HarnessSessionError):
 class HarnessInvalidSessionStoreError(HarnessSessionError):
     def __init__(self, session_id: str, message: str) -> None:
         super().__init__(
-            "invalid_session_store",
-            message,
-            details={"session_id": session_id},
+            "invalid_session_store", message, details={"session_id": session_id}
         )
 
 
@@ -86,7 +88,9 @@ class HarnessInvalidMigrationSourceError(HarnessSessionError):
 
 
 class HarnessCommandConflictError(HarnessSessionError):
-    def __init__(self, client_command_id: str, reason: str = "reused with different input") -> None:
+    def __init__(
+        self, client_command_id: str, reason: str = "reused with different input"
+    ) -> None:
         super().__init__(
             "client_command_conflict",
             f"Client command ID was {reason}: {client_command_id}",
@@ -133,8 +137,7 @@ class HarnessTurnQueueItemNotFoundError(HarnessSessionError):
 class HarnessTurnQueuePendingError(HarnessSessionError):
     def __init__(self) -> None:
         super().__init__(
-            "turn_queue_pending",
-            "Resume queued turns before starting a direct turn",
+            "turn_queue_pending", "Resume queued turns before starting a direct turn"
         )
 
 

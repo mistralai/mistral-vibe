@@ -157,7 +157,10 @@ def turn_queue_updated(
 
 
 def user_msg(
-    text: str, *, images: list[dict[str, Any]] | None = None
+    text: str,
+    *,
+    images: list[dict[str, Any]] | None = None,
+    entry_id: str | None = None,
 ) -> AppServerEvent:
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     content.extend(
@@ -166,6 +169,7 @@ def user_msg(
     return _added(
         _entry(
             "message",
+            entry_id=entry_id,
             role="user",
             content=content,
             source="turn_start",
@@ -655,6 +659,45 @@ def subagent_notification(response: str) -> AppServerEvent:
             ],
             source="harness",
             userDisplayContent=None,
+        )
+    )
+
+
+def loaded_skill(
+    name: str, content: str, *, related_entry_id: str | None = None
+) -> AppServerEvent:
+    """Build a completed skill effect."""
+    return _added(
+        _entry(
+            "effect",
+            title="skill",
+            relatedEntryId=related_entry_id,
+            detail={
+                "toolName": "skill",
+                "display": {
+                    "summary": f"Loading skill: {name}",
+                    "content": None,
+                    "suffix": "",
+                    "verb": "Loading",
+                    "message": f"skill: {name}",
+                    "settledVerb": "Loaded",
+                    "settledMessage": f"skill: {name}",
+                    "statusText": "Loading skill",
+                },
+                "kind": "skill",
+                "input": {"name": name},
+            },
+            state={
+                "status": "completed",
+                "output": None,
+                "outputText": content,
+                "durationMs": 0,
+                "display": {
+                    "success": True,
+                    "verb": "Loaded",
+                    "message": f"skill: {name}",
+                },
+            },
         )
     )
 

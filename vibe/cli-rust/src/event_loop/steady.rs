@@ -107,6 +107,7 @@ impl EventLoop {
                     let active = !settle_busy
                         && (self.app.view.command_loading
                             || self.app.compacting
+                            || crate::commands::stress::running(&self.app)
                             || matches!(self.app.session.status, Status::Starting | Status::Generating { .. }));
                     if active {
                         self.app.view.pulse_frame = self.app.view.pulse_frame.wrapping_add(1);
@@ -153,7 +154,7 @@ impl EventLoop {
                     if self.app.trust.open {
                         // Keys typed at the chat frame must not answer a gate
                         // the user has not seen yet.
-                        while input.rx.try_recv().is_ok() {}
+                        while input.try_recv().is_ok() {}
                     }
                     state.redraw_pending = true;
                     state.real_event_pending = true;
@@ -182,12 +183,7 @@ impl EventLoop {
                     state.real_event_pending = true;
                 }
                 Some(loaded) = sources.config.recv() => {
-                    self.app.config_screen.fields = loaded.fields;
-                    self.app.config_screen.targets = loaded.targets;
-                    self.app.config_screen.selected = 0;
-                    self.app.config_screen.scroll = 0;
-                    self.app.config_screen.free_scroll = false;
-                    self.app.config_screen.loading = false;
+                    crate::config::apply_loaded(&mut self.app, loaded);
                     state.redraw_pending = true;
                     state.real_event_pending = true;
                 }
@@ -302,7 +298,7 @@ impl EventLoop {
                     state.redraw_pending = true;
                     state.real_event_pending = true;
                 }
-                event = input.rx.recv() => match handle_input_event(
+                event = input.recv() => match handle_input_event(
                     &mut self.app,
                     &self.client,
                     &self.config_tx,

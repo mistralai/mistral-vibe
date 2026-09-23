@@ -204,7 +204,7 @@ impl Transcript {
         for entry in history {
             self.insert(entry, true);
         }
-        local::restore(self, local_entries);
+        local::restore_positions(self, local_entries);
     }
 
     /// `history/entryAdded`: Python `_handle_entry_added` finalizes the open
@@ -401,6 +401,12 @@ impl Transcript {
     pub fn entry_content(&self, id: &str) -> Option<Value> {
         let index = *self.indices.get(id)?;
         Some(self.entries[index].raw.get("content")?.clone())
+    }
+
+    /// The raw stored entry, for handlers reading post-patch settled state.
+    pub fn entry_raw(&self, id: &str) -> Option<&Value> {
+        let index = *self.indices.get(id)?;
+        Some(&self.entries[index].raw)
     }
 
     /// Merge the hidden retried entry into the interrupted assistant row

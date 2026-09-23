@@ -1,6 +1,6 @@
 [package]
 name = "vibe-rs"
-version = "2.25.7"
+version = "2.25.8"
 edition = "2021"
 license = "Proprietary"
 publish = false
@@ -27,7 +27,8 @@ tokio = { version = "1", features = ["rt", "macros", "process", "io-util", "io-s
 futures = "0.3"
 ignore = "0.4"
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
-crossterm = { version = "0.28" }
+# Native poll avoids the mio EOF spin; libc is required by Crossterm's wake path.
+crossterm = { version = "0.28", features = ["event-stream", "use-dev-tty", "libc"] }
 pulldown-cmark = { version = "0.10", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -37,6 +38,7 @@ base64 = "0.22"
 notify = "8"
 unicode-segmentation = "1"
 unicode-width = "0.2"
+caseless = "0.2"
 syntect = "5"
 two-face = { version = "0.5", default-features = false, features = [
     "syntect-default-onig",
@@ -60,3 +62,6 @@ libc = "0.2"
 opt-level = 3
 lto = "thin"
 debug = 1
+
+[profile.test]
+incremental = false

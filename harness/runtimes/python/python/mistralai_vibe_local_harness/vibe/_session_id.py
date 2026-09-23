@@ -1,5 +1,7 @@
 """Session ID generation with a stable suffix preserved across fork and rewind."""
 
+from __future__ import annotations
+
 import secrets
 
 

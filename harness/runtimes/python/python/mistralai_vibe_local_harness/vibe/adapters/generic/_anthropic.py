@@ -1,8 +1,10 @@
 """Anthropic Messages API adapter."""
 
+from __future__ import annotations
+
+from collections.abc import Sequence
 import json
 import re
-from collections.abc import Sequence
 from typing import Any, ClassVar
 
 from mistralai_vibe_local_harness.vibe.adapters.generic._base import (
@@ -103,7 +105,9 @@ class AnthropicMapper:
             "input": tool_input,
         }
 
-    def _append_tool_result(self, converted: list[dict[str, Any]], msg: LLMMessage) -> None:
+    def _append_tool_result(
+        self, converted: list[dict[str, Any]], msg: LLMMessage
+    ) -> None:
         tool_result = {
             "type": "tool_result",
             "tool_use_id": self._sanitize_tool_call_id(msg.tool_call_id),
@@ -123,7 +127,9 @@ class AnthropicMapper:
         else:
             converted[-1]["content"].append(tool_result)
 
-    def prepare_tools(self, tools: list[AvailableTool] | None) -> list[dict[str, Any]] | None:
+    def prepare_tools(
+        self, tools: list[AvailableTool] | None
+    ) -> list[dict[str, Any]] | None:
         if not tools:
             return None
         return [
@@ -254,13 +260,11 @@ class AnthropicAdapter(APIAdapter):
     def _build_system_blocks(system_prompt: str | None) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
         if system_prompt:
-            blocks.append(
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            )
+            blocks.append({
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            })
         return blocks
 
     @staticmethod
@@ -405,7 +409,9 @@ class AnthropicAdapter(APIAdapter):
             error = data.get("error", {})
             error_type = error.get("type", "unknown_error")
             error_message = error.get("message", "Unknown streaming error")
-            raise RuntimeError(f"Anthropic stream error ({error_type}): {error_message}")
+            raise RuntimeError(
+                f"Anthropic stream error ({error_type}): {error_message}"
+            )
         return empty_chunk
 
     def _parse_message_start(self, data: dict[str, Any]) -> LLMChunk:
@@ -451,7 +457,9 @@ class AnthropicAdapter(APIAdapter):
                         ToolCall(
                             index=index,
                             id=content_block.get("id"),
-                            function=FunctionCall(name=content_block.get("name"), arguments=""),
+                            function=FunctionCall(
+                                name=content_block.get("name"), arguments=""
+                            ),
                         )
                     ],
                 )
@@ -466,16 +474,22 @@ class AnthropicAdapter(APIAdapter):
         match delta_type:
             case "text_delta":
                 return LLMChunk(
-                    message=LLMMessage(role=Role.assistant, content=delta.get("text", ""))
+                    message=LLMMessage(
+                        role=Role.assistant, content=delta.get("text", "")
+                    )
                 )
             case "thinking_delta":
                 thinking = delta.get("thinking", "")
                 if block := self._open_reasoning_blocks.get(index):
                     block["thinking"] = block.get("thinking", "") + thinking
-                return LLMChunk(message=LLMMessage(role=Role.assistant, reasoning_content=thinking))
+                return LLMChunk(
+                    message=LLMMessage(role=Role.assistant, reasoning_content=thinking)
+                )
             case "signature_delta":
                 if block := self._open_reasoning_blocks.get(index):
-                    block["signature"] = block.get("signature", "") + delta.get("signature", "")
+                    block["signature"] = block.get("signature", "") + delta.get(
+                        "signature", ""
+                    )
                 return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
             case "input_json_delta":
                 return LLMChunk(
@@ -484,7 +498,9 @@ class AnthropicAdapter(APIAdapter):
                         tool_calls=[
                             ToolCall(
                                 index=index,
-                                function=FunctionCall(arguments=delta.get("partial_json", "")),
+                                function=FunctionCall(
+                                    arguments=delta.get("partial_json", "")
+                                ),
                             )
                         ],
                     )
@@ -506,7 +522,9 @@ class AnthropicAdapter(APIAdapter):
         delta = data.get("delta", {})
         usage_data = data.get("usage", {})
         usage = (
-            LLMUsage(prompt_tokens=0, completion_tokens=usage_data.get("output_tokens", 0))
+            LLMUsage(
+                prompt_tokens=0, completion_tokens=usage_data.get("output_tokens", 0)
+            )
             if usage_data
             else None
         )
@@ -517,4 +535,4 @@ class AnthropicAdapter(APIAdapter):
         )
 
 
-__all__ = ["AnthropicAdapter", "AnthropicMapper", "REASONING_BLOCK_TYPES"]
+__all__ = ["REASONING_BLOCK_TYPES", "AnthropicAdapter", "AnthropicMapper"]

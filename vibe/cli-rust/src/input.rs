@@ -56,9 +56,9 @@ fn is_copy_key(key: &KeyEvent) -> bool {
                 || (key.code == KeyCode::Char('c') && shift)))
 }
 
-/// The cached text of an active mouse selection (transcript/banner or bottom
-/// bar), extracted at paint time. Empty selections yield `None`. The surfaces
-/// are mutually exclusive, so at most one is set.
+/// The cached text of an active mouse selection (region or bottom bar),
+/// extracted at paint time. Empty selections yield `None`. The surfaces are
+/// mutually exclusive, so at most one is set.
 fn selection_text(app: &App) -> Option<String> {
     let region = app.selection.region.as_ref().map(|sel| sel.text.clone());
     let bottom_bar = app
@@ -69,10 +69,43 @@ fn selection_text(app: &App) -> Option<String> {
     region.or(bottom_bar).filter(|text| !text.is_empty())
 }
 
+/// Handle a copy binding without letting the active screen consume it.
+pub(crate) fn handle_copy_key(app: &mut App, key: &KeyEvent) -> bool {
+    if !is_copy_key(key) {
+        return false;
+    }
+    app.chat_input.normalize_positions();
+    if !copy_selected_input(app) {
+        if let Some(text) = selection_text(app) {
+            // Region and bottom-bar text are cached at paint time so the copy
+            // works regardless of the autocopy setting.
+            clipboard::copy_to_clipboard(&text);
+        }
+    }
+    true
+}
+
+/// Toggle the plan panel: Cmd+\, or the Alt+\ (ESC \) remap terminals deliver instead.
+fn is_todo_key(key: &KeyEvent) -> bool {
+    !key.modifiers.contains(KeyModifiers::CONTROL)
+        && key
+            .modifiers
+            .intersects(KeyModifiers::SUPER | KeyModifiers::ALT)
+        && key.code == KeyCode::Char('\\')
+}
+
 /// Handle application-level bindings before a modal consumes local keys.
 pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -> Option<bool> {
     if key.code == KeyCode::BackTab {
+        if app.vibe_code_project.open {
+            return None;
+        }
         agents::cycle(app, client);
+        return Some(false);
+    }
+    if (is_ctrl_c(&key) || is_copy_key(&key))
+        && crate::vibe_code_project::input::copy_selection(app, false)
+    {
         return Some(false);
     }
     if is_ctrl_c(&key) {
@@ -92,15 +125,7 @@ pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -
     if is_ctrl_d(&key) {
         return Some(handle_ctrl_d(app));
     }
-    if is_copy_key(&key) {
-        app.chat_input.normalize_positions();
-        if !copy_selected_input(app) {
-            if let Some(text) = selection_text(app) {
-                // Transcript/banner and bottom-bar text are cached at paint time so
-                // the copy works regardless of the autocopy setting.
-                clipboard::copy_to_clipboard(&text);
-            }
-        }
+    if handle_copy_key(app, &key) {
         return Some(false);
     }
     if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -205,6 +230,10 @@ pub fn handle_key(
         }
         return false;
     }
+    if is_todo_key(&key) {
+        app.todo_sidebar.open = !app.todo_sidebar.open;
+        return false;
+    }
     if app.feedback.message == feedback::Message::Prompt
         && !key
             .modifiers
@@ -300,7 +329,7 @@ pub fn handle_key(
             completion_manager::input_changed(app);
         } else {
             mark_cursor_moved(app);
-            // The slash query ends at the caret, so a move re-filters the popup.
+            // Completion queries end at the caret, so a move re-filters the popup.
             completion_manager::refresh(app);
         }
         return false;
@@ -315,6 +344,8 @@ pub fn handle_key(
             crate::commands::shell::interrupt(app, client);
             app.overlays.last_escape = Some(std::time::Instant::now());
         }
+        // Only a docked panel owns Esc; a dropped column must not swallow the interrupt.
+        KeyCode::Esc if app.todo_sidebar.visible => app.todo_sidebar.open = false,
         // Escape while generating interrupts the turn (Python `_interrupt_turn`).
         KeyCode::Esc if matches!(app.session.status, Status::Generating { .. }) => {
             submission::interrupt_turn(app, client);
@@ -343,6 +374,7 @@ pub fn handle_key(
                 app.chat_input.cursor = target;
                 app.chat_input.anchor = None;
                 mark_cursor_moved(app);
+                completion_manager::refresh(app);
             }
         }
         KeyCode::Down => {
@@ -352,14 +384,15 @@ pub fn handle_key(
                 app.chat_input.cursor = target;
                 app.chat_input.anchor = None;
                 mark_cursor_moved(app);
+                completion_manager::refresh(app);
             }
         }
-        KeyCode::Tab if completion_manager::accept(app) => after_accept(app),
-        // A file (`@`) completion accepts on Enter without submitting.
-        KeyCode::Enter if completion_manager::active_is_file(app) => {
+        KeyCode::Tab => {
             completion_manager::accept(app);
-            after_accept(app);
         }
+        // A file (`@`) completion accepts on Enter without submitting.
+        KeyCode::Enter
+            if completion_manager::active_is_file(app) && completion_manager::accept(app) => {}
         // A slash completion accepts the highlighted entry (completing e.g.
         // `/them` to `/theme`) and runs it in the same Enter, like Python's
         // SlashCommandController returning SUBMIT. With no popup open, accept is
@@ -369,7 +402,6 @@ pub fn handle_key(
         KeyCode::Enter if agents::switching(app) => {}
         KeyCode::Enter => {
             if completion_manager::accept(app) {
-                after_accept(app);
                 completion_manager::input_changed(app);
             }
             let exit = submission::submit(app, client, config_tx);
@@ -404,13 +436,6 @@ fn handle_escape(app: &mut App, client: &Arc<Client>) {
     reset_history_state(app);
     app.chat_input.clear();
     completion_manager::input_changed(app);
-}
-
-/// `completion_manager::accept` rewrites `app.chat_input.input`; move the caret to the end and drop
-/// any selection so the chat input stays consistent.
-fn after_accept(app: &mut App) {
-    app.chat_input.cursor = app.chat_input.input.len();
-    app.chat_input.anchor = None;
 }
 
 fn move_cursor_page(app: &mut App, down: bool) {
@@ -492,6 +517,10 @@ pub fn handle_log_level_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) 
 }
 
 pub fn handle_mcp_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
+    if mcp::search::handle_key(app, key) {
+        mcp::search_usage::record(app, client);
+        return;
+    }
     match key.code {
         KeyCode::Esc => mcp::close(app),
         KeyCode::Backspace => mcp::back(app),
@@ -500,6 +529,7 @@ pub fn handle_mcp_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         KeyCode::Enter => mcp::select(app, client),
         KeyCode::Char('d') => mcp::set_disabled(app, client, true),
         KeyCode::Char('e') => mcp::set_disabled(app, client, false),
+        KeyCode::Char('r') => mcp::refresh(app, client),
         _ => {}
     }
 }
@@ -823,6 +853,14 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
     }
     if app.quit_confirm_active() {
         return true;
+    }
+    if (app.vibe_code_project.open || app.vibe_code_project.pending) && !app.server_closed {
+        crate::vibe_code_project::input::handle_key(
+            app,
+            client,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        return false;
     }
     // A summary request is in flight: cancel it (Python's ladder runs the
     // narrator step before touching the queue).

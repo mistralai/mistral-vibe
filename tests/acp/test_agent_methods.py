@@ -171,9 +171,9 @@ async def test_config_options_delegate_to_typed_app_server_resources(
 def _acp_agent_with_allowed_models(experimental_harness: bool = False) -> VibeAcpAgent:
     config = build_test_vibe_config(
         active_model="allowed",
-        allowed_models=["allowed"],
+        allowed_models=["allowed-model"],
         models=[
-            ModelConfig(name="allowed", provider="mistral", alias="allowed"),
+            ModelConfig(name="allowed-model", provider="mistral", alias="allowed"),
             ModelConfig(name="blocked", provider="mistral", alias="blocked"),
         ],
     )

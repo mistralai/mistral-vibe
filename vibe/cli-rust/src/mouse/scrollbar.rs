@@ -46,6 +46,16 @@ pub fn register_scrollbar(
     }
 }
 
+pub(super) fn contains_track(app: &App, at: (u16, u16)) -> bool {
+    app.view
+        .mouse_regions
+        .iter()
+        .rev()
+        .find(|region| contains(region.area, at))
+        .and_then(|region| region.scrollbar)
+        .is_some_and(|state| state.contains(at))
+}
+
 pub(super) fn begin(app: &mut App, at: (u16, u16)) -> bool {
     let candidate = app
         .view
@@ -116,6 +126,10 @@ fn apply_position(app: &mut App, target: MouseTarget, position: usize, max: usiz
             app.resume_picker.scroll = position;
             app.resume_picker.free_scroll = true;
         }
+        MouseTarget::RemoteProject => {
+            app.vibe_code_project.scroll = position;
+            app.vibe_code_project.free_scroll = true;
+        }
         MouseTarget::Mcp => {
             app.mcp.scroll = position;
             app.mcp.free_scroll = true;
@@ -123,6 +137,11 @@ fn apply_position(app: &mut App, target: MouseTarget, position: usize, max: usiz
         MouseTarget::Config => {
             app.config_screen.scroll = position;
             app.config_screen.free_scroll = true;
+        }
+        MouseTarget::ConfigEditor => {
+            if let Some(edit) = app.config_screen.edit.as_mut() {
+                edit.scroll = Some(position);
+            }
         }
         MouseTarget::Approval => app.approval.detail_scroll = position,
         MouseTarget::Question => app
@@ -133,11 +152,13 @@ fn apply_position(app: &mut App, target: MouseTarget, position: usize, max: usiz
         MouseTarget::Blocked
         | MouseTarget::Toast
         | MouseTarget::Composer
+        | MouseTarget::Loading
         | MouseTarget::LogLevelPicker
         | MouseTarget::Rewind
         | MouseTarget::McpOAuth
         | MouseTarget::ConnectorAuth
-        | MouseTarget::ConfigEditor
-        | MouseTarget::BottomBar => {}
+        | MouseTarget::BottomBar
+        | MouseTarget::TodoRow
+        | MouseTarget::TodoSidebar => {}
     }
 }

@@ -4,10 +4,12 @@ An ``APIAdapter`` turns the provider-neutral message model into an HTTP request
 and parses provider chunks back into :class:`LLMChunk` values.
 """
 
-import json
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import aclosing
+import json
 from typing import Any, ClassVar, NamedTuple
 
 from mistralai_vibe_local_harness.vibe.adapters.generic._model import (
@@ -67,7 +69,7 @@ def finalize_chat_request(
     stream_options: dict[str, Any],
     api_key: str | None,
     endpoint: str,
-) -> "PreparedRequest":
+) -> PreparedRequest:
     if enable_streaming:
         payload["stream"] = True
         payload["stream_options"] = stream_options
@@ -108,7 +110,9 @@ class APIAdapter(ABC):
     ) -> PreparedRequest: ...
 
     @abstractmethod
-    def parse_response(self, data: dict[str, Any], provider: ProviderView) -> LLMChunk: ...
+    def parse_response(
+        self, data: dict[str, Any], provider: ProviderView
+    ) -> LLMChunk: ...
 
     async def parse_stream(
         self, responses: AsyncGenerator[dict[str, Any]], provider: ProviderView

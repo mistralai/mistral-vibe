@@ -24,8 +24,10 @@ pub(super) fn dispatch(
         MouseTarget::Transcript | MouseTarget::Composer => selection_event(app, target, event),
         MouseTarget::Toast => toast_event(app, event),
         MouseTarget::BottomBar => bottom_bar_event(app, event),
+        MouseTarget::Loading => loading_event(app, event),
         MouseTarget::Approval => approval::handle_mouse(app, event),
         MouseTarget::Question => question_input::handle_mouse(app, event),
+        MouseTarget::RemoteProject => crate::vibe_code_project::input::mouse(app, client, event),
         MouseTarget::Mcp => match event.kind {
             MouseEventKind::Down(MouseButton::Left) => mcp::press(app, at),
             MouseEventKind::Up(MouseButton::Left) => mcp::release(app, client, at),
@@ -42,6 +44,13 @@ pub(super) fn dispatch(
             _ => {}
         },
         MouseTarget::Trust => crate::trust_folders::handle_mouse(app, event),
+        // The pinned todo line opens the full plan, like Python's row click.
+        MouseTarget::TodoRow => {
+            if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+                app.todo_sidebar.open = true;
+            }
+        }
+        MouseTarget::TodoSidebar => {}
         MouseTarget::Config | MouseTarget::ConfigEditor => {
             config::handle_mouse(app, client, config_tx, event)
         }
@@ -55,17 +64,29 @@ pub(super) fn dispatch(
     }
 }
 
-/// Selecting toast text never dismisses the toast, which self-hides on timeout.
-fn toast_event(app: &mut App, event: MouseEvent) {
+/// Selecting an owned region copies its text; it has no click action.
+fn owned_region_event(app: &mut App, event: MouseEvent, press: fn(&mut App, (u16, u16))) {
     let at = (event.column, event.row);
     match event.kind {
-        MouseEventKind::Down(MouseButton::Left) => selection::press_toast(app, at),
+        MouseEventKind::Down(MouseButton::Left) => press(app, at),
         MouseEventKind::Drag(MouseButton::Left) => selection::drag(app, at),
         MouseEventKind::Up(MouseButton::Left) => {
             selection::release(app);
         }
         _ => {}
     }
+}
+
+/// Selecting the loading row copies its text; the row owns no click action.
+fn loading_event(app: &mut App, event: MouseEvent) {
+    owned_region_event(app, event, |app, at| {
+        selection::press_owned(app, at, selection::RegionId::Loading)
+    });
+}
+
+/// Selecting toast text never dismisses the toast, which self-hides on timeout.
+fn toast_event(app: &mut App, event: MouseEvent) {
+    owned_region_event(app, event, selection::press_toast);
 }
 
 fn bottom_bar_event(app: &mut App, event: MouseEvent) {

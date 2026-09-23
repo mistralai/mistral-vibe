@@ -71,6 +71,7 @@ class _RecordingSession:
         self.applied: list[object] = []
         self.settings: list[object] = []
         self.capabilities: list[object] = []
+        self.system_instructions: list[str | None] = []
         self.shut_down = False
 
     def configure_turn_settlement(self, settle: object) -> None:
@@ -83,10 +84,12 @@ class _RecordingSession:
         adapter_config: object,
         capabilities: object,
         *,
+        system_instructions: str | None = None,
         plugins: object = None,
         allow_reserved_turn: bool = False,
     ) -> None:
         del plugins, allow_reserved_turn
+        self.system_instructions.append(system_instructions)
         self.settings.append(settings)
         self.applied.append(adapter_config)
         self.capabilities.append(capabilities)

@@ -5,9 +5,10 @@ use ratatui::widgets::{Block, Borders};
 use ratatui::Frame;
 
 use super::theme;
-use super::trust_folders_paint::{build, paint};
+use super::trust_folders_layout::{build, CONTENT_MAX};
+use super::trust_folders_paint::paint;
 use crate::app::App;
-use crate::selection::Region;
+use crate::selection::{Region, ScrollTarget};
 
 /// `#trust-dialog { max-width: 70 }` plus its `border` and `padding: 1 5`.
 const MAX_WIDTH: u16 = 70;
@@ -19,6 +20,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     // Nothing is selectable until the dialog below claims its own text column.
     app.view.selection_region = Region::default();
     app.view.selection_chrome.clear();
+    app.view.selection_scrollbar.clear();
     if area.height < 3 || area.width == 0 {
         return;
     }
@@ -34,12 +36,13 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     if content_width == 0 {
         return;
     }
-    let layout = build(&app.trust, content_width);
+    // Inline apps keep one decorated row above and below the dialog region.
+    let region = Rect::new(area.x, area.y + 1, area.width, area.height - 2);
+    let scroll_viewport = usize::from(region.height.saturating_sub(4)).min(CONTENT_MAX);
+    let layout = build(&app.trust, content_width, scroll_viewport);
     // Only the draw knows how tall the wrapped content is, so it owns the bounds.
     app.trust.scroll_max = layout.scroll_max;
     app.trust.scroll = layout.scroll;
-    // Inline apps keep one decorated row above and below the dialog region.
-    let region = Rect::new(area.x, area.y + 1, area.width, area.height - 2);
     let box_height = (layout.rows.len() as u16 + 4).min(region.height);
     let dialog = Rect::new(
         region.x + (region.width - box_width) / 2,
@@ -56,6 +59,19 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     );
     let chrome = paint(app, f, dialog, content_width, &layout);
     app.view.selection_chrome = chrome;
+    let scroll_area = layout.virtual_rows.and_then(|_| {
+        let visible_rows = dialog.height.saturating_sub(4);
+        let height = (layout.scroll_rows as u16).min(visible_rows);
+        (height > 0).then(|| {
+            Rect::new(
+                dialog.x + 1 + PADDING_X,
+                dialog.y + 2,
+                layout.scroll_width as u16,
+                height,
+            )
+        })
+    });
+    let scroll = i32::try_from(layout.scroll).unwrap_or(i32::MAX);
     // Only the padded text column is selectable; the border and padding are chrome.
     app.view.selection_region = Region {
         area: Rect::new(
@@ -64,10 +80,12 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
             content_width as u16,
             dialog.height.saturating_sub(2),
         ),
-        top: (dialog.y + 1) as i32,
+        top: i32::from(dialog.y + 1) - scroll,
         scrollbar: layout.virtual_rows.is_some(),
         end_exclusive: true,
         document: false,
+        scroll_target: scroll_area.map_or(ScrollTarget::None, |_| ScrollTarget::Trust),
+        scroll_area: scroll_area.unwrap_or_default(),
     };
     super::selection::overlay(app, f);
 }

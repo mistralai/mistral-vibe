@@ -5,18 +5,18 @@ every session's `CURRENT` pointer and active recovery journal. Full private
 stores remain authoritative and are loaded only for new or changed entries.
 """
 
+from __future__ import annotations
+
 import hashlib
 import os
-import stat
 from pathlib import Path
+import stat
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from mistralai_vibe_local_harness.session_protocol import PublicSession
-from mistralai_vibe_local_harness.vibe._projection import (
-    with_session_preview,
-)
+from mistralai_vibe_local_harness.vibe._projection import with_session_preview
 from mistralai_vibe_local_harness.vibe._storage import (
     STORE_FORMAT_MINOR,
     CurrentPointerV1,
@@ -90,10 +90,14 @@ class UnifiedSessionCatalog:
             return ()
         cached = self._read()
         cached_by_id = (
-            {entry.session_id: entry for entry in cached.entries} if cached is not None else {}
+            {entry.session_id: entry for entry in cached.entries}
+            if cached is not None
+            else {}
         )
         reconciled: list[SessionCatalogEntryV1] = []
-        for session_root in sorted(self._unified_root.iterdir(), key=lambda path: path.name):
+        for session_root in sorted(
+            self._unified_root.iterdir(), key=lambda path: path.name
+        ):
             if not session_root.is_dir() or session_root.is_symlink():
                 continue
             session_id = session_root.name
@@ -152,16 +156,13 @@ class UnifiedSessionCatalog:
             return None
 
     def _write_if_changed(
-        self,
-        cached: _SessionCatalogV1 | None,
-        document: _SessionCatalogV1,
+        self, cached: _SessionCatalogV1 | None, document: _SessionCatalogV1
     ) -> None:
         if cached == document:
             return
         try:
             _replace_document(
-                self._path,
-                document.model_dump(mode="json", by_alias=True),
+                self._path, document.model_dump(mode="json", by_alias=True)
             )
         except OSError:
             # The catalogue is only an optimization. Read-only stores and
@@ -169,9 +170,7 @@ class UnifiedSessionCatalog:
             return
 
     def _load_entry(
-        self,
-        session_id: str,
-        key: SessionCatalogKeyV1,
+        self, session_id: str, key: SessionCatalogKeyV1
     ) -> SessionCatalogEntryV1:
         store = UnifiedSessionStore(self._storage_root, session_id)
         stored = store.load()
@@ -193,7 +192,9 @@ class UnifiedSessionCatalog:
     def _read_key(self, session_id: str) -> SessionCatalogKeyV1:
         store = UnifiedSessionStore(self._storage_root, session_id)
         _reject_symlink_components(self._storage_root, store.session_root)
-        current_value, current_bytes = _read_document_bytes(store.session_root / "CURRENT")
+        current_value, current_bytes = _read_document_bytes(
+            store.session_root / "CURRENT"
+        )
         current = CurrentPointerV1.model_validate(current_value)
         if current.session_id != session_id:
             raise ValueError("CURRENT names another session")
@@ -213,8 +214,4 @@ class UnifiedSessionCatalog:
         )
 
 
-__all__ = [
-    "SessionCatalogEntryV1",
-    "SessionCatalogKeyV1",
-    "UnifiedSessionCatalog",
-]
+__all__ = ["SessionCatalogEntryV1", "SessionCatalogKeyV1", "UnifiedSessionCatalog"]

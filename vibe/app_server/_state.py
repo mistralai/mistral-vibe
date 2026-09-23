@@ -62,6 +62,7 @@ def build_public_state(
     metadata = agent_loop.session_logger.session_metadata
     created_at = time_ms(metadata.start_time) if metadata else now_ms()
     bumped_at = optional_time_ms(metadata.bumped_at) if metadata else None
+    archived_at = optional_time_ms(metadata.archived_at) if metadata else None
     try:
         model = agent_loop.config.get_active_model().alias
     except ValueError:
@@ -78,6 +79,7 @@ def build_public_state(
         created_at=created_at,
         updated_at=now_ms(),
         bumped_at=bumped_at,
+        archived_at=archived_at,
         cwd=workdir,
         workspace_roots=[
             str(root) for root in agent_loop.harness_files.workspace_roots
@@ -129,6 +131,7 @@ def build_stored_public_state(
                 else now_ms()
             ),
             bumped_at=optional_time_ms(metadata.bumped_at),
+            archived_at=optional_time_ms(metadata.archived_at),
             cwd=cwd,
         ),
         history=history[-history_limit:] if include_history else None,

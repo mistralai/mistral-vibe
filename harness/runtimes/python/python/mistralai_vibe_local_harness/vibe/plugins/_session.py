@@ -8,18 +8,21 @@ onward they are the same code.
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
+import logging
 from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
 from mistralai_vibe_local_harness.protocol import RustPluginContextDefinition
-from mistralai_vibe_local_harness.session_protocol import PluginInfo, ResolvedPluginDefinition
+from mistralai_vibe_local_harness.session_protocol import (
+    PluginInfo,
+    ResolvedPluginDefinition,
+)
 from mistralai_vibe_local_harness.vibe._errors import HarnessSessionError
 from mistralai_vibe_local_harness.vibe._storage import PluginLockEntryV1, PluginLockV1
 from mistralai_vibe_local_harness.vibe._subagents import DeclaredAgentTypeProfile
@@ -158,7 +161,11 @@ class PluginRestoreError(HarnessSessionError):
         super().__init__(
             type(self).code,
             f"The session's pinned plugin environment could not be rebuilt ({summary})",
-            details={"diagnostics": [item.model_dump(mode="json") for item in self.diagnostics]},
+            details={
+                "diagnostics": [
+                    item.model_dump(mode="json") for item in self.diagnostics
+                ]
+            },
         )
 
 
@@ -194,7 +201,9 @@ def empty_plugin_binding() -> SessionPluginBinding:
 class SessionPluginBinder:
     """Runs create and restore over one provider and one package store."""
 
-    def __init__(self, provider: SessionPluginProvider, store: PluginPackageStore) -> None:
+    def __init__(
+        self, provider: SessionPluginProvider, store: PluginPackageStore
+    ) -> None:
         self._provider = provider
         self._store = store
 
@@ -209,34 +218,32 @@ class SessionPluginBinder:
         calling this, and re-binds the recorded lock if the apply half fails.
         """
         requested = list(requested)
-        wanted = {definition.name: definition.content_digest for definition in requested}
+        wanted = {
+            definition.name: definition.content_digest for definition in requested
+        }
         if len(wanted) != len(requested):
-            raise PluginPinMismatch(
-                [
-                    PluginRestoreDiagnostic(
-                        code=PluginRestoreDiagnosticCode.PIN_MISMATCH,
-                        message="the requested plugin list names one plugin more than once",
-                    )
-                ]
-            )
+            raise PluginPinMismatch([
+                PluginRestoreDiagnostic(
+                    code=PluginRestoreDiagnosticCode.PIN_MISMATCH,
+                    message="the requested plugin list names one plugin more than once",
+                )
+            ])
 
         pinned = await self._provider.pin(requested, session_id=session_id)
         if pinned.packages.keys() != wanted.keys():
-            raise PluginPinMismatch(
-                [
-                    PluginRestoreDiagnostic(
-                        code=PluginRestoreDiagnosticCode.PIN_MISMATCH,
-                        plugin_name=name,
-                        content_digest=wanted.get(name),
-                        message=(
-                            "the provider did not hand over a root for this plugin"
-                            if name in wanted
-                            else "the provider handed over a plugin the request did not name"
-                        ),
-                    )
-                    for name in sorted(wanted.keys() ^ pinned.packages.keys())
-                ]
-            )
+            raise PluginPinMismatch([
+                PluginRestoreDiagnostic(
+                    code=PluginRestoreDiagnosticCode.PIN_MISMATCH,
+                    plugin_name=name,
+                    content_digest=wanted.get(name),
+                    message=(
+                        "the provider did not hand over a root for this plugin"
+                        if name in wanted
+                        else "the provider handed over a plugin the request did not name"
+                    ),
+                )
+                for name in sorted(wanted.keys() ^ pinned.packages.keys())
+            ])
 
         entries: list[PluginLockEntryV1] = []
         mismatched: list[PluginRestoreDiagnostic] = []
@@ -273,13 +280,17 @@ class SessionPluginBinder:
         )
         lock = PluginLockV1(
             snapshot_digest=(
-                await asyncio.to_thread(self._store.put_blob, derived) if entries else None
+                await asyncio.to_thread(self._store.put_blob, derived)
+                if entries
+                else None
             ),
             plugins=entries,
         )
         return SessionPluginBinding(lock=lock, projection=projection)
 
-    async def restore(self, lock: PluginLockV1, *, session_id: str) -> SessionPluginBinding:
+    async def restore(
+        self, lock: PluginLockV1, *, session_id: str
+    ) -> SessionPluginBinding:
         """Rebuild the pinned checkouts and replay the pinned bytes into ``bind``.
 
         Nothing here re-resolves an installed root, compares against what is
@@ -291,17 +302,24 @@ class SessionPluginBinder:
         snapshot = b""
         if lock.snapshot_digest is not None:
             try:
-                snapshot = await asyncio.to_thread(self._store.read_blob, lock.snapshot_digest)
+                snapshot = await asyncio.to_thread(
+                    self._store.read_blob, lock.snapshot_digest
+                )
             except PluginBlobUnavailable:
-                diagnostics.append(_snapshot_unavailable(lock.snapshot_digest, "no blob"))
+                diagnostics.append(
+                    _snapshot_unavailable(lock.snapshot_digest, "no blob")
+                )
             except PluginPackageCorrupt as exc:
-                diagnostics.append(_snapshot_unavailable(lock.snapshot_digest, str(exc)))
+                diagnostics.append(
+                    _snapshot_unavailable(lock.snapshot_digest, str(exc))
+                )
 
         if diagnostics:
             raise PluginRestoreError(diagnostics)
 
         _, projection = await self._bind(
-            RestoredPlugins(snapshot=snapshot, checkouts=checkouts), session_id=session_id
+            RestoredPlugins(snapshot=snapshot, checkouts=checkouts),
+            session_id=session_id,
         )
         return SessionPluginBinding(lock=lock, projection=projection)
 
@@ -316,7 +334,10 @@ class SessionPluginBinder:
         except (TimeoutError, asyncio.CancelledError):
             logger.warning(
                 "Plugin provider release did not finish in time",
-                extra={"session_id": session_id, "timeout_seconds": RELEASE_TIMEOUT_SECONDS},
+                extra={
+                    "session_id": session_id,
+                    "timeout_seconds": RELEASE_TIMEOUT_SECONDS,
+                },
             )
         except Exception:
             logger.warning(

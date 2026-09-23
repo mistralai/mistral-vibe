@@ -7,14 +7,16 @@ chunks, and translate the final assistant message back into a
 ``RustCompletionResult``.
 """
 
+from __future__ import annotations
+
 import asyncio
+from collections.abc import AsyncGenerator, Callable
+from html import escape
+from http import HTTPStatus
 import json
 import logging
 import ssl
 import time
-from collections.abc import AsyncGenerator, Callable
-from html import escape
-from http import HTTPStatus
 from typing import Any, cast
 
 import httpx
@@ -97,7 +99,9 @@ _RETRYABLE_REQUEST_ERRORS: tuple[type[httpx.RequestError], ...] = (
 # A TLS fault while the response body streams arrives here as a bare
 # `ssl.SSLError` that no `httpx.RequestError` entry can match. Certificate rejection is the one
 # deterministic case: it will fail the same way on every attempt.
-_NON_RETRYABLE_TLS_ERRORS: tuple[type[ssl.SSLError], ...] = (ssl.SSLCertVerificationError,)
+_NON_RETRYABLE_TLS_ERRORS: tuple[type[ssl.SSLError], ...] = (
+    ssl.SSLCertVerificationError,
+)
 _INITIAL_RETRY_DELAY_S = 0.5
 _MAX_RETRY_DELAY_S = 30.0
 _RETRY_BACKOFF = 2.0
@@ -126,7 +130,9 @@ def _openai_responses_adapter() -> APIAdapter:
 
 
 def _anthropic_adapter() -> APIAdapter:
-    from mistralai_vibe_local_harness.vibe.adapters.generic._anthropic import AnthropicAdapter
+    from mistralai_vibe_local_harness.vibe.adapters.generic._anthropic import (
+        AnthropicAdapter,
+    )
 
     return AnthropicAdapter()
 
@@ -240,7 +246,9 @@ async def execute_generic_completion(
             on_delta=on_delta,
         )
 
-    _warn_on_workless_completion(result, provider=provider, route=route, tools_offered=len(tools))
+    _warn_on_workless_completion(
+        result, provider=provider, route=route, tools_offered=len(tools)
+    )
     return result
 
 
@@ -427,7 +435,9 @@ def _next_retry_delay(error: Exception, attempt: int) -> float:
     if retry_after is not None:
         return min(retry_after, _MAX_RETRY_DELAY_S)
     capped_attempt = min(attempt, 10)
-    return min(_INITIAL_RETRY_DELAY_S * (_RETRY_BACKOFF**capped_attempt), _MAX_RETRY_DELAY_S)
+    return min(
+        _INITIAL_RETRY_DELAY_S * (_RETRY_BACKOFF**capped_attempt), _MAX_RETRY_DELAY_S
+    )
 
 
 def _retry_after_seconds(error: Exception) -> float | None:
@@ -438,12 +448,11 @@ def _retry_after_seconds(error: Exception) -> float | None:
 
 
 async def _stream_json_chunks(
-    client: httpx.AsyncClient,
-    url: str,
-    body: bytes,
-    headers: dict[str, str],
+    client: httpx.AsyncClient, url: str, body: bytes, headers: dict[str, str]
 ) -> AsyncGenerator[dict[str, Any]]:
-    async with client.stream(method="POST", url=url, content=body, headers=headers) as response:
+    async with client.stream(
+        method="POST", url=url, content=body, headers=headers
+    ) as response:
         if not response.is_success:
             await response.aread()
         response.raise_for_status()
@@ -452,7 +461,9 @@ async def _stream_json_chunks(
                 continue
             delimiter = ": "
             if delimiter not in line:
-                raise ValueError("Stream chunk improperly formatted. Expected `key: value`.")
+                raise ValueError(
+                    "Stream chunk improperly formatted. Expected `key: value`."
+                )
             key, _, value = line.partition(":")
             value = value[1:] if value.startswith(" ") else value
             if key != "data":
@@ -521,7 +532,9 @@ def _assistant_to_llm_message(message: RustAssistantMessage) -> LLMMessage:
             text_parts.append(part.text)
         elif isinstance(part, RustReasoningPart):
             for item in part.content:
-                if isinstance(item, RustReasoningTextContent | RustReasoningSummaryContent):
+                if isinstance(
+                    item, RustReasoningTextContent | RustReasoningSummaryContent
+                ):
                     reasoning_parts.append(item.text)
             if part.meta:
                 stored = part.meta.get(_REASONING_PAYLOADS_META_KEY)
@@ -571,8 +584,7 @@ def _blocks_images(content: Any) -> list[ImageAttachment]:
         if isinstance(block, RustImageContentBlock):
             images.append(
                 ImageAttachment(
-                    source=InlineImageSource(data=block.data),
-                    mime_type=block.mime_type,
+                    source=InlineImageSource(data=block.data), mime_type=block.mime_type
                 )
             )
     return images
@@ -601,9 +613,7 @@ def _to_completion_result(chunk: LLMChunk) -> RustCompletionResult:
 
     finish_reason = _finish_reason(chunk, has_tool_calls=bool(message.tool_calls))
     return RustCompletionResult(
-        parts=parts,
-        finish_reason=finish_reason,
-        usage=_token_usage(chunk),
+        parts=parts, finish_reason=finish_reason, usage=_token_usage(chunk)
     )
 
 
@@ -643,7 +653,9 @@ def _tool_call_parts(
     return parts
 
 
-def _finish_reason(chunk: LLMChunk, *, has_tool_calls: bool) -> RustCompletionFinishReason:
+def _finish_reason(
+    chunk: LLMChunk, *, has_tool_calls: bool
+) -> RustCompletionFinishReason:
     if has_tool_calls:
         return "tool_call"
     raw = chunk.stop.reason if chunk.stop else None

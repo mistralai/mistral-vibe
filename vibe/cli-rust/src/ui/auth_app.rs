@@ -1,6 +1,6 @@
 //! Shared box of the MCP OAuth and connector auth bottom-apps.
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
@@ -68,19 +68,19 @@ pub fn draw(
 
     let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
     let detail = detail_lines(&view.detail, area.width);
-    let chunks = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(loading_height),
-        Constraint::Length(box_height(view.rows.len(), detail.len())),
-        Constraint::Length(1),
-    ])
-    .split(area);
+    let chunks = super::bottom_app_chunks(
+        app,
+        area,
+        loading_height,
+        box_height(view.rows.len(), detail.len()),
+    );
 
     transcript::draw(app, f, chunks[0]);
     loading::draw(app, f, chunks[1]);
     crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Blocked);
     let list_area = draw_box(f, chunks[2], view, &detail);
     crate::mouse::register_region(app, list_area, target);
+    super::todo::draw_row(app, f, chunks[4]);
     bottom_bar::draw(app, f, chunks[3]);
     list_area
 }

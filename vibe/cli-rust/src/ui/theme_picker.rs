@@ -2,7 +2,7 @@
 //! list (live-preview highlight, `›` on the current theme), and a hint. Mirrors
 //! Python's `ThemePickerApp` and its TCSS in `app.tcss`.
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
@@ -33,18 +33,13 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
 
     let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
     let picker_height = box_height(area.height);
-    let chunks = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(loading_height),
-        Constraint::Length(picker_height),
-        Constraint::Length(1),
-    ])
-    .split(area);
+    let chunks = super::bottom_app_chunks(app, area, loading_height, picker_height);
 
     transcript::draw(app, f, chunks[0]);
     loading::draw(app, f, chunks[1]);
     crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Blocked);
     draw_box(app, f, chunks[2]);
+    super::todo::draw_row(app, f, chunks[4]);
     bottom_bar::draw(app, f, chunks[3]);
 }
 

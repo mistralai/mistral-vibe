@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -13,7 +12,7 @@ import pytest
 import tomli_w
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from tests.stubs.app_server import legacy_backend
+from tests.stubs.app_server import FakeSessionBackendServices, legacy_backend
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from vibe.app_server import _runtime as runtime
@@ -24,7 +23,7 @@ from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._legacy_composition import create_legacy_app_server
 from vibe.app_server._legacy_session_backend import LegacySessionBackendHost
 from vibe.app_server._legacy_session_runtime import LegacySessionRuntimeController
-from vibe.app_server._model import ProtocolModel, validate_wire
+from vibe.app_server._model import validate_wire
 from vibe.app_server._projection import (
     project_config,
     project_config_view,
@@ -74,6 +73,7 @@ from vibe.app_server.protocol import (
     WorkspaceWorktreeListResponse,
     WorkspaceWorktreePruneParams,
     WorkspaceWorktreePruneResponse,
+    WorkspaceWorktreeReapResponse,
     WorkspaceWorktreeRemoveResponse,
 )
 from vibe.app_server.session import AppServerSession
@@ -113,47 +113,6 @@ from vibe.core.session.worktrees import (
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.utils import AgentEntrypoint
 from vibe.utils.terminal import TerminalEmulator
-
-
-class _FakeSessionBackendServices:
-    def client_info(self) -> ClientInfo:
-        return ClientInfo(name="test", version="1")
-
-    def client_capabilities(self) -> ClientCapabilities:
-        return ClientCapabilities()
-
-    def current_session_id(self) -> str:
-        return "root"
-
-    def event_watermark(self, session_id: str) -> int:
-        return 0
-
-    def account_gateway(self) -> None:
-        return None
-
-    def identity_gateway(self) -> None:
-        return None
-
-    @asynccontextmanager
-    async def lifecycle_transition(self):
-        yield
-
-    def task_finished(self, task: asyncio.Task[None]) -> None:
-        pass
-
-    async def notify(self, method: str, params: Any) -> None:
-        pass
-
-    async def publish_callback(self, callback: Any) -> None:
-        pass
-
-    async def record_child_notification(self, method: str, params: Any) -> None:
-        pass
-
-    async def request_client_result[ResultT: ProtocolModel](
-        self, method: str, params: ProtocolModel, response_type: type[ResultT]
-    ) -> ResultT:
-        raise AssertionError("test services do not serve client requests")
 
 
 def test_local_harness_options_preserves_client_positional_argument() -> None:
@@ -562,6 +521,65 @@ def test_session_list_continue_id_accepts_forked_pointer(
     response = host_module.project_session_list(config, SessionListParams())
 
     assert response.continue_session_id == "fork"
+
+
+@pytest.mark.asyncio
+async def test_worktree_reap_rpc_snapshots_before_removal(tmp_path: Path) -> None:
+    """*Prepare*: A clean, inactive managed worktree.
+    *Do*: Reap it through the passive Host API.
+    *Assert*: Removal happens only after the hidden snapshot ref is written.
+    """
+    # Prepare
+    repo = _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path)
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    managed.hold("session-a")
+    managed.release_holder("session-a")
+    handler = HostRequestHandler(HarnessFilesManager(sources=()))
+
+    # Do
+    result = await handler.dispatch(
+        "workspace/git/worktrees/reap", {"cwd": str(worktree.root)}
+    )
+
+    # Assert
+    response = cast(WorkspaceWorktreeReapResponse, result.response)
+    assert response.outcome == WorktreeReleaseOutcome.REMOVED
+    assert not worktree.root.exists()
+    assert repo.commit(f"{SNAPSHOT_REF_PREFIX}/{worktree.name}")
+
+
+@pytest.mark.asyncio
+async def test_worktree_reap_cancel_rpc_blocks_the_delayed_request(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A managed worktree and one identified archive request.
+    *Do*: Deliver its unarchive cancellation before the delayed reap RPC.
+    *Assert*: The stale reap remains cancelled and the worktree stays present.
+    """
+    # Prepare
+    _init_repo(tmp_path)
+    worktree = _prepare_auto(tmp_path)
+    managed = ManagedWorktree.at(worktree.root)
+    assert managed is not None
+    managed.hold("session-a")
+    managed.release_holder("session-a")
+    handler = HostRequestHandler(HarnessFilesManager(sources=()))
+    request = {
+        "cwd": str(worktree.root),
+        "requesterId": "session-a",
+        "requestId": "archive-a",
+    }
+
+    # Do
+    await handler.dispatch("workspace/git/worktrees/reap/cancel", request)
+    result = await handler.dispatch("workspace/git/worktrees/reap", request)
+
+    # Assert
+    response = cast(WorkspaceWorktreeReapResponse, result.response)
+    assert response.outcome == WorktreeReleaseOutcome.KEPT_CANCELLED
+    assert worktree.root.is_dir()
 
 
 @pytest.mark.asyncio
@@ -1297,7 +1315,7 @@ async def test_session_start_cleans_created_worktree_when_cancelled_mid_resoluti
     async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
         raise AssertionError("runtime should not open after cancellation")
 
-    services = _FakeSessionBackendServices()
+    services = FakeSessionBackendServices()
     controller = LegacySessionRuntimeController(
         open_root=open_root,
         runtime_factory=runtime.AgentRuntimeFactory(),
@@ -1368,7 +1386,7 @@ async def test_open_runtime_restores_legacy_session_cwd(
         runtime_factory=runtime.AgentRuntimeFactory(),
         host_handler=host_handler,
         stage_root=None,
-        services=_FakeSessionBackendServices(),
+        services=FakeSessionBackendServices(),
     )
     restore = AsyncMock(return_value=True)
     monkeypatch.setattr(controller._worktrees, "restore", restore)
@@ -1505,7 +1523,7 @@ async def test_open_runtime_maps_ambiguous_legacy_id_to_invalid_params(
         runtime_factory=runtime.AgentRuntimeFactory(),
         host_handler=host_handler,
         stage_root=None,
-        services=_FakeSessionBackendServices(),
+        services=FakeSessionBackendServices(),
     )
 
     with pytest.raises(RequestFailure) as exc_info:
@@ -1523,7 +1541,7 @@ async def test_open_runtime_maps_git_errors_to_invalid_params(
     async def open_root(request: runtime.RootOpenRequest) -> AgentLoop:
         raise AssertionError("runtime should not open after worktree failure")
 
-    services = _FakeSessionBackendServices()
+    services = FakeSessionBackendServices()
     controller = LegacySessionRuntimeController(
         open_root=open_root,
         runtime_factory=runtime.AgentRuntimeFactory(),
@@ -1550,8 +1568,9 @@ async def test_open_runtime_maps_git_errors_to_invalid_params(
 async def test_scheduler_failure_does_not_reach_app_server_task_finished(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Services(_FakeSessionBackendServices):
+    class Services(FakeSessionBackendServices):
         def __init__(self) -> None:
+            super().__init__()
             self.finished_tasks: list[asyncio.Task[None]] = []
 
         def task_finished(self, task: asyncio.Task[None]) -> None:
@@ -2114,11 +2133,13 @@ def test_experimental_harness_process_selects_the_unified_harness_host(
         UnifiedHarnessBackendHostAdapter,
     )
 
-    selected = SimpleNamespace(harness_kind="unified")
+    selected = SimpleNamespace(
+        harness_kind="unified", configure_hook_handlers=lambda _handlers: None
+    )
     monkeypatch.setattr(
         runtime, "create_experimental_harness_host", lambda *_args, **_kwargs: selected
     )
-    services = _FakeSessionBackendServices()
+    services = FakeSessionBackendServices()
 
     def unavailable_client_info() -> ClientInfo:
         raise RuntimeError("App-server client metadata is unavailable")
@@ -2145,7 +2166,7 @@ def test_default_process_selects_the_legacy_session_backend(
     monkeypatch.setattr(runtime, "create_experimental_harness_host", explode)
 
     host = runtime.HarnessProcess().create_session_backend_host(
-        _FakeSessionBackendServices()
+        FakeSessionBackendServices()
     )
 
     assert isinstance(host, LegacySessionBackendHost)
@@ -2162,7 +2183,7 @@ async def test_unavailable_experimental_harness_falls_back_to_legacy(
     process = runtime.HarnessProcess(
         HarnessFilesManager(sources=()), experimental_harness=True
     )
-    host = process.create_session_backend_host(_FakeSessionBackendServices())
+    host = process.create_session_backend_host(FakeSessionBackendServices())
     config = cast(
         ConfigReadResponse,
         (
@@ -2185,10 +2206,57 @@ async def test_unavailable_experimental_harness_falls_back_to_legacy(
 
 
 @pytest.mark.asyncio
+async def test_a_host_that_cannot_take_builtin_hooks_falls_back_to_legacy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A Host created but failing before the builtin-hook registry is
+    configured (a harness version without ``configure_hook_handlers``) must
+    fall back to the legacy backend with a startup issue — and must not leave
+    the unified host assigned, which would hand out the unified adapter while
+    the UI reports the legacy fallback.
+    """
+
+    def without_registry() -> object:
+        return SimpleNamespace()  # no configure_hook_handlers
+
+    monkeypatch.setattr(runtime, "create_experimental_harness_host", without_registry)
+    process = runtime.HarnessProcess(
+        HarnessFilesManager(sources=()), experimental_harness=True
+    )
+    host = process.create_session_backend_host(FakeSessionBackendServices())
+    config = cast(
+        ConfigReadResponse,
+        (
+            await process.host_handler.dispatch(
+                "config/read",
+                ConfigReadParams(cwd=str(tmp_path)).model_dump(
+                    mode="json", by_alias=True
+                ),
+            )
+        ).response,
+    )
+
+    assert isinstance(host, LegacySessionBackendHost)
+    assert process._experimental_harness_host is None
+    assert config.startup_issue is not None
+    assert config.startup_issue.model_dump() == {
+        "file": "--experimental-harness",
+        "message": (
+            "'types.SimpleNamespace' object has no attribute "
+            "'configure_hook_handlers'; falling back to the legacy harness."
+        ),
+    }
+
+
+@pytest.mark.asyncio
 async def test_available_experimental_harness_never_opens_a_legacy_runtime(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(runtime, "create_experimental_harness_host", object)
+    monkeypatch.setattr(
+        runtime,
+        "create_experimental_harness_host",
+        lambda: SimpleNamespace(configure_hook_handlers=lambda _handlers: None),
+    )
     process = runtime.HarnessProcess(experimental_harness=True)
     request = runtime.RootOpenRequest(
         options=SessionOptions(cwd=str(tmp_path)),

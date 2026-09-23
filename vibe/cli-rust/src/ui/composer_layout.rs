@@ -114,11 +114,32 @@ fn visual_position(rows: &[(usize, usize)], text: &str, cursor: usize) -> (usize
 }
 
 fn visual_rows(body: &str, width: u16) -> Vec<(usize, usize)> {
+    rows_with(body, |text| wrapped_ranges(text, width))
+}
+
+fn hard_wrapped_ranges(text: &str, width: u16) -> Vec<(usize, usize)> {
+    let mut rows = Vec::new();
+    let mut start = 0;
+    let mut used = 0;
+    for (index, symbol) in text.grapheme_indices(true) {
+        let symbol_width = symbol.width() as u16;
+        if index > start && used + symbol_width > width {
+            rows.push((start, index));
+            start = index;
+            used = 0;
+        }
+        used += symbol_width;
+    }
+    rows.push((start, text.len()));
+    rows
+}
+
+fn rows_with(body: &str, rows: impl Fn(&str) -> Vec<(usize, usize)>) -> Vec<(usize, usize)> {
     let mut visual = Vec::new();
     let mut body_start = 0;
     for text in body.split('\n') {
         visual.extend(
-            wrapped_ranges(text, width)
+            rows(text)
                 .into_iter()
                 .map(|(start, end)| (body_start + start, body_start + end)),
         );
@@ -143,6 +164,20 @@ impl<'a> ComposerLayout<'a> {
             body,
             cursor,
             visual_rows: visual_rows(body, content_width),
+        }
+    }
+
+    pub fn hard_wrapped(body: &'a str, cursor: usize, width: u16) -> Self {
+        let width = width.max(1);
+        let mut visual_rows = rows_with(body, |text| hard_wrapped_ranges(text, width));
+        let (_, cursor_column) = visual_position(&visual_rows, body, cursor);
+        if width > 1 && cursor_column == usize::from(width) {
+            visual_rows = rows_with(body, |text| hard_wrapped_ranges(text, width - 1));
+        }
+        Self {
+            body,
+            cursor,
+            visual_rows,
         }
     }
 
@@ -173,6 +208,16 @@ impl<'a> ComposerLayout<'a> {
     pub fn scroll(&self, viewport_rows: usize) -> u16 {
         self.caret_row()
             .saturating_sub(viewport_rows.saturating_sub(1)) as u16
+    }
+
+    /// Keep `top` as the first visible row, moving it the minimum needed to
+    /// reveal the caret, so the view only scrolls once the caret leaves it.
+    pub fn viewport_top(&self, top: usize, viewport_rows: usize) -> usize {
+        let caret = self.caret_row();
+        let last_top = self.visual_rows.len().saturating_sub(viewport_rows.max(1));
+        top.min(caret)
+            .max(caret.saturating_sub(viewport_rows.saturating_sub(1)))
+            .min(last_top)
     }
 
     pub fn caret_row(&self) -> usize {

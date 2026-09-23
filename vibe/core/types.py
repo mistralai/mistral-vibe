@@ -205,6 +205,12 @@ class SessionMetadata(BaseModel):
     # timestamp rather than a flag so the pinned shelf can be ordered by when
     # each pin was made without a second field to keep in step.
     pinned_at: str | None = None
+    # When the user archived this session, or ``None`` while it is visible.
+    archived_at: str | None = None
+    # These fields are absent from sessions written before unseen tracking.
+    # Null/null is the lazy migration: old sessions remain seen.
+    unseen_at: str | None = None
+    seen_at: str | None = None
     # The sticky GrowthBook variant assignment, persisted so a resumed session
     # keeps its buckets. NOTE: plan/org attributes and user_plan are user-scoped,
     # not session-scoped, so they are deliberately NOT persisted here — they are

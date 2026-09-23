@@ -1,12 +1,14 @@
 """Bounded raw terminal output with stable logical byte cursors."""
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 import json
 import os
+from pathlib import Path
 import secrets
 import shutil
 import threading
-from dataclasses import dataclass
-from pathlib import Path
 from typing import BinaryIO, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -92,7 +94,7 @@ class ProcessOutputStore:
         *,
         segment_bytes: int = SEGMENT_BYTES,
         retained_segments: int = RETAINED_SEGMENTS,
-    ) -> "ProcessOutputStore":
+    ) -> ProcessOutputStore:
         process_root = session_root / "processes" / process_id
         _require_safe_process_path(session_root, process_root, process_id)
         process_root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -124,7 +126,7 @@ class ProcessOutputStore:
         *,
         segment_bytes: int = SEGMENT_BYTES,
         retained_segments: int = RETAINED_SEGMENTS,
-    ) -> "ProcessOutputStore":
+    ) -> ProcessOutputStore:
         process_root = session_root / "processes" / process_id
         _require_safe_process_path(session_root, process_root, process_id)
         state_path = process_root / "output-state.json"
@@ -140,14 +142,18 @@ class ProcessOutputStore:
         return store
 
     @classmethod
-    def ensure_unavailable(cls, session_root: Path, process_id: str) -> "ProcessOutputStore":
+    def ensure_unavailable(
+        cls, session_root: Path, process_id: str
+    ) -> ProcessOutputStore:
         process_root = session_root / "processes" / process_id
         _require_safe_process_path(session_root, process_root, process_id)
         process_root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         process_root.mkdir(mode=0o700, exist_ok=True)
         _require_real_directory(process_root)
         try:
-            end = _read_state(process_root / "output-state.json", process_id).output_end_cursor
+            end = _read_state(
+                process_root / "output-state.json", process_id
+            ).output_end_cursor
         except (OSError, ValueError):
             end = 0
         state = ProcessOutputStateV1(
@@ -174,7 +180,8 @@ class ProcessOutputStore:
             candidates = [
                 entry.name
                 for entry in entries
-                if entry.name not in protected_ids and entry.is_dir(follow_symlinks=False)
+                if entry.name not in protected_ids
+                and entry.is_dir(follow_symlinks=False)
             ]
         for process_id in candidates:
             process_root = processes_root / process_id
@@ -214,7 +221,8 @@ class ProcessOutputStore:
                     self._sync_writer_locked()
                     writer.close()
                     writer = _open_segment(
-                        self.segments_root / _segment_name(self._state.output_end_cursor)
+                        self.segments_root
+                        / _segment_name(self._state.output_end_cursor)
                     )
                     self._writer = writer
                     opened_segment = True
@@ -243,7 +251,9 @@ class ProcessOutputStore:
             if limit < 1:
                 raise ValueError("max_bytes must be positive")
             if from_end:
-                read_start = max(state.output_start_cursor, state.output_end_cursor - limit)
+                read_start = max(
+                    state.output_start_cursor, state.output_end_cursor - limit
+                )
                 requested = read_start
             else:
                 if cursor > state.output_end_cursor:
@@ -261,7 +271,9 @@ class ProcessOutputStore:
                 else next_cursor < state.output_end_cursor
             )
             truncated_before = (
-                state.output_start_cursor > 0 if from_end else requested < state.output_start_cursor
+                state.output_start_cursor > 0
+                if from_end
+                else requested < state.output_start_cursor
             )
             return OutputPage(
                 output=output,
@@ -338,10 +350,7 @@ class ProcessOutputStore:
                 if self._quarantines_locked():
                     end = self._state.output_end_cursor
                     self._state = self._state.model_copy(
-                        update={
-                            "output_start_cursor": end,
-                            "finalized": True,
-                        }
+                        update={"output_start_cursor": end, "finalized": True}
                     )
                     _replace_state(self.state_path, self._state)
                     return
@@ -405,7 +414,10 @@ class ProcessOutputStore:
                 if not entry.is_file(follow_symlinks=False):
                     raise ValueError("process output contains a non-regular segment")
                 start = _parse_segment_name(entry.name)
-                segments.append((start, os.stat(entry.path, follow_symlinks=False).st_size))
+                segments.append((
+                    start,
+                    os.stat(entry.path, follow_symlinks=False).st_size,
+                ))
         segments.sort()
         return segments
 
@@ -487,7 +499,9 @@ def _read_state(path: Path, process_id: str) -> ProcessOutputStateV1:
 
 def _replace_state(path: Path, state: ProcessOutputStateV1) -> None:
     data = (
-        json.dumps(state.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(
+            state.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        ).encode()
         + b"\n"
     )
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
@@ -525,8 +539,15 @@ def _parse_segment_name(name: str) -> int:
     return cursor
 
 
-def _require_safe_process_path(session_root: Path, process_root: Path, process_id: str) -> None:
-    if not process_id or process_id in {".", ".."} or "/" in process_id or "\\" in process_id:
+def _require_safe_process_path(
+    session_root: Path, process_root: Path, process_id: str
+) -> None:
+    if (
+        not process_id
+        or process_id in {".", ".."}
+        or "/" in process_id
+        or "\\" in process_id
+    ):
         raise ValueError("invalid process ID")
     if process_root.parent.parent != session_root:
         raise ValueError("process output path escapes its Session")
@@ -534,7 +555,7 @@ def _require_safe_process_path(session_root: Path, process_root: Path, process_i
     if current.exists() and _is_link(current):
         raise ValueError("Session output root cannot be a link")
     for part in process_root.relative_to(session_root).parts:
-        current = current / part
+        current /= part
         if current.exists() and _is_link(current):
             raise ValueError("process output path cannot contain a link")
 

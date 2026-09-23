@@ -1,11 +1,13 @@
 """OpenAI Responses API adapter."""
 
-import json
-import logging
+from __future__ import annotations
+
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from http import HTTPStatus
+import json
+import logging
 from typing import Any, ClassVar, TypedDict, cast
 
 from pydantic import TypeAdapter
@@ -236,16 +238,22 @@ class _OpenAIResponsesStreamParser:
         return ToolCall(
             id=item.get("call_id") or item.get("id"),
             index=index,
-            function=FunctionCall(name=item.get("name"), arguments=item.get("arguments", "")),
+            function=FunctionCall(
+                name=item.get("name"), arguments=item.get("arguments", "")
+            ),
         )
 
     @staticmethod
     def _empty_chunk() -> LLMChunk:
-        return LLMChunk(message=LLMMessage(role=Role.assistant, content=""), usage=_EMPTY_USAGE)
+        return LLMChunk(
+            message=LLMMessage(role=Role.assistant, content=""), usage=_EMPTY_USAGE
+        )
 
     @staticmethod
     def _assistant_text_chunk(text: str) -> LLMChunk:
-        return LLMChunk(message=LLMMessage(role=Role.assistant, content=text), usage=_EMPTY_USAGE)
+        return LLMChunk(
+            message=LLMMessage(role=Role.assistant, content=text), usage=_EMPTY_USAGE
+        )
 
     @staticmethod
     def _tool_call_chunk(
@@ -445,7 +453,9 @@ class _OpenAIResponsesStreamParser:
         self.reset()
         output = response_obj.get("output") or []
         item_types = [item.get("type") for item in output]
-        if not any(item_type in {"reasoning", "function_call"} for item_type in item_types):
+        if not any(
+            item_type in {"reasoning", "function_call"} for item_type in item_types
+        ):
             # Only this event carries the provider's own account of whether it
             # reasoned, and the parsed chunk keeps none of it. Record it for the
             # one response shape that ends a turn having produced nothing else.
@@ -482,14 +492,18 @@ class _OpenAIResponsesStreamParser:
     def _on_unknown_event(self, data: _ResponsesStreamEventEnvelope) -> LLMChunk:
         if event_type := data.get("type"):
             if event_type not in self._ignored_event_types:
-                logger.debug("Ignoring OpenAI Responses stream event type: %s", event_type)
+                logger.debug(
+                    "Ignoring OpenAI Responses stream event type: %s", event_type
+                )
                 self._ignored_event_types.add(event_type)
         return self._empty_chunk()
 
     _EVENT_HANDLERS: ClassVar[
         dict[
             str,
-            "Callable[[_OpenAIResponsesStreamParser, _RawResponsesStreamEvent], LLMChunk]",
+            Callable[
+                [_OpenAIResponsesStreamParser, _RawResponsesStreamEvent], LLMChunk
+            ],
         ]
     ] = {
         "response.created": _on_response_created,
@@ -545,12 +559,10 @@ class OpenAIResponsesAdapter(APIAdapter):
                         )
                         input_items.append({"role": "user", "content": parts})
                     else:
-                        input_items.append(
-                            {
-                                "role": "user",
-                                "content": msg.content or "",
-                            }
-                        )
+                        input_items.append({
+                            "role": "user",
+                            "content": msg.content or "",
+                        })
 
                 case Role.assistant:
                     input_items.extend(
@@ -561,30 +573,24 @@ class OpenAIResponsesAdapter(APIAdapter):
                     # An assistant message the model never produced would sit
                     # between a reasoning item and the tool call it belongs to.
                     if msg.content:
-                        input_items.append(
-                            {
-                                "role": "assistant",
-                                "content": [{"type": "output_text", "text": msg.content}],
-                            }
-                        )
+                        input_items.append({
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": msg.content}],
+                        })
                     for tc in msg.tool_calls or []:
-                        input_items.append(
-                            {
-                                "type": "function_call",
-                                "call_id": tc.id or "",
-                                "name": tc.function.name or "",
-                                "arguments": tc.function.arguments or "",
-                            }
-                        )
+                        input_items.append({
+                            "type": "function_call",
+                            "call_id": tc.id or "",
+                            "name": tc.function.name or "",
+                            "arguments": tc.function.arguments or "",
+                        })
 
                 case Role.tool:
-                    input_items.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": msg.tool_call_id or "",
-                            "output": msg.content or "",
-                        }
-                    )
+                    input_items.append({
+                        "type": "function_call_output",
+                        "call_id": msg.tool_call_id or "",
+                        "output": msg.content or "",
+                    })
 
                 case _:
                     raise ValueError(f"Unsupported role: {msg.role}")
@@ -623,7 +629,9 @@ class OpenAIResponsesAdapter(APIAdapter):
         payload["reasoning"] = {"effort": self._map_reasoning_effort(thinking)}
 
         if tools:
-            payload["tools"] = [self._convert_tool_for_responses(tool) for tool in tools]
+            payload["tools"] = [
+                self._convert_tool_for_responses(tool) for tool in tools
+            ]
 
         if tools and tool_choice:
             if isinstance(tool_choice, str):
@@ -737,7 +745,9 @@ class OpenAIResponsesAdapter(APIAdapter):
             role=Role.assistant,
             content="".join(text_parts),
             reasoning_content="".join(reasoning_parts) or None,
-            reasoning_payloads=self._stream_parser._reasoning_payloads_from_output(output),
+            reasoning_payloads=self._stream_parser._reasoning_payloads_from_output(
+                output
+            ),
             tool_calls=tool_calls or None,
         )
 
@@ -751,7 +761,9 @@ class OpenAIResponsesAdapter(APIAdapter):
                 raise ValueError("OpenAI Responses response missing output")
             return LLMChunk(
                 message=self._parse_output_items(output),
-                usage=self._stream_parser._usage_from_response(response_data.get("usage")),
+                usage=self._stream_parser._usage_from_response(
+                    response_data.get("usage")
+                ),
             )
 
         return self._stream_parser.parse(data)

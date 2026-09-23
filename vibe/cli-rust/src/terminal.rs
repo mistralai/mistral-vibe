@@ -7,78 +7,90 @@ use crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
-use crossterm::terminal::{enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen};
+use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
 
 pub struct TerminalGuard {
-    keyboard_enhanced: bool,
+    active: bool,
+    keyboard_pushed: bool,
 }
 
-pub fn init() -> (ratatui::DefaultTerminal, TerminalGuard) {
-    let terminal = ratatui::init();
-    enable_raw_modes();
-    let _ = execute!(std::io::stdout(), crossterm::terminal::SetTitle("Vibe"));
-    let replaying = std::env::var_os("VIBE_REPLAY_FIXTURE").is_some();
-    let keyboard_enhanced = !replaying && supports_keyboard_enhancement().unwrap_or(false);
-    if keyboard_enhanced {
-        let _ = execute!(
-            std::io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        );
+pub fn init() -> std::io::Result<(ratatui::DefaultTerminal, TerminalGuard)> {
+    // Own the terminal before arming the guard: a failed `try_init` must not
+    // write teardown sequences to a terminal we never took over.
+    let terminal = ratatui::try_init()?;
+    let mut guard = TerminalGuard {
+        active: true,
+        keyboard_pushed: false,
+    };
+    if let Err(error) = guard.enter() {
+        drop(guard);
+        release(terminal);
+        return Err(error);
     }
-    (terminal, TerminalGuard { keyboard_enhanced })
+    Ok((terminal, guard))
 }
 
-fn enable_raw_modes() {
-    let _ = execute!(
-        std::io::stdout(),
-        EnableMouseCapture,
-        EnableBracketedPaste,
-        EnableFocusChange
-    );
-}
-
-fn disable_raw_modes() {
-    let _ = execute!(
-        std::io::stdout(),
-        DisableFocusChange,
-        DisableBracketedPaste,
-        DisableMouseCapture
-    );
-    ratatui::restore();
-    // ratatui::restore leaves the cursor hidden; the shell needs it back.
-    let _ = execute!(std::io::stdout(), Show, crossterm::terminal::SetTitle(""));
+/// Give the Ratatui terminal back, skipping its Drop when the terminal is gone:
+/// Ratatui 0.29 panics there if showing the cursor and stderr both fail.
+pub fn release(mut terminal: ratatui::DefaultTerminal) {
+    if terminal.show_cursor().is_err() {
+        std::mem::forget(terminal);
+    }
 }
 
 impl TerminalGuard {
-    /// Restore cooked mode before SIGTSTP so the shell prompt is usable.
-    pub fn suspend(&mut self) {
-        if self.keyboard_enhanced {
-            let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
-        }
-        disable_raw_modes();
+    fn enter(&mut self) -> std::io::Result<()> {
+        self.enable_raw_modes()?;
+        execute!(std::io::stdout(), crossterm::terminal::SetTitle("Vibe"))
     }
 
-    /// Re-enter the TUI after SIGCONT, hidden cursor like the steady state.
-    pub fn resume(&mut self) -> std::io::Result<()> {
-        enable_raw_mode()?;
-        execute!(std::io::stdout(), EnterAlternateScreen, Hide)?;
-        enable_raw_modes();
-        if self.keyboard_enhanced {
+    fn enable_raw_modes(&mut self) -> std::io::Result<()> {
+        execute!(
+            std::io::stdout(),
+            EnableMouseCapture,
+            EnableBracketedPaste,
+            EnableFocusChange
+        )?;
+        // Unsupported Unix terminals ignore the push; Windows rejects the command.
+        if cfg!(unix) && std::env::var_os("VIBE_REPLAY_FIXTURE").is_none() {
             execute!(
                 std::io::stdout(),
                 PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
             )?;
+            self.keyboard_pushed = true;
         }
         Ok(())
+    }
+
+    pub fn suspend(&mut self) {
+        if !std::mem::take(&mut self.active) {
+            return;
+        }
+        if std::mem::take(&mut self.keyboard_pushed) {
+            let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        crate::pointer::emit(crate::pointer::Shape::Default);
+        let _ = execute!(
+            std::io::stdout(),
+            DisableFocusChange,
+            DisableBracketedPaste,
+            DisableMouseCapture
+        );
+        let _ = ratatui::try_restore();
+        let _ = execute!(std::io::stdout(), Show, crossterm::terminal::SetTitle(""));
+    }
+
+    pub fn resume(&mut self) -> std::io::Result<()> {
+        enable_raw_mode()?;
+        // Raw mode is on, so teardown is owed even if the rest fails below.
+        self.active = true;
+        execute!(std::io::stdout(), EnterAlternateScreen, Hide)?;
+        self.enable_raw_modes()
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        if self.keyboard_enhanced {
-            let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
-        }
-        crate::pointer::emit(crate::pointer::Shape::Default);
-        disable_raw_modes();
+        self.suspend();
     }
 }

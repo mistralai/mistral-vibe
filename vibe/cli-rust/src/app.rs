@@ -20,7 +20,8 @@ use crate::config_edit::ConfigEdit;
 use crate::feedback::Feedback;
 use crate::message_queue::QueueController;
 use crate::selection::{
-    BottomBarSelection, ClickChain, Granularity, Region, RegionId, TableCellHit, TableCellSelection,
+    BottomBarSelection, ClickChain, Granularity, Region, RegionId, RowSpan, ScrollTarget,
+    TableCellHit, TableCellSelection,
 };
 use crate::transcript::Transcript;
 use crate::trust_folders::TrustFolders;
@@ -54,8 +55,10 @@ pub struct Selection {
     pub head: (u16, i32),
     /// Set on release: the next render extracts the selected text and copies it.
     pub pending_copy: bool,
-    /// Signed scroll speed while the drag stays near a transcript edge.
+    /// Signed scroll speed while the drag stays near a scrollable-region edge.
     pub edge_scroll: i8,
+    /// Scrolling document captured when the gesture began.
+    pub scroll_target: ScrollTarget,
     /// Logical markdown table-cell range owning this gesture, if any.
     pub table_cell: Option<TableCellSelection>,
     /// Selected text cached at paint time so a copy key can read it without the
@@ -209,6 +212,9 @@ pub struct Session {
     pub incomplete_stream_retries: u32,
     /// The mounted custom-tools deprecation entry's id, Python's message guard.
     pub custom_tools_deprecation_id: Option<String>,
+    /// The mounted what's-new entry's id, dropped on the first submit like
+    /// Python's `_whats_new_message`.
+    pub whats_new_id: Option<String>,
     /// Token usage snapshot at attach (Python `reset_usage_baseline`); the
     /// exit summary reports the delta against it.
     pub usage_baseline: Option<crate::server::TokenUsage>,
@@ -271,11 +277,19 @@ pub struct View {
     /// The toast text region a selection is anchored in, or the default region
     /// while no toast owns one.
     pub toast_selection_region: Region,
+    /// The loading-area row a drag can select, published by whichever screen
+    /// paints it (Python's loading widgets are selectable Statics).
+    pub loading_selection_region: Region,
+    /// The question box content a drag can select while a question is pending.
+    pub question_selection_region: Region,
+    /// Question-box `(y, x0, x1)` cells painted as option prefixes (cursor,
+    /// numbering, checkbox), so a selection never highlights or copies them.
+    pub question_selection_chrome: Vec<RowSpan>,
     /// Inclusive `(y, x0, x1)` cells inside the region that belong to no widget,
     /// so Textual never selects them: padding around and between widgets.
     pub selection_chrome: Vec<(u16, u16, u16)>,
-    /// Last rendered transcript scrollbar geometry for selection auto-scroll.
-    pub transcript_scrollbar: ui::scrollbar::State,
+    /// Last rendered selectable-region scrollbar geometry for edge auto-scroll.
+    pub selection_scrollbar: ui::scrollbar::State,
     /// Current chat input box, used to map mouse drags to the editor document.
     pub input_area: Rect,
     /// Mouse regions from the latest frame, bounded by the painted UI.
@@ -325,8 +339,11 @@ impl Default for View {
             selection_region: Region::default(),
             toast_text_areas: Vec::new(),
             toast_selection_region: Region::default(),
+            loading_selection_region: Region::default(),
+            question_selection_region: Region::default(),
+            question_selection_chrome: Vec::new(),
             selection_chrome: Vec::new(),
-            transcript_scrollbar: ui::scrollbar::State::default(),
+            selection_scrollbar: ui::scrollbar::State::default(),
             input_area: Rect::default(),
             mouse_regions: Vec::new(),
             mouse: crate::mouse::MouseState::default(),
@@ -612,11 +629,15 @@ pub struct QuestionApp {
     pub other_cursor: usize,
     /// When the app opened, so buffered keys cannot answer it instantly.
     pub mount_time: Option<Instant>,
+    /// Screen row of the in-flight mouse press, so a same-row release can
+    /// click even when the press started no selection gesture.
+    pub mouse_press_row: Option<u16>,
 }
 
 /// `/mcp` browser state (Python's `MCPApp` bottom-app).
 #[derive(Default)]
 pub struct MCPApp {
+    pub search: crate::mcp::search::Search,
     /// While set the browser replaces the input box: title, option list, hint.
     pub open: bool,
     /// Latest `mcp/read` projection, refreshed by `mcp/refresh` and `mcp/toggle`.
@@ -734,6 +755,10 @@ pub struct App {
     pub log_level_picker: LogLevelPicker,
     pub thinking_picker: ThinkingPicker,
     pub resume_picker: ResumePicker,
+    pub vibe_code_project: crate::vibe_code_project::State,
+    /// The latest written todo list (Python `TodoTracker`), never seeded from history.
+    pub todo_tracker: crate::todo_tracker::TodoTracker,
+    pub todo_sidebar: crate::todo_tracker::TodoSidebar,
     pub rewind: Rewind,
     pub approval: crate::approval::State,
     pub question_app: QuestionApp,
@@ -775,6 +800,13 @@ pub struct App {
 pub const QUIT_CONFIRM_DELAY: Duration = Duration::from_secs(1);
 
 impl App {
+    pub fn set_session_id(&mut self, session_id: String) {
+        if self.session.session_id.as_deref() != Some(session_id.as_str()) {
+            self.vibe_code_project = Default::default();
+        }
+        self.session.session_id = Some(session_id);
+    }
+
     /// True while a Ctrl+C quit confirmation is still pending.
     pub fn quit_confirm_active(&self) -> bool {
         self.overlays

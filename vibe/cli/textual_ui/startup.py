@@ -36,6 +36,7 @@ async def resolve_session_open_plan(
     host: AppServerHost,
     *,
     prompt_for_workspace_trust: bool,
+    autocopy_to_clipboard: bool = True,
     show_resume_picker: bool,
     initially_resuming: bool,
     resume_session_id: str | None = None,
@@ -43,7 +44,9 @@ async def resolve_session_open_plan(
     showed_trust_prompt = False
     try:
         if prompt_for_workspace_trust:
-            trust_granted, showed_trust_prompt = await _resolve_workspace_trust(host)
+            trust_granted, showed_trust_prompt = await _resolve_workspace_trust(
+                host, autocopy_to_clipboard=autocopy_to_clipboard
+            )
             if not trust_granted:
                 await host.close()
                 return None
@@ -89,6 +92,7 @@ async def open_textual_session(
     host: AppServerHost,
     *,
     prompt_for_workspace_trust: bool,
+    autocopy_to_clipboard: bool = True,
     show_resume_picker: bool,
     initially_resuming: bool,
     resume_session_id: str | None = None,
@@ -96,6 +100,7 @@ async def open_textual_session(
     plan = await resolve_session_open_plan(
         host,
         prompt_for_workspace_trust=prompt_for_workspace_trust,
+        autocopy_to_clipboard=autocopy_to_clipboard,
         show_resume_picker=show_resume_picker,
         initially_resuming=initially_resuming,
         resume_session_id=resume_session_id,
@@ -113,7 +118,9 @@ async def open_textual_session(
     )
 
 
-async def _resolve_workspace_trust(host: AppServerHost) -> tuple[bool, bool]:
+async def _resolve_workspace_trust(
+    host: AppServerHost, *, autocopy_to_clipboard: bool = True
+) -> tuple[bool, bool]:
     """Returns (trust_granted, prompt_shown)."""
     status = await host.trust_status(host.cwd)
     details = status.details
@@ -127,6 +134,7 @@ async def _resolve_workspace_trust(host: AppServerHost) -> tuple[bool, bool]:
         offer_repo_trust="trust_repo" in details.available_decisions,
         repo_explicitly_untrusted=details.repo_explicitly_untrusted,
         settings_path=details.settings_path,
+        autocopy_to_clipboard=autocopy_to_clipboard,
     )
     try:
         decision = await dialog.run_trust_dialog_async()

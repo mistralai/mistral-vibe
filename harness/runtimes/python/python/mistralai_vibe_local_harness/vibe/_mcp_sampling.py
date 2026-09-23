@@ -1,5 +1,7 @@
 """MCP SDK boundary for server-initiated sampling requests."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from typing import Any, cast
@@ -23,18 +25,17 @@ from mistralai_vibe_local_harness.vibe._mcp_models import (
 logger = logging.getLogger(__name__)
 
 
-def build_sampling_callback(
-    completion: MCPSamplingCompletion,
-) -> MCPSamplingCallback:
+def build_sampling_callback(completion: MCPSamplingCompletion) -> MCPSamplingCallback:
     async def sample(
-        context: RequestContext[ClientSession, Any],
-        params: CreateMessageRequestParams,
+        context: RequestContext[ClientSession, Any], params: CreateMessageRequestParams
     ) -> CreateMessageResult | ErrorData:
         del context
         try:
             request = MCPSamplingRequest(
                 messages=tuple(
-                    MCPSamplingMessage(role=message.role, text=_content_text(message.content))
+                    MCPSamplingMessage(
+                        role=message.role, text=_content_text(message.content)
+                    )
                     for message in params.messages
                 ),
                 system_prompt=params.systemPrompt,
@@ -60,9 +61,10 @@ def build_sampling_callback(
 def _content_text(content: object) -> str:
     blocks = content if isinstance(content, list) else [content]
     return "\n".join(
-        str(getattr(block, "text"))
+        str(getattr(block, "text"))  # noqa: B009 - block is untyped here
         for block in blocks
-        if getattr(block, "type", None) == "text" and isinstance(getattr(block, "text", None), str)
+        if getattr(block, "type", None) == "text"
+        and isinstance(getattr(block, "text", None), str)
     )
 
 

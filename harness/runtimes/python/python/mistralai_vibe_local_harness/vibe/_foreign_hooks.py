@@ -20,10 +20,10 @@ point's policy. The fail action per point:
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import json
 from collections.abc import Awaitable, Callable
+import contextlib
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any
 
@@ -109,10 +109,14 @@ def _tool_scoped[I, R](
     handler: Callable[[I, HookContext], Awaitable[R]], match: str | None
 ) -> ToolScopedHook[I, R]:
     predicate = match_predicate(match)
-    return ToolScopedHook(run=handler, selects=lambda name: selects_tool(predicate, name))
+    return ToolScopedHook(
+        run=handler, selects=lambda name: selects_tool(predicate, name)
+    )
 
 
-def _stdin_payload(hook_input: RustPreToolCallHookInput, context: HookContext) -> dict[str, Any]:
+def _stdin_payload(
+    hook_input: RustPreToolCallHookInput, context: HookContext
+) -> dict[str, Any]:
     tool_call = hook_input.tool_call
     return {
         "cwd": str(context.config.cwd),
@@ -202,7 +206,9 @@ async def _read_capped(reader: asyncio.StreamReader | None, limit: int) -> bytes
     return b"".join(chunks)
 
 
-async def _feed_stdin_and_wait(process: asyncio.subprocess.Process, stdin: bytes) -> None:
+async def _feed_stdin_and_wait(
+    process: asyncio.subprocess.Process, stdin: bytes
+) -> None:
     writer = process.stdin
     if writer is not None:
         with contextlib.suppress(ConnectionResetError, BrokenPipeError, OSError):
@@ -275,7 +281,7 @@ def build_pre_tool_call_handler(
             payload = _stdin_payload(hook_input, context)
             stdin = json.dumps(payload).encode("utf-8")
             stdout = await _run_command(command, context.config.cwd, timeout_s, stdin)
-        except Exception:  # noqa: BLE001 - any execution failure maps to the strict action
+        except Exception:
             result, notice = _fail(strict, original_arguments, tool_name=display_name)
         else:
             result, notice = _interpret_stdout(
@@ -301,7 +307,9 @@ def _tool_result_text(result: RustToolResult) -> str:
     # bash carries its output only there, and a hook reading ``tool_output_text`` would
     # otherwise see nothing.
     text = "".join(
-        block.text for block in result.content if isinstance(block, RustTextContentBlock)
+        block.text
+        for block in result.content
+        if isinstance(block, RustTextContentBlock)
     )
     if text:
         return text
@@ -338,7 +346,9 @@ def _post_tool_payload(
             if isinstance(result, RustToolFailureResult)
             else _tool_result_text(result)
         ),
-        "tool_error": result.error.message if isinstance(result, RustToolFailureResult) else None,
+        "tool_error": result.error.message
+        if isinstance(result, RustToolFailureResult)
+        else None,
         # Stub: the harness protocol carries no per-tool timing (RustPostToolCallHookInput
         # has only tool_call + tool_result), so there is nothing to plumb here yet. A hook
         # keying off duration_ms always sees 0 until the Core surfaces execution timing.
@@ -347,8 +357,7 @@ def _post_tool_payload(
 
 
 def _post_tool_fail(
-    strict: bool,  # noqa: FBT001
-    result: RustToolResult,
+    strict: bool, result: RustToolResult
 ) -> tuple[RustToolResult, _HookNotice | None]:
     # ``strict`` blanks the model-visible result so a failed guard does not leak output it
     # never got to inspect. Both fields are cleared: Core falls back to
@@ -438,10 +447,12 @@ def build_post_tool_call_handler(
             payload = _post_tool_payload(hook_input, context)
             stdin = json.dumps(payload).encode("utf-8")
             stdout = await _run_command(command, context.config.cwd, timeout_s, stdin)
-        except Exception:  # noqa: BLE001 - any execution failure maps to the point's action
+        except Exception:
             new_result, notice = _post_tool_fail(strict, result)
         else:
-            new_result, notice = _interpret_post_tool_stdout(stdout, result, strict=strict)
+            new_result, notice = _interpret_post_tool_stdout(
+                stdout, result, strict=strict
+            )
         await _emit_completed(
             context,
             name=name,
@@ -449,7 +460,9 @@ def build_post_tool_call_handler(
             tool_call_id=hook_input.tool_call.call_id,
             notice=notice,
         )
-        return RustPostToolCallHookResult(output=RustPostToolCallOutput(tool_result=new_result))
+        return RustPostToolCallHookResult(
+            output=RustPostToolCallOutput(tool_result=new_result)
+        )
 
     return _tool_scoped(handler, match)
 
@@ -470,10 +483,7 @@ def _retry(feedback: str) -> RustPostAgentTurnHookResult:
 
 
 def _post_agent_payload(context: HookContext) -> dict[str, Any]:
-    return {
-        "cwd": str(context.config.cwd),
-        "hook_event_name": _POST_AGENT_EVENT_NAME,
-    }
+    return {"cwd": str(context.config.cwd), "hook_event_name": _POST_AGENT_EVENT_NAME}
 
 
 def _interpret_post_agent_stdout(
@@ -503,7 +513,7 @@ def build_post_agent_turn_handler(
     name: str,
     command: str,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
-    strict: bool = False,  # noqa: ARG001 - uniform builder API; post_agent has no blocking mode
+    strict: bool = False,
 ) -> PostAgentTurnHookHandler:
     async def handler(
         _hook_input: RustCompletionHookInput, context: HookContext
@@ -512,7 +522,7 @@ def build_post_agent_turn_handler(
             payload = _post_agent_payload(context)
             stdin = json.dumps(payload).encode("utf-8")
             stdout = await _run_command(command, context.config.cwd, timeout_s, stdin)
-        except Exception:  # noqa: BLE001 - a failed review always accepts the turn
+        except Exception:
             return _accept()
         result, notice = _interpret_post_agent_stdout(stdout)
         await _emit_completed(

@@ -254,6 +254,10 @@ emits_finish_reason = false  # set false for OpenAI-compatible endpoints that en
 ### Models
 
 ```toml
+# Restrict selectable models by their canonical API names, not their aliases.
+# Glob patterns and regular expressions prefixed with "re:" are supported.
+allowed_models = ["mistral-vibe-cli-*"]
+
 [[models]]
 name = "mistral-vibe-cli-latest"
 provider = "mistral"
@@ -412,6 +416,13 @@ Otherwise the server uses OAuth and starts browser login by default. Pass
 `vibe mcp add --help` for all supported authentication and timeout options.
 Use `vibe mcp remove <name>` to remove a server from the user configuration;
 stored OAuth credentials are deleted when available.
+
+With `VIBE_CLI=rust`, shell `mcp add` uses the OAuth-only `/mcp add` syntax:
+`vibe mcp add https://mcp.linear.app/mcp --name linear --no-login`.
+It accepts repeatable `--scope`, `--transport`, and `--allow-insecure-http`;
+without `--no-login`, it starts browser login. Both `add` and `remove NAME`
+update user config without a chat session. Use `VIBE_CLI=python vibe mcp add`
+for the stdio/static-auth flags above. `remove` is argv-only, not a slash command.
 
 Hosted OAuth MCP servers can also be added from inside Vibe:
 
@@ -815,7 +826,27 @@ its transcript shows a local information message explaining how to give it a
 new goal or stop it from Main. Set `show_subagent_status_list = false` in
 `config.toml`, or change it through `/config`, to hide this UI.
 
-Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
+Custom agents are TOML files in `~/.vibe/agents/NAME.toml` or a project's
+`.vibe/agents/NAME.toml`. A file with `agent_type = "subagent"` is offered to the
+model to spawn; anything else is a mode the user selects. Both kinds read
+`description`, `enabled_tools`, `disabled_tools`, and per-tool `permission`, plus
+a prompt: `instructions` for prompt text written inline, or `system_prompt_id`
+naming a `.md` file in `.vibe/prompts/` or `~/.vibe/prompts/`. `instructions`
+wins when both are present.
+
+A mode's prompt is fixed when the conversation starts. Selecting the mode with
+`--agent`, or switching to it with Shift+Tab before the first message, runs it on
+its own prompt. Switching to it later changes its tools, permissions and model
+but keeps the prompt the conversation began with; `/clear` then runs the new
+mode's prompt from the start.
+
+On the Unified Harness a custom subagent runs on built-in tools only, with no
+MCP, connector, or plugin tools, and a per-tool `allowlist` or `denylist` caps
+the tool at "ask" rather than narrowing it, because the child runs under the
+parent's configuration. An agent file that cannot be honored (no description, a
+prompt id that resolves nowhere) is dropped and reported in the session's config
+issues. The built-in `explore` subagent is not offered there: a plain spawn
+already starts a child that inherits the parent's prompt and tools.
 
 ## Built-in Slash Commands
 
@@ -1216,8 +1247,11 @@ directories. The trust database is stored in `~/.vibe/trusted_folders.toml`.
 Project-local config (`.vibe/` directory) is only loaded when the current
 directory is explicitly trusted.
 
-Interactive mode prompts to trust unknown folders. The prompt targets the
-closest ancestor of the cwd (the cwd itself included) containing a `.git`
+Interactive mode prompts to trust unknown folders. Use Up/Down or the mouse
+wheel to scroll its detected-file list. Its text supports drag, double-click,
+and triple-click selection; dragging near a list edge scrolls while extending
+the selection. The prompt targets the closest
+ancestor of the cwd (the cwd itself included) containing a `.git`
 entry; the search excludes the user's home directory and the filesystem
 root, and falls back to the cwd if no qualifying ancestor is found.
 Programmatic mode (`-p`/`--prompt`) never prompts: the folder is untrusted.

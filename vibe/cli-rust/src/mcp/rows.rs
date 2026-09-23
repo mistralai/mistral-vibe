@@ -58,7 +58,7 @@ impl Row {
 pub fn rows(app: &MCPApp) -> Vec<Row> {
     match viewing_source(app) {
         Some(source) => detail_rows(&app.state, source),
-        None => list_rows(&app.state),
+        None => list_rows(&app.state, &app.search.query),
     }
 }
 
@@ -98,12 +98,17 @@ pub fn title(app: &MCPApp) -> String {
     }
 }
 
-fn list_rows(state: &MCPState) -> Vec<Row> {
-    let servers = sources(state, MCPSourceKind::Server);
-    let connectors = sources(state, MCPSourceKind::Connector);
+fn list_rows(state: &MCPState, query: &str) -> Vec<Row> {
+    let servers = filtered_sources(state, MCPSourceKind::Server, query);
+    let connectors = filtered_sources(state, MCPSourceKind::Connector, query);
     if servers.is_empty() && connectors.is_empty() {
         return vec![Row::Note(
-            "No MCP servers or connectors configured".to_owned(),
+            if query.trim().is_empty() {
+                "No MCP servers or connectors configured"
+            } else {
+                "No matching MCP servers or connectors"
+            }
+            .to_owned(),
         )];
     }
     let mut rows = Vec::new();
@@ -134,6 +139,26 @@ fn sources(state: &MCPState, kind: MCPSourceKind) -> Vec<&MCPSourceSummary> {
             .then_with(|| a.name.cmp(&b.name))
     });
     sources
+}
+
+fn filtered_sources<'a>(
+    state: &'a MCPState,
+    kind: MCPSourceKind,
+    query: &str,
+) -> Vec<&'a MCPSourceSummary> {
+    let ordered = sources(state, kind);
+    let query = query.trim();
+    if query.is_empty() {
+        return ordered;
+    }
+    let mut scored: Vec<_> = ordered
+        .into_iter()
+        .filter_map(|source| {
+            crate::utils::fuzzy::score(query, &source.name).map(|score| (score, source))
+        })
+        .collect();
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored.into_iter().map(|(_, source)| source).collect()
 }
 
 fn add_source_group(rows: &mut Vec<Row>, title: &str, sources: &[&MCPSourceSummary]) {

@@ -292,6 +292,15 @@ class VibeConfigSchema(ConfigSchema):
     @classmethod
     def validate_merged(cls, data: dict[str, Any], *, origins: dict[str, str]) -> Self:
         config = super().validate_merged(data, origins=origins)
+        # Model validators run before origins are assigned.
+        if (
+            config.origin_of("allowed_models") == AdminConfigLayer.NAME
+            and config.allowed_models
+            and not config.available_models()
+        ):
+            raise ValueError(
+                "Admin allowed_models matches none of the configured models."
+            )
         if config.origin_of("auto_compact_threshold") != AdminConfigLayer.NAME:
             return config
 
@@ -338,7 +347,7 @@ class VibeConfigSchema(ConfigSchema):
     allowed_models: Annotated[list[str], WithReplaceMerge()] = Field(
         default_factory=list,
         description=(
-            "An explicit list of model aliases/patterns to allow. If set, only these"
+            "An explicit list of model names/patterns to allow. If set, only these"
             " models are selectable. An empty list allows all configured models."
             " Supports glob patterns (e.g., 'mistral-*') and regex with 're:' prefix."
         ),
@@ -464,7 +473,7 @@ class VibeConfigSchema(ConfigSchema):
         default=BuiltinAgentName.ACCEPT_EDITS,
         description=(
             "Agent profile to use when no --agent flag is passed. "
-            "Builtin: ask, plan, accept-edits, auto-approve. "
+            "Builtin: ask, plan, accept-edits, smart-approve, auto-approve. "
             "Applies in both interactive and programmatic (-p/--prompt) mode."
         ),
     )
@@ -654,10 +663,15 @@ class VibeConfigSchema(ConfigSchema):
         allowed = {
             alias: model
             for alias, model in self.models.items()
-            if name_matches(alias, self.allowed_models)
+            if name_matches(model.name, self.allowed_models)
         }
-        # A filter that matches nothing degrades to "allow all" rather than
-        # bricking model selection; the mismatch already surfaces as a warning.
+        if self.origin_of("allowed_models") == "admin":
+            # An administrator's policy must fail closed: an invalid policy must
+            # not allow a user-configured model to run.
+            return allowed
+        # A filter that matches nothing in a non-enforced config degrades to
+        # "allow all" rather than bricking model selection; the mismatch already
+        # surfaces as a warning.
         return allowed or self.models
 
     def get_active_model(self) -> ModelConfig:
@@ -921,7 +935,9 @@ class VibeConfigSchema(ConfigSchema):
         for pattern in self.allowed_models:
             if not (pattern or "").strip():
                 continue
-            if any(name_matches(alias, [pattern]) for alias in self.models):
+            if any(
+                name_matches(model.name, [pattern]) for model in self.models.values()
+            ):
                 continue
             logger.warning(
                 "Allowed model '%s' matches none of your configured models.", pattern
@@ -929,6 +945,23 @@ class VibeConfigSchema(ConfigSchema):
             self._validation_warnings.append(
                 f"Allowed model '{pattern}' matches none of your configured models."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_disallowed_active_model(self) -> VibeConfigSchema:
+        if not self.active_model or self.active_model in self.available_models():
+            return self
+        fallback = self.resolve_default_model_alias()
+        logger.warning(
+            "Active model '%s' is excluded by allowed_models; "
+            "falling back to default model '%s'.",
+            self.active_model,
+            fallback,
+        )
+        self._validation_warnings.append(
+            f"Active model '{self.active_model}' is excluded by allowed_models "
+            f"— falling back to default model '{fallback}'."
+        )
         return self
 
     @model_validator(mode="after")

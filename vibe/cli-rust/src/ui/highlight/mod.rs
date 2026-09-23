@@ -15,9 +15,8 @@ use crate::ui::theme;
 const MAX_BYTES: usize = 512 * 1024;
 const MAX_LINES: usize = 10_000;
 const MAX_LINE_BYTES: usize = 4 * 1024;
-/// Highlighted blocks kept per theme; the transcript re-renders them every
-/// frame, and diffs enter one line at a time.
-const CACHE_CAP: usize = 512;
+/// Must exceed the distinct lines of rebuilt bodies, or the clear-on-full cache always misses.
+const CACHE_CAP: usize = 4096;
 
 /// One styled span run per source line.
 pub type Highlighted = Vec<Vec<Span<'static>>>;

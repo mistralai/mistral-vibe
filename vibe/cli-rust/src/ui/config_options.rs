@@ -12,7 +12,7 @@ pub(super) fn build_lines(fields: &[ConfigField], selected: usize, sections: boo
             .map(|(rank, field)| Opt::Row {
                 selected: rank == selected,
                 name: truncate(&field.name, NAME_W),
-                value: truncate(&field.value, VALUE_W),
+                value: truncate(&field.display_value(), VALUE_W),
             })
             .collect();
     }
@@ -35,7 +35,7 @@ pub(super) fn build_lines(fields: &[ConfigField], selected: usize, sections: boo
             out.push(Opt::Row {
                 selected: rank == selected,
                 name: truncate(&field.name, NAME_W),
-                value: truncate(&field.value, VALUE_W),
+                value: truncate(&field.display_value(), VALUE_W),
             });
             rank += 1;
         }

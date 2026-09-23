@@ -1,5 +1,7 @@
 //! `/config` settings screen state and value formatting.
 
+mod dynamic;
+
 use crate::server::method;
 use crate::server::Client;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -41,20 +43,50 @@ pub fn load(session_id: String, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>)
         let _ = tx.send(loaded).await;
     });
 }
+pub fn apply_loaded(app: &mut App, mut loaded: Loaded) {
+    let index = app.config_screen.selected;
+    let path = filtered(app).get(index).map(|field| field.path.clone());
+    for field in &mut loaded.fields {
+        dynamic::apply_choices(app, field);
+    }
+    app.config_screen.fields = loaded.fields;
+    app.config_screen.targets = loaded.targets;
+    let fields = filtered(app);
+    app.config_screen.selected = path
+        .and_then(|path| fields.iter().position(|field| field.path == path))
+        .unwrap_or_else(|| index.min(fields.len().saturating_sub(1)));
+    app.config_screen.loading = false;
+}
+
 pub fn filtered(app: &App) -> Vec<&ConfigField> {
-    let query = app.config_screen.query.trim().to_lowercase();
-    let matches: Vec<&ConfigField> = app
+    use crate::utils::fuzzy;
+    use std::cmp::Reverse;
+
+    let query = app.config_screen.query.trim();
+    if query.is_empty() {
+        let mut fields: Vec<_> = app.config_screen.fields.iter().collect();
+        fields.sort_by_key(|field| !field.popular);
+        return fields;
+    }
+    let mut scored: Vec<_> = app
         .config_screen
         .fields
         .iter()
-        .filter(|field| query.is_empty() || field.name.to_lowercase().contains(&query))
+        .filter_map(|field| {
+            let name = fuzzy::score(query, &field.name).unwrap_or(0);
+            let description = fuzzy::score(query, &field.description).unwrap_or(0);
+            // Names carry twice the description weight, without rounding.
+            let score = (name * 2).max(description);
+            (score > 0).then_some((score, field))
+        })
         .collect();
-    matches
-        .iter()
-        .copied()
-        .filter(|field| field.popular)
-        .chain(matches.iter().copied().filter(|field| !field.popular))
-        .collect()
+    if scored.len() <= 5 {
+        // Popular fields get Python's 1.25x boost only in the merged list.
+        scored.sort_by_key(|(score, field)| Reverse(score * if field.popular { 5 } else { 4 }));
+    } else {
+        scored.sort_by_key(|(score, field)| (!field.popular, Reverse(*score)));
+    }
+    scored.into_iter().map(|(_, field)| field).collect()
 }
 
 pub fn handle_key(app: &mut App, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>, key: KeyEvent) {
@@ -197,7 +229,7 @@ fn reset_selected(app: &mut App, client: &Arc<Client>, tx: &mpsc::Sender<Loaded>
     write(app, client, tx, field, "remove", Value::Null, target);
 }
 
-fn origin_label(origin: &str) -> String {
+pub(crate) fn origin_label(origin: &str) -> String {
     match origin {
         "default" => "defaults".to_owned(),
         "overrides" => "temporary".to_owned(),
@@ -231,7 +263,8 @@ pub(crate) fn write(
         let params = serde_json::json!({
             "sessionId": session_id,
             "ops": [{"op": op, "path": field.path, "value": value, "targetLayer": target}],
-            "reason": "config screen update",
+            "reason": if op == "set" { "config screen edit" } else { "config screen reset" },
+            "reloadRuntime": false,
         });
         let event = match client.request(method::CONFIG_WRITE, params).await {
             Ok(result) => model_picker::Event::Written(result),

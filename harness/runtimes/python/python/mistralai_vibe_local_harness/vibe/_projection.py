@@ -1,5 +1,7 @@
 """Projection from committed Harness activity to Session Protocol state."""
 
+from __future__ import annotations
+
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -37,10 +39,10 @@ from mistralai_vibe_local_harness.protocol import (
     RustTurnSteeringReceivedObservation,
 )
 from mistralai_vibe_local_harness.session_protocol import (
+    BlockedSessionStatus,
     CompletedPublicTurn,
     FailedPublicTurn,
     FailedSessionStatus,
-    BlockedSessionStatus,
     IdleSessionStatus,
     InProgressPublicTurn,
     InterruptedPublicTurn,
@@ -51,7 +53,9 @@ from mistralai_vibe_local_harness.session_protocol import (
     TitleSource,
     TokenUsage,
 )
-from mistralai_vibe_local_harness.vibe._observability import add_uncorrelated_tool_result
+from mistralai_vibe_local_harness.vibe._observability import (
+    add_uncorrelated_tool_result,
+)
 from mistralai_vibe_local_harness.vibe._runtime_config import CompletionDelta
 from mistralai_vibe_local_harness.vibe._storage import (
     ProjectionDelta,
@@ -113,7 +117,7 @@ class SessionProjector:
     def projection(self) -> ProjectionStateV1:
         return self._projection
 
-    def rebased(self, projection: ProjectionStateV1) -> "SessionProjector":
+    def rebased(self, projection: ProjectionStateV1) -> SessionProjector:
         """A projector on ``projection`` that keeps this one's live streamed content.
 
         Callers that resync to the store mid-turn would otherwise drop the
@@ -133,24 +137,29 @@ class SessionProjector:
         rebased._projection = rebased._projection.model_copy(
             update={
                 "snapshot": stored.model_copy(
-                    update={"history": stored.history.model_copy(update={"entries": entries})}
+                    update={
+                        "history": stored.history.model_copy(
+                            update={"entries": entries}
+                        )
+                    }
                 )
             }
         )
         return rebased
 
     def apply_action_started(
-        self,
-        action: RustToolCallAction | RustLLMCallAction,
-        *,
-        observed_at: int,
+        self, action: RustToolCallAction | RustLLMCallAction, *, observed_at: int
     ) -> ProjectionUpdate:
         state = self._projection.snapshot
         entries = list(state.history.entries)
         if isinstance(action, RustLLMCallAction):
             if action.purpose != "compaction":
-                raise ValueError("only compaction LLM actions have public start entries")
-            entry = _running_compaction_entry(state.session.id, entries, action, observed_at)
+                raise ValueError(
+                    "only compaction LLM actions have public start entries"
+                )
+            entry = _running_compaction_entry(
+                state.session.id, entries, action, observed_at
+            )
         else:
             entry = _running_effect_entry(state.session.id, action, observed_at)
         if not _replace_entry(entries, cast(str, entry["id"]), entry):
@@ -163,7 +172,9 @@ class SessionProjector:
         )
         return self._advance(public)
 
-    def apply(self, transition: RustSessionTransition, *, observed_at: int) -> ProjectionUpdate:
+    def apply(  # noqa: PLR0912, PLR0914, PLR0915 - one branch per observation
+        self, transition: RustSessionTransition, *, observed_at: int
+    ) -> ProjectionUpdate:
         state = self._projection.snapshot
         entries = list(state.history.entries)
         latest_turn = state.latest_turn
@@ -175,7 +186,9 @@ class SessionProjector:
                 latest_turn = InProgressPublicTurn(
                     id=observation.turn_id,
                     session_id=state.session.id,
-                    queue_item_id=_content_meta_value(observation.content, "vibe_queue_item_id"),
+                    queue_item_id=_content_meta_value(
+                        observation.content, "vibe_queue_item_id"
+                    ),
                     started_at=observed_at,
                 )
                 if content_is_injected(observation.content):
@@ -266,7 +279,8 @@ class SessionProjector:
                 # retracted and spins in_progress for the rest of the session.
                 entries = [
                     _settled_provisional_entry(entry, observed_at, cause="failure")
-                    if _is_provisional(entry) and _belongs_to_action(entry, observation.action_id)
+                    if _is_provisional(entry)
+                    and _belongs_to_action(entry, observation.action_id)
                     else entry
                     for entry in entries
                 ]
@@ -293,7 +307,9 @@ class SessionProjector:
                         cached_input_tokens=usage.cached_input_tokens,
                     )
             elif isinstance(observation, RustToolResultCommittedObservation):
-                entry = _completed_effect_entry(state.session.id, entries, observation, observed_at)
+                entry = _completed_effect_entry(
+                    state.session.id, entries, observation, observed_at
+                )
                 if not _replace_entry(entries, cast(str, entry["id"]), entry):
                     entries.append(entry)
             elif isinstance(observation, RustToolDiscoveryFinishedObservation):
@@ -337,11 +353,14 @@ class SessionProjector:
                 # that content's fate rather than the turn's, and "failure" is
                 # the nearest of the three the lifecycle union allows.
                 entries = [
-                    entry for entry in entries if not _is_open_effect(entry, observation.turn_id)
+                    entry
+                    for entry in entries
+                    if not _is_open_effect(entry, observation.turn_id)
                 ]
                 entries = [
                     _settled_provisional_entry(entry, observed_at, cause="failure")
-                    if _is_provisional(entry) and entry.get("turnId") == observation.turn_id
+                    if _is_provisional(entry)
+                    and entry.get("turnId") == observation.turn_id
                     else entry
                     for entry in entries
                 ]
@@ -421,7 +440,9 @@ class SessionProjector:
         self, entries: list[JsonObject], *, observed_at: int
     ) -> ProjectionUpdate:
         state = self._projection.snapshot
-        history = state.history.model_copy(update={"entries": [*state.history.entries, *entries]})
+        history = state.history.model_copy(
+            update={"entries": [*state.history.entries, *entries]}
+        )
         public = state.model_copy(
             update={
                 "session": state.session.model_copy(update={"updated_at": observed_at}),
@@ -446,11 +467,17 @@ class SessionProjector:
         state = self._projection.snapshot
         entries = list(state.history.entries)
         if delta.restart:
-            entries = _cleared_provisional_entries(entries, delta.action_id, observed_at)
+            entries = _cleared_provisional_entries(
+                entries, delta.action_id, observed_at
+            )
         if delta.reasoning:
-            entries = _merge_provisional_reasoning(entries, state.session.id, delta, observed_at)
+            entries = _merge_provisional_reasoning(
+                entries, state.session.id, delta, observed_at
+            )
         if delta.text:
-            entries = _merge_provisional_message(entries, state.session.id, delta, observed_at)
+            entries = _merge_provisional_message(
+                entries, state.session.id, delta, observed_at
+            )
         history = state.history.model_copy(update={"entries": entries})
         public = state.model_copy(
             update={
@@ -535,12 +562,20 @@ class SessionProjector:
 
 
 def renamed_session_state(
-    state: PublicSessionState, title: str, *, observed_at: int, source: TitleSource = "manual"
+    state: PublicSessionState,
+    title: str,
+    *,
+    observed_at: int,
+    source: TitleSource = "manual",
 ) -> PublicSessionState:
     return state.model_copy(
         update={
             "session": state.session.model_copy(
-                update={"title": title, "title_source": source, "updated_at": observed_at}
+                update={
+                    "title": title,
+                    "title_source": source,
+                    "updated_at": observed_at,
+                }
             )
         }
     )
@@ -555,7 +590,9 @@ def public_message_entry(
     observed_at: int,
     source: str,
 ) -> JsonObject:
-    return _message_entry(session_id, turn_id, entry_id, role, content, observed_at, source)
+    return _message_entry(
+        session_id, turn_id, entry_id, role, content, observed_at, source
+    )
 
 
 def content_is_injected(content: Sequence[Any]) -> bool:
@@ -597,7 +634,9 @@ def with_session_preview(state: PublicSessionState) -> PublicSessionState:
     )
 
 
-def settle_stalled_projection(state: PublicSessionState, *, observed_at: int) -> PublicSessionState:
+def settle_stalled_projection(
+    state: PublicSessionState, *, observed_at: int
+) -> PublicSessionState:
     """Present a mid-turn projection with no live owner as settled.
 
     Projects a ``running``/``blocked`` turn as ``interrupted``, settles its open
@@ -611,11 +650,7 @@ def settle_stalled_projection(state: PublicSessionState, *, observed_at: int) ->
     turn_id = status.active_turn_id
     reason = "Interrupted by process restart"
     entries = _settle_open_effects(
-        list(state.history.entries),
-        turn_id,
-        observed_at,
-        cancelled=True,
-        reason=reason,
+        list(state.history.entries), turn_id, observed_at, cancelled=True, reason=reason
     )
     interrupted = InterruptedPublicTurn(
         id=turn_id,
@@ -692,7 +727,9 @@ def _message_entry(
 ) -> JsonObject:
     client_message_id = _client_message_id(content) if role == "user" else None
     user_display_content = (
-        _content_meta_object(content, "vibe.userDisplayContent") if role == "user" else None
+        _content_meta_object(content, "vibe.userDisplayContent")
+        if role == "user"
+        else None
     )
     return cast(
         JsonObject,
@@ -768,7 +805,9 @@ def _belongs_to_action(entry: JsonObject, action_id: str) -> bool:
     entry_id = entry.get("id")
     if not isinstance(entry_id, str):
         return False
-    return entry_id == f"assistant-{action_id}" or entry_id.startswith(f"reasoning-{action_id}-")
+    return entry_id == f"assistant-{action_id}" or entry_id.startswith(
+        f"reasoning-{action_id}-"
+    )
 
 
 def _merge_provisional_entry(
@@ -793,19 +832,23 @@ def _merge_provisional_entry(
 
 
 def _merge_provisional_message(
-    entries: list[JsonObject],
-    session_id: str,
-    delta: CompletionDelta,
-    observed_at: int,
+    entries: list[JsonObject], session_id: str, delta: CompletionDelta, observed_at: int
 ) -> list[JsonObject]:
     entry_id = f"assistant-{delta.action_id}"
 
     def extend(entry: JsonObject) -> JsonObject:
         content = entry.get("content")
         blocks = list(content) if isinstance(content, list) else []
-        head = blocks[0] if blocks and isinstance(blocks[0], dict) else {"type": "text", "text": ""}
+        head = (
+            blocks[0]
+            if blocks and isinstance(blocks[0], dict)
+            else {"type": "text", "text": ""}
+        )
         text = head.get("text")
-        updated_head = {**head, "text": (text if isinstance(text, str) else "") + delta.text}
+        updated_head = {
+            **head,
+            "text": (text if isinstance(text, str) else "") + delta.text,
+        }
         return cast(JsonObject, {**entry, "content": [updated_head, *blocks[1:]]})
 
     return _merge_provisional_entry(
@@ -834,17 +877,18 @@ def _merge_provisional_message(
 
 
 def _merge_provisional_reasoning(
-    entries: list[JsonObject],
-    session_id: str,
-    delta: CompletionDelta,
-    observed_at: int,
+    entries: list[JsonObject], session_id: str, delta: CompletionDelta, observed_at: int
 ) -> list[JsonObject]:
     entry_id = f"reasoning-{delta.action_id}-0"
 
     def extend(entry: JsonObject) -> JsonObject:
         text = entry.get("text")
         return cast(
-            JsonObject, {**entry, "text": (text if isinstance(text, str) else "") + delta.reasoning}
+            JsonObject,
+            {
+                **entry,
+                "text": (text if isinstance(text, str) else "") + delta.reasoning,
+            },
         )
 
     return _merge_provisional_entry(
@@ -936,7 +980,9 @@ def public_notice_entry(
         detail["status"] = status
     if content is not None:
         detail["content"] = content
-    level = "warning" if status == "warning" else "error" if status == "error" else "info"
+    level = (
+        "warning" if status == "warning" else "error" if status == "error" else "info"
+    )
     return cast(
         JsonObject,
         {
@@ -985,7 +1031,9 @@ def _content_meta_object(content: Sequence[Any], key: str) -> JsonObject | None:
 
 
 def _content_preview(content: Sequence[Any]) -> str:
-    return _text_preview([part.text for part in content if isinstance(part, RustTextContentBlock)])
+    return _text_preview([
+        part.text for part in content if isinstance(part, RustTextContentBlock)
+    ])
 
 
 def _text_preview(parts: Sequence[str]) -> str:
@@ -1018,14 +1066,26 @@ def _public_content_block(part: Any) -> JsonValue:
                     "kind": "link",
                     "uri": serialized["uri"],
                     **({"name": serialized["name"]} if serialized.get("name") else {}),
-                    **({"title": serialized["title"]} if serialized.get("title") else {}),
+                    **(
+                        {"title": serialized["title"]}
+                        if serialized.get("title")
+                        else {}
+                    ),
                     **(
                         {"description": serialized["description"]}
                         if serialized.get("description")
                         else {}
                     ),
-                    **({"mediaType": serialized["mimeType"]} if serialized.get("mimeType") else {}),
-                    **({"size": serialized["size"]} if serialized.get("size") is not None else {}),
+                    **(
+                        {"mediaType": serialized["mimeType"]}
+                        if serialized.get("mimeType")
+                        else {}
+                    ),
+                    **(
+                        {"size": serialized["size"]}
+                        if serialized.get("size") is not None
+                        else {}
+                    ),
                 },
             },
         )
@@ -1039,7 +1099,11 @@ def _public_content_block(part: Any) -> JsonValue:
                     "resource": {
                         "kind": "text" if "text" in resource else "blob",
                         "uri": resource["uri"],
-                        **({"mediaType": resource["mimeType"]} if resource.get("mimeType") else {}),
+                        **(
+                            {"mediaType": resource["mimeType"]}
+                            if resource.get("mimeType")
+                            else {}
+                        ),
                         **({"text": resource["text"]} if "text" in resource else {}),
                         **({"blob": resource["blob"]} if "blob" in resource else {}),
                     },
@@ -1111,7 +1175,9 @@ def _model_change_count(entries: Sequence[JsonObject]) -> int:
     )
 
 
-def _model_change_entry(session_id: str, model: str, sequence: int, observed_at: int) -> JsonObject:
+def _model_change_entry(
+    session_id: str, model: str, sequence: int, observed_at: int
+) -> JsonObject:
     return cast(
         JsonObject,
         {
@@ -1192,9 +1258,7 @@ def _failed_compaction_entry(
         details={
             "trigger": observation.trigger,
             "attempt": observation.attempt,
-            "error": {
-                "code": observation.error.code,
-            },
+            "error": {"code": observation.error.code},
             # Public summary-failure reason, recovered where the Core message is
             # available; None for size overflow or provider-stream failures.
             "reason": _compaction_failure_reason(observation.error),
@@ -1235,10 +1299,7 @@ def _terminal_compaction_entry(
 
 def _add_token_usage(current: TokenUsage | None, added: Any) -> TokenUsage:
     previous = current or TokenUsage(
-        input_tokens=0,
-        output_tokens=0,
-        total_tokens=0,
-        cached_input_tokens=0,
+        input_tokens=0, output_tokens=0, total_tokens=0, cached_input_tokens=0
     )
     return TokenUsage(
         input_tokens=previous.input_tokens + added.input_tokens,
@@ -1248,7 +1309,7 @@ def _add_token_usage(current: TokenUsage | None, added: Any) -> TokenUsage:
     )
 
 
-def _completed_effect_entry(
+def _completed_effect_entry(  # noqa: PLR0914 - one cohesive effect entry
     session_id: str,
     entries: Sequence[JsonObject],
     observation: RustToolResultCommittedObservation,
@@ -1261,11 +1322,13 @@ def _completed_effect_entry(
         part.text for part in result.content if isinstance(part, RustTextContentBlock)
     )
     serialized = cast(
-        JsonValue,
-        result.model_dump(mode="json", by_alias=True, exclude_none=True),
+        JsonValue, result.model_dump(mode="json", by_alias=True, exclude_none=True)
     )
     approval = _approval_meta(result)
-    if isinstance(result, RustToolFailureResult) and result.error.code == "tool_skipped":
+    if (
+        isinstance(result, RustToolFailureResult)
+        and result.error.code == "tool_skipped"
+    ):
         reason = output_text or result.error.message
         effect_state: JsonObject = {
             "status": "skipped",
@@ -1306,14 +1369,12 @@ def _completed_effect_entry(
     if existing is not None:
         updated = dict(existing)
         detail = _completed_effect_detail(existing, result.meta)
-        updated.update(
-            {
-                "updatedAt": observed_at,
-                "generationStatus": "completed",
-                "detail": detail,
-                "state": effect_state,
-            }
-        )
+        updated.update({
+            "updatedAt": observed_at,
+            "generationStatus": "completed",
+            "detail": detail,
+            "state": effect_state,
+        })
         return cast(JsonObject, updated)
     add_uncorrelated_tool_result()
     tool_name = "tool"
@@ -1382,12 +1443,9 @@ def _approval_meta(result: object) -> JsonObject | None:
 
 
 def _completed_tool_discovery_effect_entry(
-    session_id: str,
-    observation: RustToolDiscoveryFinishedObservation,
-    observed_at: int,
+    session_id: str, observation: RustToolDiscoveryFinishedObservation, observed_at: int
 ) -> JsonObject:
     """Make the Core-local discovery call visible without exposing its query."""
-
     message = "for relevant tools"
     return cast(
         JsonObject,
@@ -1441,10 +1499,7 @@ def _settle_open_effects(
         if _is_open_effect(entry, turn_id):
             settled.append(
                 _settled_open_effect_entry(
-                    entry,
-                    observed_at,
-                    cancelled=cancelled,
-                    reason=reason,
+                    entry, observed_at, cancelled=cancelled, reason=reason
                 )
             )
         elif _is_provisional(entry) and entry.get("turnId") == turn_id:
@@ -1473,25 +1528,22 @@ def _is_open_effect(entry: JsonObject, turn_id: str) -> bool:
 
 
 def _settled_provisional_entry(
-    entry: JsonObject, observed_at: int, *, cause: Literal["failure", "steer", "interrupt"]
+    entry: JsonObject,
+    observed_at: int,
+    *,
+    cause: Literal["failure", "steer", "interrupt"],
 ) -> JsonObject:
     updated = dict(entry)
-    updated.update(
-        {
-            "updatedAt": observed_at,
-            "generationStatus": "completed",
-            "outcome": {"type": "discarded", "cause": cause},
-        }
-    )
+    updated.update({
+        "updatedAt": observed_at,
+        "generationStatus": "completed",
+        "outcome": {"type": "discarded", "cause": cause},
+    })
     return cast(JsonObject, updated)
 
 
 def _settled_open_effect_entry(
-    entry: JsonObject,
-    observed_at: int,
-    *,
-    cancelled: bool,
-    reason: str,
+    entry: JsonObject, observed_at: int, *, cancelled: bool, reason: str
 ) -> JsonObject:
     state = entry.get("state")
     output_text = ""
@@ -1513,13 +1565,11 @@ def _settled_open_effect_entry(
             "display": {"success": False, "message": reason},
         }
     updated = dict(entry)
-    updated.update(
-        {
-            "updatedAt": observed_at,
-            "generationStatus": "completed",
-            "state": effect_state,
-        }
-    )
+    updated.update({
+        "updatedAt": observed_at,
+        "generationStatus": "completed",
+        "state": effect_state,
+    })
     return cast(JsonObject, updated)
 
 
@@ -1527,9 +1577,15 @@ def _effect_detail(action: RustToolCallAction) -> tuple[str, JsonObject]:
     if isinstance(action, RustRuntimeBuiltinToolCallAction):
         tool_name = action.call.name
         if tool_name == "subagent.spawn":
-            arguments = action.call.arguments if isinstance(action.call.arguments, dict) else {}
-            agent_name = _str_argument(cast(JsonObject, arguments), "agentName") or "subagent"
-            agent_type = _str_argument(cast(JsonObject, arguments), "agentType") or "generic"
+            arguments = (
+                action.call.arguments if isinstance(action.call.arguments, dict) else {}
+            )
+            agent_name = (
+                _str_argument(cast(JsonObject, arguments), "agentName") or "subagent"
+            )
+            agent_type = (
+                _str_argument(cast(JsonObject, arguments), "agentType") or "generic"
+            )
             message = _str_argument(cast(JsonObject, arguments), "message") or ""
             return (
                 tool_name,
@@ -1579,11 +1635,15 @@ def _str_argument(arguments: JsonObject, name: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _completed_effect_detail(existing: JsonObject, result_meta: JsonObject | None) -> JsonObject:
+def _completed_effect_detail(
+    existing: JsonObject, result_meta: JsonObject | None
+) -> JsonObject:
     detail = existing.get("detail")
     if not isinstance(detail, dict) or detail.get("kind") != "subagent":
         return cast(JsonObject, detail) if isinstance(detail, dict) else {}
-    annotation = result_meta.get("mistral.vibe.subagent") if result_meta is not None else None
+    annotation = (
+        result_meta.get("mistral.vibe.subagent") if result_meta is not None else None
+    )
     if not isinstance(annotation, dict):
         return cast(JsonObject, detail)
     child_session_id = annotation.get("childSessionId")
@@ -1604,7 +1664,9 @@ def _find_entry(entries: Sequence[JsonObject], entry_id: str) -> JsonObject | No
     return None
 
 
-def _replace_entry(entries: list[JsonObject], entry_id: str, replacement: JsonObject) -> bool:
+def _replace_entry(
+    entries: list[JsonObject], entry_id: str, replacement: JsonObject
+) -> bool:
     for index, entry in enumerate(entries):
         if entry.get("id") == entry_id:
             entries[index] = replacement

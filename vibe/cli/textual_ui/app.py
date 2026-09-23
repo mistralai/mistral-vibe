@@ -71,6 +71,7 @@ from vibe.app_server.models import (
     ImageAttachment,
     MCPSourceKind,
     MentionStats,
+    PathGrantScope,
     PreparedPrompt,
     PublicCallbackEntry,
     PublicChildSession,
@@ -542,6 +543,7 @@ class StartupOptions:
     show_resume_picker: bool = False
     is_resuming_session: bool = False
     prompt_for_workspace_trust: bool = False
+    autocopy_to_clipboard: bool = True
     startup_show_resume_picker: bool | None = None
     startup_prompt_for_workspace_trust: bool | None = None
     resume_session_id: str | None = None
@@ -844,6 +846,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._queue_selected_widget: Widget | None = None
         self._fatal_init_error = False
         self._force_quit_task: asyncio.Task[None] | None = None
+        self._shown_config_validation_warnings: set[str] = set()
 
     def _mark_session_ready(self) -> None:
         self._session_ready.set()
@@ -1290,6 +1293,7 @@ class VibeApp(App):  # noqa: PLR0904
         if resolved_theme != self.theme:
             self.run_worker(self._apply_theme(config.theme))
         set_config_log_level(config.log_level)
+        self._show_config_validation_warnings(config)
         self._refresh_banner()
         self._refresh_context_progress()
         self._refresh_subagent_list()
@@ -1587,8 +1591,17 @@ class VibeApp(App):  # noqa: PLR0904
     def _show_config_issues(self) -> None:
         for issue in self.app_server.resources.runtime.issues:
             self._show_config_issue(issue)
-        for warning in self.app_server.resources.config.current.validation_warnings:
+        self._show_config_validation_warnings(self.app_server.resources.config.current)
+
+    def _show_config_validation_warnings(self, config: ConfigView) -> None:
+        self._shown_config_validation_warnings.intersection_update(
+            config.validation_warnings
+        )
+        for warning in config.validation_warnings:
+            if warning in self._shown_config_validation_warnings:
+                continue
             self.notify(warning, severity="warning", markup=False, timeout=10)
+            self._shown_config_validation_warnings.add(warning)
 
     def _show_config_issue(self, issue: ConfigIssue) -> None:
         self.notify(
@@ -2101,12 +2114,16 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_approval_app_approval_granted_always_tool(
         self, message: ApprovalApp.ApprovalGrantedAlwaysTool
     ) -> None:
-        await self._respond_to_approval(ApprovalDecisionType.APPROVE_FOR_SESSION)
+        await self._respond_to_approval(
+            ApprovalDecisionType.APPROVE_FOR_SESSION, path_scope=message.path_scope
+        )
 
     async def on_approval_app_approval_granted_always_permanent(
         self, message: ApprovalApp.ApprovalGrantedAlwaysPermanent
     ) -> None:
-        await self._respond_to_approval(ApprovalDecisionType.APPROVE_PERMANENTLY)
+        await self._respond_to_approval(
+            ApprovalDecisionType.APPROVE_PERMANENTLY, path_scope=message.path_scope
+        )
 
     async def on_approval_app_approval_rejected(
         self, message: ApprovalApp.ApprovalRejected
@@ -3072,7 +3089,10 @@ class VibeApp(App):  # noqa: PLR0904
             match callback.detail:
                 case ApprovalCallbackDetail() as detail:
                     await self._switch_to_approval_app(
-                        detail.effect, detail.required_permissions, detail.reason
+                        detail.effect,
+                        detail.required_permissions,
+                        detail.path_scope_choices,
+                        detail.reason,
                     )
                 case UserInputCallbackDetail() as detail:
                     await self._switch_to_question_app(detail.request)
@@ -3082,14 +3102,18 @@ class VibeApp(App):  # noqa: PLR0904
             raise
 
     async def _respond_to_approval(
-        self, decision: ApprovalDecisionType, feedback: str | None = None
+        self,
+        decision: ApprovalDecisionType,
+        feedback: str | None = None,
+        path_scope: PathGrantScope | None = None,
     ) -> None:
         callback = self._active_callback
         if callback is None or not isinstance(callback.detail, ApprovalCallbackDetail):
             return
         await self._respond_to_active_callback(
             ApprovalCallbackOutput(
-                decision=ApprovalDecision(type=decision), feedback=feedback
+                decision=ApprovalDecision(type=decision, path_scope=path_scope),
+                feedback=feedback,
             )
         )
 
@@ -4796,8 +4820,12 @@ class VibeApp(App):  # noqa: PLR0904
                 UserCommandMessage("Lean agent is already installed.")
             )
             return
-        await self.app_server.resources.agents.set_installed("lean", installed=True)
-        await self._reload_config()
+        try:
+            await self.app_server.resources.agents.set_installed("lean", installed=True)
+        except AppServerResponseError as exc:
+            await self._mount_and_scroll(ErrorMessage(str(exc)))
+            return
+        await self._mount_and_scroll(UserCommandMessage("Lean agent installed."))
 
     async def _uninstall_lean(self, **kwargs: Any) -> None:
         current = {agent.name for agent in self.app_server.resources.agents.all}
@@ -4806,8 +4834,14 @@ class VibeApp(App):  # noqa: PLR0904
                 UserCommandMessage("Lean agent is not installed.")
             )
             return
-        await self.app_server.resources.agents.set_installed("lean", installed=False)
-        await self._reload_config()
+        try:
+            await self.app_server.resources.agents.set_installed(
+                "lean", installed=False
+            )
+        except AppServerResponseError as exc:
+            await self._mount_and_scroll(ErrorMessage(str(exc)))
+            return
+        await self._mount_and_scroll(UserCommandMessage("Lean agent uninstalled."))
 
     async def _reset_message_widgets(self) -> None:
         """Tear down the on-screen conversation widgets and UI state.
@@ -5173,12 +5207,14 @@ class VibeApp(App):  # noqa: PLR0904
         self,
         effect: EffectDetail,
         required_permissions: list[RequiredPermission] | None = None,
+        path_scope_choices: list[PathGrantScope] | None = None,
         reason: str | None = None,
     ) -> None:
         approval_app = ApprovalApp(
             effect=effect,
             config=self.config,
             required_permissions=required_permissions,
+            path_scope_choices=path_scope_choices,
             reason=reason,
         )
         await self._switch_from_input(approval_app, scroll=True)
@@ -6580,6 +6616,7 @@ def run_textual_ui(
             plan = await resolve_session_open_plan(
                 host,
                 prompt_for_workspace_trust=effective_startup.prompt_for_workspace_trust,
+                autocopy_to_clipboard=effective_startup.autocopy_to_clipboard,
                 show_resume_picker=effective_startup.show_resume_picker,
                 initially_resuming=effective_startup.is_resuming_session,
                 resume_session_id=effective_startup.resume_session_id,

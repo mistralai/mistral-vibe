@@ -57,7 +57,7 @@ from vibe.app_server._effect_models import (
     effect_input_json as effect_input_json,
 )
 from vibe.app_server._model import ProtocolModel
-from vibe.permissions import RequiredPermission
+from vibe.permissions import PathGrantScope, RequiredPermission
 from vibe.questions import (
     QuestionChoice as QuestionChoice,
     UserAnswer as UserAnswer,
@@ -303,6 +303,7 @@ class ApprovalDecisionType(StrEnum):
 
 class ApprovalDecision(ProtocolModel):
     type: ApprovalDecisionType
+    path_scope: PathGrantScope | None = None
 
 
 class ApprovalCallbackDetail(ProtocolModel):
@@ -312,6 +313,7 @@ class ApprovalCallbackDetail(ProtocolModel):
     choices: list[ApprovalDecisionType] = Field(
         default_factory=lambda: list(ApprovalDecisionType)
     )
+    path_scope_choices: list[PathGrantScope] = Field(default_factory=list)
     related_entry_id: str | None = None
     # Why approval is being requested (e.g. smart approve's risk reason); shown in the
     # approval dialog. None for the static per-tool permission gate.
@@ -1137,6 +1139,8 @@ class PublicSession(ProtocolModel):
     updated_at: int
     bumped_at: int | None = None
     pinned_at: int | None = None
+    archived_at: int | None = None
+    is_unseen: bool = False
     cwd: str | None = None
     workspace_roots: list[str] = Field(default_factory=list)
     # What this session runs; ``None`` follows the current default.

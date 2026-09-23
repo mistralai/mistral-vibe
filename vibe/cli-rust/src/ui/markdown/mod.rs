@@ -75,6 +75,15 @@ pub struct PreparedMarkdown {
 }
 
 impl PreparedMarkdown {
+    fn from_lines(lines: Vec<Line<'static>>) -> Self {
+        Self {
+            lines,
+            cells: Vec::new(),
+            links: Vec::new(),
+            prewrapped: false,
+        }
+    }
+
     pub fn lines(&self) -> &[Line<'static>] {
         &self.lines
     }

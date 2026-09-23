@@ -48,7 +48,8 @@ pub fn resolve(
 ) -> Vec<RowSpan> {
     let (anchor, head) = span.selection;
     let span_chrome = span.chrome;
-    let flow = flow(anchor, head, chat, span.origin, span.end_exclusive);
+    let end_exclusive = span.end_exclusive && granularity == Granularity::Char;
+    let flow = flow(anchor, head, chat, span.origin, end_exclusive);
     let rows: Vec<Row> = flow
         .into_iter()
         .filter_map(|span| {

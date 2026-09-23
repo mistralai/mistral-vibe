@@ -70,7 +70,25 @@ pub fn shape(app: &App) -> Shape {
         return Shape::Text;
     }
     if target == crate::mouse::MouseTarget::Trust {
+        let at = crate::trust_folders::selection_position(app, at);
         return if app.view.selection_region.contains(at) {
+            Shape::Text
+        } else {
+            Shape::Default
+        };
+    }
+    if target == crate::mouse::MouseTarget::RemoteProject {
+        if crate::mouse::scrollbar_at(app, at) {
+            return Shape::Default;
+        }
+        let project = &app.vibe_code_project;
+        let position = at.into();
+        if project.search_area.contains(position) || project.branch_area.contains(position) {
+            return Shape::Text;
+        }
+        return if project.selectable_index_at(at).is_some() {
+            Shape::Pointer
+        } else if app.view.selection_region.contains(at) {
             Shape::Text
         } else {
             Shape::Default

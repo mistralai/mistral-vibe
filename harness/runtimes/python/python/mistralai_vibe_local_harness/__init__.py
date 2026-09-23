@@ -1,6 +1,7 @@
-from mistralai_vibe_local_harness._native import HarnessSession, hook_tool_catalog
+from __future__ import annotations
 
-from .protocol import (
+from mistralai_vibe_local_harness._native import HarnessSession, hook_tool_catalog
+from mistralai_vibe_local_harness.protocol import (
     RustAudioContentBlock,
     RustAutomaticCompactionPolicy,
     RustBlobResourceContents,
@@ -11,8 +12,8 @@ from .protocol import (
     RustDisabledRuntimeToolFeature,
     RustEmbeddedResourceContentBlock,
     RustEnabledRuntimeToolFeature,
-    RustFilesystemLargeOutputPolicy,
     RustFilesystemAction,
+    RustFilesystemLargeOutputPolicy,
     RustHarnessConfig,
     RustHarnessNotification,
     RustHarnessSettings,
@@ -27,7 +28,7 @@ from .protocol import (
     RustToolSettings,
     RustTurnSettings,
 )
-from .runtime import (
+from mistralai_vibe_local_harness.runtime import (
     FilesystemHandler,
     HarnessCommandRejected,
     HarnessCompletionFailed,
@@ -44,13 +45,12 @@ from .runtime import (
 )
 
 __all__ = [
+    "FilesystemHandler",
     "HarnessCommandRejected",
     "HarnessCompletionFailed",
     "HarnessInterrupted",
     "HarnessSession",
-    "hook_tool_catalog",
     "InMemoryHarnessRuntime",
-    "FilesystemHandler",
     "ModelAssistantContentDelta",
     "ModelCompletionFinished",
     "ModelReasoningSummaryDelta",
@@ -62,26 +62,27 @@ __all__ = [
     "RustAutomaticCompactionPolicy",
     "RustBlobResourceContents",
     "RustContentBlock",
-    "RustEmbeddedResourceContentBlock",
+    "RustContextSettings",
     "RustDisabledCompactionPolicy",
     "RustDisabledLargeOutputPolicy",
     "RustDisabledRuntimeToolFeature",
+    "RustEmbeddedResourceContentBlock",
     "RustEnabledRuntimeToolFeature",
-    "RustFilesystemLargeOutputPolicy",
     "RustFilesystemAction",
+    "RustFilesystemLargeOutputPolicy",
     "RustHarnessConfig",
-    "RustHarnessSettings",
     "RustHarnessNotification",
+    "RustHarnessSettings",
     "RustImageContentBlock",
+    "RustProgrammaticToolSettings",
+    "RustProvidedToolCallAction",
     "RustResourceLinkContentBlock",
+    "RustRuntimeBuiltinToolCallAction",
     "RustTextContentBlock",
     "RustTextResourceContents",
     "RustToolCallAction",
-    "RustRuntimeBuiltinToolCallAction",
-    "RustProvidedToolCallAction",
-    "RustProgrammaticToolSettings",
     "RustToolSettings",
     "RustTurnSettings",
-    "RustContextSettings",
     "ToolExecutionResult",
+    "hook_tool_catalog",
 ]

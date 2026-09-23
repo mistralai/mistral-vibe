@@ -7,16 +7,20 @@ imported when a provider selects the ``vertex-anthropic`` api style.
 # google-auth is an optional, lazily-imported dependency for the Vertex path.
 # pyright: reportMissingImports=false
 
+from __future__ import annotations
+
+from collections.abc import Sequence
 import json
 import threading
-from collections.abc import Sequence
 from typing import Any, ClassVar
 
 import google.auth
 import google.auth.credentials
 from google.auth.transport.requests import Request
 
-from mistralai_vibe_local_harness.vibe.adapters.generic._anthropic import AnthropicAdapter
+from mistralai_vibe_local_harness.vibe.adapters.generic._anthropic import (
+    AnthropicAdapter,
+)
 from mistralai_vibe_local_harness.vibe.adapters.generic._base import PreparedRequest
 from mistralai_vibe_local_harness.vibe.adapters.generic._model import (
     AvailableTool,
@@ -32,11 +36,11 @@ def build_vertex_base_url(region: str) -> str:
     return f"https://{region}-aiplatform.googleapis.com"
 
 
-def build_vertex_endpoint(region: str, project_id: str, model: str, streaming: bool = False) -> str:
+def build_vertex_endpoint(
+    region: str, project_id: str, model: str, streaming: bool = False
+) -> str:
     action = "streamRawPredict" if streaming else "rawPredict"
-    return (
-        f"/v1/projects/{project_id}/locations/{region}/publishers/anthropic/models/{model}:{action}"
-    )
+    return f"/v1/projects/{project_id}/locations/{region}/publishers/anthropic/models/{model}:{action}"
 
 
 class VertexCredentials:
@@ -56,7 +60,9 @@ class VertexCredentials:
             if not creds.valid:
                 creds.refresh(Request())
             if creds.token is None:
-                raise RuntimeError("Vertex AI credential refresh did not produce a token")
+                raise RuntimeError(
+                    "Vertex AI credential refresh did not produce a token"
+                )
             return creds.token
 
 
@@ -132,7 +138,9 @@ class VertexAnthropicAdapter(AnthropicAdapter):
             "anthropic-beta": self.BETA_FEATURES,
         }
 
-        endpoint = build_vertex_endpoint(region, project_id, model_name, streaming=enable_streaming)
+        endpoint = build_vertex_endpoint(
+            region, project_id, model_name, streaming=enable_streaming
+        )
         base_url = build_vertex_base_url(region)
 
         body = json.dumps(payload).encode("utf-8")

@@ -51,6 +51,7 @@ pub(super) fn press(app: &mut App, offset: usize) {
     };
     app.chat_input.anchor = Some(anchor);
     app.chat_input.cursor = cursor;
+    crate::completion_manager::refresh(app);
 }
 
 /// Extend to `at`, snapping both ends outwards for a word or paragraph drag

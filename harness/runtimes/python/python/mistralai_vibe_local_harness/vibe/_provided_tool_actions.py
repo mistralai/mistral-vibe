@@ -1,6 +1,9 @@
 """Generic provided-tool result mapping shared by Runtime integrations."""
 
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable
+
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from mistralai_vibe_local_harness.protocol import (
@@ -12,7 +15,9 @@ from mistralai_vibe_local_harness.protocol import (
     RustToolSucceededEvent,
     RustToolSuccessResult,
 )
-from mistralai_vibe_local_harness.vibe._connector_models import ConnectorNormalizedResult
+from mistralai_vibe_local_harness.vibe._connector_models import (
+    ConnectorNormalizedResult,
+)
 from mistralai_vibe_local_harness.vibe._mcp_models import MCPNormalizedResult
 
 _CONTENT_BLOCKS = TypeAdapter(list[RustContentBlock])
@@ -35,9 +40,7 @@ async def execute_provided_tool_action(
 ) -> RustToolSucceededEvent | RustToolFailedEvent:
     try:
         result = await call(
-            action.call.group_name,
-            action.call.tool_name,
-            action.call.arguments,
+            action.call.group_name, action.call.tool_name, action.call.arguments
         )
         content = _CONTENT_BLOCKS.validate_python(list(result.content))
     except failure_type as exc:

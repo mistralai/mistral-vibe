@@ -13,10 +13,14 @@ type EffectKind = Literal[
 ]
 type ConnectorOperation = Literal["cleanup", "gateway_call"]
 type ConnectorOutcome = Literal["cancelled", "failure", "success"]
-type SubagentOperation = Literal["list", "spawn", "wait", "send_message", "interrupt", "close"]
+type SubagentOperation = Literal[
+    "list", "spawn", "wait", "send_message", "interrupt", "close"
+]
 type SubagentOperationOutcome = Literal["failure", "success", "timeout"]
 type SubagentTerminalOutcome = Literal["completed", "failed", "interrupted"]
-type SubagentRecoveryPhase = Literal["action_reconciliation", "child_preflight", "child_watch"]
+type SubagentRecoveryPhase = Literal[
+    "action_reconciliation", "child_preflight", "child_watch"
+]
 
 _meter = metrics.get_meter(__name__)
 
@@ -91,19 +95,12 @@ def record_session_operation(
 
 def add_recovery_failure(*, failure_code: str, phase: str) -> None:
     _recovery_failures.add(
-        1,
-        {
-            "error.type": failure_code,
-            "mistral_ai.vibe_harness.restore.phase": phase,
-        },
+        1, {"error.type": failure_code, "mistral_ai.vibe_harness.restore.phase": phase}
     )
 
 
 def record_effect_reconciliation(
-    elapsed_s: float,
-    *,
-    kind: EffectKind,
-    outcome: OperationOutcome,
+    elapsed_s: float, *, kind: EffectKind, outcome: OperationOutcome
 ) -> None:
     _effect_reconciliation_duration.record(
         elapsed_s,
@@ -154,16 +151,11 @@ def record_subagent_operation(
 
 
 def add_subagent_active_turns(delta: int) -> None:
-    _subagent_active_turns.add(
-        delta,
-        {"mistral_ai.vibe_harness.backend": "unified"},
-    )
+    _subagent_active_turns.add(delta, {"mistral_ai.vibe_harness.backend": "unified"})
 
 
 def add_subagent_recovery_failure(
-    *,
-    failure_code: str,
-    phase: SubagentRecoveryPhase,
+    *, failure_code: str, phase: SubagentRecoveryPhase
 ) -> None:
     _subagent_recovery_failures.add(
         1,
@@ -186,9 +178,7 @@ def add_subagent_orphan_detected() -> None:
 
 
 def record_subagent_notification_lag(
-    elapsed_s: float,
-    *,
-    outcome: SubagentTerminalOutcome,
+    elapsed_s: float, *, outcome: SubagentTerminalOutcome
 ) -> None:
     _subagent_notification_lag.record(
         elapsed_s,

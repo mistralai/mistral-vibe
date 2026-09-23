@@ -1,6 +1,9 @@
 """Mistral connector gateway transport built on generic MCP HTTP machinery."""
 
+from __future__ import annotations
+
 import asyncio
+from http import HTTPStatus
 import logging
 import time
 from urllib.parse import quote
@@ -49,11 +52,7 @@ class ConnectorGatewayClient:
         self._closed = False
 
     async def call(
-        self,
-        *,
-        raw_connector_id: str,
-        remote_tool_name: str,
-        arguments: JsonObject,
+        self, *, raw_connector_id: str, remote_tool_name: str, arguments: JsonObject
     ) -> ConnectorNormalizedResult:
         started_at = time.perf_counter()
         with _tracer.start_as_current_span("connector.gateway.call") as span:
@@ -65,7 +64,9 @@ class ConnectorGatewayClient:
                     arguments=arguments,
                 )
             except asyncio.CancelledError:
-                span.set_attribute("mistral_ai.vibe_harness.connector.outcome", "cancelled")
+                span.set_attribute(
+                    "mistral_ai.vibe_harness.connector.outcome", "cancelled"
+                )
                 record_connector_operation(
                     time.perf_counter() - started_at,
                     operation="gateway_call",
@@ -80,7 +81,9 @@ class ConnectorGatewayClient:
                 )
                 raise
             except ConnectorRuntimeFailure as exc:
-                span.set_attribute("mistral_ai.vibe_harness.connector.outcome", "failure")
+                span.set_attribute(
+                    "mistral_ai.vibe_harness.connector.outcome", "failure"
+                )
                 span.set_attribute("error.type", exc.code)
                 record_connector_operation(
                     time.perf_counter() - started_at,
@@ -113,14 +116,12 @@ class ConnectorGatewayClient:
             return result
 
     async def _call(
-        self,
-        *,
-        raw_connector_id: str,
-        remote_tool_name: str,
-        arguments: JsonObject,
+        self, *, raw_connector_id: str, remote_tool_name: str, arguments: JsonObject
     ) -> ConnectorNormalizedResult:
         if self._closed:
-            raise ConnectorRuntimeFailure("connector_runtime_closed", "Connector gateway is closed")
+            raise ConnectorRuntimeFailure(
+                "connector_runtime_closed", "Connector gateway is closed"
+            )
         encoded_id = quote(raw_connector_id, safe="")
         server = ResolvedMCPServerConfig(
             name="connector-gateway",
@@ -157,12 +158,12 @@ class ConnectorGatewayClient:
                 "Connector authorization is required",
             ) from exc
         except MCPHTTPStatusFailure as exc:
-            if exc.status_code == 403:
+            if exc.status_code == HTTPStatus.FORBIDDEN:
                 raise ConnectorRuntimeFailure(
                     "connector_authorization_required",
                     "Connector authorization is required",
                 ) from exc
-            if exc.status_code == 404:
+            if exc.status_code == HTTPStatus.NOT_FOUND:
                 raise ConnectorRuntimeFailure(
                     "connector_not_found", "Connector gateway route was not found"
                 ) from exc
@@ -180,12 +181,10 @@ class ConnectorGatewayClient:
                 raise ConnectorRuntimeFailure(
                     "connector_timeout", "Connector gateway timed out", retryable=True
                 ) from exc
-            if exc.code in {
-                "mcp_invalid_payload",
-                "mcp_invalid_result",
-            }:
+            if exc.code in {"mcp_invalid_payload", "mcp_invalid_result"}:
                 raise ConnectorRuntimeFailure(
-                    "connector_invalid_result", "Connector gateway returned an invalid result"
+                    "connector_invalid_result",
+                    "Connector gateway returned an invalid result",
                 ) from exc
             raise ConnectorRuntimeFailure(
                 "connector_gateway_failed", "Connector gateway call failed"
@@ -201,9 +200,7 @@ class ConnectorGatewayClient:
         started_at = time.perf_counter()
         self._closed = True
         record_connector_operation(
-            time.perf_counter() - started_at,
-            operation="cleanup",
-            outcome="success",
+            time.perf_counter() - started_at, operation="cleanup", outcome="success"
         )
 
 

@@ -1,5 +1,7 @@
 """Attach and transfer resource-link fallbacks for file-backed images."""
 
+from __future__ import annotations
+
 import base64
 import hashlib
 from pathlib import Path
@@ -26,10 +28,7 @@ def build_file_image_content_block(
     *, data: str, uri: str, name: str, mime_type: str, size: int
 ) -> RustImageContentBlock:
     resource_link = RustResourceLinkContentBlock(
-        uri=uri,
-        name=name,
-        mime_type=mime_type,
-        size=size,
+        uri=uri, name=name, mime_type=mime_type, size=size
     )
     image = RustImageContentBlock(data=data, mime_type=mime_type)
     return image.model_copy(
@@ -62,25 +61,20 @@ def export_file_image_fallback(value: dict[str, JsonValue]) -> dict[str, JsonVal
 
     exported = dict(value)
     remaining_meta = {
-        key: item for key, item in meta.items() if key != FILE_IMAGE_RESOURCE_LINK_META_KEY
+        key: item
+        for key, item in meta.items()
+        if key != FILE_IMAGE_RESOURCE_LINK_META_KEY
     }
     if remaining_meta:
         exported["_meta"] = remaining_meta
     else:
         exported.pop("_meta", None)
-    exported["file_fallback"] = {
-        "type": "file",
-        "name": resource_link.name,
-    }
+    exported["file_fallback"] = {"type": "file", "name": resource_link.name}
     return exported
 
 
 def materialize_file_image_fallback(
-    image: RustImageContentBlock,
-    *,
-    name: str,
-    attachments_root: Path,
-    keep_meta: bool,
+    image: RustImageContentBlock, *, name: str, attachments_root: Path, keep_meta: bool
 ) -> RustImageContentBlock:
     """Write imported image bytes into the destination session and link them."""
     try:

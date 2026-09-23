@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -39,10 +41,7 @@ async def execute_self_tool(
             call_id=action.call_id,
             result=RustToolFailureResult(
                 error=RustProtocolError(
-                    code="tool_failed",
-                    message=str(exc),
-                    retryable=False,
-                    details=None,
+                    code="tool_failed", message=str(exc), retryable=False, details=None
                 )
             ),
         )

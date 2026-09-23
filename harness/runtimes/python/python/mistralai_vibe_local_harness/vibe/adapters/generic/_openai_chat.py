@@ -1,5 +1,7 @@
 """OpenAI-compatible chat/completions adapters."""
 
+from __future__ import annotations
+
 from collections.abc import Sequence
 from typing import Any, ClassVar
 
@@ -27,12 +29,16 @@ from mistralai_vibe_local_harness.vibe.adapters.generic._provider import Provide
 class OpenAIAdapter(APIAdapter):
     endpoint: ClassVar[str] = "/chat/completions"
 
-    def _reasoning_to_api(self, msg_dict: dict[str, Any], field_name: str) -> dict[str, Any]:
+    def _reasoning_to_api(
+        self, msg_dict: dict[str, Any], field_name: str
+    ) -> dict[str, Any]:
         if field_name != "reasoning_content" and "reasoning_content" in msg_dict:
             msg_dict[field_name] = msg_dict.pop("reasoning_content")
         return msg_dict
 
-    def _reasoning_from_api(self, msg_dict: dict[str, Any], field_name: str) -> dict[str, Any]:
+    def _reasoning_from_api(
+        self, msg_dict: dict[str, Any], field_name: str
+    ) -> dict[str, Any]:
         if field_name != "reasoning_content" and field_name in msg_dict:
             msg_dict["reasoning_content"] = msg_dict.pop(field_name)
         return msg_dict
@@ -47,7 +53,8 @@ class OpenAIAdapter(APIAdapter):
         if isinstance(text, str) and text:
             parts.append({"type": "text", "text": text})
         parts.extend(
-            {"type": "image_url", "image_url": {"url": to_data_uri(att)}} for att in source.images
+            {"type": "image_url", "image_url": {"url": to_data_uri(att)}}
+            for att in source.images
         )
         msg_dict["content"] = parts
         return msg_dict
@@ -61,10 +68,7 @@ class OpenAIAdapter(APIAdapter):
                 self._reasoning_to_api(
                     msg.model_dump(
                         exclude_none=True,
-                        exclude={
-                            "reasoning_payloads": True,
-                            "images": True,
-                        },
+                        exclude={"reasoning_payloads": True, "images": True},
                     ),
                     field_name,
                 ),
@@ -111,7 +115,9 @@ class OpenAIAdapter(APIAdapter):
             endpoint=self.endpoint,
         )
 
-    def _parse_message(self, data: dict[str, Any], field_name: str) -> LLMMessage | None:
+    def _parse_message(
+        self, data: dict[str, Any], field_name: str
+    ) -> LLMMessage | None:
         if data.get("choices"):
             choice = data["choices"][0]
             if "message" in choice:
@@ -149,7 +155,9 @@ class OpenAIAdapter(APIAdapter):
         )
         choices = data.get("choices") or []
         finish_reason = choices[0].get("finish_reason") if choices else None
-        stop = StopInfo(reason=str(finish_reason)) if finish_reason is not None else None
+        stop = (
+            StopInfo(reason=str(finish_reason)) if finish_reason is not None else None
+        )
 
         return LLMChunk(message=message, usage=usage, stop=stop)
 
@@ -330,7 +338,9 @@ class ReasoningAdapter(APIAdapter):
         )
         choices = data.get("choices") or []
         finish_reason = choices[0].get("finish_reason") if choices else None
-        stop = StopInfo(reason=str(finish_reason)) if finish_reason is not None else None
+        stop = (
+            StopInfo(reason=str(finish_reason)) if finish_reason is not None else None
+        )
 
         return LLMChunk(message=message, usage=usage, stop=stop)
 

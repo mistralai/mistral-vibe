@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import asyncio
-import logging
-import re
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from concurrent.futures import CancelledError
 from html import escape
+from http import HTTPStatus
+import logging
+import re
 from typing import Any, Literal, cast
 
 import httpx
@@ -75,7 +78,9 @@ def _register_retry_hook(client: Mistral, hook: _RetryNoticeHook) -> None:
     registry = client.sdk_configuration.__dict__.get("_hooks")
     register = getattr(registry, "register_after_error_hook", None)
     if not callable(register):
-        logger.warning("Mistral SDK does not expose retry hooks; retry notices are disabled")
+        logger.warning(
+            "Mistral SDK does not expose retry hooks; retry notices are disabled"
+        )
         return
     register(hook)
 
@@ -115,7 +120,11 @@ async def execute_mistral_completion(
         if on_retry is None:
             return
         if response.status_code in _RETRYABLE_STATUS_CODES:
-            category = "rate_limited" if response.status_code == 429 else "server_error"
+            category = (
+                "rate_limited"
+                if response.status_code == HTTPStatus.TOO_MANY_REQUESTS
+                else "server_error"
+            )
             await report_retry(
                 ProviderRetry(category=category, detail=f"HTTP {response.status_code}")
             )
@@ -132,7 +141,9 @@ async def execute_mistral_completion(
         # pins a non-daemon worker thread and hangs interpreter exit.
         if not loop.is_running():
             return
-        category = "timed_out" if isinstance(error, httpx.TimeoutException) else "connection"
+        category = (
+            "timed_out" if isinstance(error, httpx.TimeoutException) else "connection"
+        )
         notice = cast(
             Coroutine[Any, Any, None],
             report_retry(ProviderRetry(category=category, detail=type(error).__name__)),
@@ -147,7 +158,7 @@ async def execute_mistral_completion(
             future.result(timeout=_RETRY_NOTICE_TIMEOUT_S)
         except CancelledError:
             return
-        except Exception:  # noqa: BLE001
+        except Exception:
             future.cancel()
             logger.warning("Could not report retry", exc_info=True)
 
@@ -205,7 +216,9 @@ def _read_completion(response: Any) -> RustCompletionResult:
     elif isinstance(content, list):
         reasoning, reasoning_meta = _extract_reasoning(content)
         if reasoning:
-            parts.append(RustReasoningPart(content=reasoning, _meta=reasoning_meta or None))
+            parts.append(
+                RustReasoningPart(content=reasoning, _meta=reasoning_meta or None)
+            )
         text = _delta_text(content)
         if text:
             parts.append(RustTextContentBlock(text=text))
@@ -249,7 +262,9 @@ async def _read_stream(
         if isinstance(reason := _read_field(choice, "finish_reason"), str):
             finish_reason = _finish_reason(reason)
         if on_delta is not None and (delta_text or delta_reasoning):
-            await on_delta(ProviderStreamDelta(text=delta_text, reasoning=delta_reasoning))
+            await on_delta(
+                ProviderStreamDelta(text=delta_text, reasoning=delta_reasoning)
+            )
     parts: list[RustCompletionResultPart] = []
     if reasoning_parts:
         parts.append(
@@ -266,11 +281,7 @@ async def _read_stream(
         parts.append(RustTextContentBlock(text=" "))
     if tool_calls:
         finish_reason = "tool_call"
-    return RustCompletionResult(
-        parts=parts,
-        finish_reason=finish_reason,
-        usage=usage,
-    )
+    return RustCompletionResult(parts=parts, finish_reason=finish_reason, usage=usage)
 
 
 def _delta_text(content: object) -> str:
@@ -401,16 +412,16 @@ def _message_payload(
                     if isinstance(item, RustReasoningTextContent)
                 ]
                 if thinking_items:
-                    reasoning_chunks.append({"type": "thinking", "thinking": thinking_items})
+                    reasoning_chunks.append({
+                        "type": "thinking",
+                        "thinking": thinking_items,
+                    })
         text_content = _text(message.content)
         if reasoning_chunks:
             all_chunks = reasoning_chunks.copy()
             if text_content:
                 all_chunks.append({"type": "text", "text": text_content})
-            payload: dict[str, Any] = {
-                "role": "assistant",
-                "content": all_chunks,
-            }
+            payload: dict[str, Any] = {"role": "assistant", "content": all_chunks}
         else:
             payload = {
                 "role": "assistant",
@@ -449,12 +460,10 @@ def _content(content: Sequence[Any]) -> str | list[dict[str, Any]]:
         if (text := _block_text(block)) is not None:
             parts.append({"type": "text", "text": text})
         elif isinstance(block, RustImageContentBlock):
-            parts.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{block.mime_type};base64,{block.data}"},
-                }
-            )
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{block.mime_type};base64,{block.data}"},
+            })
     return parts
 
 
@@ -509,8 +518,7 @@ def _tool_payload(tool: RustToolDefinition) -> dict[str, Any]:
 
 
 def _collect_tool_call_deltas(
-    tool_calls: dict[int, dict[str, str]],
-    deltas: object,
+    tool_calls: dict[int, dict[str, str]], deltas: object
 ) -> None:
     if not isinstance(deltas, list):
         return
@@ -518,7 +526,10 @@ def _collect_tool_call_deltas(
         raw_index = _read_field(delta, "index")
         index = raw_index if isinstance(raw_index, int) else len(tool_calls)
         current = tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
-        if isinstance(identifier := _read_field(delta, "id"), str) and identifier != "null":
+        if (
+            isinstance(identifier := _read_field(delta, "id"), str)
+            and identifier != "null"
+        ):
             current["id"] = _merge_streamed_value(current["id"], identifier)
         function = _read_field(delta, "function")
         if isinstance(name := _read_field(function, "name"), str) and name:
@@ -571,9 +582,13 @@ def _first_choice(chunk: object) -> object | None:
 def _usage(value: object) -> RustTokenUsage | None:
     if value is None:
         return None
-    input_tokens = _read_field(value, "prompt_tokens") or _read_field(value, "input_tokens") or 0
+    input_tokens = (
+        _read_field(value, "prompt_tokens") or _read_field(value, "input_tokens") or 0
+    )
     output_tokens = (
-        _read_field(value, "completion_tokens") or _read_field(value, "output_tokens") or 0
+        _read_field(value, "completion_tokens")
+        or _read_field(value, "output_tokens")
+        or 0
     )
     prompt_tokens_details = _read_field(value, "prompt_tokens_details")
     cached_input_tokens = _read_field(prompt_tokens_details, "cached_tokens") or 0

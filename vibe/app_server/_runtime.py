@@ -13,7 +13,7 @@ import shutil
 import stat
 import tempfile
 import threading
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlsplit
 
 from pydantic import JsonValue, ValidationError
@@ -22,6 +22,11 @@ from vibe import __version__
 from vibe._experimental_harness import (
     ExperimentalHarnessUnavailableError,
     create_experimental_harness_host,
+)
+from vibe.app_server._agent_types import (
+    AgentToolCatalogue,
+    resolve_agent_types,
+    workspace_agent_types,
 )
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._projection import (
@@ -65,7 +70,7 @@ from vibe.app_server.protocol import (
 from vibe.app_server.transport import JsonRpcTransport, memory_transport_pair
 from vibe.core.agent_loop import AgentLoop, AgentRuntimePolicy
 from vibe.core.agents.manager import AgentManager
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import AgentProfile, BuiltinAgentName
 from vibe.core.config import (
     MCPHttp,
     MCPServer,
@@ -184,18 +189,53 @@ def _build_project_context_section(
     return context
 
 
+def _agent_profile_prompt(
+    profile: AgentProfile,
+) -> tuple[str | None, ConfigIssue | None]:
+    """The prompt text an agent profile asks for, or why it cannot have it.
+
+    Only a prompt id the profile itself declares is resolved as a file. The id
+    the config carries otherwise is a GrowthBook variant the SDK owns, and
+    reading a bundled Vibe prompt of the same name would quietly serve the
+    legacy text instead.
+    """
+    from vibe.core.prompts import MissingPromptFileError, load_system_prompt
+
+    prompt_id = profile.overrides.get("system_prompt_id")
+    if not isinstance(prompt_id, str) or not prompt_id:
+        return None, None
+    try:
+        return load_system_prompt(prompt_id), None
+    except (MissingPromptFileError, ValueError) as error:
+        logger.warning("Agent %r: %s", profile.name, error)
+        return None, ConfigIssue(
+            file=str(profile.source_path or profile.name),
+            message=f"Agent '{profile.name}': {error}",
+        )
+
+
 def _build_unified_system_instructions(
-    config: VibeConfigSchema, harness_files: HarnessFilesManager, *, cwd: Path
+    config: VibeConfigSchema,
+    harness_files: HarnessFilesManager,
+    *,
+    cwd: Path,
+    base: str | None = None,
+    extra: str | None = None,
 ) -> str:
     from mistralai_vibe_local_harness.vibe import build_vibe_code_system_instructions
 
     # The Vibe config layer resolves the GrowthBook system-prompt variant before
-    # the experimental Runtime is composed. The SDK owns the corresponding text.
-    # AGENTS.md docs are host-composed custom instructions: the harness core
-    # never loads them, so parity with the legacy prompt is restored here. The
-    # core appends its capability sections after this text, keeping the docs
-    # above skills/plugins in the final prompt.
-    instructions = build_vibe_code_system_instructions(variant=config.system_prompt_id)
+    # the experimental Runtime is composed. The SDK owns the corresponding text,
+    # except when the active agent named a prompt of its own, which arrives as
+    # ``base`` already read off disk. AGENTS.md docs are host-composed custom
+    # instructions: the harness core never loads them, so parity with the legacy
+    # prompt is restored here. The core appends its capability sections after
+    # this text, keeping the docs above skills/plugins in the final prompt.
+    instructions = base or build_vibe_code_system_instructions(
+        variant=config.system_prompt_id
+    )
+    if extra:
+        instructions = f"{instructions}\n\n{extra}"
     if config.include_project_context:
         instructions = f"{instructions}\n\n{_build_project_context_section(config, harness_files, cwd)}"
         agents_md_section = get_agents_md_section(
@@ -1155,13 +1195,37 @@ class HarnessProcess:
 
         startup_issue: ConfigIssue | None = None
         if selection.use_unified:
+            # The attribute is assigned only after the configure call succeeds:
+            # an exception past the factory (a missing builtin-hook-registry
+            # method on an older pinned harness, or an import the harness
+            # version cannot satisfy) must leave it None so the fallback below
+            # is honest — otherwise the UI reports legacy while
+            # ``create_session_backend_host`` still hands out the unified
+            # adapter, or the process crashes instead of falling back.
+            unified_host: object | None = None
             try:
-                self._experimental_harness_host = create_experimental_harness_host()
-            except (ExperimentalHarnessUnavailableError, ImportError) as exc:
+                candidate = create_experimental_harness_host()
+                # The Host-global builtin hook registry: the lazy AGENTS.md
+                # injection handler must not land in any session's *foreign*
+                # handler map, or it surfaces public hook-run notices. The
+                # matching binding is merged into every session's compiled
+                # hooks at context build (see merge_agents_md_hook).
+                from vibe.app_server._agents_md_hooks import agents_md_hook_handlers
+
+                cast(Any, candidate).configure_hook_handlers(
+                    agents_md_hook_handlers(self.harness_files)
+                )
+                unified_host = candidate
+            except (
+                ExperimentalHarnessUnavailableError,
+                ImportError,
+                AttributeError,
+            ) as exc:
                 startup_issue = ConfigIssue(
                     file="--experimental-harness",
                     message=f"{exc}; falling back to the legacy harness.",
                 )
+            self._experimental_harness_host = unified_host
         self.host_handler = HostRequestHandler(
             self.harness_files,
             startup_issue=startup_issue,
@@ -1323,8 +1387,10 @@ class HarnessProcess:
             tool_catalog_for_config,
         )
 
+        from vibe.app_server._agents_md_hooks import merge_agents_md_hook
         from vibe.app_server._plugins import (
             core_plugins,
+            plugin_agent_names,
             plugin_issues,
             requested_plugin_definitions,
         )
@@ -1399,8 +1465,18 @@ class HarnessProcess:
                 *(Path(root).expanduser() for root in options.workspace_roots),
             ])
         )
+        # Built before the plugins, which bind the workspace's own agent types
+        # through the same projection as a plugin's and therefore need a manager
+        # to read them from. Both the credential service and the agent manager
+        # read the orchestrator lazily, so they stay correct across every config
+        # mutation and must outlive any single derivation.
+        agents = AgentManager(
+            config_orchestrator,
+            options.agent or config.resolve_default_agent(),
+            harness_files=harness_files,
+        )
         plugins, plugin_provider, plugin_mcp = await self._build_plugins(
-            session_config, cwd
+            session_config, cwd, agents=agents
         )
         command_environment_mode = _command_environment_mode()
         match command_environment_mode:
@@ -1437,14 +1513,6 @@ class HarnessProcess:
         # appends each request's shape here, the adapter drains it to telemetry.
         request_sent = RequestSentQueue()
 
-        # Both the credential service and the agent manager read the
-        # orchestrator lazily, so they stay correct across every config
-        # mutation and must outlive any single derivation.
-        agents = AgentManager(
-            config_orchestrator,
-            options.agent or config.resolve_default_agent(),
-            harness_files=harness_files,
-        )
         if require_api_key:
             config_orchestrator.config.require_active_provider_api_key()
         # The store is the session's memory of what the user approved
@@ -1559,6 +1627,20 @@ class HarnessProcess:
                 plugin_contexts=core_plugins(plugins),
                 skill_tool_available="skill" in available_tools,
             )
+            # Advertised here, bound by the plugin projection. Both sides measure
+            # the same files against the same catalogue, so the names the model
+            # reads are the names the Host can spawn.
+            agent_types = resolve_agent_types(
+                workspace_agent_types(agents),
+                AgentToolCatalogue(
+                    available=frozenset(available_tools),
+                    permission_of=lambda name: (
+                        derived_tools.get_tool_config(name).permission
+                    ),
+                ),
+                reserved=plugin_agent_names(plugins.materialized.resolution.agents),
+            )
+            profile_prompt, prompt_issue = _agent_profile_prompt(agents.active_profile)
             return UnifiedRuntimeDerivation(
                 runtime=build_unified_runtime_snapshot(
                     config_orchestrator,
@@ -1566,6 +1648,8 @@ class HarnessProcess:
                     issues=[
                         *plugin_issues(plugins),
                         *skill_issues,
+                        *agent_types.issues,
+                        *([prompt_issue] if prompt_issue is not None else []),
                         *_hook_config_issues(hook_result),
                     ],
                     skills=skills.catalogue,
@@ -1578,7 +1662,11 @@ class HarnessProcess:
                 core_config=RustHarnessConfig(
                     task_id="runtime-template",
                     system_instructions=_build_unified_system_instructions(
-                        config, harness_files, cwd=cwd
+                        config,
+                        harness_files,
+                        cwd=cwd,
+                        base=profile_prompt,
+                        extra=agents.active_profile.instructions,
                     ),
                     settings=RustHarnessSettings(
                         turn=RustTurnSettings(max_iterations=max_iterations),
@@ -1628,6 +1716,7 @@ class HarnessProcess:
                             ),
                         ],
                         skills=list(skills.definitions),
+                        agent_types=list(agent_types.definitions),
                     ),
                     # No plugins: once a provider is configured its `bind` is
                     # the only source, and a template's would silently win over
@@ -1747,6 +1836,11 @@ class HarnessProcess:
             ),
             tool_catalog=lambda: tool_catalog_for_config(core_config_json),
         )
+        # Builtin hooks that the Core must bind for every unified session; the
+        # lazy AGENTS.md injection restores the legacy read_file's discovery of
+        # subdirectory docs (see _agents_md_hooks). The handler is registered
+        # Host-globally, so only the binding rides the session here.
+        hooks = merge_agents_md_hook(hooks)
         return UnifiedSessionContext(
             storage_root=self._unified_storage_root(config.session_logging),
             session_logging_enabled=config.session_logging.enabled,
@@ -1797,6 +1891,13 @@ class HarnessProcess:
         workspace_roots = [
             Path(root).expanduser().resolve() for root in options.workspace_roots
         ]
+        # The session cwd is deliberately absent from workspace_roots here:
+        # a listed cwd becomes a session root, and ``project_roots`` returns
+        # the listed roots even when the tree is untrusted, which would load
+        # that tree's AGENTS.md past the trust gate. The same invariant is
+        # enforced by the AGENTS.md hook handler (see
+        # ``_agents_md_hooks._session_files``); the durable home would be
+        # ``for_session`` itself ignoring a listed root equal to the cwd.
         harness_files = self.harness_files.for_session(
             cwd, workspace_roots=workspace_roots
         )
@@ -1932,7 +2033,7 @@ class HarnessProcess:
         return registry
 
     async def _build_plugins(
-        self, session_config: _SessionConfig, cwd: Path
+        self, session_config: _SessionConfig, cwd: Path, *, agents: AgentManager
     ) -> tuple[SessionPlugins, UnifiedPluginProvider, PluginMCPCatalog]:
         """The Host's own resolve, and the provider the Runtime binds through.
 
@@ -1940,7 +2041,6 @@ class HarnessProcess:
         and building them twice would open two MCP client pools for one session.
         """
         from vibe.app_server._plugins import (
-            AgentToolCatalogue,
             UnifiedPluginProvider,
             installed_plugin_scopes,
             resolve_session_plugins,
@@ -1991,6 +2091,9 @@ class HarnessProcess:
                 # walked elsewhere would report the session's plugins uninstalled.
                 harness_files=session_config.harness_files,
                 agent_tools=agent_tools,
+                # Read per bind for the same reason as the catalogue above: an
+                # agent file edited mid-session reaches the next bind.
+                agent_types=lambda: workspace_agent_types(agents),
             ),
             plugin_mcp,
         )
@@ -2468,29 +2571,23 @@ def rust_agent_tool_ceiling(
 ) -> dict[RustRuntimeBuiltinToolName, Literal["allow", "ask", "deny"]]:
     # A ceiling, never a grant: the Runtime keeps the stricter of this and the mode
     # the parent holds, so the worst a wrong answer here does is deny a child
-    # something it was allowed. ``allowlist``/``denylist`` are deliberately not read
-    # — they are per-call path and command policy only Vibe's live resolver can
-    # answer, and the child runs under that resolver rather than a snapshot of it.
-    enabled = _glob_patterns(overrides.get("enabled_tools"))
-    disabled = _glob_patterns(overrides.get("disabled_tools"))
-    narrowed = {
-        name
-        for name in available_tools
-        if (not enabled or name_matches(name, enabled))
-        and not (disabled and name_matches(name, disabled))
-    }
+    # something it was allowed. ``allowlist``/``denylist`` are not carried as
+    # patterns — they are per-call path and command policy only Vibe's live
+    # resolver can answer, and the child runs under that resolver holding the
+    # parent's configuration rather than a snapshot of the profile's. They still
+    # change the answer: a profile that would hand the child an unconditional
+    # ``allow`` while relying on a list to keep that grant narrow is capped at
+    # ``ask`` instead, so the calls the list was there to restrain reach the user
+    # (see ``agent_ceiling_downgrades``).
+    narrowed = _profile_tools(available_tools, overrides)
     per_tool = overrides.get("tools")
     per_tool = per_tool if isinstance(per_tool, Mapping) else {}
 
     def permission(name: str) -> ToolPermission:
-        entry = per_tool.get(name)
-        declared = entry.get("permission") if isinstance(entry, Mapping) else None
-        if not isinstance(declared, str):
-            return permission_of(name)
-        try:
-            return ToolPermission(declared)
-        except ValueError:
-            return permission_of(name)
+        resolved = _declared_permission(per_tool.get(name), name, permission_of)
+        if resolved is ToolPermission.ALWAYS and _list_narrowed(per_tool.get(name)):
+            return ToolPermission.ASK
+        return resolved
 
     # The ceiling encodes what the profile *permits* (allow/ask/deny), not what
     # the session's approval mode would do. The Runtime takes the stricter of
@@ -2516,6 +2613,71 @@ def rust_agent_tool_ceiling(
     for builtin in ("process.output", "process.write", "process.list", "process.stop"):
         ceiling[builtin] = "allow"
     return ceiling
+
+
+def agent_ceiling_downgrades(
+    available_tools: set[str],
+    permission_of: Callable[[str], ToolPermission],
+    overrides: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Tools whose profile narrowing ``rust_agent_tool_ceiling`` cannot express.
+
+    A ceiling says allow, ask, or deny per tool. It cannot say "bash, but only
+    these commands", and the resolver that can runs against the parent's
+    configuration rather than the child's profile. A profile that grants a tool
+    outright while relying on a list to keep the grant narrow is therefore capped
+    at ``ask``. Returned so a caller can tell the user which tools that happened
+    to, and that their narrowing is approximated rather than enforced.
+    """
+    per_tool = overrides.get("tools")
+    if not isinstance(per_tool, Mapping):
+        return ()
+    # Measured against the tools the profile actually leaves the child, not
+    # every tool the session has. A profile that disables a tool and still
+    # carries a stanza for it has already denied it, and reporting that a denied
+    # tool will ask for approval describes a call that cannot happen.
+    return tuple(
+        sorted(
+            name
+            for name in _profile_tools(available_tools, overrides)
+            if _list_narrowed(per_tool.get(name))
+            and _declared_permission(per_tool.get(name), name, permission_of)
+            is ToolPermission.ALWAYS
+        )
+    )
+
+
+def _profile_tools(available_tools: set[str], overrides: Mapping[str, Any]) -> set[str]:
+    """The tools a profile leaves its child, before permissions are read."""
+    enabled = _glob_patterns(overrides.get("enabled_tools"))
+    disabled = _glob_patterns(overrides.get("disabled_tools"))
+    return {
+        name
+        for name in available_tools
+        if (not enabled or name_matches(name, enabled))
+        and not (disabled and name_matches(name, disabled))
+    }
+
+
+def _declared_permission(
+    entry: Any, name: str, permission_of: Callable[[str], ToolPermission]
+) -> ToolPermission:
+    declared = entry.get("permission") if isinstance(entry, Mapping) else None
+    if not isinstance(declared, str):
+        return permission_of(name)
+    try:
+        return ToolPermission(declared)
+    except ValueError:
+        return permission_of(name)
+
+
+def _list_narrowed(entry: Any) -> bool:
+    if not isinstance(entry, Mapping):
+        return False
+    return any(
+        isinstance(entry.get(key), list) and entry.get(key)
+        for key in ("allowlist", "denylist")
+    )
 
 
 def _glob_patterns(value: Any) -> list[str]:

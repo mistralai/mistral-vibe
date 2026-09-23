@@ -1,5 +1,7 @@
 """SSE line iteration."""
 
+from __future__ import annotations
+
 from collections.abc import AsyncGenerator
 
 import httpx
@@ -16,7 +18,9 @@ async def iter_sse_lines(response: httpx.Response) -> AsyncGenerator[str]:
         held_cr = buffer.endswith(b"\r")
         if held_cr:
             buffer = buffer[:-1]
-        *lines, buffer = buffer.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+        *lines, buffer = (
+            buffer.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+        )
         if held_cr:
             buffer += b"\r"
         for line in lines:

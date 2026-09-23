@@ -1,11 +1,15 @@
 //! Client-owned transcript messages preserved until the server supersedes them.
 
+mod positions;
+
+pub(super) use positions::preserve_file_image_links;
+pub use positions::{preserve, restore, restore_positions};
+
 use serde_json::Value;
 
-use crate::server::{HistoryEntry, MessageContent};
+use crate::server::{HistoryEntry, ImageAttachment, MessageContent};
 
-use super::{entry_id, Transcript};
-use crate::server::ImageAttachment;
+use super::Transcript;
 
 pub(super) fn user_projection_for_echo(
     transcript: &Transcript,
@@ -31,76 +35,6 @@ pub(super) fn user_projection_for_echo(
 
 fn is_user_message(entry: &HistoryEntry) -> bool {
     matches!(entry, HistoryEntry::Message(message) if message.role == "user")
-}
-
-pub fn preserve(transcript: &Transcript) -> Vec<(String, Value)> {
-    transcript
-        .entries
-        .iter()
-        .map(|entry| &entry.raw)
-        .filter(|entry| entry.get("local").and_then(Value::as_bool) == Some(true))
-        .filter_map(|entry| entry_id(entry).map(|id| (id, entry.clone())))
-        .collect()
-}
-
-pub fn restore(transcript: &mut Transcript, entries: Vec<(String, Value)>) {
-    for (id, entry) in entries {
-        let Some(&index) = transcript.indices.get(&id) else {
-            transcript.insert(entry, false);
-            continue;
-        };
-        let stored = &mut transcript.entries[index];
-        if preserve_file_image_links(&entry, &mut stored.raw) {
-            stored.typed = crate::server::HistoryEntry::from_value(&stored.raw);
-            transcript.next_rev += 1;
-            stored.rev = transcript.next_rev;
-        }
-    }
-}
-
-/// Keep clickable file metadata when the server echoes the same images as inline bytes.
-pub(super) fn preserve_file_image_links(local: &Value, server: &mut Value) -> bool {
-    if local.get("role").and_then(Value::as_str) != Some("user")
-        || server.get("role").and_then(Value::as_str) != Some("user")
-    {
-        return false;
-    }
-    let Some(local_content) = local.get("content").and_then(Value::as_array) else {
-        return false;
-    };
-    let local_images: Vec<Value> = local_content
-        .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
-        .map(|block| block["attachment"].clone())
-        .collect();
-    let Some(server_content) = server.get_mut("content").and_then(Value::as_array_mut) else {
-        return false;
-    };
-    let server_image_count = server_content
-        .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
-        .count();
-    if local_images.len() != server_image_count {
-        return false;
-    }
-    let mut changed = false;
-    for (block, attachment) in server_content
-        .iter_mut()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
-        .zip(local_images)
-    {
-        let local_is_file =
-            attachment.pointer("/source/kind").and_then(Value::as_str) == Some("file");
-        let server_is_inline = block
-            .pointer("/attachment/source/kind")
-            .and_then(Value::as_str)
-            == Some("inline");
-        if local_is_file && server_is_inline {
-            block["attachment"] = attachment;
-            changed = true;
-        }
-    }
-    changed
 }
 
 /// Insert a client-owned message immediately. A server echo with the same id

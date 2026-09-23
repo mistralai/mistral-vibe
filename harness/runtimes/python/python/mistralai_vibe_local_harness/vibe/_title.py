@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
+from contextlib import suppress
 import dataclasses
 import logging
 import re
-from collections.abc import Sequence
-from contextlib import suppress
 
 from pydantic import JsonValue
 
@@ -32,8 +32,12 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
     LocalModelRoute,
     LocalRuntimeAdapterConfig,
 )
-from mistralai_vibe_local_harness.vibe.adapters.generic import execute_generic_completion
-from mistralai_vibe_local_harness.vibe.adapters.mistral import execute_mistral_completion
+from mistralai_vibe_local_harness.vibe.adapters.generic import (
+    execute_generic_completion,
+)
+from mistralai_vibe_local_harness.vibe.adapters.mistral import (
+    execute_mistral_completion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +85,11 @@ class TitlePolicy:
     total_timeout_seconds: float = 20.0
     max_tokens: int = 96
     max_title_chars: int = 72
-    generic_titles: frozenset[str] = frozenset({"new session", "untitled session", "untitled"})
+    generic_titles: frozenset[str] = frozenset({
+        "new session",
+        "untitled session",
+        "untitled",
+    })
 
     @property
     def tail_transcript_chars(self) -> int:
@@ -99,7 +107,7 @@ def build_title_transcript(
         if entry.get("type") != "message":
             continue
         role = entry.get("role")
-        if role not in ("user", "assistant"):
+        if role not in {"user", "assistant"}:
             continue
         text = _entry_text(entry).strip()
         if not text:
@@ -115,13 +123,17 @@ def build_title_transcript(
     return f"{head}{_ELISION}{tail}"
 
 
-def clean_title(content: str | None, *, policy: TitlePolicy = DEFAULT_TITLE_POLICY) -> str | None:
+def clean_title(
+    content: str | None, *, policy: TitlePolicy = DEFAULT_TITLE_POLICY
+) -> str | None:
     if not content:
         return None
     stripped = content.strip()
     first_line = stripped.splitlines()[0] if stripped else ""
     first_line = _CONTROL_CHARS_RE.sub("", first_line)
-    collapsed = _WHITESPACE_RE.sub(" ", first_line).strip().strip(_WRAPPING_QUOTES).strip()
+    collapsed = (
+        _WHITESPACE_RE.sub(" ", first_line).strip().strip(_WRAPPING_QUOTES).strip()
+    )
     if not collapsed or collapsed.lower() in policy.generic_titles:
         return None
     if len(collapsed) > policy.max_title_chars:
@@ -130,7 +142,9 @@ def clean_title(content: str | None, *, policy: TitlePolicy = DEFAULT_TITLE_POLI
 
 
 def _cold_route(config: LocalRuntimeAdapterConfig) -> LocalModelRoute:
-    return LocalModelRoute(model=config.active_model.model, temperature=0.0, thinking="off")
+    return LocalModelRoute(
+        model=config.active_model.model, temperature=0.0, thinking="off"
+    )
 
 
 def _title_completion_config(
@@ -194,9 +208,13 @@ async def execute_title_completion(
 
     route = config.title_model or _cold_route(config)
     messages: list[RustMessage] = [
-        RustSystemMessage(content=[RustTextContentBlock(text=_SESSION_TITLE_SYSTEM_PROMPT)]),
+        RustSystemMessage(
+            content=[RustTextContentBlock(text=_SESSION_TITLE_SYSTEM_PROMPT)]
+        ),
         RustUserMessage(
-            content=[RustTextContentBlock(text=_user_prompt(transcript, previous_title))]
+            content=[
+                RustTextContentBlock(text=_user_prompt(transcript, previous_title))
+            ]
         ),
     ]
     try:
@@ -212,7 +230,11 @@ async def execute_title_completion(
             )
         elif title_config.backend == "generic":
             result = await execute_generic_completion(
-                messages, tools=[], config=title_config, credential=credential, route=route
+                messages,
+                tools=[],
+                config=title_config,
+                credential=credential,
+                route=route,
             )
         else:
             raise ValueError(f"Unsupported completion backend: {title_config.backend}")
@@ -345,7 +367,9 @@ class TitleCadence:
         if not periodic and self._attempts >= self._policy.capped_max_generations:
             return False
         initial_pending = self._last_generated_step < 0
-        new_compaction = compaction_id is not None and compaction_id != self._last_compaction_id
+        new_compaction = (
+            compaction_id is not None and compaction_id != self._last_compaction_id
+        )
         initial_due = initial_pending and (
             step >= self._policy.initial_max_steps or (turn_completing and step >= 1)
         )

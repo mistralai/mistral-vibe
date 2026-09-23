@@ -9,6 +9,26 @@ use super::{notice, theme};
 use crate::app::App;
 use crate::selection::region::{self, RegionId, RowSpan};
 
+/// The non-scrolling region a surface that paints all its own text publishes
+/// (the question box content, the loading row); its copy comes from the frame.
+pub(crate) fn frame_region(area: Rect) -> crate::selection::Region {
+    crate::selection::Region {
+        area,
+        top: i32::from(area.y),
+        scrollbar: false,
+        end_exclusive: false,
+        document: false,
+        ..crate::selection::Region::default()
+    }
+}
+
+/// Register the loading row for mouse routing and paint its selection overlay.
+pub(crate) fn loading_region(app: &mut App, f: &mut Frame, area: Rect) {
+    crate::mouse::register_region(app, area, crate::mouse::MouseTarget::Loading);
+    app.view.loading_selection_region = frame_region(area);
+    overlay_region(app, f, RegionId::Loading);
+}
+
 /// Highlight the selection inside the main screen region.
 pub fn overlay(app: &mut App, f: &mut Frame) {
     overlay_region(app, f, RegionId::Main);

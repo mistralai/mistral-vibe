@@ -8,9 +8,12 @@ use super::super::super::{pulse, theme};
 use super::super::diff;
 use super::effect_body::{push_edit_diff, push_effect_body, push_todo_body};
 use super::expand_marker;
-use crate::utils::text;
+use crate::utils::{clean::clean_output, text};
 
 pub(super) struct EffectView<'a> {
+    /// Entry position and revision: the result-body cache key.
+    pub index: usize,
+    pub rev: u64,
     pub in_progress: bool,
     pub local: bool,
     pub expanded: bool,
@@ -46,8 +49,11 @@ pub(super) fn push_effect(
     attached_output: Option<&str>,
     pulse_frame: usize,
     width: u16,
+    cache: Option<&mut crate::ui::markdown::MarkdownCache>,
 ) {
     let EffectView {
+        index,
+        rev,
         in_progress,
         local,
         expanded,
@@ -58,7 +64,7 @@ pub(super) fn push_effect(
     let mut body = effect.body();
     if body.is_empty() {
         body = attached_output
-            .map(|text| text.lines().map(str::to_owned).collect())
+            .map(|text| clean_output(text).lines().map(str::to_owned).collect())
             .unwrap_or_default();
     }
     let settled_open = settled_open(effect, in_progress);
@@ -153,16 +159,40 @@ pub(super) fn push_effect(
     // The stream widget: a running call's latest `/state/outputText` append,
     // one gutter in (Python `tool-stream-message`, cleared on settle). It holds
     // the last patch's own delta, never the accumulated state text.
-    let stream_delta = stream_delta.unwrap_or("");
-    if in_progress && !local && !stream_delta.is_empty() {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("→ {stream_delta}"), theme::muted_style()),
-        ]));
+    if in_progress && !local {
+        let stream_delta = clean_output(stream_delta.unwrap_or(""));
+        if !stream_delta.is_empty() {
+            for line in format!("→ {stream_delta}").lines() {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(text::expand_tabs(line), theme::muted_style()),
+                ]));
+            }
+        }
     }
     if !shown {
         return;
     }
+    match cache {
+        Some(cache) => {
+            let prepared = cache.prepare_lines(index, rev, width, theme::active_index(), || {
+                let mut result = Vec::new();
+                push_result(&mut result, effect, &body, width);
+                result
+            });
+            lines.extend_from_slice(prepared.lines());
+        }
+        None => push_result(lines, effect, &body, width),
+    }
+}
+
+/// The result body under the header: a pure function of the effect, its body, and width.
+fn push_result(
+    lines: &mut Vec<Line<'static>>,
+    effect: &crate::server::EffectEntry,
+    body: &[String],
+    width: u16,
+) {
     if let Some(output) = effect.file_edit_output() {
         push_edit_diff(
             lines,
@@ -195,7 +225,7 @@ pub(super) fn push_effect(
         .unwrap_or("");
     push_effect_body(
         lines,
-        &body,
+        body,
         width,
         content_style,
         lang,

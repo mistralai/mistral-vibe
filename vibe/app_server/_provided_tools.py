@@ -94,7 +94,9 @@ def vibe_tool_groups(
                 description=Todo.get_full_description(),
                 input_schema=TodoArgs.model_json_schema(),
                 output_schema=TodoResult.model_json_schema(),
-                exposure="direct",
+                # Programmatic too: a `run_typescript` program is one tool call, so a
+                # direct-only tool leaves the list frozen until the program returns.
+                exposure="direct_and_programmatic",
             )
         )
     if _passes_tool_filters(
@@ -128,14 +130,10 @@ def _passes_tool_filters(
 
 
 class VibeProvidedTools:
-    """The executor factory, plus the per-session state its closures read.
-
-    The todo list is held here rather than in the closure so a rewind can drop it:
-    an in-place rewind keeps the session alive, and a list that outlived the
-    truncated history would let ``todo read`` return the discarded entries.
-    """
-
     def __init__(self) -> None:
+        # Held here rather than in the executor closure so a rewind can drop it: an
+        # in-place rewind keeps the session alive, and a list that outlived the
+        # truncated history would let `todo read` return the discarded entries.
         self._todos: dict[str, list[TodoItem]] = {}
 
     def executor_factory(

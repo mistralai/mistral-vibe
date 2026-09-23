@@ -8,11 +8,22 @@ use std::time::Duration;
 
 use deno_ast::EmitOptions;
 use deno_ast::MediaType;
+use deno_ast::ModuleItemRef;
 use deno_ast::ModuleSpecifier;
 use deno_ast::ParseParams;
+use deno_ast::ParsedSource;
+use deno_ast::SourceRangedForSpanned;
+use deno_ast::StartSourcePos;
+use deno_ast::TextChange;
 use deno_ast::TranspileModuleOptions;
 use deno_ast::TranspileOptions;
+use deno_ast::apply_text_changes;
 use deno_ast::parse_program;
+use deno_ast::swc::ast::Callee;
+use deno_ast::swc::ast::Expr;
+use deno_ast::swc::ast::MemberProp;
+use deno_ast::swc::ast::Stmt;
+use deno_ast::swc::ast::UnaryOp;
 use deno_core::v8;
 use serde::Serialize;
 use serde_json::Value;
@@ -429,16 +440,10 @@ fn initialize_v8() {
 }
 
 fn transpile(code: &str) -> Result<String, String> {
-    let parsed = parse_program(ParseParams {
-        specifier: ModuleSpecifier::parse("file:///run_typescript.ts")
-            .map_err(|error| error.to_string())?,
-        text: code.to_string().into(),
-        media_type: MediaType::TypeScript,
-        capture_tokens: false,
-        maybe_syntax: None,
-        scope_analysis: false,
-    })
-    .map_err(|error| error.to_string())?;
+    let mut parsed = parse_typescript(code)?;
+    if let Some(rewritten) = without_top_level_main_calls(&parsed) {
+        parsed = parse_typescript(&rewritten)?;
+    }
     parsed
         .transpile(
             &TranspileOptions::default(),
@@ -447,6 +452,68 @@ fn transpile(code: &str) -> Result<String, String> {
         )
         .map(|result| result.into_source().text)
         .map_err(|error| error.to_string())
+}
+
+fn parse_typescript(code: &str) -> Result<ParsedSource, String> {
+    parse_program(ParseParams {
+        specifier: ModuleSpecifier::parse("file:///run_typescript.ts")
+            .map_err(|error| error.to_string())?,
+        text: code.to_string().into(),
+        media_type: MediaType::TypeScript,
+        capture_tokens: false,
+        maybe_syntax: None,
+        scope_analysis: false,
+    })
+    .map_err(|error| error.to_string())
+}
+
+/// Returns the program without its top-level statements that call `main`, if any.
+///
+/// The sandbox calls `main` after evaluating the program, so a program that
+/// also calls it would run `main`, and every tool call in it, twice. Each
+/// statement becomes an empty statement so that automatic semicolon insertion
+/// cannot join its neighbors.
+fn without_top_level_main_calls(parsed: &ParsedSource) -> Option<String> {
+    let removals = parsed
+        .program_ref()
+        .body()
+        .filter_map(|item| match item {
+            ModuleItemRef::Stmt(Stmt::Expr(statement)) if calls_main(&statement.expr) => {
+                let range = statement
+                    .range()
+                    .as_byte_range(StartSourcePos::START_SOURCE_POS);
+                Some(TextChange::new(range.start, range.end, ";".to_string()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if removals.is_empty() {
+        return None;
+    }
+    Some(apply_text_changes(parsed.text(), removals))
+}
+
+/// Matches `main()`, optionally awaited, voided, or chained with promise handlers.
+fn calls_main(expression: &Expr) -> bool {
+    match expression {
+        Expr::Await(awaited) => calls_main(&awaited.arg),
+        Expr::Unary(unary) if unary.op == UnaryOp::Void => calls_main(&unary.arg),
+        Expr::Paren(paren) => calls_main(&paren.expr),
+        Expr::Call(call) => match &call.callee {
+            Callee::Expr(callee) => match callee.as_ref() {
+                Expr::Ident(identifier) => &*identifier.sym == "main",
+                Expr::Member(member) => {
+                    matches!(
+                        &member.prop,
+                        MemberProp::Ident(name) if matches!(&*name.sym, "then" | "catch" | "finally")
+                    ) && calls_main(&member.obj)
+                }
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 fn build_source(
@@ -1342,6 +1409,45 @@ async function main(): Promise<number> {
                 result: CodeResult::Success { value: json!(7) },
             }
         );
+    }
+
+    #[test]
+    fn runs_main_once_when_the_program_also_calls_it() {
+        for invocation in [
+            "main();",
+            "await main();",
+            "void main();",
+            "main().catch(console.error);",
+            "main().then(console.log).catch(console.error);",
+        ] {
+            let source = format!(
+                r#"
+async function main() {{
+  const draft = await tools.test.create_draft({{ subject: "Résumé — semaine 38" }});
+  return draft.id;
+}}
+{invocation}
+"#
+            );
+            let first = pending(run(&partial(&source), &[tool("create_draft")], "run"));
+            assert_eq!(first.tool_state.len(), 1, "{invocation}");
+            let resolved = resolve_all(first, &[json!({"id": "draft-1"})]);
+
+            let result = run(&resolved, &[tool("create_draft")], "run");
+
+            assert_eq!(
+                result,
+                TypeScriptRunResult::CodeResult {
+                    stdout: None,
+                    stderr: None,
+                    tool_state: resolved.tool_state,
+                    result: CodeResult::Success {
+                        value: json!("draft-1")
+                    },
+                },
+                "{invocation}"
+            );
+        }
     }
 
     #[test]

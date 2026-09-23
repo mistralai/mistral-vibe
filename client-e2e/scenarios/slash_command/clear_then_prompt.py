@@ -28,15 +28,27 @@ def _rebind(value: Any) -> Any:
 
 
 def _cleared_turn() -> list[AppServerEvent]:
-    return [
+    events = [
         _rebind(event)
         for event in (
             turn_started(),
             user_msg("hello again"),
             assistant_msg("Hello again."),
-            turn_completed(),
         )
     ]
+    snapshot = json.loads(json.dumps(_cleared))
+    snapshot["eventId"] += len(events)
+    snapshot["history"] = [
+        event["params"]["entry"]
+        for event in events
+        if event["method"] == "history/entryAdded"
+    ]
+    events.append({
+        "method": "session/snapshot",
+        "params": {"sessionId": _CLEARED_SESSION_ID, "state": snapshot},
+    })
+    events.append(_rebind(turn_completed()))
+    return events
 
 
 _first_turn = [

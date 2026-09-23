@@ -13,6 +13,7 @@ pub mod process;
 pub mod proto_agents;
 pub mod proto_approval;
 pub mod proto_mcp;
+pub mod proto_projects;
 pub mod proto_questions;
 pub mod proto_trust;
 pub mod reader;

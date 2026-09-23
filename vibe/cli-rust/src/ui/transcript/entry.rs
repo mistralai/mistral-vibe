@@ -169,6 +169,8 @@ pub(super) fn render(
                 &mut content,
                 effect,
                 EffectView {
+                    index: entry.index,
+                    rev: entry.rev,
                     in_progress,
                     local: entry.local,
                     expanded: expansion.entry,
@@ -178,6 +180,7 @@ pub(super) fn render(
                 entry.attached_output,
                 pulse_frame,
                 content_width,
+                cache,
             );
         }
         H::Interrupt(_) => push_interrupt(&mut content),

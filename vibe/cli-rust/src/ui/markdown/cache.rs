@@ -1,7 +1,9 @@
-//! Bounded prepared-markdown cache keyed by entry revision, width, and theme.
+//! Bounded prepared entry-row cache (markdown and effect bodies) keyed by entry revision, width, and theme.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+
+use ratatui::text::Line;
 
 use super::PreparedMarkdown;
 
@@ -37,6 +39,33 @@ impl MarkdownCache {
         theme: usize,
         source: impl FnOnce() -> String,
     ) -> Arc<PreparedMarkdown> {
+        self.get_or_build(entry, revision, width, theme, || {
+            super::prepare_uncached(&source(), width)
+        })
+    }
+
+    /// Cache non-markdown entry rows (effect result bodies) under the same key and bounds.
+    pub fn prepare_lines(
+        &mut self,
+        entry: usize,
+        revision: u64,
+        width: u16,
+        theme: usize,
+        build: impl FnOnce() -> Vec<Line<'static>>,
+    ) -> Arc<PreparedMarkdown> {
+        self.get_or_build(entry, revision, width, theme, || {
+            PreparedMarkdown::from_lines(build())
+        })
+    }
+
+    fn get_or_build(
+        &mut self,
+        entry: usize,
+        revision: u64,
+        width: u16,
+        theme: usize,
+        build: impl FnOnce() -> PreparedMarkdown,
+    ) -> Arc<PreparedMarkdown> {
         let key = Key {
             entry,
             revision,
@@ -51,8 +80,7 @@ impl MarkdownCache {
         }
 
         self.remove_stale(entry, width);
-        let source = source();
-        let prepared = Arc::new(super::prepare_uncached(&source, width));
+        let prepared = Arc::new(build());
         let bytes = prepared.retained_bytes();
         if bytes > MAX_MARKDOWN_CACHE_BYTES {
             return prepared;

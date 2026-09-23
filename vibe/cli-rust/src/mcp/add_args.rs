@@ -9,13 +9,25 @@ pub fn add_help() -> String {
     )
 }
 
-/// Parsed `/mcp add` arguments (Python `MCPAddArgs`).
+/// Parsed MCP add arguments, shared by argv and the slash command.
+#[derive(Debug, clap::Args)]
 pub struct AddArgs {
+    /// Hosted MCP server URL.
     pub url: String,
+    /// Server alias (defaults to a name derived from the URL).
+    #[arg(long)]
     pub name: Option<String>,
+    /// OAuth scope. Repeat the flag for multiple scopes.
+    #[arg(long = "scope")]
     pub scopes: Vec<String>,
+    /// Remote MCP transport.
+    #[arg(long, default_value = "streamable-http", value_parser = parse_transport)]
     pub transport: String,
+    /// Persist without starting browser login.
+    #[arg(long = "no-login", action = clap::ArgAction::SetFalse)]
     pub login: bool,
+    /// Allow plaintext HTTP to non-localhost hosts; credentials are unencrypted.
+    #[arg(long)]
     pub allow_insecure_http: bool,
 }
 

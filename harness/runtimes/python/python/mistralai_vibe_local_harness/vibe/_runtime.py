@@ -1,13 +1,15 @@
 """Durable Harness Step Protocol driving and Runtime-owned effect recovery."""
 
+from __future__ import annotations
+
 import asyncio
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
 import json
 import logging
 import secrets
 import time
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import JsonValue, TypeAdapter
@@ -114,8 +116,8 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
 from mistralai_vibe_local_harness.vibe._storage import (
     CommandReservedRecordV1,
     CoreInputRecordV1,
-    JournalRecordV1,
     HarnessStoreCapacityError,
+    JournalRecordV1,
     ManagedProcessV1,
     PendingInternalCommand,
     PluginLockV1,
@@ -135,7 +137,9 @@ if TYPE_CHECKING:
     from mistralai_vibe_local_harness.vibe._subagents._configuration import (
         ResolvedSubagentConfiguration,
     )
-    from mistralai_vibe_local_harness.vibe._subagents._controller import SubagentController
+    from mistralai_vibe_local_harness.vibe._subagents._controller import (
+        SubagentController,
+    )
 
 type ActionExecutor = Callable[[RustAction], Awaitable[RustEvent]]
 type ActionRecoverer = Callable[[RuntimeActionV1, RustAction], Awaitable[RustEvent]]
@@ -213,7 +217,7 @@ class _PendingProcessCoreInput:
     completed: asyncio.Future[None]
 
 
-class DurableSessionRuntime:
+class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surface
     """Own one Core together with its write-ahead recovery protocol.
 
     Core inputs and results are serialized while independent Actions may run
@@ -223,7 +227,7 @@ class DurableSessionRuntime:
     executor's result event is durable before it is supplied to Core.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - explicit Runtime dependencies
         self,
         *,
         config: RustHarnessConfig,
@@ -258,7 +262,9 @@ class DurableSessionRuntime:
                 snapshot=projection,
             )
         )
-        self._replayed_transition = replayed_transitions[-1] if replayed_transitions else None
+        self._replayed_transition = (
+            replayed_transitions[-1] if replayed_transitions else None
+        )
         self._replayed_core_inputs = replayed_core_inputs
         self._execute_action = execute_action or _unavailable_action
         self._recover_action = recover_action
@@ -274,10 +280,14 @@ class DurableSessionRuntime:
             ):
                 raise ValueError("process manager and command environment do not match")
         self._request_process_approval = request_process_approval
-        self._process_start_barriers: dict[str, asyncio.Future[Literal["accepted", "failed"]]] = {}
+        self._process_start_barriers: dict[
+            str, asyncio.Future[Literal["accepted", "failed"]]
+        ] = {}
         self._terminal_tasks: dict[str, asyncio.Task[None]] = {}
         self._pending_terminal_snapshots: dict[str, ProcessTerminalSnapshot] = {}
-        self._pending_process_action_results: dict[str, _PendingProcessActionResult] = {}
+        self._pending_process_action_results: dict[
+            str, _PendingProcessActionResult
+        ] = {}
         self._pending_process_core_input: _PendingProcessCoreInput | None = None
         self._terminal_retry_task: asyncio.Task[None] | None = None
         self._terminal_retry_wakeup = asyncio.Event()
@@ -312,7 +322,7 @@ class DurableSessionRuntime:
         process_manager: SessionProcessManager | None = None,
         process_config: LocalRuntimeAdapterConfig | None = None,
         request_process_approval: ApprovalRequester | None = None,
-    ) -> "DurableSessionRuntime":
+    ) -> DurableSessionRuntime:
         core, transitions = stored.restore_core_with_transitions(config)
         replayed_config = stored.replayed_config(config)
         records = tuple(
@@ -327,7 +337,10 @@ class DurableSessionRuntime:
             for record, transition in zip(records, transitions, strict=True)
         )
         replayed_transitions = transitions
-        if not replayed_transitions and stored.runtime_state.pending_transition is not None:
+        if (
+            not replayed_transitions
+            and stored.runtime_state.pending_transition is not None
+        ):
             replayed_transitions = (stored.runtime_state.pending_transition,)
         runtime = cls(
             config=replayed_config,
@@ -396,8 +409,11 @@ class DurableSessionRuntime:
     def configure_action_applied_sink(self, sink: ActionAppliedSink) -> None:
         self._action_applied_sink = sink
 
-    def configure_subagent_controller(self, controller: "SubagentController") -> None:
-        if self._subagent_controller is not None and self._subagent_controller is not controller:
+    def configure_subagent_controller(self, controller: SubagentController) -> None:
+        if (
+            self._subagent_controller is not None
+            and self._subagent_controller is not controller
+        ):
             raise RuntimeError("subagent controller is already configured")
         self._subagent_controller = controller
 
@@ -407,24 +423,30 @@ class DurableSessionRuntime:
 
     async def commit_runtime_state(self, runtime_state: RuntimeStateV3) -> None:
         """Publish a complete private state generation at a safe effect boundary."""
-
         async with self._lock:
             self._guard_open()
             await self._catch_up_projection()
             stored = self._store.load()
-            if runtime_state.snapshot_sequence != stored.runtime_state.snapshot_sequence:
-                raise RuntimeError("Runtime-state update used a stale snapshot sequence")
+            if (
+                runtime_state.snapshot_sequence
+                != stored.runtime_state.snapshot_sequence
+            ):
+                raise RuntimeError(
+                    "Runtime-state update used a stale snapshot sequence"
+                )
             await self._commit_runtime_state_off_thread(stored, runtime_state)
 
     async def update_runtime_state(self, update: RuntimeStateUpdate) -> None:
         """Atomically update private state against the latest recovery sequence."""
-
         async with self._lock:
             self._guard_open()
             await self._catch_up_projection()
             stored = self._store.load()
             runtime_state = update(stored.runtime_state.model_copy(deep=True))
-            if runtime_state.snapshot_sequence != stored.runtime_state.snapshot_sequence:
+            if (
+                runtime_state.snapshot_sequence
+                != stored.runtime_state.snapshot_sequence
+            ):
                 raise RuntimeError("Runtime-state update changed the snapshot sequence")
             if runtime_state == stored.runtime_state:
                 return
@@ -442,7 +464,6 @@ class DurableSessionRuntime:
         still installing a replacement, so ``close`` retires the wrong Core and the new one
         leaks. Shielding keeps cancellation as atomic as it was while this ran inline.
         """
-
         commit = asyncio.create_task(
             asyncio.to_thread(self._commit_runtime_state_locked, stored, runtime_state),
             name=f"runtime-state-commit-{self._store.session_id}",
@@ -468,7 +489,6 @@ class DurableSessionRuntime:
         generations, so standing anywhere past the published cursor is proof it took
         input the stored checkpoint does not contain.
         """
-
         if self._pending_process_core_input is not None:
             return True
         if any(isinstance(record, CoreInputRecordV1) for record in stored.journal):
@@ -491,7 +511,9 @@ class DurableSessionRuntime:
     ) -> None:
         inspection = self.inspection
         pending_transition = (
-            self._replayed_transition if inspection.status in {"running", "compacting"} else None
+            self._replayed_transition
+            if inspection.status in {"running", "compacting"}
+            else None
         )
         projection_state = stored.projection_state.model_copy(
             update={"snapshot_sequence": runtime_state.snapshot_sequence}
@@ -534,24 +556,20 @@ class DurableSessionRuntime:
         async with self._lock:
             self._guard_open()
             await self._catch_up_projection()
-            transition = await self._apply(RustNotificationEvent(notification=notification))
+            transition = await self._apply(
+                RustNotificationEvent(notification=notification)
+            )
         return await self._drive(transition, recovering=False)
 
     async def fail_pending_action(
-        self,
-        *,
-        action_id: str,
-        expected_turn_id: str,
-        error: RustProtocolError,
+        self, *, action_id: str, expected_turn_id: str, error: RustProtocolError
     ) -> RustSessionTransition:
         async with self._lock:
             self._guard_open()
             await self._catch_up_projection()
             transition = await self._apply(
                 RustFailTurnEvent(
-                    action_id=action_id,
-                    expected_turn_id=expected_turn_id,
-                    error=error,
+                    action_id=action_id, expected_turn_id=expected_turn_id, error=error
                 )
             )
         await self._reconcile_subagent_receipts()
@@ -571,9 +589,12 @@ class DurableSessionRuntime:
         validate_process_config(config)
         if (
             self._process_manager is not None
-            and config.command_environment != self._process_manager.backend.command_environment
+            and config.command_environment
+            != self._process_manager.backend.command_environment
         ):
-            raise ValueError("command environment cannot change while a Session is loaded")
+            raise ValueError(
+                "command environment cannot change while a Session is loaded"
+            )
         self._process_config = config
 
     def configure_work_state_callback(self, callback: WorkStateCallback) -> None:
@@ -633,7 +654,9 @@ class DurableSessionRuntime:
                 else:
                     transition = self._replayed_transition
                     if transition is None:
-                        raise RuntimeError("recoverable Core checkpoint has no replayed transition")
+                        raise RuntimeError(
+                            "recoverable Core checkpoint has no replayed transition"
+                        )
             if idle:
                 await self._wait_for_terminal_updates()
                 return None
@@ -696,9 +719,10 @@ class DurableSessionRuntime:
             self._guard_open()
             await self._settle_idle_locked()
 
-    async def drive_transition(self, transition: RustSessionTransition) -> RustSessionTransition:
+    async def drive_transition(
+        self, transition: RustSessionTransition
+    ) -> RustSessionTransition:
         """Drive an already-admitted command without delaying its caller."""
-
         terminal = await self._drive(transition, recovering=False)
         async with self._lock:
             self._guard_open()
@@ -718,60 +742,61 @@ class DurableSessionRuntime:
         self._terminal_retry_wakeup.set()
         transition: RustSessionTransition | None = None
         owned: asyncio.Future[DurableCommandResult] | None = None
-        async with self._lock:
-            self._guard_open()
-            await self._catch_up_projection()
-            reservation = await asyncio.to_thread(
-                self._store.reserve_command, client_command_id, method, params
-            )
-            if reservation.completed:
-                return DurableCommandResult(
-                    response=reservation.response,
-                    transition=None,
-                    replayed_receipt=True,
-                )
-            in_flight = self._in_flight_commands.get(client_command_id)
-            if in_flight is None:
-                transition = (
-                    await self._apply(command)
-                    if reservation.newly_reserved
-                    else await self._resume_reserved_command(command)
-                )
-                # Core has taken the command. From here the turn it started
-                # will end whatever becomes of this task, so its receipt
-                # becomes the Runtime's to answer rather than the task's.
-                # See ``_answer_abandoned_commands_locked``.
-                self._unanswered_commands[client_command_id] = response_factory
-                if accepted_public_history_entries:
-                    existing_ids = {
-                        entry_id
-                        for entry in self._projector.projection.snapshot.history.entries
-                        if isinstance(entry_id := entry.get("id"), str)
-                    }
-                    missing = [
-                        entry
-                        for entry in accepted_public_history_entries
-                        if not isinstance(entry_id := entry.get("id"), str)
-                        or entry_id not in existing_ids
-                    ]
-                    if missing:
-                        now = time.time_ns() // 1_000_000
-                        await self._record_projection_update(
-                            self._projector.append_public_history_entries(missing, observed_at=now)
-                        )
-                owned = asyncio.get_running_loop().create_future()
-                self._in_flight_commands[client_command_id] = owned
-        if in_flight is not None:
-            completed = await asyncio.shield(in_flight)
-            return DurableCommandResult(
-                response=completed.response,
-                transition=None,
-                replayed_receipt=True,
-            )
-        assert transition is not None
-        assert owned is not None
         try:
-            terminal = await self._drive(transition, recovering=not reservation.newly_reserved)
+            async with self._lock:
+                self._guard_open()
+                await self._catch_up_projection()
+                reservation = await asyncio.to_thread(
+                    self._store.reserve_command, client_command_id, method, params
+                )
+                if reservation.completed:
+                    return DurableCommandResult(
+                        response=reservation.response,
+                        transition=None,
+                        replayed_receipt=True,
+                    )
+                in_flight = self._in_flight_commands.get(client_command_id)
+                if in_flight is None:
+                    # Admission publishes the turn before model execution starts, so an
+                    # interrupt can cancel its caller while _apply is still returning.
+                    owned = asyncio.get_running_loop().create_future()
+                    self._in_flight_commands[client_command_id] = owned
+                    transition = (
+                        await self._apply(command)
+                        if reservation.newly_reserved
+                        else await self._resume_reserved_command(command)
+                    )
+                    # Shutdown must not answer commands Core has not accepted.
+                    self._unanswered_commands[client_command_id] = response_factory
+                    if accepted_public_history_entries:
+                        existing_ids = {
+                            entry_id
+                            for entry in self._projector.projection.snapshot.history.entries
+                            if isinstance(entry_id := entry.get("id"), str)
+                        }
+                        missing = [
+                            entry
+                            for entry in accepted_public_history_entries
+                            if not isinstance(entry_id := entry.get("id"), str)
+                            or entry_id not in existing_ids
+                        ]
+                        if missing:
+                            now = time.time_ns() // 1_000_000
+                            await self._record_projection_update(
+                                self._projector.append_public_history_entries(
+                                    missing, observed_at=now
+                                )
+                            )
+            if in_flight is not None:
+                completed = await asyncio.shield(in_flight)
+                return DurableCommandResult(
+                    response=completed.response, transition=None, replayed_receipt=True
+                )
+            assert transition is not None
+            assert owned is not None
+            terminal = await self._drive(
+                transition, recovering=not reservation.newly_reserved
+            )
             async with self._lock:
                 self._guard_open()
                 response = response_factory(terminal)
@@ -781,6 +806,8 @@ class DurableSessionRuntime:
             owned.set_result(result)
             return result
         except BaseException as error:
+            if owned is None:
+                raise
             if isinstance(error, asyncio.CancelledError):
                 owned.cancel()
                 self._cancelled_commands.add(client_command_id)
@@ -792,11 +819,14 @@ class DurableSessionRuntime:
                 owned.exception()
             raise
         finally:
-            async with self._lock:
-                if self._in_flight_commands.get(client_command_id) is owned:
-                    del self._in_flight_commands[client_command_id]
+            if owned is not None:
+                async with self._lock:
+                    if self._in_flight_commands.get(client_command_id) is owned:
+                        del self._in_flight_commands[client_command_id]
 
-    async def _answer_command_locked(self, client_command_id: str, response: JsonValue) -> None:
+    async def _answer_command_locked(
+        self, client_command_id: str, response: JsonValue
+    ) -> None:
         """Write a reservation's outcome down, and only then give up the duty to write it.
 
         Every answer goes through here so that a receipt is answered once, and
@@ -855,7 +885,9 @@ class DurableSessionRuntime:
         if self.inspection.pending_actions:
             return
         terminal = self._replayed_transition
-        for client_command_id, response_factory in tuple(self._unanswered_commands.items()):
+        for client_command_id, response_factory in tuple(
+            self._unanswered_commands.items()
+        ):
             response = response_factory(terminal) if terminal is not None else {}
             await self._answer_command_locked(client_command_id, response)
             logger.info(
@@ -896,7 +928,9 @@ class DurableSessionRuntime:
                 else await self._resume_reserved_command(command)
             )
             response = response_factory(transition)
-            await asyncio.to_thread(self._store.succeed_command, client_command_id, response)
+            await asyncio.to_thread(
+                self._store.succeed_command, client_command_id, response
+            )
             return DurableCommandResult(response=response, transition=transition)
 
     async def append_public_history_entries(self, entries: list[JsonObject]) -> None:
@@ -910,7 +944,9 @@ class DurableSessionRuntime:
                 self._projector.append_public_history_entries(entries, observed_at=now)
             )
 
-    async def append_provisional_completion_content(self, delta: CompletionDelta) -> None:
+    async def append_provisional_completion_content(
+        self, delta: CompletionDelta
+    ) -> None:
         """Project a provisional fragment of an in-flight completion.
 
         Best-effort publication from the completion executor: a projection
@@ -922,21 +958,31 @@ class DurableSessionRuntime:
             await self._catch_up_projection()
             now = time.time_ns() // 1_000_000
             await self._record_projection_update(
-                self._projector.append_provisional_completion_content(delta, observed_at=now)
+                self._projector.append_provisional_completion_content(
+                    delta, observed_at=now
+                )
             )
 
     async def rename_session(
-        self, title: str, *, observed_at: int | None = None, source: TitleSource = "manual"
+        self,
+        title: str,
+        *,
+        observed_at: int | None = None,
+        source: TitleSource = "manual",
     ) -> None:
         async with self._lock:
             self._guard_open()
             await self._catch_up_projection()
-            when = observed_at if observed_at is not None else time.time_ns() // 1_000_000
+            when = (
+                observed_at if observed_at is not None else time.time_ns() // 1_000_000
+            )
             await self._record_projection_update(
                 self._projector.rename_session(title, observed_at=when, source=source)
             )
 
-    def register_callback(self, callback_id: str, kind: str, routing: dict[str, JsonValue]) -> None:
+    def register_callback(
+        self, callback_id: str, kind: str, routing: dict[str, JsonValue]
+    ) -> None:
         self._guard_open()
         self._store.register_callback(callback_id, kind, routing)
         logger.info(
@@ -979,7 +1025,9 @@ class DurableSessionRuntime:
         async with self._lock:
             owner = self._process_callback_reservations.get(callback_id)
             with self._store.use_journal_reservation(owner):
-                await asyncio.to_thread(self.resolve_callback, callback_id, result, failed=failed)
+                await asyncio.to_thread(
+                    self.resolve_callback, callback_id, result, failed=failed
+                )
             self._process_callback_reservations.pop(callback_id, None)
 
     async def reconfigure_skills(self, skills: Sequence[RustSkillDefinition]) -> None:
@@ -987,17 +1035,20 @@ class DurableSessionRuntime:
             lambda live: live.model_copy(update={"skills": list(skills)}, deep=True)
         )
 
-    async def reconfigure_plugins(self, plugins: Sequence[RustPluginContextDefinition]) -> None:
+    async def reconfigure_plugins(
+        self, plugins: Sequence[RustPluginContextDefinition]
+    ) -> None:
         async with self._lock:
             self._guard_open()
-            updated = self._config.model_copy(update={"plugins": list(plugins)}, deep=True)
+            updated = self._config.model_copy(
+                update={"plugins": list(plugins)}, deep=True
+            )
             if updated == self._config:
                 return
             self._config = updated
 
     async def reconfigure_capability_dimension(
-        self,
-        update: Callable[[RustHarnessCapabilitySet], RustHarnessCapabilitySet],
+        self, update: Callable[[RustHarnessCapabilitySet], RustHarnessCapabilitySet]
     ) -> None:
         async with self._lock:
             self._guard_open()
@@ -1006,7 +1057,9 @@ class DurableSessionRuntime:
             merged = update(live)
             if merged == live:
                 return
-            await self._reconfigure_capabilities_locked(merged, _capability_revision(merged))
+            await self._reconfigure_capabilities_locked(
+                merged, _capability_revision(merged)
+            )
 
     async def reconfigure_settings(self, settings: RustHarnessSettings) -> None:
         params = _settings_reconfigure_params(settings)
@@ -1043,10 +1096,7 @@ class DurableSessionRuntime:
             await self._record_projection_update(update)
 
     async def compact_context(
-        self,
-        *,
-        client_command_id: str,
-        instructions: str,
+        self, *, client_command_id: str, instructions: str
     ) -> ContextCompactionResult:
         result = await self.command(
             client_command_id=client_command_id,
@@ -1058,17 +1108,16 @@ class DurableSessionRuntime:
         return _parse_context_compaction_response(result.response)
 
     async def replace_quiescent_context(
-        self,
-        *,
-        checkpoint: dict[str, JsonValue],
-        projection: PublicSessionState,
+        self, *, checkpoint: dict[str, JsonValue], projection: PublicSessionState
     ) -> None:
         async with self._lock:
             self._guard_open()
             await self._catch_up_projection()
             stored = self._store.load()
             if not stored.runtime_state.quiescent or stored.journal:
-                raise RuntimeError("cannot replace context while Runtime work is pending")
+                raise RuntimeError(
+                    "cannot replace context while Runtime work is pending"
+                )
             sequence = stored.runtime_state.snapshot_sequence
             watermark = stored.projection_state.watermark + 1
             projection_state = ProjectionStateV1(
@@ -1079,7 +1128,9 @@ class DurableSessionRuntime:
             )
             self._store.write_generation(
                 checkpoint=checkpoint,
-                runtime_state=_runtime_state_for_replaced_context(stored.runtime_state).model_copy(
+                runtime_state=_runtime_state_for_replaced_context(
+                    stored.runtime_state
+                ).model_copy(
                     update={
                         "core_capabilities": self._config.capabilities,
                         "core_settings": self._config.settings,
@@ -1110,10 +1161,7 @@ class DurableSessionRuntime:
                     await emitted
 
     async def reconfigure_capabilities(
-        self,
-        capabilities: RustHarnessCapabilitySet,
-        *,
-        revision: str,
+        self, capabilities: RustHarnessCapabilitySet, *, revision: str
     ) -> None:
         params = _capability_reconfigure_params(capabilities, revision)
         async with self._lock:
@@ -1187,7 +1235,9 @@ class DurableSessionRuntime:
             await asyncio.to_thread(
                 self._store.fail_command, orphan.client_command_id, orphan.reason
             )
-            add_recovery_failure(failure_code="OrphanedInternalReservation", phase="replay")
+            add_recovery_failure(
+                failure_code="OrphanedInternalReservation", phase="replay"
+            )
             logger.warning(
                 "Unified session abandoned an unresumable internal command",
                 extra={
@@ -1233,7 +1283,7 @@ class DurableSessionRuntime:
         *,
         plugin_lock: PluginLockV1,
         config: RustHarnessConfig,
-        subagents: "ResolvedSubagentConfiguration | None" = None,
+        subagents: ResolvedSubagentConfiguration | None = None,
     ) -> None:
         """Replace the pinned set of an idle session: lock and Core together.
 
@@ -1251,7 +1301,9 @@ class DurableSessionRuntime:
         # to spawn a type the model can now see.
         controller = self._subagent_controller
         if controller is not None and subagents is not None:
-            await controller.rebind_agent_types(subagents.bindings, subagents.policy_ceiling)
+            await controller.rebind_agent_types(
+                subagents.bindings, subagents.policy_ceiling
+            )
 
     async def interrupt(
         self, *, expected_turn_id: str, reason: str | None = None
@@ -1326,12 +1378,16 @@ class DurableSessionRuntime:
             self._closed = True
             self._core.close()
 
-    async def _resume_reserved_command(self, command: RustEvent) -> RustSessionTransition:
+    async def _resume_reserved_command(
+        self, command: RustEvent
+    ) -> RustSessionTransition:
         if self._replayed_transition is not None:
             return self._replayed_transition
         return await self._apply(command)
 
-    async def _core_holds_input(self, client_command_id: str, command: RustEvent) -> bool:
+    async def _core_holds_input(
+        self, client_command_id: str, command: RustEvent
+    ) -> bool:
         """Whether the journal shows Core consumed the input this reservation made.
 
         A reconfigure is answered rather than applied only on this evidence, and
@@ -1363,7 +1419,10 @@ class DurableSessionRuntime:
                 continue
             if not after_reservation:
                 continue
-            if isinstance(record, CoreInputRecordV1) and record.payload.input.command == command:
+            if (
+                isinstance(record, CoreInputRecordV1)
+                and record.payload.input.command == command
+            ):
                 return True
         return False
 
@@ -1384,9 +1443,7 @@ class DurableSessionRuntime:
         )
         if reservation.completed:
             return DurableCommandResult(
-                response=reservation.response,
-                transition=None,
-                replayed_receipt=True,
+                response=reservation.response, transition=None, replayed_receipt=True
             )
         transition: RustSessionTransition | None = None
         if reservation.newly_reserved or not await self._core_holds_input(
@@ -1396,14 +1453,20 @@ class DurableSessionRuntime:
             if transition.actions:
                 raise RuntimeError("Core capability reconfiguration emitted actions")
         response = response_factory(transition) if transition is not None else {}
-        await asyncio.to_thread(self._store.succeed_command, client_command_id, response)
+        await asyncio.to_thread(
+            self._store.succeed_command, client_command_id, response
+        )
         if compact and not self.inspection.pending_actions:
             await self._compact_store()
         return DurableCommandResult(response=response, transition=transition)
 
     async def _accept_capability_config(self, params: dict[str, JsonValue]) -> None:
-        capabilities = RustHarnessCapabilitySet.model_validate(params.get("capabilities"))
-        self._config = self._config.model_copy(update={"capabilities": capabilities}, deep=True)
+        capabilities = RustHarnessCapabilitySet.model_validate(
+            params.get("capabilities")
+        )
+        self._config = self._config.model_copy(
+            update={"capabilities": capabilities}, deep=True
+        )
         if not self.inspection.pending_actions:
             await self._compact_store()
 
@@ -1481,10 +1544,7 @@ class DurableSessionRuntime:
             while True:
                 recovering_transition = recovering
                 await self._start_transition_actions(
-                    current,
-                    in_flight,
-                    finished,
-                    recovering=recovering,
+                    current, in_flight, finished, recovering=recovering
                 )
                 recovering = False
                 if not in_flight:
@@ -1502,7 +1562,9 @@ class DurableSessionRuntime:
                 event = await task
                 async with self._lock:
                     self._guard_open()
-                    pending_ids = {pending.action_id for pending in self.inspection.pending_actions}
+                    pending_ids = {
+                        pending.action_id for pending in self.inspection.pending_actions
+                    }
                     if action.action_id not in pending_ids:
                         del in_flight[action_id]
                         continue
@@ -1513,7 +1575,9 @@ class DurableSessionRuntime:
                     )
                     with self._store.use_journal_reservation(owner):
                         current = await self._apply(event)
-                    pending_ids = {pending.action_id for pending in self.inspection.pending_actions}
+                    pending_ids = {
+                        pending.action_id for pending in self.inspection.pending_actions
+                    }
                 await self._acknowledge_process_result_applied(action, event)
                 await self._reconcile_subagent_receipts()
                 if self._action_applied_sink is not None:
@@ -1542,15 +1606,22 @@ class DurableSessionRuntime:
         async with self._lock:
             self._guard_open()
             stored = self._store.load()
-            pending_ids = {pending.action_id for pending in self.inspection.pending_actions}
-            durable_actions = {action.action_id: action for action in stored.runtime_state.actions}
+            pending_ids = {
+                pending.action_id for pending in self.inspection.pending_actions
+            }
+            durable_actions = {
+                action.action_id: action for action in stored.runtime_state.actions
+            }
             candidates = [(action, recovering) for action in transition.actions]
             if recovering and isinstance(transition.next, RustActionsNextAction):
                 scheduled_ids = {action.action_id for action, _ in candidates}
                 for directive in transition.next.directives:
                     if not isinstance(directive, RustKeepActionDirective):
                         continue
-                    if directive.action_id in in_flight or directive.action_id in scheduled_ids:
+                    if (
+                        directive.action_id in in_flight
+                        or directive.action_id in scheduled_ids
+                    ):
                         continue
                     durable = durable_actions.get(directive.action_id)
                     if durable is None:
@@ -1567,7 +1638,9 @@ class DurableSessionRuntime:
                     name=f"harness-action:{action.action_id}",
                 )
                 task.add_done_callback(
-                    lambda _task, completed_id=action.action_id: finished.put_nowait(completed_id)
+                    lambda _task, completed_id=action.action_id: finished.put_nowait(
+                        completed_id
+                    )
                 )
                 in_flight[action.action_id] = (action, task)
 
@@ -1583,7 +1656,9 @@ class DurableSessionRuntime:
         admitted: list[tuple[RustAction, asyncio.Task[RustEvent]]] = []
         async with self._lock:
             stored = await asyncio.to_thread(self._store.load)
-            durable_actions = {item.action_id: item for item in stored.runtime_state.actions}
+            durable_actions = {
+                item.action_id: item for item in stored.runtime_state.actions
+            }
             for action_id, pair in tasks.items():
                 durable = durable_actions.get(action_id)
                 if durable is not None and durable.process_request_sha256 is not None:
@@ -1591,14 +1666,18 @@ class DurableSessionRuntime:
                 else:
                     pair[1].cancel()
         cancelled = [
-            task for _, task in tasks.values() if all(task is not item[1] for item in admitted)
+            task
+            for _, task in tasks.values()
+            if all(task is not item[1] for item in admitted)
         ]
         if cancelled:
             await asyncio.gather(*cancelled, return_exceptions=True)
         for action, task in admitted:
             event = await asyncio.shield(task)
             async with self._lock:
-                pending_ids = {item.action_id for item in self.inspection.pending_actions}
+                pending_ids = {
+                    item.action_id for item in self.inspection.pending_actions
+                }
                 if action.action_id not in pending_ids:
                     continue
                 owner = (
@@ -1614,9 +1693,11 @@ class DurableSessionRuntime:
                 if isinstance(emitted, Awaitable):
                     await emitted
 
-    async def _resolve_action(self, action: RustAction, *, recovering: bool) -> RustEvent:
+    async def _resolve_action(  # noqa: PLR0912, PLR0914, PLR0915 - one branch per action kind
+        self, action: RustAction, *, recovering: bool
+    ) -> RustEvent:
         capacity_failure: RustEvent | None = None
-        async with self._lock:
+        async with self._lock:  # noqa: PLR1702 - resolution runs under one lock scope
             self._guard_open()
             stored = await asyncio.to_thread(self._store.load)
             durable = next(
@@ -1629,12 +1710,16 @@ class DurableSessionRuntime:
             )
             tool_action = (
                 action
-                if isinstance(action, RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction)
+                if isinstance(
+                    action,
+                    RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction,
+                )
                 else None
             )
             compaction_action = (
                 action
-                if isinstance(action, RustLLMCallAction) and action.purpose == "compaction"
+                if isinstance(action, RustLLMCallAction)
+                and action.purpose == "compaction"
                 else None
             )
             if durable is not None and durable.state in {"succeeded", "failed"}:
@@ -1671,20 +1756,21 @@ class DurableSessionRuntime:
                     if config is not None and self._process_manager is not None:
                         try:
                             validate_process_action(
-                                action,
-                                session_id=self._store.session_id,
-                                config=config,
+                                action, session_id=self._store.session_id, config=config
                             )
                         except ProcessActionError:
                             pass
                         else:
                             denied_start = (
                                 action.call.name == "process.start"
-                                and config.tool_modes.get("process.start", "allow") == "deny"
+                                and config.tool_modes.get("process.start", "allow")
+                                == "deny"
                             )
                             if not denied_start:
                                 try:
-                                    await self._reserve_process_action_storage(action, stored)
+                                    await self._reserve_process_action_storage(
+                                        action, stored
+                                    )
                                 except HarnessStoreCapacityError:
                                     capacity_failure = _process_persistence_failure(
                                         action, self._store.session_id
@@ -1718,7 +1804,9 @@ class DurableSessionRuntime:
                 if capacity_failure is not None:
                     value = cast(
                         JsonValue,
-                        capacity_failure.model_dump(mode="json", by_alias=True, exclude_none=True),
+                        capacity_failure.model_dump(
+                            mode="json", by_alias=True, exclude_none=True
+                        ),
                     )
                     await asyncio.to_thread(
                         self._store.record_action_result,
@@ -1753,11 +1841,7 @@ class DurableSessionRuntime:
         except asyncio.CancelledError:
             event = _failed_action_event(action, "Action cancelled")
             await self._record_action_result(
-                action,
-                durable,
-                event,
-                reconcile_started=reconcile_started,
-                failed=True,
+                action, durable, event, reconcile_started=reconcile_started, failed=True
             )
             raise
         except Exception as exc:
@@ -1781,7 +1865,9 @@ class DurableSessionRuntime:
         except Exception:
             if action.action_id not in self._process_action_reservations:
                 raise
-            await self._retry_process_action_result(action, durable, event, failed=failed)
+            await self._retry_process_action_result(
+                action, durable, event, failed=failed
+            )
         return event
 
     async def _record_action_result(
@@ -1800,13 +1886,14 @@ class DurableSessionRuntime:
                 outcome="failure" if failed else "success",
             )
         value = cast(
-            JsonValue,
-            event.model_dump(mode="json", by_alias=True, exclude_none=True),
+            JsonValue, event.model_dump(mode="json", by_alias=True, exclude_none=True)
         )
         async with self._lock:
             self._guard_open()
             owner = (
-                action.action_id if action.action_id in self._process_action_reservations else None
+                action.action_id
+                if action.action_id in self._process_action_reservations
+                else None
             )
             with self._store.use_journal_reservation(owner):
                 await asyncio.to_thread(
@@ -1817,13 +1904,20 @@ class DurableSessionRuntime:
                 )
             completed = next(
                 item
-                for item in (await asyncio.to_thread(self._store.load)).runtime_state.actions
+                for item in (
+                    await asyncio.to_thread(self._store.load)
+                ).runtime_state.actions
                 if item.action_id == action.action_id
             )
-        if self._process_manager is not None and completed.process_request_sha256 is not None:
-            self._process_manager.acknowledge(action.action_id, completed.process_request_sha256)
+        if (
+            self._process_manager is not None
+            and completed.process_request_sha256 is not None
+        ):
+            self._process_manager.acknowledge(
+                action.action_id, completed.process_request_sha256
+            )
 
-    async def _resolve_process_action(
+    async def _resolve_process_action(  # noqa: PLR0911 - one return per process action
         self,
         durable: RuntimeActionV1,
         action: RustRuntimeBuiltinToolCallAction,
@@ -1862,7 +1956,9 @@ class DurableSessionRuntime:
                 return recovered
         try:
             if isinstance(request, ValidatedProcessStart):
-                return await self._start_process(durable, action, request, config, manager)
+                return await self._start_process(
+                    durable, action, request, config, manager
+                )
             if isinstance(request, ValidatedProcessOutput):
                 return await self._read_process_output(action, request, manager)
             if isinstance(request, ValidatedProcessWrite):
@@ -1897,7 +1993,8 @@ class DurableSessionRuntime:
                 command=request.command,
                 cwd=str(request.cwd),
                 command_environment=cast(
-                    Literal["unix", "git_bash", "powershell"], config.command_environment
+                    Literal["unix", "git_bash", "powershell"],
+                    config.command_environment,
                 ),
                 created_at=created_at,
             )
@@ -1953,7 +2050,9 @@ class DurableSessionRuntime:
                 async with self._lock:
                     self._guard_open()
                     with self._store.use_journal_reservation(request.process_id):
-                        await asyncio.to_thread(self._store.record_process_state, running)
+                        await asyncio.to_thread(
+                            self._store.record_process_state, running
+                        )
         except Exception:
             if await self._find_process(request.process_id) == running:
                 return process_succeeded(
@@ -1961,10 +2060,7 @@ class DurableSessionRuntime:
                 )
             snapshot = await manager.rollback_start(request.process_id)
             await self._record_started_process(
-                prepared,
-                snapshot,
-                start_outcome="failed",
-                failure_stage="persistence",
+                prepared, snapshot, start_outcome="failed", failure_stage="persistence"
             )
             raise ProcessActionError(
                 process_error(
@@ -1973,7 +2069,9 @@ class DurableSessionRuntime:
                     {"processId": request.process_id, "stage": "persistence"},
                 )
             ) from None
-        return process_succeeded(action, {"processId": request.process_id, "status": "running"})
+        return process_succeeded(
+            action, {"processId": request.process_id, "status": "running"}
+        )
 
     async def _write_process(
         self,
@@ -1994,7 +2092,9 @@ class DurableSessionRuntime:
             prepared=None,
             manager=manager,
         )
-        result = await manager.write(action.action_id, digest, request.process_id, request.data)
+        result = await manager.write(
+            action.action_id, digest, request.process_id, request.data
+        )
         return process_succeeded(
             action,
             {
@@ -2052,7 +2152,9 @@ class DurableSessionRuntime:
     ) -> RustEvent:
         process = await self._require_process(request.process_id)
         try:
-            if process.status == "running" and manager.has_live_process(request.process_id):
+            if process.status == "running" and manager.has_live_process(
+                request.process_id
+            ):
                 page, _, _ = await manager.output(
                     request.process_id,
                     from_end=request.from_end,
@@ -2135,7 +2237,9 @@ class DurableSessionRuntime:
             },
         )
 
-    async def _list_processes(self, action: RustRuntimeBuiltinToolCallAction) -> RustEvent:
+    async def _list_processes(
+        self, action: RustRuntimeBuiltinToolCallAction
+    ) -> RustEvent:
         try:
             await self._wait_for_terminal_updates()
         except Exception as error:
@@ -2264,7 +2368,8 @@ class DurableSessionRuntime:
                 )
                 if (
                     persisted is None
-                    or persisted.process_manager_instance_id != manager.manager_instance_id
+                    or persisted.process_manager_instance_id
+                    != manager.manager_instance_id
                     or persisted.process_request_sha256 != digest
                     or persisted.prepared_process_start != prepared
                 ):
@@ -2272,7 +2377,9 @@ class DurableSessionRuntime:
                 return persisted
             return next(
                 item
-                for item in (await asyncio.to_thread(self._store.load)).runtime_state.actions
+                for item in (
+                    await asyncio.to_thread(self._store.load)
+                ).runtime_state.actions
                 if item.action_id == action.action_id
             )
 
@@ -2320,7 +2427,7 @@ class DurableSessionRuntime:
             )
         return process
 
-    async def _recover_process_action(
+    async def _recover_process_action(  # noqa: PLR0911 - one return per recovery outcome
         self,
         durable: RuntimeActionV1,
         action: RustRuntimeBuiltinToolCallAction,
@@ -2336,7 +2443,9 @@ class DurableSessionRuntime:
         manager = self._process_manager
         if durable.process_request_sha256 is not None:
             if durable.process_request_sha256 != digest:
-                return process_failed(action, _process_identity_conflict(action, request))
+                return process_failed(
+                    action, _process_identity_conflict(action, request)
+                )
             if manager is not None and (
                 durable.process_manager_instance_id == manager.manager_instance_id
             ):
@@ -2360,7 +2469,9 @@ class DurableSessionRuntime:
             if process is None:
                 prepared = durable.prepared_process_start
                 if prepared is None:
-                    return process_failed(action, _process_identity_conflict(action, request))
+                    return process_failed(
+                        action, _process_identity_conflict(action, request)
+                    )
                 process = await self._record_recovered_start(prepared)
             if process.start_outcome == "accepted":
                 return process_succeeded(
@@ -2422,7 +2533,11 @@ class DurableSessionRuntime:
             self._guard_open()
             stored = await asyncio.to_thread(self._store.load)
         return next(
-            (item for item in stored.runtime_state.processes if item.process_id == process_id),
+            (
+                item
+                for item in stored.runtime_state.processes
+                if item.process_id == process_id
+            ),
             None,
         )
 
@@ -2433,7 +2548,11 @@ class DurableSessionRuntime:
             process.process_id,
         )
         orphaned = process.model_copy(
-            update={"status": "orphaned", "exit_code": None, "finished_at": _timestamp()}
+            update={
+                "status": "orphaned",
+                "exit_code": None,
+                "finished_at": _timestamp(),
+            }
         )
         async with self._lock:
             self._guard_open()
@@ -2442,7 +2561,9 @@ class DurableSessionRuntime:
         self._log_terminal_process(orphaned)
         return orphaned
 
-    async def _record_recovered_start(self, prepared: PreparedProcessStartV1) -> ManagedProcessV1:
+    async def _record_recovered_start(
+        self, prepared: PreparedProcessStartV1
+    ) -> ManagedProcessV1:
         await asyncio.to_thread(
             ProcessOutputStore.ensure_unavailable,
             self._store.session_root,
@@ -2490,7 +2611,9 @@ class DurableSessionRuntime:
         )
         return process
 
-    async def _commit_terminal_snapshot(self, snapshot: ProcessTerminalSnapshot) -> None:
+    async def _commit_terminal_snapshot(
+        self, snapshot: ProcessTerminalSnapshot
+    ) -> None:
         await self._start_barrier(snapshot.process_id)
         if not snapshot.output_available:
             await asyncio.to_thread(
@@ -2508,7 +2631,8 @@ class DurableSessionRuntime:
                         item
                         for item in stored.runtime_state.actions
                         if item.prepared_process_start is not None
-                        and item.prepared_process_start.process_id == snapshot.process_id
+                        and item.prepared_process_start.process_id
+                        == snapshot.process_id
                     ),
                     None,
                 )
@@ -2598,9 +2722,12 @@ class DurableSessionRuntime:
         async with self._lock:
             self._guard_open()
             stored = await asyncio.to_thread(self._store.load)
-            pending_action_ids = {action.action_id for action in self.inspection.pending_actions}
+            pending_action_ids = {
+                action.action_id for action in self.inspection.pending_actions
+            }
         acknowledged = {
-            item.process_id for item in stored.runtime_state.submitted_process_notifications
+            item.process_id
+            for item in stored.runtime_state.submitted_process_notifications
         }
         manager = self._process_manager
         for process in stored.runtime_state.processes:
@@ -2702,15 +2829,22 @@ class DurableSessionRuntime:
                 min(attempt, len(_PROCESS_DURABILITY_RETRY_DELAYS_SECONDS) - 1)
             ]
             try:
-                await asyncio.wait_for(self._terminal_retry_wakeup.wait(), timeout=delay)
+                await asyncio.wait_for(
+                    self._terminal_retry_wakeup.wait(), timeout=delay
+                )
             except TimeoutError:
                 pass
             self._terminal_retry_wakeup.clear()
             failed = False
             pending_core_input = self._pending_process_core_input
-            if pending_core_input is not None and not pending_core_input.completed.done():
+            if (
+                pending_core_input is not None
+                and not pending_core_input.completed.done()
+            ):
                 try:
-                    with self._store.use_journal_reservation(pending_core_input.reservation_owner):
+                    with self._store.use_journal_reservation(
+                        pending_core_input.reservation_owner
+                    ):
                         await self._persist_core_transition(
                             pending_core_input.payload,
                             pending_core_input.transition,
@@ -2727,7 +2861,9 @@ class DurableSessionRuntime:
             if failed:
                 attempt += 1
                 continue
-            for action_id, pending in tuple(self._pending_process_action_results.items()):
+            for action_id, pending in tuple(
+                self._pending_process_action_results.items()
+            ):
                 try:
                     await self._record_action_result(
                         pending.action,
@@ -2744,7 +2880,9 @@ class DurableSessionRuntime:
                 if not pending.completed.done():
                     pending.completed.set_result(None)
                 self._notify_work_state_changed()
-            for process_identifier, snapshot in tuple(self._pending_terminal_snapshots.items()):
+            for process_identifier, snapshot in tuple(
+                self._pending_terminal_snapshots.items()
+            ):
                 task = self._terminal_tasks.get(process_identifier)
                 if task is not None and not task.done():
                     continue
@@ -2775,7 +2913,9 @@ class DurableSessionRuntime:
                 and not task.cancelled()
                 and task.exception() is not None
             ):
-                self._schedule_terminal_snapshot(self._pending_terminal_snapshots[identifier])
+                self._schedule_terminal_snapshot(
+                    self._pending_terminal_snapshots[identifier]
+                )
         tasks = [
             task
             for identifier, task in self._terminal_tasks.items()
@@ -2815,7 +2955,9 @@ class DurableSessionRuntime:
         if action.call.name != "process.start":
             self._notify_work_state_changed()
             return
-        identifier = process_id(self._store.session_id, action.action_id, action.call_id)
+        identifier = process_id(
+            self._store.session_id, action.action_id, action.call_id
+        )
         barrier = self._process_start_barriers.get(identifier)
         if barrier is not None and not barrier.done():
             barrier.set_result(
@@ -2835,7 +2977,9 @@ class DurableSessionRuntime:
         if not await asyncio.to_thread(self._store.has_journal_capacity, required):
             await self._compact_store(allow_recoverable=True)
         if not await asyncio.to_thread(self._store.has_journal_capacity, required):
-            raise HarnessStoreCapacityError("insufficient space for process Action lifecycle")
+            raise HarnessStoreCapacityError(
+                "insufficient space for process Action lifecycle"
+            )
         reservations = {action.action_id: temporary}
         if process_identifier is not None:
             reservations[process_identifier] = permanent
@@ -2849,7 +2993,9 @@ class DurableSessionRuntime:
             self._process_lifetime_reservations[process_identifier] = permanent
 
     def _restore_process_storage_reservations(self, stored: StoredSession) -> None:
-        pending_action_ids = {action.action_id for action in self.inspection.pending_actions}
+        pending_action_ids = {
+            action.action_id for action in self.inspection.pending_actions
+        }
         reserved_process_ids: set[str] = set()
         for durable in stored.runtime_state.actions:
             if durable.kind != "process" or durable.action_id not in pending_action_ids:
@@ -2871,13 +3017,18 @@ class DurableSessionRuntime:
             for notification in stored.runtime_state.submitted_process_notifications
         }
         for process in stored.runtime_state.processes:
-            if process.process_id in notified or process.process_id in reserved_process_ids:
+            if (
+                process.process_id in notified
+                or process.process_id in reserved_process_ids
+            ):
                 continue
             process_bytes = len(
                 canonical_json(
                     cast(
                         JsonValue,
-                        process.model_dump(mode="json", by_alias=True, exclude_none=True),
+                        process.model_dump(
+                            mode="json", by_alias=True, exclude_none=True
+                        ),
                     )
                 )
             )
@@ -2928,13 +3079,19 @@ class DurableSessionRuntime:
             else None
         )
         if not isinstance(refreshed, RustLLMCallAction):
-            raise RuntimeError("Core model-input resync did not return a completion refresh")
+            raise RuntimeError(
+                "Core model-input resync did not return a completion refresh"
+            )
         return refreshed
 
-    async def _ensure_action_started(self, action: RustToolCallAction | RustLLMCallAction) -> None:
+    async def _ensure_action_started(
+        self, action: RustToolCallAction | RustLLMCallAction
+    ) -> None:
         if isinstance(action, RustLLMCallAction):
             if action.purpose != "compaction" or action.compaction_id is None:
-                raise ValueError("only identified compaction actions have public start entries")
+                raise ValueError(
+                    "only identified compaction actions have public start entries"
+                )
             entry_id = f"checkpoint-compaction-{action.compaction_id}"
         else:
             entry_id = f"effect-{action.action_id}"
@@ -2954,8 +3111,7 @@ class DurableSessionRuntime:
         if durable.recovery_mode in {"idempotent_retry", "reconcile", "redeliver"}:
             return await self._execute_action(action)
         return _failed_action_event(
-            action,
-            "The interrupted effect cannot be reconnected safely",
+            action, "The interrupted effect cannot be reconnected safely"
         )
 
     async def _apply(self, command: RustEvent) -> RustSessionTransition:
@@ -2964,16 +3120,20 @@ class DurableSessionRuntime:
         if pending is not None:
             if pending.command == command:
                 await self._retry_pending_process_core_input_once(pending)
-                if pending.wait_for_completion and self._pending_process_core_input is pending:
+                if (
+                    pending.wait_for_completion
+                    and self._pending_process_core_input is pending
+                ):
                     self._pending_process_core_input = None
                 return pending.transition
             await self._wait_for_pending_process_core_input(pending)
             if not pending.wait_for_completion:
                 if not isinstance(pending.command, RustNotificationEvent):
-                    raise RuntimeError("pending terminal Core input is not a notification")
+                    raise RuntimeError(
+                        "pending terminal Core input is not a notification"
+                    )
                 await self._record_process_notification_submitted(
-                    pending.reservation_owner,
-                    pending.command.notification.id,
+                    pending.reservation_owner, pending.command.notification.id
                 )
             elif self._pending_process_core_input is pending:
                 self._pending_process_core_input = None
@@ -3005,7 +3165,9 @@ class DurableSessionRuntime:
             raise RuntimeError(f"Core rejected durable input: {result!r}")
         transition = result.transition
         previous_transition = self._replayed_transition
-        update = self._projector.apply(transition, observed_at=payload.determinism.time_unix_ms)
+        update = self._projector.apply(
+            transition, observed_at=payload.determinism.time_unix_ms
+        )
         # Track the Core's just-applied transition before persisting. A last-resort
         # compaction inside _persist_core_transition (capacity error on the
         # projection append) folds a checkpoint that already includes this input,
@@ -3018,7 +3180,9 @@ class DurableSessionRuntime:
             )
         else:
             persistence = asyncio.create_task(
-                self._persist_process_core_transition(command, payload, transition, update),
+                self._persist_process_core_transition(
+                    command, payload, transition, update
+                ),
                 name=f"process-core-durability-{payload.input_id}",
             )
             try:
@@ -3066,7 +3230,9 @@ class DurableSessionRuntime:
             # later input lands under an ID replay rejects, stranding the session.
             # Only the write is compensated -- once the record lands the input is
             # durable, and a projection append that then fails is repaired by replay.
-            await asyncio.to_thread(self._discard_undurable_core_input, previous_transition)
+            await asyncio.to_thread(
+                self._discard_undurable_core_input, previous_transition
+            )
             raise
         await self._record_projection_update(update)
 
@@ -3153,7 +3319,9 @@ class DurableSessionRuntime:
             raise
         self._complete_pending_process_core_input(pending)
 
-    async def _wait_for_pending_process_core_input(self, pending: _PendingProcessCoreInput) -> None:
+    async def _wait_for_pending_process_core_input(
+        self, pending: _PendingProcessCoreInput
+    ) -> None:
         self._ensure_terminal_retry(immediate=True)
         try:
             await asyncio.shield(pending.completed)
@@ -3161,7 +3329,9 @@ class DurableSessionRuntime:
             await pending.completed
             raise
 
-    def _complete_pending_process_core_input(self, pending: _PendingProcessCoreInput) -> None:
+    def _complete_pending_process_core_input(
+        self, pending: _PendingProcessCoreInput
+    ) -> None:
         self._replayed_transition = pending.transition
         if not pending.completed.done():
             pending.completed.set_result(None)
@@ -3193,14 +3363,18 @@ class DurableSessionRuntime:
 
     async def _advance_projection(self, watermark: int, delta: ProjectionDelta) -> None:
         try:
-            await asyncio.to_thread(self._store.advance_projection_delta, watermark, delta)
+            await asyncio.to_thread(
+                self._store.advance_projection_delta, watermark, delta
+            )
         except HarnessStoreCapacityError:
             # Last-resort net: compaction folds the journal into a fresh
             # generation whose baseline equals the delta's prior snapshot, so the
             # retried delta reconstructs the same advance. Proactive compaction in
             # ``_apply`` should keep this from ever firing.
             await self._compact_store(allow_recoverable=True)
-            await asyncio.to_thread(self._store.advance_projection_delta, watermark, delta)
+            await asyncio.to_thread(
+                self._store.advance_projection_delta, watermark, delta
+            )
         effective = (await asyncio.to_thread(self._store.load)).projection_state
         self._projector = self._projector.rebased(effective)
 
@@ -3213,11 +3387,12 @@ class DurableSessionRuntime:
         )
         for replayed in pending:
             update = self._projector.apply(
-                replayed.transition,
-                observed_at=replayed.observed_at,
+                replayed.transition, observed_at=replayed.observed_at
             )
             if update.delta is not None:
-                await self._advance_projection(update.projection.watermark, update.delta)
+                await self._advance_projection(
+                    update.projection.watermark, update.delta
+                )
         self._replayed_core_inputs = ()
 
     async def _maybe_compact_journal(self) -> None:
@@ -3279,7 +3454,9 @@ class DurableSessionRuntime:
             if self.inspection.status in {"running", "compacting"}
             else None
         )
-        runtime_state = runtime_state.model_copy(update={"pending_transition": pending_transition})
+        runtime_state = runtime_state.model_copy(
+            update={"pending_transition": pending_transition}
+        )
         if not allow_recoverable and not runtime_state.quiescent:
             return False
         if not stored.journal:
@@ -3351,7 +3528,9 @@ class DurableSessionRuntime:
             raise RuntimeError("cannot re-pin the plugins of a non-quiescent session")
         return stored
 
-    def _rewrite_plugins_sync(self, plugin_lock: PluginLockV1, config: RustHarnessConfig) -> None:
+    def _rewrite_plugins_sync(
+        self, plugin_lock: PluginLockV1, config: RustHarnessConfig
+    ) -> None:
         stored = self._load_quiescent()
         sequence = stored.runtime_state.snapshot_sequence
         checkpoint, core_last_input_id = self._capture_core_generation()
@@ -3414,7 +3593,10 @@ def _process_storage_reservation(
 ) -> tuple[int, int, str | None]:
     action_bytes = len(
         canonical_json(
-            cast(JsonValue, action.model_dump(mode="json", by_alias=True, exclude_none=True))
+            cast(
+                JsonValue,
+                action.model_dump(mode="json", by_alias=True, exclude_none=True),
+            )
         )
     )
     temporary = _PROCESS_ACTION_OVERHEAD_BYTES + action_bytes * 3
@@ -3427,7 +3609,10 @@ def _process_storage_reservation(
             canonical_json(
                 cast(
                     JsonValue,
-                    [process.model_dump(mode="json", by_alias=True) for process in processes],
+                    [
+                        process.model_dump(mode="json", by_alias=True)
+                        for process in processes
+                    ],
                 )
             )
         )
@@ -3447,7 +3632,9 @@ def _process_persistence_failure(
                 "process_start_failed",
                 "Background process could not be started",
                 {
-                    "processId": process_id(session_id, action.action_id, action.call_id),
+                    "processId": process_id(
+                        session_id, action.action_id, action.call_id
+                    ),
                     "stage": "persistence",
                 },
             ),
@@ -3461,11 +3648,7 @@ def _process_persistence_failure(
         details["processId"] = process_identifier
     return process_failed(
         action,
-        process_error(
-            "process_io_failed",
-            "Background process I/O failed",
-            details,
-        ),
+        process_error("process_io_failed", "Background process I/O failed", details),
     )
 
 
@@ -3487,7 +3670,9 @@ def _rebuilt_core(core: HarnessSession, expected_last_input_id: int) -> HarnessS
     return core
 
 
-def _runtime_state_for_replaced_context(runtime_state: RuntimeStateV3) -> RuntimeStateV3:
+def _runtime_state_for_replaced_context(
+    runtime_state: RuntimeStateV3,
+) -> RuntimeStateV3:
     """Drop the ledgers that belong to the timeline a replaced context abandons.
 
     A Core rebuilt from history numbers its inputs from the beginning again, and
@@ -3540,9 +3725,7 @@ def build_terminal_notification(process: ManagedProcessV1) -> RustHarnessNotific
     return RustHarnessNotification(
         id=f"background-process:{process.process_id}:terminal",
         source=RustBackgroundProcessNotificationSource(
-            process_id=process.process_id,
-            status=process.status,
-            exit_code=exit_code,
+            process_id=process.process_id, status=process.status, exit_code=exit_code
         ),
         level=cast(Literal["info", "warning", "error"], level),
         message=message,
@@ -3613,7 +3796,9 @@ def _context_compaction_response(transition: RustSessionTransition) -> JsonValue
         and observation.trigger == "manual"
     ]
     if len(terminal) != 1:
-        raise RuntimeError("manual context compaction has no single terminal observation")
+        raise RuntimeError(
+            "manual context compaction has no single terminal observation"
+        )
     observation = terminal[0]
     if isinstance(observation, RustContextCompactedObservation):
         return {"type": "succeeded", "summary": observation.summary}
@@ -3686,7 +3871,9 @@ def _capability_reconfigure_command(
 
 def _action_kind(
     action: RustAction,
-) -> Literal["completion", "tool", "hook", "process", "callback", "child", "filesystem"]:
+) -> Literal[
+    "completion", "tool", "hook", "process", "callback", "child", "filesystem"
+]:
     if isinstance(action, RustLLMCallAction):
         return "completion"
     if isinstance(action, RustHookCallActionBase):
@@ -3713,7 +3900,9 @@ def _recovery_mode(action: RustAction) -> RecoveryMode:
 
 
 async def _unavailable_action(action: RustAction) -> RustEvent:
-    return _failed_action_event(action, "No Runtime adapter is configured for this action")
+    return _failed_action_event(
+        action, "No Runtime adapter is configured for this action"
+    )
 
 
 async def _cancel_tasks(tasks: Sequence[asyncio.Task[RustEvent]]) -> None:
@@ -3726,16 +3915,15 @@ async def _cancel_tasks(tasks: Sequence[asyncio.Task[RustEvent]]) -> None:
 
 def _failed_action_event(action: RustAction, message: str) -> RustEvent:
     error = RustProtocolError(
-        code="effect_recovery_failed",
-        message=message,
-        retryable=False,
-        details=None,
+        code="effect_recovery_failed", message=message, retryable=False, details=None
     )
     if isinstance(action, RustLLMCallAction):
         return RustCompletionFailedEvent(action_id=action.action_id, error=error)
     if isinstance(action, RustHookCallActionBase):
         return RustHookFailedEvent(action_id=action.action_id, error=error)
-    if isinstance(action, RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction):
+    if isinstance(
+        action, RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction
+    ):
         return RustToolFailedEvent(
             action_id=action.action_id,
             call_id=action.call_id,

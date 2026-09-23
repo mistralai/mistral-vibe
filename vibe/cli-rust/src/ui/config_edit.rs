@@ -1,44 +1,45 @@
-//! Nested `/config` value editor.
+//! Nested config editor with disjoint, content-sized regions.
 
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+mod layout;
+mod persistence;
+
+use ratatui::layout::{Margin, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
+use unicode_segmentation::UnicodeSegmentation;
 
-use super::theme;
+use super::{composer_layout::ComposerLayout, scrollbar, theme};
 use crate::app::App;
-use crate::config_edit;
+use crate::config_edit::{self, ConfigEdit};
+pub(super) use layout::draw_too_small;
+use layout::{height, paragraph, Layout};
 
-pub fn draw(app: &App, f: &mut Frame, area: Rect) -> Option<(Rect, Option<Rect>)> {
-    let Some(edit) = &app.config_screen.edit else {
-        return None;
+pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
+    let Some(edit) = app.config_screen.edit.as_mut() else {
+        return;
     };
-    let width = area.width.saturating_sub(8).clamp(24, 80);
-    let choices = config_edit::choices(&edit.field);
-    let main_width = if edit.field.layers.is_empty() {
-        width - 6
-    } else {
-        width.saturating_sub(43)
-    };
-    let total_choice_rows = choices
+    edit.choice_regions.clear();
+    let values = config_edit::choices(&edit.field);
+    let selected = config_edit::choice_index(edit, &values);
+    let choices: Vec<_> = values
         .iter()
-        .map(|choice| {
-            wrap(
-                &config_edit::choice_label(&edit.field, choice),
-                main_width as usize,
-            )
-            .len()
-        })
-        .sum::<usize>();
-    let choice_rows = total_choice_rows.min(config_edit::MAX_VISIBLE_CHOICES);
-    let height = (choice_rows as u16 + 10).max(9);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let box_area = Rect::new(x, y, width, height);
-    f.render_widget(Clear, box_area);
+        .map(|choice| config_edit::choice_label(&edit.field, choice))
+        .collect();
+    let Some(layout) = Layout::new(edit, &choices, area) else {
+        draw_too_small(
+            app,
+            f,
+            area,
+            "Enlarge terminal to edit this setting. Esc Cancel",
+        );
+        return;
+    };
     let bg = theme::surface();
-    f.buffer_mut().set_style(box_area, Style::default().bg(bg));
+    f.render_widget(Clear, layout.modal);
+    f.buffer_mut()
+        .set_style(layout.modal, Style::default().bg(bg));
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
@@ -52,255 +53,248 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) -> Option<(Rect, Option<Rect>)
                 ),
                 Span::raw(" "),
             ])),
-        box_area,
+        layout.modal,
     );
-    let body_x = x + 3;
-    let mut row = y + 2;
-    if !edit.field.description.is_empty() {
-        f.buffer_mut().set_stringn(
-            body_x,
-            row,
-            &edit.field.description,
-            main_width as usize,
-            Style::default()
-                .fg(theme::muted())
-                .bg(bg)
-                .add_modifier(Modifier::DIM),
-        );
-        row += 1;
+    let mut description = edit.field.description.clone();
+    if choices.is_empty() && config_edit::is_multiline(&edit.field) {
+        if !description.is_empty() {
+            description.push('\n');
+        }
+        description.push_str(if edit.field.kind == "list" {
+            "One item per line."
+        } else {
+            "Edit as JSON."
+        });
     }
-    let scroll_region =
-        (!choices.is_empty()).then_some(Rect::new(body_x, row, main_width, choice_rows as u16));
-    if choices.is_empty() {
-        f.buffer_mut().set_stringn(
-            body_x,
-            row,
-            &edit.draft,
-            main_width as usize,
-            Style::default().fg(theme::foreground()).bg(bg),
-        );
+    f.render_widget(
+        paragraph(&description).style(theme::dim(theme::muted())),
+        Rect::new(
+            layout.main.x,
+            layout.main.y,
+            layout.main.width,
+            layout.description_height,
+        ),
+    );
+    let editor = layout.editor();
+    let scrollbar = if choices.is_empty() {
+        input(f, editor, edit);
+        None
     } else {
-        let mut choice_y = row;
-        let offset = config_edit::choice_offset(edit.choice, choices.len());
-        let mut rows_left = config_edit::MAX_VISIBLE_CHOICES;
-        for (index, choice) in choices
-            .iter()
-            .skip(offset)
-            .take(config_edit::MAX_VISIBLE_CHOICES)
-            .enumerate()
-        {
-            let label = config_edit::choice_label(&edit.field, choice);
-            let lines = wrap(&label, main_width as usize);
-            if lines.len() > rows_left {
-                break;
-            }
-            let line_count = lines.len();
-            let selected = offset + index == edit.choice;
-            let style = if selected {
+        draw_choices(f, editor, edit, &choices, selected)
+    };
+    persistence::inspector(f, layout.side, &edit.field);
+    f.render_widget(
+        Paragraph::new("─".repeat(usize::from(layout.targets.width)))
+            .style(Style::default().fg(theme::muted())),
+        Rect::new(
+            layout.targets.x,
+            layout.targets.y - 2,
+            layout.targets.width,
+            1,
+        ),
+    );
+    persistence::targets(f, layout.targets, &app.config_screen.targets, edit.target);
+    help(
+        f,
+        layout.help,
+        !choices.is_empty(),
+        config_edit::is_multiline(&edit.field),
+    );
+    if let Some(error) = &edit.error {
+        f.render_widget(
+            Paragraph::new(error.as_str()).style(Style::default().fg(theme::error())),
+            Rect::new(
+                layout.targets.x,
+                layout.targets.y - 3,
+                layout.targets.width,
+                1,
+            ),
+        );
+    }
+    crate::mouse::register_region(app, layout.modal, crate::mouse::MouseTarget::Blocked);
+    if !choices.is_empty() {
+        crate::mouse::register_region(app, editor, crate::mouse::MouseTarget::ConfigEditor);
+    }
+    if let Some((track, total, offset)) = scrollbar {
+        scrollbar::draw_large(
+            app,
+            f,
+            crate::mouse::MouseTarget::ConfigEditor,
+            track,
+            total,
+            usize::from(editor.height),
+            offset,
+        );
+    }
+}
+
+fn input(f: &mut Frame, mut area: Rect, edit: &mut ConfigEdit) {
+    if !config_edit::is_multiline(&edit.field) {
+        area.height = area.height.min(3);
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::primary()));
+    let inner = layout::input_inner(area);
+    edit.input_width = Some(inner.width);
+    f.render_widget(block, area);
+    let cursor_style = Style::default()
+        .fg(theme::block_cursor_fg())
+        .bg(theme::block_cursor_bg());
+    let layout = ComposerLayout::hard_wrapped(&edit.draft, edit.cursor, inner.width);
+    let offset = layout.viewport_top(edit.scroll.unwrap_or(0), usize::from(inner.height));
+    edit.scroll = Some(offset);
+    let rows = layout
+        .rows()
+        .skip(offset)
+        .take(usize::from(inner.height))
+        .map(|row| {
+            let Some(at) = layout.caret_in(row) else {
+                return Line::raw(row.text);
+            };
+            let len = row.text[at..].graphemes(true).next().map_or(0, str::len);
+            Line::from(vec![
+                Span::raw(row.text[..at].to_owned()),
+                Span::styled(
+                    if len == 0 {
+                        " ".to_owned()
+                    } else {
+                        row.text[at..at + len].to_owned()
+                    },
+                    cursor_style,
+                ),
+                Span::raw(row.text[at + len..].to_owned()),
+            ])
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(rows).style(Style::default().fg(theme::foreground())),
+        inner,
+    );
+}
+
+pub fn vertical_cursor(edit: &ConfigEdit, down: bool) -> usize {
+    let Some(width) = edit.input_width else {
+        return edit.cursor;
+    };
+    ComposerLayout::hard_wrapped(&edit.draft, edit.cursor, width)
+        .vertical_offset(down)
+        .0
+}
+
+fn draw_choices(
+    f: &mut Frame,
+    area: Rect,
+    edit: &mut ConfigEdit,
+    choices: &[String],
+    selected: usize,
+) -> Option<(Rect, usize, usize)> {
+    let mut content = area.inner(Margin::new(1, 0));
+    let visible = usize::from(area.height);
+    if choices
+        .iter()
+        .map(|label| usize::from(height(label, content.width)))
+        .sum::<usize>()
+        > visible
+    {
+        content.width = content.width.saturating_sub(2);
+    }
+    let heights: Vec<usize> = choices
+        .iter()
+        .map(|label| usize::from(height(label, content.width)))
+        .collect();
+    let total: usize = heights.iter().sum();
+    let selected_start: usize = heights.iter().take(selected).sum();
+    let selected_height = heights.get(selected).copied().unwrap_or(1);
+    let offset = (selected_start + selected_height)
+        .saturating_sub(visible)
+        .min(selected_start);
+    let offset = edit
+        .scroll
+        .unwrap_or(offset)
+        .min(total.saturating_sub(visible));
+    edit.scroll = edit.scroll.map(|_| offset);
+    let mut row = 0;
+    for (index, (label, count)) in choices.iter().zip(heights).enumerate() {
+        let end = row + count;
+        let start = row.max(offset);
+        let bottom = end.min(offset + visible);
+        if start < bottom {
+            let rect = Rect::new(
+                content.x,
+                content.y + (start - offset) as u16,
+                content.width,
+                (bottom - start) as u16,
+            );
+            let style = if index == selected {
                 Style::default()
                     .fg(theme::block_cursor_fg())
                     .bg(theme::block_cursor_bg())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme::foreground()).bg(bg)
-            };
-            for line in lines {
-                if selected {
-                    f.buffer_mut().set_style(
-                        Rect::new(body_x + 1, choice_y, main_width - 2, 1),
-                        Style::default().bg(theme::block_cursor_bg()),
-                    );
-                }
-                f.buffer_mut()
-                    .set_stringn(body_x + 1, choice_y, line, main_width as usize, style);
-                choice_y += 1;
-            }
-            rows_left -= line_count;
-        }
-        if total_choice_rows > choice_rows {
-            let scrollbar_x = body_x + main_width - 2;
-            let scrollbar = Style::default()
-                .fg(theme::scrollbar())
-                .bg(theme::scrollbar());
-            for scrollbar_y in row..row + choice_rows as u16 {
-                f.buffer_mut()
-                    .set_string(scrollbar_x, scrollbar_y, " ", scrollbar);
-            }
-            f.buffer_mut().set_string(
-                scrollbar_x,
-                row + choice_rows as u16 - 1,
-                "▇",
                 Style::default()
-                    .fg(theme::scrollbar_bg())
-                    .bg(theme::scrollbar()),
-            );
-        }
-    }
-    if !edit.field.layers.is_empty() {
-        let side_x = x + width - 37;
-        for side_y in y + 2..y + 5 {
-            f.buffer_mut().set_string(
-                x + width - 39,
-                side_y,
-                "│",
-                Style::default().fg(theme::muted()).bg(bg),
-            );
-        }
-        f.buffer_mut().set_string(
-            side_x,
-            y + 2,
-            "WHERE IT'S SET",
-            Style::default()
-                .fg(theme::muted())
-                .bg(bg)
-                .add_modifier(Modifier::BOLD | Modifier::DIM),
-        );
-        for (index, (layer, value)) in edit.field.layers.iter().take(8).enumerate() {
-            let prefix = if index == 0 { "▸ " } else { "  " };
-            let layer = if layer == "default" {
-                "defaults"
-            } else {
-                layer
+                    .fg(theme::foreground())
+                    .bg(theme::surface())
             };
-            f.buffer_mut().set_stringn(
-                side_x,
-                y + 4 + index as u16,
-                format!("{prefix}{layer:<9} "),
-                12,
-                Style::default().fg(theme::muted()).bg(bg),
+            if index == selected {
+                f.buffer_mut().set_style(
+                    Rect::new(rect.x, rect.y, area.width - 2, rect.height),
+                    style,
+                );
+            }
+            f.render_widget(
+                paragraph(label)
+                    .scroll(((start - row) as u16, 0))
+                    .style(style),
+                rect,
             );
-            f.buffer_mut().set_stringn(
-                side_x + 12,
-                y + 4 + index as u16,
-                value,
-                23,
-                if index == 0 {
-                    Style::default()
-                        .fg(theme::foreground())
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme::muted()).bg(bg)
-                },
-            );
+            edit.choice_regions.push((rect, index));
+        }
+        row = end;
+        if row >= offset + visible {
+            break;
         }
     }
-    f.buffer_mut().set_stringn(
-        body_x,
-        y + height - 7,
-        "─".repeat((width - 6) as usize),
-        (width - 6) as usize,
-        Style::default().fg(theme::muted()).bg(bg),
-    );
-    draw_target_bar(app, f, edit.target, body_x, y + height - 5, bg);
-    let help = if choices.is_empty() {
-        if config_edit::is_multiline(&edit.field) {
-            "Ctrl+S Save  Esc Cancel  Tab Change Layer"
-        } else {
-            "Enter Save  Esc Cancel  Tab Change Layer"
-        }
-    } else {
-        "↑↓/jk Navigate  Enter Select  Esc Cancel  Tab Change Layer"
+    (total > visible).then_some((
+        Rect::new(area.right() - 2, area.y, 1, area.height),
+        total,
+        offset,
+    ))
+}
+
+fn help(f: &mut Frame, area: Rect, choices: bool, multiline: bool) {
+    let save = match (choices, multiline) {
+        (true, _) => "Enter Select",
+        (false, true) => "Ctrl+S Save",
+        _ => "Enter Save",
     };
-    f.buffer_mut().set_string(
-        body_x,
-        y + height - 2,
-        help,
-        Style::default()
-            .fg(theme::muted())
-            .bg(bg)
-            .add_modifier(Modifier::DIM),
-    );
-    if !choices.is_empty() {
-        let key = Style::default()
-            .fg(theme::primary())
-            .bg(bg)
-            .add_modifier(Modifier::BOLD)
-            .remove_modifier(Modifier::DIM);
-        for (offset, key_text) in [(0, "↑↓/jk"), (16, "Enter"), (30, "Esc"), (42, "Tab")] {
-            f.buffer_mut()
-                .set_string(body_x + offset, y + height - 2, key_text, key);
-        }
+    let mut hints = Vec::new();
+    if choices {
+        hints.push(("↑↓/jk", "Navigate"));
     }
-    Some((box_area, scroll_region))
-}
-
-const TARGET_BAR_PREFIX: &str = "Save to";
-const TARGET_BAR_GAP: u16 = 4;
-const TARGET_MARKER_WIDTH: u16 = 2;
-
-/// Two lines: the save targets, then each target's persistence hint beneath it.
-fn draw_target_bar(app: &App, f: &mut Frame, target: usize, body_x: u16, y: u16, bg: Color) {
-    let base = Style::default().bg(bg).remove_modifier(Modifier::DIM);
-    let strong = base.fg(theme::foreground()).add_modifier(Modifier::BOLD);
-    let plain = base.fg(theme::foreground());
-    let dim = Style::default()
-        .fg(theme::muted())
-        .bg(bg)
-        .add_modifier(Modifier::DIM);
-    f.buffer_mut()
-        .set_string(body_x, y, TARGET_BAR_PREFIX, strong);
-    let indent = TARGET_BAR_PREFIX.chars().count() as u16 + 3;
-    let (mut x, mut hint_x) = (body_x + indent, body_x + indent);
-    for (index, name) in app.config_screen.targets.iter().enumerate() {
-        let (label, hint) = (target_label(name), target_hint(name));
-        let width = label.chars().count().max(hint.chars().count());
+    let (key, action) = save.split_once(' ').unwrap();
+    hints.extend([(key, action), ("Esc", "Cancel"), ("Tab", "Change Layer")]);
+    if area.width < 60 {
+        hints.retain(|(key, _)| *key != "↑↓/jk");
+        hints.last_mut().unwrap().1 = "Layer";
+    }
+    let mut spans = Vec::new();
+    for (index, (key, action)) in hints.iter().enumerate() {
         if index > 0 {
-            x += TARGET_BAR_GAP;
-            hint_x += TARGET_BAR_GAP;
+            spans.push(Span::raw("  "));
         }
-        let active = index == target;
-        let marker = if active { "● " } else { "○ " };
-        f.buffer_mut()
-            .set_string(x, y, marker, if active { plain } else { dim });
-        f.buffer_mut().set_string(
-            x + TARGET_MARKER_WIDTH,
-            y,
-            format!("{label:<width$}"),
-            if active { strong } else { dim },
-        );
-        f.buffer_mut().set_string(
-            hint_x + TARGET_MARKER_WIDTH,
-            y + 1,
-            format!("{hint:<width$}"),
-            dim.add_modifier(Modifier::ITALIC),
-        );
-        x += TARGET_MARKER_WIDTH + width as u16;
-        hint_x += TARGET_MARKER_WIDTH + width as u16;
+        let style = if choices {
+            Style::default()
+                .fg(theme::primary())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            theme::dim(theme::muted())
+        };
+        spans.push(Span::styled(*key, style));
+        spans.push(Span::styled(
+            format!(" {action}"),
+            theme::dim(theme::muted()),
+        ));
     }
-}
-
-/// Python `origin_label`.
-fn target_label(target: &str) -> &str {
-    match target {
-        "default" => "defaults",
-        "overrides" => "temporary",
-        "environment" => "env",
-        "admin" => "your administrator",
-        "user-toml" => "user config",
-        "project-toml" => "project config",
-        _ => target,
-    }
-}
-
-/// Python `target_hint`.
-fn target_hint(target: &str) -> &str {
-    match target {
-        "overrides" => "until restart",
-        "project-toml" => "saved for this project",
-        _ => "saved globally",
-    }
-}
-
-fn wrap(text: &str, width: usize) -> Vec<&str> {
-    if text.chars().count() <= width {
-        return vec![text];
-    }
-    let split = text[..text
-        .char_indices()
-        .nth(width)
-        .map_or(text.len(), |(i, _)| i)]
-        .rfind(' ')
-        .unwrap_or(width);
-    vec![text[..split].trim_end(), text[split..].trim_start()]
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

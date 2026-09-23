@@ -1,11 +1,13 @@
 //! `/mcp` browser state (Python `MCPApp` and `VibeApp._show_mcp`).
 
-mod add_args;
+pub mod add_args;
 mod browser;
 pub mod commands;
 mod help;
 mod notices;
 pub mod rows;
+pub mod search;
+pub mod search_usage;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +40,7 @@ pub enum Event {
     /// A refresh or a toggle returned a new runtime for the open browser.
     Refreshed(Value),
     Error(String),
+    SearchRecorded,
 }
 
 /// Run `/mcp` (Python `_show_mcp`): subcommands first, else read and open.
@@ -109,6 +112,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             reconcile_selection(app);
         }
         Event::Error(message) => add_error(app, &message),
+        Event::SearchRecorded => {}
     }
     app.commit_finished();
 }
@@ -152,6 +156,7 @@ fn open(app: &mut App, client: &Arc<Client>, state: MCPState, initial_source: &s
     }
     add_result(app, "MCP and connectors opened...");
     app.mcp.state = state;
+    app.mcp.search = search::Search::default();
     app.mcp.viewing_name = (!initial_source.is_empty()).then(|| initial_source.to_owned());
     app.mcp.viewing_kind = None;
     app.mcp.selected = 0;

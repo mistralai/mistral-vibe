@@ -46,6 +46,7 @@ def store_golden(
                 for r in normalize_requests(requests)
             ],
             indent=1,
+            sort_keys=True,
         )
         + "\n"
     )

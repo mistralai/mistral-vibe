@@ -2,6 +2,8 @@
 //! boundaries. Pure operations on `(input, cursor)`; the `chat input` module owns
 //! the `Action`/selection policy on top.
 
+use unicode_segmentation::UnicodeSegmentation;
+
 /// A word char, matching Python's `\w` (unicode alphanumerics plus underscore).
 pub(crate) fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
@@ -35,17 +37,17 @@ pub(crate) fn line_bounds(input: &str, cursor: usize) -> (usize, usize) {
     (start, end)
 }
 
-/// Byte length of the char starting at `cursor`, or 0 at end of text.
-fn char_len_at(input: &str, cursor: usize) -> usize {
-    input[cursor..].chars().next().map_or(0, char::len_utf8)
+/// Byte length of the grapheme starting at `cursor`, or 0 at end of text.
+fn grapheme_len_at(input: &str, cursor: usize) -> usize {
+    input[cursor..].graphemes(true).next().map_or(0, str::len)
 }
 
-/// Byte length of the char ending at `cursor`, or 0 at start of text.
-fn char_len_before(input: &str, cursor: usize) -> usize {
+/// Byte length of the grapheme ending at `cursor`, or 0 at start of text.
+fn grapheme_len_before(input: &str, cursor: usize) -> usize {
     input[..cursor]
-        .chars()
+        .graphemes(true)
         .next_back()
-        .map_or(0, char::len_utf8)
+        .map_or(0, str::len)
 }
 
 /// Insert `s` at the cursor and advance past it (Textual paste / typed char).
@@ -54,31 +56,31 @@ pub(crate) fn insert(input: &mut String, cursor: &mut usize, s: &str) {
     *cursor += s.len();
 }
 
-/// Delete the char left of the cursor (`backspace`).
+/// Delete the grapheme left of the cursor (`backspace`).
 pub(crate) fn delete_left(input: &mut String, cursor: &mut usize) {
-    let n = char_len_before(input, *cursor);
+    let n = grapheme_len_before(input, *cursor);
     if n > 0 {
         input.replace_range(*cursor - n..*cursor, "");
         *cursor -= n;
     }
 }
 
-/// Delete the char right of the cursor (`delete`, `ctrl+d` with text).
+/// Delete the grapheme right of the cursor (`delete`, `ctrl+d` with text).
 pub(crate) fn delete_right(input: &mut String, cursor: &usize) {
-    let n = char_len_at(input, *cursor);
+    let n = grapheme_len_at(input, *cursor);
     if n > 0 {
         input.replace_range(*cursor..*cursor + n, "");
     }
 }
 
-/// Move the cursor one char left (`left`).
+/// Move the cursor one grapheme left (`left`).
 pub(crate) fn cursor_left(input: &str, cursor: &mut usize) {
-    *cursor -= char_len_before(input, *cursor);
+    *cursor -= grapheme_len_before(input, *cursor);
 }
 
-/// Move the cursor one char right (`right`).
+/// Move the cursor one grapheme right (`right`).
 pub(crate) fn cursor_right(input: &str, cursor: &mut usize) {
-    *cursor += char_len_at(input, *cursor);
+    *cursor += grapheme_len_at(input, *cursor);
 }
 
 /// Column (byte offset within its line) the cursor jumps to going one word left.

@@ -125,6 +125,7 @@ fn region(area: Rect) -> Region {
         scrollbar: false,
         end_exclusive: false,
         document: false,
+        ..Region::default()
     }
 }
 

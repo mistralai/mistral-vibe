@@ -1,13 +1,15 @@
 """Validation and deterministic values for local background-process Actions."""
 
+from __future__ import annotations
+
 import base64
 import binascii
+from dataclasses import dataclass
 import hashlib
 import json
 import os
-import re
-from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Literal, cast
 
 from pydantic import JsonValue
@@ -72,6 +74,7 @@ _POSIX_ENV_DEFAULTS = {
     "DEBIAN_FRONTEND": "noninteractive",
 }
 _POWERSHELL_ENV_DEFAULTS = {"GIT_PAGER": "more", "PAGER": "more"}
+_MAX_OUTPUT_WAIT_MS = 30_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +131,9 @@ type ValidatedProcessAction = (
     | ValidatedProcessList
     | ValidatedProcessStop
 )
-type MutatingProcessAction = ValidatedProcessStart | ValidatedProcessWrite | ValidatedProcessStop
+type MutatingProcessAction = (
+    ValidatedProcessStart | ValidatedProcessWrite | ValidatedProcessStop
+)
 
 
 def validate_process_action(
@@ -231,7 +236,9 @@ def process_request_sha256(request: MutatingProcessAction) -> str:
 
 
 def process_error(code: str, message: str, details: JsonObject) -> RustProtocolError:
-    return RustProtocolError(code=code, message=message, retryable=False, details=details)
+    return RustProtocolError(
+        code=code, message=message, retryable=False, details=details
+    )
 
 
 def manager_error(error: ProcessManagerError) -> RustProtocolError:
@@ -244,7 +251,9 @@ def process_succeeded(
     return RustToolSucceededEvent(
         action_id=action.action_id,
         call_id=action.call_id,
-        result=RustToolSuccessResult(structured_content=cast(JsonValue, structured_content)),
+        result=RustToolSuccessResult(
+            structured_content=cast(JsonValue, structured_content)
+        ),
     )
 
 
@@ -274,7 +283,11 @@ def _validate_start(
     )
     issues = _environment_issues(explicit_env, windows=_is_windows(config))
     if not command.strip():
-        issues.append(ProcessArgumentIssue("command", "empty_command", "Command must not be empty"))
+        issues.append(
+            ProcessArgumentIssue(
+                "command", "empty_command", "Command must not be empty"
+            )
+        )
     cwd, cwd_issue = _resolve_working_directory(
         arguments.get("cwd", ""), config.cwd, windows=_is_windows(config)
     )
@@ -295,13 +308,19 @@ def _validate_start(
     )
 
 
-def _validate_output(action: RustRuntimeBuiltinToolCallAction) -> ValidatedProcessOutput:
+def _validate_output(
+    action: RustRuntimeBuiltinToolCallAction,
+) -> ValidatedProcessOutput:
     arguments = action.call.arguments
     wait_ms = _integer(arguments, "waitMs", 0)
     issues = []
-    if wait_ms > 30_000:
+    if wait_ms > _MAX_OUTPUT_WAIT_MS:
         issues.append(
-            ProcessArgumentIssue("waitMs", "value_too_large", "waitMs must be at most 30000")
+            ProcessArgumentIssue(
+                "waitMs",
+                "value_too_large",
+                f"waitMs must be at most {_MAX_OUTPUT_WAIT_MS}",
+            )
         )
     _raise_argument_issues("process.output", issues)
     return ValidatedProcessOutput(
@@ -324,7 +343,9 @@ def _validate_write(
         text = _required_string(arguments, "text", allow_empty=True)
         if not text:
             issues.append(
-                ProcessArgumentIssue("text", "empty_input", "Process input must not be empty")
+                ProcessArgumentIssue(
+                    "text", "empty_input", "Process input must not be empty"
+                )
             )
         else:
             data = text.encode()
@@ -332,7 +353,9 @@ def _validate_write(
         controls = arguments["control"]
         if not isinstance(controls, list):
             raise ValueError("process.write control must be a list")
-        data = b"".join(_CONTROL_BYTES[cast(ProcessControlKey, key)] for key in controls)
+        data = b"".join(
+            _CONTROL_BYTES[cast(ProcessControlKey, key)] for key in controls
+        )
     else:
         encoded = _required_string(arguments, "bytesBase64")
         try:
@@ -340,7 +363,9 @@ def _validate_write(
         except (ValueError, binascii.Error):
             issues.append(
                 ProcessArgumentIssue(
-                    "bytesBase64", "invalid_base64", "bytesBase64 must contain valid base64"
+                    "bytesBase64",
+                    "invalid_base64",
+                    "bytesBase64 must contain valid base64",
                 )
             )
         if windows and data:
@@ -358,7 +383,9 @@ def _validate_write(
     return ValidatedProcessWrite(process_id=process_identifier, data=data)
 
 
-def _environment_issues(env: dict[str, str], *, windows: bool) -> list[ProcessArgumentIssue]:
+def _environment_issues(
+    env: dict[str, str], *, windows: bool
+) -> list[ProcessArgumentIssue]:
     issues: list[ProcessArgumentIssue] = []
     folded_names: set[str] = set()
     duplicate = False
@@ -411,10 +438,7 @@ def _environment_issues(env: dict[str, str], *, windows: bool) -> list[ProcessAr
 
 
 def _resolve_working_directory(
-    value: JsonValue,
-    session_cwd: Path,
-    *,
-    windows: bool,
+    value: JsonValue, session_cwd: Path, *, windows: bool
 ) -> tuple[Path | None, ProcessArgumentIssue | None]:
     if not isinstance(value, str):
         raise ValueError("process.start cwd must be a string")
@@ -448,28 +472,38 @@ def _merge_process_environment(
     windows = command_environment != "unix"
     merged = dict(base)
     defaults = (
-        _POWERSHELL_ENV_DEFAULTS if command_environment == "powershell" else _POSIX_ENV_DEFAULTS
+        _POWERSHELL_ENV_DEFAULTS
+        if command_environment == "powershell"
+        else _POSIX_ENV_DEFAULTS
     )
     for name, value in defaults.items():
         _setdefault_environment(merged, name, value, windows=windows)
     for name, value in explicit.items():
         if windows:
             folded = name.casefold()
-            merged = {key: item for key, item in merged.items() if key.casefold() != folded}
+            merged = {
+                key: item for key, item in merged.items() if key.casefold() != folded
+            }
         merged[name] = value
     return merged
 
 
-def _setdefault_environment(env: dict[str, str], name: str, value: str, *, windows: bool) -> None:
+def _setdefault_environment(
+    env: dict[str, str], name: str, value: str, *, windows: bool
+) -> None:
     if windows and any(key.casefold() == name.casefold() for key in env):
         return
     env.setdefault(name, value)
 
 
-def _raise_argument_issues(tool: ProcessToolName, issues: list[ProcessArgumentIssue]) -> None:
+def _raise_argument_issues(
+    tool: ProcessToolName, issues: list[ProcessArgumentIssue]
+) -> None:
     if not issues:
         return
-    sorted_issues = sorted(issues, key=lambda item: (item.location, item.type, item.message))
+    sorted_issues = sorted(
+        issues, key=lambda item: (item.location, item.type, item.message)
+    )
     raise ProcessActionError(
         process_error(
             "invalid_arguments",
@@ -492,7 +526,9 @@ def _raise_argument_issues(tool: ProcessToolName, issues: list[ProcessArgumentIs
     )
 
 
-def _required_string(arguments: JsonObject, name: str, *, allow_empty: bool = False) -> str:
+def _required_string(
+    arguments: JsonObject, name: str, *, allow_empty: bool = False
+) -> str:
     value = arguments.get(name)
     if not isinstance(value, str) or (not allow_empty and not value):
         raise ValueError(f"process Action {name} must be a nonempty string")
@@ -510,7 +546,9 @@ def _process_command_environment(
     config: LocalRuntimeAdapterConfig,
 ) -> ProcessCommandEnvironment:
     if config.command_environment not in {"unix", "git_bash", "powershell"}:
-        raise ValueError("background processes require a host-shell command environment")
+        raise ValueError(
+            "background processes require a host-shell command environment"
+        )
     return cast(ProcessCommandEnvironment, config.command_environment)
 
 
@@ -554,6 +592,6 @@ __all__ = [
     "process_request_sha256",
     "process_succeeded",
     "resolve_process_start",
-    "validate_process_config",
     "validate_process_action",
+    "validate_process_config",
 ]

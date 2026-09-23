@@ -12,10 +12,15 @@ SVGs are uploaded automatically — no separate store step needed.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import difflib
+import json
 import os
+from pathlib import Path
 import warnings
+from xml.etree import ElementTree
 
+from e2e.app_server import golden
 from e2e.app_server.capture import Capture, capture_scenario
 from e2e.app_server.config import CLIENTS, REPLAY_BIN
 from e2e.app_server.golden import (
@@ -27,9 +32,15 @@ from e2e.app_server.golden import (
     store_golden,
 )
 from e2e.app_server.parity import normalize_requests
-from e2e.app_server.scenario import Action, Scenario, available_scenarios, load_scenario
+from e2e.app_server.scenario import (
+    Action,
+    Request,
+    Scenario,
+    available_scenarios,
+    load_scenario,
+)
 from e2e.app_server.svg import to_svg
-from e2e.pty.screen import Snapshot
+from e2e.pty.screen import Snapshot, Terminal
 import pytest
 
 _LIVE_DIR = golden_path("_live")
@@ -92,6 +103,120 @@ def test_scenario_expectations_reject_wrong_clipboard() -> None:
 
     with pytest.raises(AssertionError):
         _assert_scenario_expectations(captured, scenario)
+
+
+def test_svg_groups_text_without_merging_styles() -> None:
+    terminal = Terminal(40, 24)
+    terminal.feed(b"plain  text \x1b[1;38;2;255;0;0;48;2;0;0;255mbold red\x1b[0m end")
+
+    svg = ElementTree.fromstring(to_svg(terminal.snapshot("styled"), "test"))
+    nodes = [
+        node
+        for node in svg.findall(".//{*}text")
+        if node.get("y") == "20" and node.text and node.text.strip()
+    ]
+
+    assert [node.text for node in nodes] == [
+        "plain\u00a0\u00a0text\u00a0",
+        "bold\u00a0red",
+        "\u00a0end",
+    ]
+    assert [node.attrib["x"].split()[0] for node in nodes] == ["0", "146.4", "244"]
+    assert nodes[0].attrib["x"].split() == [
+        f"{round(i * 12.2, 2):g}" for i in range(12)
+    ]
+    assert all("textLength" not in node.attrib for node in nodes)
+    assert all(
+        node.get("style") == "font-variant-ligatures:none;font-kerning:none"
+        for node in nodes
+    )
+    assert nodes[0].get("class") == nodes[2].get("class")
+    assert nodes[0].get("class") != nodes[1].get("class")
+    style = svg.find("{*}style")
+    assert style is not None and style.text is not None
+    assert "fill: #ff0000;font-weight: bold" in style.text
+    background = [
+        node for node in svg.findall(".//{*}rect") if node.get("fill") == "#0000ff"
+    ]
+    assert [(node.get("x"), node.get("width")) for node in background] == [
+        ("146.4", "97.6")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("\u2500\u2500\u2588\u2588", [("\u2500\u2500\u2588\u2588", "0")]),
+        ("ab界X", [("ab", "0"), ("界", "24.4"), ("X", "61")]),
+        ("abx\u0301Y", [("ab", "0"), ("x\u0301", "24.4"), ("Y", "36.6")]),
+        ("\x1b[4ma b\x1b[0m", [("a", "0"), ("b", "24.4")]),
+        ("\x1b[9ma b\x1b[0m", [("a", "0"), ("b", "24.4")]),
+    ],
+)
+def test_svg_preserves_unicode_and_decorated_spaces(
+    text: str, expected: list[tuple[str, str]]
+) -> None:
+    terminal = Terminal(40, 120)
+    terminal.feed(text.encode())
+
+    svg = ElementTree.fromstring(to_svg(terminal.snapshot("unicode"), "test"))
+    visible = [
+        (node.text.rstrip("\u00a0"), node.attrib["x"].split()[0])
+        for node in svg.findall(".//{*}text")
+        if node.get("y") == "20" and node.text and node.text.strip()
+    ]
+    assert visible == expected
+
+
+def test_golden_keeps_snapshots_in_each_scenario(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(golden, "GOLDEN_DIR", tmp_path)
+    terminal = Terminal(40, 120)
+    terminal.feed(b"same screen")
+    first = terminal.snapshot("first")
+    second = replace(first, label="second")
+
+    store_golden("one", [first, second], [])
+    store_golden("two", [second], [])
+
+    assert {path.name for path in tmp_path.iterdir()} == {"one", "two"}
+    assert sorted(path.name for path in (tmp_path / "one").iterdir()) == [
+        "requests.json",
+        "snapshot_00_first.svg",
+        "snapshot_01_second.svg",
+    ]
+    assert load_golden_svgs("one") == [
+        to_svg(first, "one [first]"),
+        to_svg(second, "one [second]"),
+    ]
+    assert load_golden_svgs("two") == [to_svg(second, "two [second]")]
+    assert load_golden_requests("one") == []
+
+    terminal.feed(b" changed")
+    changed = terminal.snapshot("changed")
+    store_golden("one", [changed], [])
+    assert [path.name for path in (tmp_path / "one").glob("*.svg")] == [
+        "snapshot_00_changed.svg"
+    ]
+    assert load_golden_svgs("one") == [to_svg(changed, "one [changed]")]
+    assert load_golden_svgs("two") == [to_svg(second, "two [second]")]
+
+    store_golden("two", [], [])
+    assert [path.name for path in (tmp_path / "two").iterdir()] == ["requests.json"]
+    assert load_golden_svgs("two") == []
+
+
+def test_golden_requests_are_written_with_sorted_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(golden, "GOLDEN_DIR", tmp_path)
+
+    store_golden("one", [], [Request("m", {"b": {"d": 1, "c": 2}, "a": 3})])
+
+    params = json.loads((tmp_path / "one" / "requests.json").read_text())[0]["params"]
+    assert list(params) == ["a", "b"]
+    assert list(params["b"]) == ["c", "d"]
 
 
 @pytest.mark.parametrize("name", available_scenarios())

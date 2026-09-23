@@ -1,7 +1,9 @@
 """Bounded Host-scoped persistent descriptor cache for Unified MCP."""
 
+from __future__ import annotations
+
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import hashlib
 import json
 import math
@@ -65,7 +67,9 @@ class _CacheRecordV1(_StrictModel):
                 format_version=self.key.format_version,
                 naming_version=self.key.naming_version,
                 server_fingerprint=self.key.server_fingerprint,
-                authorization_descriptor_revision=(self.key.authorization_descriptor_revision),
+                authorization_descriptor_revision=(
+                    self.key.authorization_descriptor_revision
+                ),
             ),
             source_name=self.source_name,
             discovered_at=self.discovered_at,
@@ -88,31 +92,29 @@ class _CacheRecordV1(_StrictModel):
 
     @classmethod
     def from_runtime(cls, record: MCPDescriptorCacheRecordV1) -> Self:
-        return cls.model_validate(
-            {
-                "key": {
-                    "formatVersion": record.key.format_version,
-                    "namingVersion": record.key.naming_version,
-                    "serverFingerprint": record.key.server_fingerprint,
-                    "authorizationDescriptorRevision": (
-                        record.key.authorization_descriptor_revision
-                    ),
-                },
-                "sourceName": record.source_name,
-                "discoveredAt": record.discovered_at,
-                "lastUsedAt": record.last_used_at,
-                "descriptors": [
-                    {
-                        "remoteName": descriptor.remote_name,
-                        "description": descriptor.description,
-                        "inputSchema": descriptor.input_schema,
-                        "outputSchema": descriptor.output_schema,
-                        "annotations": descriptor.annotations,
-                    }
-                    for descriptor in record.descriptors
-                ],
-            }
-        )
+        return cls.model_validate({
+            "key": {
+                "formatVersion": record.key.format_version,
+                "namingVersion": record.key.naming_version,
+                "serverFingerprint": record.key.server_fingerprint,
+                "authorizationDescriptorRevision": (
+                    record.key.authorization_descriptor_revision
+                ),
+            },
+            "sourceName": record.source_name,
+            "discoveredAt": record.discovered_at,
+            "lastUsedAt": record.last_used_at,
+            "descriptors": [
+                {
+                    "remoteName": descriptor.remote_name,
+                    "description": descriptor.description,
+                    "inputSchema": descriptor.input_schema,
+                    "outputSchema": descriptor.output_schema,
+                    "annotations": descriptor.annotations,
+                }
+                for descriptor in record.descriptors
+            ],
+        })
 
 
 class MCPDescriptorCache:
@@ -161,19 +163,10 @@ class MCPDescriptorCache:
         discovered_at: datetime,
         now: datetime | None = None,
     ) -> None:
-        await asyncio.to_thread(
-            self._touch_sync,
-            key,
-            source_name,
-            discovered_at,
-            now,
-        )
+        await asyncio.to_thread(self._touch_sync, key, source_name, discovered_at, now)
 
-    def _read_sync(
-        self,
-        key: MCPDescriptorCacheKey,
-        source_name: str,
-        now: datetime | None,
+    def _read_sync(  # noqa: PLR0911 - one return per cache-miss reason
+        self, key: MCPDescriptorCacheKey, source_name: str, now: datetime | None
     ) -> MCPDescriptorCacheRecordV1 | None:
         if self._policy.ttl_s == 0:
             return None
@@ -209,7 +202,7 @@ class MCPDescriptorCache:
             self._best_effort_replace(path, _encode_record(touched))
             return touched
 
-    def _write_sync(self, record: MCPDescriptorCacheRecordV1) -> bool:
+    def _write_sync(self, record: MCPDescriptorCacheRecordV1) -> bool:  # noqa: PLR0911 - one return per rejection reason
         if self._policy.ttl_s == 0:
             return False
         if len(record.descriptors) > self._policy.max_tools_per_record:
@@ -278,7 +271,9 @@ class MCPDescriptorCache:
                 "formatVersion": key.format_version,
                 "namingVersion": key.naming_version,
                 "serverFingerprint": key.server_fingerprint,
-                "authorizationDescriptorRevision": (key.authorization_descriptor_revision),
+                "authorizationDescriptorRevision": (
+                    key.authorization_descriptor_revision
+                ),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -345,7 +340,8 @@ class MCPDescriptorCache:
         entries.sort(key=lambda entry: (entry[0], entry[1].name))
         total_bytes = sum(entry[2] for entry in entries)
         while (
-            len(entries) > self._policy.max_files or total_bytes > self._policy.max_directory_bytes
+            len(entries) > self._policy.max_files
+            or total_bytes > self._policy.max_directory_bytes
         ):
             _, path, size = entries.pop(0)
             try:
@@ -359,7 +355,9 @@ class _suppress_os_error:
     def __enter__(self) -> None:
         return None
 
-    def __exit__(self, exception_type: object, exception: object, traceback: object) -> bool:
+    def __exit__(
+        self, exception_type: object, exception: object, traceback: object
+    ) -> bool:
         return isinstance(exception, OSError)
 
 
@@ -381,7 +379,7 @@ def _is_valid_timestamp(value: datetime, now: datetime) -> bool:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _validate_policy(policy: MCPDescriptorCachePolicy) -> None:

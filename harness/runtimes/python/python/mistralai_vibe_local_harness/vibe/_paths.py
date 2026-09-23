@@ -1,5 +1,7 @@
 """Platform-aware path conversion for Vibe Runtime adapters."""
 
+from __future__ import annotations
+
 from nturl2path import url2pathname as windows_url2pathname
 import sys
 from urllib.parse import unquote, urlparse

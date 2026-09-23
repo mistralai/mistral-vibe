@@ -553,66 +553,76 @@ async def test_a_grant_for_a_dynamic_program_name_covers_nothing_else(
 
 
 @pytest.mark.asyncio
-async def test_a_permanent_grant_skips_a_pattern_the_allowlist_cannot_express(
+async def test_a_permanent_path_grant_is_written_to_the_shell_allowlist(
     tmp_path: Path,
 ) -> None:
     """*Prepare*: A resolver, and a bash call reading a file outside the workspace.
-    *Do*: Grant it permanently.
-    *Assert*: The directory glob is not written to the shell's allowlist. A shell
-    matches that list against command prefixes, so the glob would be read back as
-    a command and match nothing -- a permanent-looking entry granting nothing.
+    *Do*: Grant it permanently, then resolve the same call on a fresh session.
+    *Assert*: The typed path grant is in the shell allowlist, and the next session
+    allows the file without asking. The shell reads ``vibe-path`` entries back.
     """
     # Prepare
     resolver, orchestrator = _resolver(tmp_path)
     outside = Path("/etc/hosts")
-    outcome = await resolver.resolve("file_system.bash", {"command": f"cat {outside}"})
+    command = f"cat {outside}"
+    outcome = await resolver.resolve("file_system.bash", {"command": command})
     assert [permission["scope"] for permission in outcome.required_permissions] == [
         PermissionScope.OUTSIDE_DIRECTORY.value
+    ]
+    [path_grant] = [
+        str(permission["sessionPattern"]) for permission in outcome.required_permissions
     ]
 
     # Do
     await resolver.grant("file_system.bash", _granted(outcome), permanent=True)
 
     # Assert
-    bash_config = orchestrator.config.tools.get("bash", {})
-    # Asserted as "nothing was written" rather than "this glob was not written":
-    # the resolver emits the symlink-resolved directory, so naming the glob here
-    # would pass on macOS whatever the persistence layer did with it.
-    assert "allowlist" not in bash_config
+    bash_config = orchestrator.config.tools["bash"]
+    assert path_grant in bash_config["allowlist"]
     assert bash_config.get("permission") != ToolPermission.ALWAYS.value
-    again = await resolver.resolve("file_system.bash", {"command": f"cat {outside}"})
+    next_session, _ = _resolver(tmp_path, bash={"allowlist": bash_config["allowlist"]})
+    again = await next_session.resolve("file_system.bash", {"command": command})
     assert again.decision == "allow"
 
 
 @pytest.mark.asyncio
-async def test_a_permanent_grant_warns_about_each_scope_it_keeps_to_the_session(
+async def test_a_permanent_grant_persists_command_and_path_scopes(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """*Prepare*: A resolver, and a bash call needing a command and a directory.
-    *Do*: Grant it permanently.
-    *Assert*: The command reaches the allowlist, the directory does not, and the
-    warning still fires. Half a grant is still a grant the next session re-prompts
-    for, and warning only when nothing survives reads as "all of it persisted".
+    """*Prepare*: A resolver, and a bash call needing a command and an outside path.
+    *Do*: Grant it permanently, then resolve it on a fresh session.
+    *Assert*: Both patterns reach the allowlist, and the next session no longer
+    asks for the outside path. A path grant is an entry the shell reads back.
     """
     # Prepare
     resolver, orchestrator = _resolver(tmp_path, bash={"allowlist": []})
-    outcome = await resolver.resolve(
-        "file_system.bash", {"command": "grep $PATTERN /etc/hosts"}
-    )
+    command = "grep $PATTERN /etc/hosts"
+    outcome = await resolver.resolve("file_system.bash", {"command": command})
     assert sorted(
         str(permission["scope"]) for permission in outcome.required_permissions
     ) == [
         PermissionScope.COMMAND_PATTERN.value,
         PermissionScope.OUTSIDE_DIRECTORY.value,
     ]
+    path_grant = next(
+        str(permission["sessionPattern"])
+        for permission in outcome.required_permissions
+        if permission["scope"] == PermissionScope.OUTSIDE_DIRECTORY.value
+    )
 
     # Do
     with caplog.at_level(logging.WARNING):
         await resolver.grant("file_system.bash", _granted(outcome), permanent=True)
 
     # Assert
-    assert orchestrator.config.tools["bash"]["allowlist"] == ["grep"]
-    assert PermissionScope.OUTSIDE_DIRECTORY.value in caplog.text
+    allowlist = orchestrator.config.tools["bash"]["allowlist"]
+    assert allowlist == sorted(["grep", path_grant])
+    assert PermissionScope.OUTSIDE_DIRECTORY.value not in caplog.text
+    next_session, _ = _resolver(tmp_path, bash={"allowlist": allowlist})
+    again = await next_session.resolve("file_system.bash", {"command": command})
+    assert PermissionScope.OUTSIDE_DIRECTORY.value not in [
+        permission["scope"] for permission in again.required_permissions
+    ]
 
 
 @pytest.mark.asyncio

@@ -20,11 +20,9 @@ _EFFECT_ID = "streaming-bash"
 env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 # A release step must not consume a marker of its own, so settle key by key.
 settle_per_key = True
-# Step 0 lands on the accepted-before-started transient, where Python counts the
-# in-flight prompt as queued and Rust shows turn-interrupt controls instead
-# (see queue/first_prompt_hint.py); the streamed-line behavior under test is
-# steps 1 and 2.
-capture_steps = {1, 2}
+# Open the busy group before capturing the streamed output and its removal.
+_EXPAND_GROUP = "\x1b[<0;1;32M\x1b[<0;1;32m"
+capture_steps = {2, 3, 4}
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -32,7 +30,11 @@ timeline: Timeline = [
     user_msg(_PROMPT),
     bash_started("tail -f app.log", _EFFECT_ID),
     bash_output_chunk(_EFFECT_ID, "downloading 42%"),
-    bash_output_chunk(_EFFECT_ID, "... 99%"),
+    bash_output_chunk(
+        _EFFECT_ID,
+        "old\r\x1b[31m... 99%\x1b[0m\x1b]0;hidden\x07\x00\x08\x7f\r\n\tfinishing",
+    ),
+    bash_output_chunk(_EFFECT_ID, "\x1b[2J\x1b[H\x07\x00\x08\x7f"),
     bash_completed(_EFFECT_ID, "tail -f app.log", stdout="done"),
     assistant_msg("Done."),
     turn_completed(),
@@ -40,6 +42,9 @@ timeline: Timeline = [
     # then the call and its two streamed chunks) pin the live `→` line on the
     # LATEST chunk, never the accumulated output.
     {"release": 6},
-    # The remaining three settle the effect: the `→` line clears.
+    _EXPAND_GROUP,
+    # A controls-only chunk has no visible stream row.
+    {"release": 1},
+    # The remaining three settle the effect.
     {"release": 3},
 ]

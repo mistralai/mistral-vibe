@@ -11,7 +11,7 @@ import tempfile
 from threading import Lock
 from typing import BinaryIO
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from vibe.core.paths import WORKTREES_DIR
 from vibe.core.session.session_lease import (
@@ -54,6 +54,12 @@ class WorktreeRecord(BaseModel):
     base_commit: str | None = None
     branch_created: bool
     claimed_at: datetime
+    # The aggregate flag lets startup pruning finish an interrupted reap. The
+    # maps make per-session cancellation reject a delayed request with the same
+    # identity without cancelling another archived session sharing this tree.
+    reap_requested: bool = False
+    reap_requests: dict[str, str] = Field(default_factory=dict)
+    reap_cancellations: set[str] = Field(default_factory=set)
 
     @classmethod
     def new(
@@ -168,6 +174,13 @@ class WorktreeClaim:
     @property
     def directory(self) -> Path:
         return _claims_root() / self.bucket / self.name
+
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        root = _claims_root()
+        root.mkdir(parents=True, exist_ok=True)
+        with _lease_directory_lock(root):
+            yield
 
     def write(self, record: WorktreeRecord) -> None:
         self._write_json(RECORD_FILENAME, record)

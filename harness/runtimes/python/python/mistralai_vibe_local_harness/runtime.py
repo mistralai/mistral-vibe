@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 import json
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue
@@ -165,30 +167,31 @@ type ProvidedToolHandler = Callable[
     [RustProvidedToolCallAction], ToolExecutionResult | Awaitable[ToolExecutionResult]
 ]
 type FilesystemHandler = Callable[[RustFilesystemAction], str | Awaitable[str]]
-type HookHandler = Callable[[RustHookCallAction], RustHookResult | Awaitable[RustHookResult]]
+type HookHandler = Callable[
+    [RustHookCallAction], RustHookResult | Awaitable[RustHookResult]
+]
 type CompletionObserver = Callable[
-    [str, Literal["agent", "compaction"], ModelCompletionDelta],
-    None | Awaitable[None],
+    [str, Literal["agent", "compaction"], ModelCompletionDelta], None | Awaitable[None]
 ]
 
 
-class HarnessInterrupted(RuntimeError):  # noqa: N818
+class HarnessInterrupted(RuntimeError):
     pass
 
 
-class HarnessCompletionFailed(RuntimeError):  # noqa: N818
+class HarnessCompletionFailed(RuntimeError):
     def __init__(self, error: RustProtocolError) -> None:
         super().__init__(error.message)
         self.error = error
 
 
-class HarnessCommandRejected(RuntimeError):  # noqa: N818
+class HarnessCommandRejected(RuntimeError):
     def __init__(self, result: RustRejectedApplyResult) -> None:
         super().__init__(f"harness command rejected: {result.rejection.code}")
         self.rejection = result.rejection
 
 
-class _ModelInputRevisionMismatch(RuntimeError):  # noqa: N818
+class _ModelInputRevisionMismatch(RuntimeError):
     pass
 
 
@@ -207,24 +210,24 @@ class InMemoryHarnessRuntime:
     ) -> None:
         self._session = HarnessSession.create(
             config.model_dump_json(exclude_none=True),
-            json.dumps(
-                [
-                    message.model_dump(by_alias=True, exclude_none=True)
-                    for message in initial_history
-                ]
-            ),
+            json.dumps([
+                message.model_dump(by_alias=True, exclude_none=True)
+                for message in initial_history
+            ]),
         )
         self._model_handler = model_handler
         expected_builtins = set(RUNTIME_BUILTIN_TOOL_NAMES)
         missing = expected_builtins - runtime_builtin_handlers.keys()
         if missing:
             raise ValueError(
-                "Harness Runtime does not implement built-ins: " + ", ".join(sorted(missing))
+                "Harness Runtime does not implement built-ins: "
+                + ", ".join(sorted(missing))
             )
         unexpected = runtime_builtin_handlers.keys() - expected_builtins
         if unexpected:
             raise ValueError(
-                "Harness Runtime registered unknown built-ins: " + ", ".join(sorted(unexpected))
+                "Harness Runtime registered unknown built-ins: "
+                + ", ".join(sorted(unexpected))
             )
         self._runtime_builtin_handlers = dict(runtime_builtin_handlers)
         self._provided_tool_handler = provided_tool_handler
@@ -240,12 +243,15 @@ class InMemoryHarnessRuntime:
             for binding in capabilities.hook_bindings
         ]
         if set(self._hook_handlers) != {binding.id for binding in hook_bindings}:
-            raise ValueError("hook handler IDs must exactly match configured hook binding IDs")
+            raise ValueError(
+                "hook handler IDs must exactly match configured hook binding IDs"
+            )
         self._hook_bindings: dict[str, RustHarnessHookBinding] = {
             binding.id: binding for binding in hook_bindings
         }
         self._buffer_completion_output = any(
-            binding.point in {"post_llm_call", "post_agent_turn"} for binding in hook_bindings
+            binding.point in {"post_llm_call", "post_agent_turn"}
+            for binding in hook_bindings
         )
         self._next_input_id = 1
         self._model_context: list[RustMessage] = []
@@ -280,7 +286,9 @@ class InMemoryHarnessRuntime:
             RustUserMessageEvent(
                 turn_id=turn_id,
                 content=(
-                    [RustTextContentBlock(text=content)] if isinstance(content, str) else content
+                    [RustTextContentBlock(text=content)]
+                    if isinstance(content, str)
+                    else content
                 ),
                 mode=mode,
             )
@@ -297,8 +305,7 @@ class InMemoryHarnessRuntime:
         schedule(transition)
         while pending:
             completed, pending = await asyncio.wait(
-                pending,
-                return_when=asyncio.FIRST_COMPLETED,
+                pending, return_when=asyncio.FIRST_COMPLETED
             )
             for task in completed:
                 transition = task.result()
@@ -306,10 +313,7 @@ class InMemoryHarnessRuntime:
         return _terminal_output(transition)
 
     def interrupt(
-        self,
-        reason: str | None = None,
-        *,
-        expected_turn_id: str | None = None,
+        self, reason: str | None = None, *, expected_turn_id: str | None = None
     ) -> RustSessionTransition:
         return self._apply(
             RustInterruptEvent(
@@ -326,7 +330,7 @@ class InMemoryHarnessRuntime:
         """Deliver Runtime-owned async information without driving a new action."""
         return self._apply(RustNotificationEvent(notification=notification))
 
-    async def _execute(self, action: RustAction) -> RustSessionTransition:
+    async def _execute(self, action: RustAction) -> RustSessionTransition:  # noqa: PLR0911 - one return per action kind
         if isinstance(action, RustLLMCallAction):
             return await self._execute_completion(action)
         if isinstance(
@@ -339,7 +343,9 @@ class InMemoryHarnessRuntime:
             | RustPostToolCallHookAction,
         ):
             return await self._execute_hook(action)
-        if isinstance(action, RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction):
+        if isinstance(
+            action, RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction
+        ):
             try:
                 if isinstance(action, RustRuntimeBuiltinToolCallAction):
                     result = await _resolve_tool(
@@ -347,7 +353,7 @@ class InMemoryHarnessRuntime:
                     )
                 else:
                     result = await _resolve_tool(self._provided_tool_handler(action))
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:
                 return self._apply(
                     RustToolFailedEvent(
                         action_id=action.action_id,
@@ -394,17 +400,14 @@ class InMemoryHarnessRuntime:
                 )
             success = (
                 RustToolSuccessResult(
-                    content=result.content,
-                    structured_content=result.output,
+                    content=result.content, structured_content=result.output
                 )
                 if "output" in result.model_fields_set
                 else RustToolSuccessResult(content=result.content)
             )
             return self._apply(
                 RustToolSucceededEvent(
-                    action_id=action.action_id,
-                    call_id=action.call_id,
-                    result=success,
+                    action_id=action.action_id, call_id=action.call_id, result=success
                 )
             )
         if isinstance(action, RustFilesystemAction):
@@ -413,16 +416,22 @@ class InMemoryHarnessRuntime:
                 if handler is None:
                     raise RuntimeError("filesystem support is not configured")
                 model_path = handler(action)
-                model_path = await model_path if isinstance(model_path, Awaitable) else model_path
+                model_path = (
+                    await model_path
+                    if isinstance(model_path, Awaitable)
+                    else model_path
+                )
                 if not isinstance(model_path, str) or not model_path:
-                    raise TypeError("filesystem handler must return a non-empty model path")
+                    raise TypeError(
+                        "filesystem handler must return a non-empty model path"
+                    )
                 return self._apply(
                     RustFilesystemSucceededEvent(
                         action_id=action.action_id,
                         result=RustFilesystemWriteResult(model_path=model_path),
                     )
                 )
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:
                 return self._apply(
                     RustFilesystemFailedEvent(
                         action_id=action.action_id,
@@ -436,7 +445,9 @@ class InMemoryHarnessRuntime:
                 )
         raise AssertionError(f"unsupported harness action: {action!r}")
 
-    async def _execute_completion(self, action: RustLLMCallAction) -> RustSessionTransition:
+    async def _execute_completion(
+        self, action: RustLLMCallAction
+    ) -> RustSessionTransition:
         action = self._prepare_completion_action(action)
         request = ModelRequest(
             action_id=action.action_id,
@@ -452,11 +463,12 @@ class InMemoryHarnessRuntime:
         try:
             async for item in self._model_handler(request):
                 if result is not None:
-                    raise RuntimeError("model stream emitted data after its finished item")
+                    raise RuntimeError(
+                        "model stream emitted data after its finished item"
+                    )
                 if isinstance(item, ModelCompletionFinished):
                     result = assembler.finish(
-                        finish_reason=item.finish_reason,
-                        usage=item.usage,
+                        finish_reason=item.finish_reason, usage=item.usage
                     )
                     continue
                 assembler.push(item)
@@ -467,12 +479,10 @@ class InMemoryHarnessRuntime:
                 ):
                     await _resolve_completion_observer(
                         self._completion_observer(
-                            action.action_id,
-                            action.purpose,
-                            item,
+                            action.action_id, action.purpose, item
                         )
                     )
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             return self._apply(
                 RustCompletionFailedEvent(
                     action_id=action.action_id,
@@ -497,13 +507,12 @@ class InMemoryHarnessRuntime:
                 )
             )
         return self._apply(
-            RustCompletionSucceededEvent(
-                action_id=action.action_id,
-                result=result,
-            )
+            RustCompletionSucceededEvent(action_id=action.action_id, result=result)
         )
 
-    def _select_hook_handlers(self, action: RustHookCallAction) -> list[tuple[str, HookHandler]]:
+    def _select_hook_handlers(
+        self, action: RustHookCallAction
+    ) -> list[tuple[str, HookHandler]]:
         """Validate the complete selected-ID list before any hook executes.
 
         Runtime validation is limited to registry membership, uniqueness, point
@@ -514,7 +523,9 @@ class InMemoryHarnessRuntime:
         previous_order = -1
         for binding_id in action.hook_binding_ids:
             if binding_id in seen:
-                raise RuntimeError(f"core selected duplicate hook binding {binding_id!r}")
+                raise RuntimeError(
+                    f"core selected duplicate hook binding {binding_id!r}"
+                )
             seen.add(binding_id)
             binding = self._hook_bindings.get(binding_id)
             handler = self._hook_handlers.get(binding_id)
@@ -545,8 +556,10 @@ class InMemoryHarnessRuntime:
                 current, terminal = _continue_hook_pipeline(current, result)
                 if terminal:
                     break
-            return self._apply(RustHookCompletedEvent(action_id=action.action_id, result=result))
-        except Exception as error:  # noqa: BLE001
+            return self._apply(
+                RustHookCompletedEvent(action_id=action.action_id, result=result)
+            )
+        except Exception as error:
             return self._apply(
                 RustHookFailedEvent(
                     action_id=action.action_id,
@@ -569,7 +582,9 @@ class InMemoryHarnessRuntime:
             command=command,
         )
         result = parse_apply_result(
-            self._session.apply(payload.model_dump_json(exclude_none=False, by_alias=True))
+            self._session.apply(
+                payload.model_dump_json(exclude_none=False, by_alias=True)
+            )
         )
         if isinstance(result, RustRejectedApplyResult):
             raise HarnessCommandRejected(result)
@@ -581,7 +596,9 @@ class InMemoryHarnessRuntime:
         self._next_input_id += 1
         return transition
 
-    def _prepare_completion_action(self, action: RustLLMCallAction) -> RustLLMCallAction:
+    def _prepare_completion_action(
+        self, action: RustLLMCallAction
+    ) -> RustLLMCallAction:
         try:
             self._apply_model_input_update(action)
             return action
@@ -612,16 +629,12 @@ class InMemoryHarnessRuntime:
                     "harness context refresh changed the completion action id"
                 ) from None
             self._apply_model_input_update(
-                refreshed_action,
-                allow_replace_same_revision=True,
+                refreshed_action, allow_replace_same_revision=True
             )
             return refreshed_action
 
     def _apply_model_input_update(
-        self,
-        action: RustLLMCallAction,
-        *,
-        allow_replace_same_revision: bool = False,
+        self, action: RustLLMCallAction, *, allow_replace_same_revision: bool = False
     ) -> None:
         message_update = action.model_input.messages
         message_update_key = message_update.model_dump_json(exclude_none=False)
@@ -654,7 +667,9 @@ class InMemoryHarnessRuntime:
                 next_messages = [*self._model_context, *message_update.messages]
                 next_message_revision = message_update.revision
         else:
-            raise AssertionError(f"unsupported model message update: {message_update!r}")
+            raise AssertionError(
+                f"unsupported model message update: {message_update!r}"
+            )
 
         tool_update = action.model_input.tool_catalog
         if isinstance(tool_update, RustModelToolCatalogKeep):
@@ -681,7 +696,9 @@ class InMemoryHarnessRuntime:
             next_tool_revision = tool_update.revision
             next_tool_update_key = tool_update_key
         else:
-            raise AssertionError(f"unsupported model tool-catalog update: {tool_update!r}")
+            raise AssertionError(
+                f"unsupported model tool-catalog update: {tool_update!r}"
+            )
 
         self._model_context = next_messages
         self._model_context_revision = next_message_revision
@@ -716,27 +733,20 @@ class _CompletionResultAssembler:
                 self._push_reasoning(RustReasoningSummaryContent(text=summary))
             case RustReasoningPart():
                 self._parts.append(delta.model_copy(deep=True))
-            case ModelToolCallStartedDelta(
-                call_id=call_id,
-                name=name,
-                meta=meta,
-            ):
+            case ModelToolCallStartedDelta(call_id=call_id, name=name, meta=meta):
                 if call_id in self._tool_call_indexes:
                     raise RuntimeError(f"duplicate model tool call ID {call_id!r}")
                 self._tool_call_indexes[call_id] = len(self._parts)
                 self._parts.append(
-                    RustCompletionResultToolCallPart.model_validate(
-                        {
-                            "id": call_id,
-                            "name": name,
-                            "arguments_json": "",
-                            **({} if meta is None else {"_meta": meta}),
-                        }
-                    )
+                    RustCompletionResultToolCallPart.model_validate({
+                        "id": call_id,
+                        "name": name,
+                        "arguments_json": "",
+                        **({} if meta is None else {"_meta": meta}),
+                    })
                 )
             case ModelToolCallArgumentsDelta(
-                call_id=call_id,
-                json_fragment=json_fragment,
+                call_id=call_id, json_fragment=json_fragment
             ):
                 index = self._tool_call_indexes.get(call_id)
                 if index is None:
@@ -751,15 +761,10 @@ class _CompletionResultAssembler:
                 )
 
     def finish(
-        self,
-        *,
-        finish_reason: RustCompletionFinishReason,
-        usage: RustTokenUsage | None,
+        self, *, finish_reason: RustCompletionFinishReason, usage: RustTokenUsage | None
     ) -> RustCompletionResult:
         return RustCompletionResult(
-            parts=self._parts,
-            finish_reason=finish_reason,
-            usage=usage,
+            parts=self._parts, finish_reason=finish_reason, usage=usage
         )
 
     def _push_content(self, block: RustContentBlock) -> None:
@@ -770,7 +775,9 @@ class _CompletionResultAssembler:
             and previous.annotations == block.annotations
             and previous.meta == block.meta
         ):
-            self._parts[-1] = previous.model_copy(update={"text": previous.text + block.text})
+            self._parts[-1] = previous.model_copy(
+                update={"text": previous.text + block.text}
+            )
             return
         self._parts.append(block)
 
@@ -794,7 +801,9 @@ class _CompletionResultAssembler:
                 }
             )
             return
-        self._parts[-1] = previous.model_copy(update={"content": [*previous.content, content]})
+        self._parts[-1] = previous.model_copy(
+            update={"content": [*previous.content, content]}
+        )
 
 
 async def _resolve_completion_observer(value: None | Awaitable[None]) -> None:
@@ -830,9 +839,8 @@ def _identity_hook_result(action: RustHookCallAction) -> RustHookResult:
     raise AssertionError(f"unsupported hook action: {action!r}")
 
 
-def _continue_hook_pipeline(
-    action: RustHookCallAction,
-    result: RustHookResult,
+def _continue_hook_pipeline(  # noqa: PLR0911 - one return per hook kind
+    action: RustHookCallAction, result: RustHookResult
 ) -> tuple[RustHookCallAction, bool]:
     if isinstance(action, RustPreAgentTurnHookAction) and isinstance(
         result, RustPreAgentTurnHookResult
@@ -841,7 +849,11 @@ def _continue_hook_pipeline(
             return action, True
         return (
             action.model_copy(
-                update={"input": RustPreAgentTurnHookInput(user_content=result.output.user_content)}
+                update={
+                    "input": RustPreAgentTurnHookInput(
+                        user_content=result.output.user_content
+                    )
+                }
             ),
             False,
         )
@@ -849,20 +861,26 @@ def _continue_hook_pipeline(
         result, RustPreLlmCallHookResult
     ):
         return action, result.output.type == "skip"
-    if isinstance(action, RustPostLlmCallHookAction | RustPostAgentTurnHookAction) and isinstance(
-        result, RustPostLlmCallHookResult | RustPostAgentTurnHookResult
-    ):
+    if isinstance(
+        action, RustPostLlmCallHookAction | RustPostAgentTurnHookAction
+    ) and isinstance(result, RustPostLlmCallHookResult | RustPostAgentTurnHookResult):
         if result.output.type != "accept":
             return action, True
         if result.output.acceptance.type == "candidate":
             return action, False
         candidate = action.input.candidate
-        message = candidate.message.model_copy(update={"content": result.output.acceptance.content})
+        message = candidate.message.model_copy(
+            update={"content": result.output.acceptance.content}
+        )
         return (
             action.model_copy(
                 update={
                     "input": action.input.model_copy(
-                        update={"candidate": candidate.model_copy(update={"message": message})}
+                        update={
+                            "candidate": candidate.model_copy(
+                                update={"message": message}
+                            )
+                        }
                     )
                 }
             ),
@@ -883,7 +901,9 @@ def _continue_hook_pipeline(
                         tool_call=tool_call.model_copy(
                             update={
                                 "call": tool_call.call.model_copy(
-                                    update={"arguments": result.output.effective_arguments}
+                                    update={
+                                        "arguments": result.output.effective_arguments
+                                    }
                                 )
                             }
                         )
@@ -925,7 +945,9 @@ def _terminal_output(transition: RustSessionTransition) -> list[RustContentBlock
         raise HarnessInterrupted(transition.turn.reason or "Harness turn interrupted")
     if isinstance(transition.turn, RustFailedTurn):
         raise HarnessCompletionFailed(transition.turn.error)
-    raise RuntimeError("harness became idle without completing, failing, or interrupting the turn")
+    raise RuntimeError(
+        "harness became idle without completing, failing, or interrupting the turn"
+    )
 
 
 __all__ = [

@@ -12,6 +12,7 @@ use crate::question_app::{
     navigate_to_option, next_question, other_option_idx, other_text, prev_question, select,
     select_option, set_selected_option, submit_option_idx, submit_other, toggle_selection,
 };
+use crate::selection;
 use crate::utils::input_edit;
 
 /// The question app owns every key while it is open (Python `QuestionApp.on_key`).
@@ -89,6 +90,30 @@ fn edit_other(app: &mut App, ch: Option<char>) {
     sync_free_choice_selection(app);
 }
 
+/// Paste into the focused free-text row, keeping only the first line (Python
+/// `Input._on_paste`); a paste never falls through to the composer.
+pub fn handle_paste(app: &mut App, text: String) {
+    if !is_other_selected(app) || text.is_empty() {
+        return;
+    }
+    let line = first_paste_line(&text);
+    let idx = app.question_app.current_question_idx;
+    let text = app.question_app.other_texts.entry(idx).or_default();
+    let cursor = &mut app.question_app.other_cursor;
+    input_edit::insert(text, cursor, line);
+    sync_free_choice_selection(app);
+}
+
+const PASTE_LINE_BREAKS: [char; 10] = [
+    '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}', '\u{2029}',
+];
+
+/// The first line of pasted text, splitting like Python's `str.splitlines`.
+fn first_paste_line(text: &str) -> &str {
+    text.find(|ch: char| PASTE_LINE_BREAKS.contains(&ch))
+        .map_or(text, |end| &text[..end])
+}
+
 /// In multi-select, typed free text ticks the free-text row and clearing it unticks.
 fn sync_free_choice_selection(app: &mut App) {
     if !current_question(app).multi_select {
@@ -107,28 +132,55 @@ fn sync_free_choice_selection(app: &mut App) {
     }
 }
 
-/// A click moves the cursor to the clicked row and, in multi-select, ticks it
-/// (Python `on_click`); the free-text row is only ever ticked, never unticked.
+/// A drag selects the box text (Textual widgets are selectable); a release on
+/// the pressed cell runs Python `on_click`, whatever the click chain, so a
+/// jittered round trip still clicks and a drag never navigates. The free-text
+/// row is Python's Input, which owns its mouse: no screen selection starts
+/// there, and any same-row release still focuses it.
 pub fn handle_mouse(app: &mut App, event: MouseEvent) {
+    let at = (event.column, event.row);
     match event.kind {
-        MouseEventKind::ScrollUp => {
-            wheel(app, true);
-            return;
+        MouseEventKind::Down(MouseButton::Left) => {
+            app.question_app.mouse_press_row = Some(event.row);
+            if !pressed_other_row(app, event.row) {
+                selection::press_owned(app, at, selection::RegionId::Question);
+            }
         }
-        MouseEventKind::ScrollDown => {
-            wheel(app, false);
-            return;
+        MouseEventKind::Drag(MouseButton::Left) => selection::drag(app, at),
+        MouseEventKind::Up(MouseButton::Left) => {
+            let same_row = app
+                .question_app
+                .mouse_press_row
+                .take()
+                .is_some_and(|row| row == event.row);
+            let same_cell = app.selection.press == Some(at);
+            let option_idx = option_row_idx(app, event.row);
+            selection::release(app);
+            if same_cell || (same_row && pressed_other_row(app, event.row)) {
+                click(app, option_idx);
+            }
         }
-        MouseEventKind::Down(MouseButton::Left) => {}
-        _ => return,
+        _ => {}
     }
-    let Some((_, option_idx)) = app
-        .question_app
+}
+
+fn option_row_idx(app: &App, row: u16) -> Option<usize> {
+    app.question_app
         .option_rows
         .iter()
         .copied()
-        .find(|(row, _)| *row == event.row)
-    else {
+        .find(|(r, _)| *r == row)
+        .map(|(_, idx)| idx)
+}
+
+fn pressed_other_row(app: &App, row: u16) -> bool {
+    other_option_idx(app).is_some_and(|idx| option_row_idx(app, row) == Some(idx))
+}
+
+/// Move the cursor to the clicked option and, in multi-select, tick it (Python
+/// `on_click`); the free-text row is only ever ticked, never unticked.
+fn click(app: &mut App, option_idx: Option<usize>) {
+    let Some(option_idx) = option_idx else {
         return;
     };
     set_selected_option(app, option_idx);

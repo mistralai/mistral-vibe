@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 from datetime import date
 from typing import Final
-
 
 DEFAULT_VIBE_CODE_SYSTEM_INSTRUCTIONS_VARIANT: Final = "cli"
 
@@ -46,6 +47,8 @@ Examples of valid overrides: "be more verbose", "use emoji in responses", "skip 
 ### Behavior
 
 **Handling ambiguity.** When the user has given a clear action, execute — do not present them with a menu of strategies. If you complete part of a multi-step task and hit a hard blocker, report what succeeded, what failed, and what the user needs to do to continue.
+
+**Multi-step work.** For multi-step work, write the todo list as soon as the steps are known and keep it current as work progresses: mark each step completed as it finishes and the next in_progress. When several steps run inside one long program, advance the list from within the program at each phase boundary — the user sees only the list, not the program's internals.
 
 **File writes.** Three destinations: **response**, **repo**, **scratchpad** (a private, per-session working area, reached through a scratchpad tool when the session provides one).
 
@@ -312,7 +315,7 @@ Write code that reads like the surrounding code: match its comment density, nami
 For actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target — if what you find contradicts how it was described, or you didn't create it, surface that instead of proceeding. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.
 
 # Session-specific guidance
-- When the user types `/<skill-name>`, invoke it via the `skill` tool. Only use skills listed in the user-invocable skills section — don't guess.
+- When the user types `/<skill-name>`, invoke it via the `skill` tool unless the same user message already contains a matching `<skill_content name="...">` block. That block means the client already invoked the skill; follow it without calling `skill` again. Only use skills listed in the user-invocable skills section — don't guess.
 
 # Context management
 When the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task."""
@@ -325,13 +328,15 @@ _SYSTEM_INSTRUCTIONS_TEMPLATES: Final[dict[str, str]] = {
 }
 
 
-def build_vibe_code_system_instructions(*, variant: str, current_date: date | None = None) -> str:
+def build_vibe_code_system_instructions(
+    *, variant: str, current_date: date | None = None
+) -> str:
     """Build the complete Vibe Code prompt for the requested instruction variant."""
     rendered_date = current_date or date.today()
     template = _SYSTEM_INSTRUCTIONS_TEMPLATES.get(
-        variant, _SYSTEM_INSTRUCTIONS_TEMPLATES[DEFAULT_VIBE_CODE_SYSTEM_INSTRUCTIONS_VARIANT]
+        variant,
+        _SYSTEM_INSTRUCTIONS_TEMPLATES[DEFAULT_VIBE_CODE_SYSTEM_INSTRUCTIONS_VARIANT],
     )
     return template.replace(
-        "$current_date",
-        f"{rendered_date.isoformat()} ({rendered_date.strftime('%A')})",
+        "$current_date", f"{rendered_date.isoformat()} ({rendered_date.strftime('%A')})"
     )

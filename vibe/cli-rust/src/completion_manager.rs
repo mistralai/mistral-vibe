@@ -7,7 +7,7 @@ use crate::utils::fuzzy;
 
 const FILE_MATCH_LIMIT: usize = 100;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct CompletionEntry {
     pub label: String,
     pub description: String,
@@ -15,7 +15,7 @@ pub struct CompletionEntry {
 
 enum ActiveCompletion {
     Slash { start: usize, end: usize },
-    File { start: usize },
+    File { start: usize, end: usize },
 }
 
 pub fn input_changed(app: &mut App) {
@@ -40,14 +40,20 @@ pub fn refresh(app: &mut App) {
         app.completion.entries.clear();
         return;
     }
-    app.completion.entries = match active(app) {
+    let entries = match active(app) {
         Some(ActiveCompletion::Slash { .. }) => slash_entries(app),
-        Some(ActiveCompletion::File { start }) => file_entries(app, start),
+        Some(ActiveCompletion::File { start, end }) => file_entries(app, start, end),
         None => Vec::new(),
     };
-    if app.completion.selected >= app.completion.entries.len() {
+    // Python keeps the highlighted item only across re-renders that leave the
+    // list identical (path_completion `_update_suggestions`); a caret move that
+    // lands on another token rebuilds a different list and restarts at the top.
+    if entries != app.completion.entries {
         app.completion.selected = 0;
+        app.completion.scroll = 0;
+        app.completion.reveal = false;
     }
+    app.completion.entries = entries;
 }
 
 pub fn is_open(app: &App) -> bool {
@@ -88,18 +94,25 @@ pub fn accept(app: &mut App) -> bool {
     let Some(entry) = app.completion.entries.get(app.completion.selected) else {
         return false;
     };
-    let replacement = entry.label.clone();
+    let mut replacement = entry.label.clone();
     match active(app) {
-        Some(ActiveCompletion::Slash { start, end }) => app.chat_input.input.replace_range(
-            start..end,
-            replacement.strip_prefix('/').unwrap_or(&replacement),
-        ),
-        Some(ActiveCompletion::File { start }) => app
-            .chat_input
-            .input
-            .replace_range(start.., &format!("{replacement} ")),
+        Some(ActiveCompletion::Slash { start, end }) => {
+            app.chat_input.input.replace_range(
+                start..end,
+                replacement.strip_prefix('/').unwrap_or(&replacement),
+            );
+            app.chat_input.cursor = app.chat_input.input.len();
+        }
+        Some(ActiveCompletion::File { start, end }) => {
+            if !replacement.ends_with('/') {
+                replacement.push(' ');
+            }
+            app.chat_input.input.replace_range(start..end, &replacement);
+            app.chat_input.cursor = start + replacement.len();
+        }
         None => return false,
     }
+    app.chat_input.anchor = None;
     app.completion.dismissed = true;
     app.completion.entries.clear();
     app.completion.selected = 0;
@@ -124,12 +137,13 @@ fn active(app: &App) -> Option<ActiveCompletion> {
         let end = input.find(char::is_whitespace).unwrap_or(input.len());
         return Some(ActiveCompletion::Slash { start, end });
     }
-    let start = input.rfind('@')?;
-    let query = &input[start + 1..];
+    let end = crate::chat_input::clamp_offset(input, app.chat_input.cursor);
+    let start = input[..end].rfind('@')?;
+    let query = &input[start + 1..end];
     if query.contains(' ') {
         return None;
     }
-    Some(ActiveCompletion::File { start })
+    Some(ActiveCompletion::File { start, end })
 }
 
 /// `/help` and `/config` outrank equal matches (Python `_PROMOTED_BOOSTS`,
@@ -167,8 +181,8 @@ fn slash_entries(app: &App) -> Vec<CompletionEntry> {
     scored.into_iter().map(|(_, entry)| entry).collect()
 }
 
-fn file_entries(app: &App, start: usize) -> Vec<CompletionEntry> {
-    let query = app.chat_input.input[start + 1..].replace('\\', "/");
+fn file_entries(app: &App, start: usize, end: usize) -> Vec<CompletionEntry> {
+    let query = app.chat_input.input[start + 1..end].replace('\\', "/");
     app.completion
         .files
         .matching(&query, FILE_MATCH_LIMIT)

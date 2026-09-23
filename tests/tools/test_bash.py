@@ -70,6 +70,7 @@ from vibe.core.tools.terminal_runtime import TerminalRuntime
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows
+from vibe.permissions import PathGrantScope, path_grant_pattern
 
 
 @pytest.fixture
@@ -2268,7 +2269,7 @@ def test_allowlisted_option_paths_outside_workspace_require_approval(
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ASK
     assert any(
-        str(outside.parent) in required.label
+        required.invocation_pattern == str(outside.resolve())
         for required in permission.required_permissions
     )
 
@@ -2319,7 +2320,7 @@ def test_read_only_option_paths_outside_workspace_require_approval(
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ASK
     assert any(
-        str(outside.parent) in required.label
+        required.invocation_pattern == str(outside.resolve())
         for required in permission.required_permissions
     )
 
@@ -2346,6 +2347,122 @@ def test_read_only_option_paths_inside_workspace_remain_allowed(shell_kind, comm
 
 
 @pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("target_exists", [False, True])
+def test_shell_path_scope_root_does_not_widen_file_targets(
+    shell_kind, target_exists, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside"
+    target = outside / "target.txt"
+    workdir.mkdir()
+    outside.mkdir()
+    if target_exists:
+        target.write_text("content", encoding="utf-8")
+    monkeypatch.chdir(workdir)
+
+    permission = _resolve_default_shell_permission(shell_kind, f"cat {target}")
+
+    assert isinstance(permission, PermissionContext)
+    [required] = [
+        item
+        for item in permission.required_permissions
+        if item.scope is PermissionScope.OUTSIDE_DIRECTORY
+    ]
+    assert required.path_scope_root is None
+
+
+@pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_shell_path_scope_root_does_not_widen_unreadable_targets(
+    shell_kind, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    outside = tmp_path / "outside"
+    target = outside / "target"
+    workdir.mkdir()
+    outside.mkdir()
+    target.mkdir()
+    monkeypatch.chdir(workdir)
+    monkeypatch.setattr("vibe.core.tools.utils.os.access", lambda *_args: False)
+
+    permission = _resolve_default_shell_permission(shell_kind, f"cat {target}")
+
+    assert isinstance(permission, PermissionContext)
+    [required] = [
+        item
+        for item in permission.required_permissions
+        if item.scope is PermissionScope.OUTSIDE_DIRECTORY
+    ]
+    assert required.path_scope_root is None
+
+
+@pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_shell_path_scope_root_identifies_existing_directories(
+    shell_kind, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    target = tmp_path / "outside"
+    workdir.mkdir()
+    target.mkdir()
+    monkeypatch.chdir(workdir)
+
+    permission = _resolve_default_shell_permission(shell_kind, f"ls {target}")
+
+    assert isinstance(permission, PermissionContext)
+    [required] = [
+        item
+        for item in permission.required_permissions
+        if item.scope is PermissionScope.OUTSIDE_DIRECTORY
+    ]
+    assert required.path_scope_root == str(target)
+
+
+@pytest.mark.skipif(is_windows(), reason="uses POSIX symlinks")
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_recursive_folder_grant_does_not_cover_symlink_target(
+    shell_kind, tmp_path, monkeypatch
+):
+    workdir = tmp_path / "workdir"
+    approved = tmp_path / "approved"
+    unapproved = tmp_path / "unapproved"
+    workdir.mkdir()
+    approved.mkdir()
+    unapproved.mkdir()
+    secret = unapproved / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    (approved / "link").symlink_to(unapproved, target_is_directory=True)
+    monkeypatch.chdir(workdir)
+    grant = path_grant_pattern(
+        str(approved.resolve()), PathGrantScope.DIRECTORY_RECURSIVE
+    )
+
+    if shell_kind == "legacy":
+        config = BashToolConfig()
+        config.allowlist.append(grant)
+        tool = Bash(config_getter=lambda: config, state=BaseToolState())
+        permission = tool.resolve_permission(
+            BashArgs(command=f"cat {approved / 'link' / 'secret.txt'}")
+        )
+    else:
+        config = ExperimentalBashToolConfig()
+        config.allowlist.append(grant)
+        tool = ExperimentalBash(config_getter=lambda: config, state=BaseToolState())
+        permission = tool.resolve_permission(
+            ExperimentalBashArgs(command=f"cat {approved / 'link' / 'secret.txt'}")
+        )
+
+    assert isinstance(permission, PermissionContext)
+    outside = [
+        item
+        for item in permission.required_permissions
+        if item.scope is PermissionScope.OUTSIDE_DIRECTORY
+    ]
+    assert [item.invocation_pattern for item in outside] == [str(secret.resolve())]
+
+
+@pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
 def test_legacy_bash_quoted_outside_path_requires_approval(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     outside = tmp_path.parent / "outside.txt"
@@ -2359,7 +2476,7 @@ def test_legacy_bash_quoted_outside_path_requires_approval(tmp_path, monkeypatch
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ASK
     assert any(
-        str(outside.parent) in required.label
+        required.invocation_pattern == str(outside.resolve())
         for required in permission.required_permissions
     )
 
@@ -2380,7 +2497,7 @@ def test_experimental_bash_quoted_outside_path_requires_approval(tmp_path, monke
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ASK
     assert any(
-        str(outside.parent) in required.label
+        required.invocation_pattern == str(outside.resolve())
         for required in permission.required_permissions
     )
 

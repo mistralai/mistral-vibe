@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-import secrets
-import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+import logging
 from pathlib import Path
+import secrets
+import time
 
 from mistralai_vibe_local_harness.protocol import (
     RustAcceptCandidate,
@@ -66,10 +66,11 @@ from mistralai_vibe_local_harness.vibe._file_tools import execute_file_tool
 from mistralai_vibe_local_harness.vibe._hook_matcher import qualified_tool_name
 from mistralai_vibe_local_harness.vibe._permissions import ALWAYS_ASK, PermissionOutcome
 from mistralai_vibe_local_harness.vibe._projection import (
-    APPROVAL_NOTE_META_KEY,
     APPROVAL_META_KEY,
+    APPROVAL_NOTE_META_KEY,
     public_notice_entry,
 )
+from mistralai_vibe_local_harness.vibe._protected_paths import protected_target
 from mistralai_vibe_local_harness.vibe._runtime import ActionExecutor
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     CompletionDeltaSink,
@@ -80,7 +81,6 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
 from mistralai_vibe_local_harness.vibe._self_tools import execute_self_tool
 from mistralai_vibe_local_harness.vibe._shell_tools import execute_shell_tool
 from mistralai_vibe_local_harness.vibe._skill_tools import execute_skill_tool
-from mistralai_vibe_local_harness.vibe._protected_paths import protected_target
 from mistralai_vibe_local_harness.vibe._smart_approve import (
     CLASSIFIER_PROMPT_VERSION,
     DEFAULT_SMART_APPROVE_MODEL,
@@ -114,7 +114,7 @@ class ApprovalGrant(StrEnum):
 
     @property
     def remembered(self) -> bool:
-        return self in (ApprovalGrant.SESSION, ApprovalGrant.ALWAYS)
+        return self in {ApprovalGrant.SESSION, ApprovalGrant.ALWAYS}
 
 
 # A tool call the approval/classify gates act on: a Runtime builtin or a provided/MCP
@@ -245,7 +245,9 @@ class HookHandlers:
     pre_tool_call: Mapping[str, PreToolCallHookHandler] = field(default_factory=dict)
     pre_agent_turn: Mapping[str, PreAgentTurnHookHandler] = field(default_factory=dict)
     post_tool_call: Mapping[str, PostToolCallHookHandler] = field(default_factory=dict)
-    post_agent_turn: Mapping[str, PostAgentTurnHookHandler] = field(default_factory=dict)
+    post_agent_turn: Mapping[str, PostAgentTurnHookHandler] = field(
+        default_factory=dict
+    )
 
 
 def merge_hook_handlers(builtins: HookHandlers, foreign: HookHandlers) -> HookHandlers:
@@ -326,7 +328,7 @@ type ProvidedToolApproval = ToolApprovalMode | Mapping[str, ToolApprovalMode]
 _UNGATED_PROVIDED_TOOLS = frozenset({("ui", "ask_user_question")})
 
 
-def build_local_action_executor(
+def build_local_action_executor(  # noqa: PLR0913 - explicit executor dependencies
     config: LocalRuntimeAdapterConfig,
     request_approval: ApprovalRequester | None = None,
     provided_tool_executor: ProvidedToolExecutor | None = None,
@@ -377,11 +379,15 @@ class _LocalActionState:
         self._provided_tool_executor = provided_tool_executor
         # Frozen for the session: unlike ``tool_modes``, these do not follow an
         # ``apply_adapter_config`` mode switch.
-        self._provided_tool_modes: Mapping[str, ProvidedToolApproval] = provided_tool_modes or {}
+        self._provided_tool_modes: Mapping[str, ProvidedToolApproval] = (
+            provided_tool_modes or {}
+        )
         self._hook_handlers = hook_handlers
         self._session_id = session_id
         self._filesystem_root = (
-            filesystem_root.expanduser().resolve() if filesystem_root is not None else None
+            filesystem_root.expanduser().resolve()
+            if filesystem_root is not None
+            else None
         )
         # The path a file call was cleared for by the permission resolver (main's
         # out-of-workspace grant handoff); set during gating, read by the file tool.
@@ -420,7 +426,9 @@ class _LocalActionState:
         # Kept session-wide, not per turn, so a re-ask in a later turn still lands.
         self._smart_denied_keys: set[tuple[str, str]] = set()
         self._classification_sink: ClassificationSink | None = None
-        self._retry_sink: Callable[[str, ProviderRetry | None], Awaitable[None]] | None = None
+        self._retry_sink: (
+            Callable[[str, ProviderRetry | None], Awaitable[None]] | None
+        ) = None
         self._delta_sink: CompletionDeltaSink | None = None
 
     def configure(self, config: LocalRuntimeAdapterConfig) -> None:
@@ -449,7 +457,9 @@ class _LocalActionState:
     def bind_classification_sink(self, sink: ClassificationSink) -> None:
         self._classification_sink = sink
 
-    def bind_retry_sink(self, sink: Callable[[str, ProviderRetry | None], Awaitable[None]]) -> None:
+    def bind_retry_sink(
+        self, sink: Callable[[str, ProviderRetry | None], Awaitable[None]]
+    ) -> None:
         self._retry_sink = sink
 
     def bind_completion_delta_sink(self, sink: CompletionDeltaSink) -> None:
@@ -475,13 +485,14 @@ class _LocalActionState:
                 content=notice.content,
             )
             await sink([entry])
-        except Exception:  # noqa: BLE001 - notice emission is best-effort
+        except Exception:
             logger.warning("Failed to emit hook notice %s", notice.kind, exc_info=True)
 
     def _emits_run_notices(self, binding_ids: Sequence[str]) -> bool:
         """A run's container is emitted only when a foreign hook is in the batch."""
-        return self._notice_sink is not None and not self._foreign_binding_ids.isdisjoint(
-            binding_ids
+        return (
+            self._notice_sink is not None
+            and not self._foreign_binding_ids.isdisjoint(binding_ids)
         )
 
     def _provided_tool_mode(self, call: RustProvidedToolCall) -> ToolApprovalMode:
@@ -492,7 +503,7 @@ class _LocalActionState:
             approval = approval.get(call.tool_name)
         return approval or self._config.provided_tool_mode
 
-    async def execute(self, action: RustAction) -> RustEvent:
+    async def execute(self, action: RustAction) -> RustEvent:  # noqa: PLR0911 - one return per action kind
         if isinstance(action, RustLLMCallAction):
             self._apply_model_input(action)
             return await execute_completion(
@@ -507,7 +518,9 @@ class _LocalActionState:
             isinstance(action, RustProvidedToolCallAction)
             and self._provided_tool_executor is not None
         ):
-            denial = await self._gate_tool_call(action, self._provided_tool_mode(action.call))
+            denial = await self._gate_tool_call(
+                action, self._provided_tool_mode(action.call)
+            )
             if denial is not None:
                 return self._with_approval_note(denial, action.action_id)
             return self._with_approval_note(
@@ -576,13 +589,17 @@ class _LocalActionState:
             # malformed action away from checkpoints and other session metadata.
             tool_results_root = (workspace / "tool-results").resolve()
             if not destination.is_relative_to(tool_results_root):
-                raise ValueError("filesystem write path must resolve under tool-results")
-            await asyncio.to_thread(_replace_text_file, destination, action.operation.content)
+                raise ValueError(
+                    "filesystem write path must resolve under tool-results"
+                )
+            await asyncio.to_thread(
+                _replace_text_file, destination, action.operation.content
+            )
             return RustFilesystemSucceededEvent(
                 action_id=action.action_id,
                 result=RustFilesystemWriteResult(model_path=str(destination)),
             )
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             return RustFilesystemFailedEvent(
                 action_id=action.action_id,
                 error=RustProtocolError(
@@ -593,25 +610,33 @@ class _LocalActionState:
                 ),
             )
 
-    async def _execute_pre_tool_call_hook(self, action: RustPreToolCallHookAction) -> RustEvent:
+    async def _execute_pre_tool_call_hook(
+        self, action: RustPreToolCallHookAction
+    ) -> RustEvent:
         try:
             selected = _select_for_tool(
-                _resolve_hooks(action.hook_binding_ids, self._hook_handlers.pre_tool_call),
+                _resolve_hooks(
+                    action.hook_binding_ids, self._hook_handlers.pre_tool_call
+                ),
                 action.input.tool_call.call,
             )
-        except Exception as error:  # noqa: BLE001 - a duplicate binding id, localized
+        except Exception as error:
             return _hook_pipeline_failed(action, error)
         emit_run = self._emits_run_notices([bid for bid, _ in selected])
         call_id = action.input.tool_call.call_id
         if emit_run:
             await self._emit_notice(
-                HookNoticeData(kind="hook_run_started", scope="pre_tool", tool_call_id=call_id)
+                HookNoticeData(
+                    kind="hook_run_started", scope="pre_tool", tool_call_id=call_id
+                )
             )
         try:
             context = self._pre_tool_call_context(action.turn_id)
             tool_call = action.input.tool_call
             for _, handler in selected:
-                result = await handler(RustPreToolCallHookInput(tool_call=tool_call), context)
+                result = await handler(
+                    RustPreToolCallHookInput(tool_call=tool_call), context
+                )
                 output = result.output
                 if isinstance(output, RustHookSkip):
                     # A deny short-circuits: no later hook can un-skip the call, and the
@@ -621,27 +646,35 @@ class _LocalActionState:
                         result=RustPreToolCallHookResult(output=output),
                     )
                 tool_call = _with_arguments(tool_call, output.effective_arguments)
-        except Exception as error:  # noqa: BLE001 - localized as one hook_failed
+        except Exception as error:
             return _hook_pipeline_failed(action, error)
         else:
             return RustHookCompletedEvent(
                 action_id=action.action_id,
                 result=RustPreToolCallHookResult(
-                    output=RustPreToolCallContinue(effective_arguments=tool_call.call.arguments)
+                    output=RustPreToolCallContinue(
+                        effective_arguments=tool_call.call.arguments
+                    )
                 ),
             )
         finally:
             if emit_run:
                 await self._emit_notice(
                     HookNoticeData(
-                        kind="hook_run_completed", scope="pre_tool", tool_call_id=call_id
+                        kind="hook_run_completed",
+                        scope="pre_tool",
+                        tool_call_id=call_id,
                     )
                 )
 
-    async def _execute_pre_agent_turn_hook(self, action: RustPreAgentTurnHookAction) -> RustEvent:
+    async def _execute_pre_agent_turn_hook(
+        self, action: RustPreAgentTurnHookAction
+    ) -> RustEvent:
         try:
             context = self._hook_context()
-            handlers = _resolve_hooks(action.hook_binding_ids, self._hook_handlers.pre_agent_turn)
+            handlers = _resolve_hooks(
+                action.hook_binding_ids, self._hook_handlers.pre_agent_turn
+            )
             user_content = action.input.user_content
             for _, handler in handlers:
                 result = await handler(
@@ -654,7 +687,7 @@ class _LocalActionState:
                         result=RustPreAgentTurnHookResult(output=output),
                     )
                 user_content = output.user_content
-        except Exception as error:  # noqa: BLE001 - localized as one hook_failed
+        except Exception as error:
             return _hook_pipeline_failed(action, error)
         return RustHookCompletedEvent(
             action_id=action.action_id,
@@ -663,21 +696,27 @@ class _LocalActionState:
             ),
         )
 
-    async def _execute_post_tool_call_hook(self, action: RustPostToolCallHookAction) -> RustEvent:
+    async def _execute_post_tool_call_hook(
+        self, action: RustPostToolCallHookAction
+    ) -> RustEvent:
         # post_tool hooks chain and cannot skip -- the tool already ran; each only rewrites
         # the model-visible result.
         try:
             selected = _select_for_tool(
-                _resolve_hooks(action.hook_binding_ids, self._hook_handlers.post_tool_call),
+                _resolve_hooks(
+                    action.hook_binding_ids, self._hook_handlers.post_tool_call
+                ),
                 action.input.tool_call.call,
             )
-        except Exception as error:  # noqa: BLE001 - a duplicate binding id, localized
+        except Exception as error:
             return _hook_pipeline_failed(action, error)
         emit_run = self._emits_run_notices([bid for bid, _ in selected])
         call_id = action.input.tool_call.call_id
         if emit_run:
             await self._emit_notice(
-                HookNoticeData(kind="hook_run_started", scope="post_tool", tool_call_id=call_id)
+                HookNoticeData(
+                    kind="hook_run_started", scope="post_tool", tool_call_id=call_id
+                )
             )
         try:
             context = self._hook_context()
@@ -685,11 +724,13 @@ class _LocalActionState:
             tool_result = action.input.tool_result
             for _, handler in selected:
                 result = await handler(
-                    RustPostToolCallHookInput(tool_call=tool_call, tool_result=tool_result),
+                    RustPostToolCallHookInput(
+                        tool_call=tool_call, tool_result=tool_result
+                    ),
                     context,
                 )
                 tool_result = result.output.tool_result
-        except Exception as error:  # noqa: BLE001 - localized as one hook_failed
+        except Exception as error:
             return _hook_pipeline_failed(action, error)
         else:
             return RustHookCompletedEvent(
@@ -702,19 +743,27 @@ class _LocalActionState:
             if emit_run:
                 await self._emit_notice(
                     HookNoticeData(
-                        kind="hook_run_completed", scope="post_tool", tool_call_id=call_id
+                        kind="hook_run_completed",
+                        scope="post_tool",
+                        tool_call_id=call_id,
                     )
                 )
 
-    async def _execute_post_agent_turn_hook(self, action: RustPostAgentTurnHookAction) -> RustEvent:
+    async def _execute_post_agent_turn_hook(
+        self, action: RustPostAgentTurnHookAction
+    ) -> RustEvent:
         # The first non-accept decision (retry or reject) is the turn's outcome and
         # short-circuits the rest; among accepts, a later content replacement wins.
         emit_run = self._emits_run_notices(action.hook_binding_ids)
         if emit_run:
-            await self._emit_notice(HookNoticeData(kind="hook_run_started", scope="post_agent"))
+            await self._emit_notice(
+                HookNoticeData(kind="hook_run_started", scope="post_agent")
+            )
         try:
             context = self._hook_context()
-            handlers = _resolve_hooks(action.hook_binding_ids, self._hook_handlers.post_agent_turn)
+            handlers = _resolve_hooks(
+                action.hook_binding_ids, self._hook_handlers.post_agent_turn
+            )
             candidate = action.input.candidate
             replacement: list[RustContentBlock] | None = None
             # Each hook reviews the model's original completion, not a prior hook's
@@ -722,7 +771,9 @@ class _LocalActionState:
             # content blocks, so it cannot be fed back into the next hook's input without a
             # lossy, protocol-undefined conversion. Among accepts, the last replacement wins.
             for _, handler in handlers:
-                result = await handler(RustCompletionHookInput(candidate=candidate), context)
+                result = await handler(
+                    RustCompletionHookInput(candidate=candidate), context
+                )
                 output = result.output
                 if isinstance(output, RustCompletionHookAccept):
                     if isinstance(output.acceptance, RustReplaceAssistantContent):
@@ -749,7 +800,7 @@ class _LocalActionState:
             # counter so a cancelled retrying turn cannot leak one entry per turn_id.
             self._post_agent_retries.pop(action.turn_id, None)
             raise
-        except Exception as error:  # noqa: BLE001 - localized as one hook_failed
+        except Exception as error:
             self._post_agent_retries.pop(action.turn_id, None)
             return _hook_pipeline_failed(action, error)
         finally:
@@ -848,7 +899,9 @@ class _LocalActionState:
                 "approvalType": approval_meta[1],
                 "approvalSource": approval_meta[2],
             }
-        return event.model_copy(update={"result": event.result.model_copy(update={"meta": meta})})
+        return event.model_copy(
+            update={"result": event.result.model_copy(update={"meta": meta})}
+        )
 
     def _hook_approver(self, turn_id: str) -> HookApprovalCallback:
         """Bridge a hook body's approval request onto the Runtime approval callback.
@@ -879,7 +932,9 @@ class _LocalActionState:
 
         return approve
 
-    async def _gate_tool_call(self, action: GatedToolAction, mode: str) -> RustEvent | None:
+    async def _gate_tool_call(
+        self, action: GatedToolAction, mode: str
+    ) -> RustEvent | None:
         """Apply an approval mode to a pending builtin or provided call.
 
         Returns a failed tool event to block the call, or ``None`` to let it run.
@@ -915,7 +970,9 @@ class _LocalActionState:
                         message="Approval callbacks are not implemented yet",
                     )
                 required = outcome.required_permissions if outcome else ()
-                approved = (await self._request_approval(action, None, required)).approved
+                approved = (
+                    await self._request_approval(action, None, required)
+                ).approved
                 if not approved:
                     self._record_approval_meta(action.action_id, "skip", "ask", "user")
                     return _failed_tool_action(
@@ -929,10 +986,12 @@ class _LocalActionState:
                 return await self._classify_gate(action)
             case _:
                 source = "bypass" if self._config.bypass_approval else "config"
-                self._record_approval_meta(action.action_id, "execute", "always", source)
+                self._record_approval_meta(
+                    action.action_id, "execute", "always", source
+                )
                 return None
 
-    async def _classify_gate(self, action: GatedToolAction) -> RustEvent | None:
+    async def _classify_gate(self, action: GatedToolAction) -> RustEvent | None:  # noqa: PLR0911 - one return per gate verdict
         """Gate a builtin or provided call through the smart-approve risk classifier.
 
         Returns ``None`` to let the tool run, or a failed tool event to deny it.
@@ -971,7 +1030,9 @@ class _LocalActionState:
             )
         if outcome.decision == "allow":
             self._record_approval_meta(action.action_id, "execute", "always", "smart")
-            self._smart_proceed(action.action_id, "Auto-approved: allowed by your permission rules")
+            self._smart_proceed(
+                action.action_id, "Auto-approved: allowed by your permission rules"
+            )
             return None
         required = outcome.required_permissions
 
@@ -984,7 +1045,10 @@ class _LocalActionState:
         # Exact: it scopes what a human's session grant covers.
         key = (request.tool_name, request.args_hash())
 
-        if key in self._session_approvals or request.tool_name in self._session_approved_tools:
+        if (
+            key in self._session_approvals
+            or request.tool_name in self._session_approved_tools
+        ):
             self._emit_classification(
                 action,
                 tool_name=request.tool_name,
@@ -1069,7 +1133,7 @@ class _LocalActionState:
             approval_grant=grant.value if grant is not None else None,
         )
 
-    def _emit_classification(
+    def _emit_classification(  # noqa: PLR0913 - explicit classification fields
         self,
         action: GatedToolAction,
         *,
@@ -1120,7 +1184,9 @@ class _LocalActionState:
         try:
             sink(payload)
         except Exception:  # telemetry is best-effort
-            logger.warning("Failed to publish tool classification telemetry", exc_info=True)
+            logger.warning(
+                "Failed to publish tool classification telemetry", exc_info=True
+            )
 
     def _reset_smart_counters_on_new_turn(self, turn_id: str) -> None:
         if turn_id == self._smart_turn_id:
@@ -1199,13 +1265,17 @@ class _LocalActionState:
                 raise RuntimeError("model tool cache is out of date")
 
 
-def _with_arguments(tool_call: RustHookToolCall, arguments: JsonObject) -> RustHookToolCall:
+def _with_arguments(
+    tool_call: RustHookToolCall, arguments: JsonObject
+) -> RustHookToolCall:
     return tool_call.model_copy(
         update={"call": tool_call.call.model_copy(update={"arguments": arguments})}
     )
 
 
-def _resolve_hooks[H](binding_ids: Sequence[str], registry: Mapping[str, H]) -> list[tuple[str, H]]:
+def _resolve_hooks[H](
+    binding_ids: Sequence[str], registry: Mapping[str, H]
+) -> list[tuple[str, H]]:
     """Resolve Core-selected binding IDs to registered hook bodies, in order.
 
     A binding whose handler is not registered is *skipped*, not fatal: on a crash-mid-turn
@@ -1244,7 +1314,9 @@ def _select_for_tool[H](
     ]
 
 
-def _hook_pipeline_failed(action: RustHookCallActionBase, error: object) -> RustHookFailedEvent:
+def _hook_pipeline_failed(
+    action: RustHookCallActionBase, error: object
+) -> RustHookFailedEvent:
     return RustHookFailedEvent(
         action_id=action.action_id,
         error=RustProtocolError(
@@ -1267,7 +1339,9 @@ def _unsupported_action(action: RustAction) -> RustEvent:
         return RustCompletionFailedEvent(action_id=action.action_id, error=error)
     if isinstance(action, RustHookCallActionBase):
         return RustHookFailedEvent(action_id=action.action_id, error=error)
-    if isinstance(action, RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction):
+    if isinstance(
+        action, RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction
+    ):
         return _failed_tool_action(action, code=error.code, message=error.message)
     if isinstance(action, RustFilesystemAction):
         return RustFilesystemFailedEvent(action_id=action.action_id, error=error)
@@ -1293,10 +1367,7 @@ def _failed_tool_action(
         call_id=action.call_id,
         result=RustToolFailureResult(
             error=RustProtocolError(
-                code=code,
-                message=message,
-                retryable=False,
-                details=None,
+                code=code, message=message, retryable=False, details=None
             )
         ),
     )

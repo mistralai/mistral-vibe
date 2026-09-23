@@ -1,0 +1,20 @@
+[
+ {
+  "method": "config/write",
+  "params": {
+   "ops": [
+    {
+     "op": "set",
+     "path": "/disabled_tools",
+     "targetLayer": "user-toml",
+     "value": [
+      "connector_githuXb.retrieve_pull_request_informationY"
+     ]
+    }
+   ],
+   "reason": "config screen edit",
+   "reloadRuntime": false,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

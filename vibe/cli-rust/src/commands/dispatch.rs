@@ -40,6 +40,7 @@ pub(super) fn run_command(
         "/theme" => theme_picker::open(app),
         "/model" => model_picker::open(app),
         "/thinking" => crate::thinking_picker::open(app),
+        "/remote-project" => crate::vibe_code_project::open(app, client),
         "/log-level" => log_level_picker::open(app),
         "/resume" | "/continue" => resume_picker::open(app, client),
         "/rewind" => rewind::start(app, client),

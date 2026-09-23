@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
@@ -35,9 +37,15 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
     ProviderStreamDelta,
     RequestSentTelemetry,
 )
-from mistralai_vibe_local_harness.vibe.adapters._correlation import CORRELATION_ID_HEADER
-from mistralai_vibe_local_harness.vibe.adapters.generic import execute_generic_completion
-from mistralai_vibe_local_harness.vibe.adapters.mistral import execute_mistral_completion
+from mistralai_vibe_local_harness.vibe.adapters._correlation import (
+    CORRELATION_ID_HEADER,
+)
+from mistralai_vibe_local_harness.vibe.adapters.generic import (
+    execute_generic_completion,
+)
+from mistralai_vibe_local_harness.vibe.adapters.mistral import (
+    execute_mistral_completion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +132,9 @@ class _ProvisionalDeltaEmitter:
             self._published = False
             self._last_flush = time.monotonic()
             await self._emit(
-                CompletionDelta(action_id=self._action_id, turn_id=self._turn_id, restart=True)
+                CompletionDelta(
+                    action_id=self._action_id, turn_id=self._turn_id, restart=True
+                )
             )
 
     async def aclose(self) -> None:
@@ -179,8 +189,10 @@ class _ProvisionalDeltaEmitter:
             await self._sink(delta)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - provisional output is best-effort
-            logger.warning("Could not project provisional completion content", exc_info=True)
+        except Exception:
+            logger.warning(
+                "Could not project provisional completion content", exc_info=True
+            )
 
 
 async def execute_completion(
@@ -193,13 +205,17 @@ async def execute_completion(
 ) -> RustCompletionSucceededEvent | RustCompletionFailedEvent:
     turn_id = action.turn_id
 
-    route = config.compaction_model if action.purpose == "compaction" else config.active_model
+    route = (
+        config.compaction_model
+        if action.purpose == "compaction"
+        else config.active_model
+    )
     image_error = _validate_image_support(messages, route)
     if image_error is not None:
         return RustCompletionFailedEvent(action_id=action.action_id, error=image_error)
     try:
         credential: ProviderCredentialResult = await config.credentials.resolve()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # A resolver is not allowed to fail the turn with an untyped error.
         return _stream_failed_event(action, exc, provider=config.provider, route=route)
     if isinstance(credential, ProviderAuthRequired):
@@ -228,7 +244,7 @@ async def execute_completion(
             return
         try:
             await retry_sink(turn_id, retry)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("Could not report provider retry", exc_info=True)
 
     retry_observer = (
@@ -266,13 +282,17 @@ async def execute_completion(
             )
         else:
             raise ValueError(f"Unsupported completion backend: {config.backend}")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         rejection = _REJECTION_REASONS.get(_provider_status(exc) or 0)
         if rejection is None:
-            return _stream_failed_event(action, exc, provider=config.provider, route=route)
+            return _stream_failed_event(
+                action, exc, provider=config.provider, route=route
+            )
         # Tell the credential's owner what the borrower observed, so the
         # material just refused is not re-sent on the next turn.
-        await config.credentials.reject(observed_revision=credential.revision, reason=rejection)
+        await config.credentials.reject(
+            observed_revision=credential.revision, reason=rejection
+        )
         return _unauthorized_event(
             action,
             rejection,
@@ -311,7 +331,9 @@ def _text_length(content: Iterable[object]) -> int:
 
     Harness messages carry typed content blocks, so only ``text`` blocks count.
     """
-    return sum(len(block.text) for block in content if isinstance(block, RustTextContentBlock))
+    return sum(
+        len(block.text) for block in content if isinstance(block, RustTextContentBlock)
+    )
 
 
 def _emit_request_sent(
@@ -470,10 +492,7 @@ def _response_body(exc: BaseException) -> str | None:
 
 
 def _failure_details(
-    action: RustLLMCallAction,
-    provider: str,
-    route: LocalModelRoute,
-    exc: BaseException,
+    action: RustLLMCallAction, provider: str, route: LocalModelRoute, exc: BaseException
 ) -> JsonObject:
     details: JsonObject = {
         "provider": provider,

@@ -224,11 +224,13 @@ fn apply_done(
     }
     quit(app);
     let new_session_id = state.session.id.clone();
-    app.session.session_id = Some(new_session_id.clone());
+    app.set_session_id(new_session_id.clone());
     app.session.active_turn_id = None;
     // Python drops the queued prompts and rebuilds every widget from the
     // returned history, so no client-owned entry survives the rewind.
     app.view.transcript.clear();
+    // Either rewind mode leaves the harness session without its todo list.
+    app.todo_tracker.clear();
     app.queue.clear();
     app.view.expanded.clear();
     app.view.transcript.load_snapshot(&state);

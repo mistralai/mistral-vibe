@@ -28,10 +28,12 @@ from vibe.app_server.protocol import (
     ConfigWriteParams,
     ConfigWriteResponse,
     ContextInjectParams,
+    EmptyResponse,
     ModelConfigWriteParams,
     ProtocolErrorCode,
     RuntimeMutationStatus,
     ServerWarningParams,
+    SessionMarkAsSeenParams,
     SessionReadParams,
     SessionSettingsUpdateParams,
 )
@@ -46,6 +48,7 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "enqueue_turn",
         "guard_request",
         "inject_context",
+        "install_agent",
         "interrupt_turn",
         "read",
         "read_turn_queue",
@@ -60,12 +63,15 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "steer_turn",
         "subscribe",
         "switch_agent",
+        "uninstall_agent",
         "update_settings",
         "write_config",
         "write_model_config",
     }
 
     assert _SESSION_BACKEND_METHODS == {
+        "agents/install",
+        "agents/uninstall",
         "callback/result",
         "config/reload",
         "config/model/write",
@@ -154,6 +160,49 @@ async def test_pin_requires_the_optional_host_capability() -> None:
         )
 
     assert exc_info.value.code is ProtocolErrorCode.METHOD_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_mark_as_seen_requires_the_optional_host_capability() -> None:
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
+    )
+
+    with pytest.raises(RequestFailure) as exc_info:
+        await server._dispatch_backend_host_operation(
+            "session/markAsSeen", {"sessionId": "saved-session"}
+        )
+
+    assert exc_info.value.code is ProtocolErrorCode.METHOD_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_mark_as_seen_routes_to_the_selected_backend_host() -> None:
+    received: SessionMarkAsSeenParams | None = None
+
+    class SeenStateHost:
+        async def mark_as_seen(self, params: SessionMarkAsSeenParams) -> EmptyResponse:
+            nonlocal received
+            received = params
+            return EmptyResponse()
+
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        session_backend_host_factory=lambda _: cast(
+            SessionBackendHost, SeenStateHost()
+        ),
+    )
+
+    result = await server._dispatch_backend_host_operation(
+        "session/markAsSeen", {"sessionId": "saved-session"}
+    )
+
+    assert received == SessionMarkAsSeenParams(session_id="saved-session")
+    assert result is not None
+    assert result.response == EmptyResponse()
 
 
 @pytest.mark.asyncio

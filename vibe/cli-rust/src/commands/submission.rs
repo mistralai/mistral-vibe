@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use super::{dispatch, is_side_channel, parse};
 use crate::app::{App, QueuedPrompt, Status, ToastSeverity};
 use crate::input_modes::{classify, ClassifiedInput};
+use crate::startup::banners;
 use crate::transcript::local;
 use crate::{completion_manager, config, message_queue};
 
@@ -87,12 +88,16 @@ pub fn submit(
     // as "steer the accepted queue into this turn" (Python `_handle_paused_submit`).
     if value.is_empty() {
         if app.queue.paused {
+            // Python drops the what's-new body past its empty-input early
+            // return, so releasing a held queue with Enter dismisses it too.
+            banners::dismiss_whats_new(app);
             message_queue::resume(app, client);
         } else {
             message_queue::steer_pending(app, client);
         }
         return false;
     }
+    banners::dismiss_whats_new(app);
     // Editing a queued prompt: Enter saves it in place instead of queuing a new one.
     if app.queue.editing {
         if message_queue::confirm_consumed_edit(app) {
@@ -108,10 +113,18 @@ pub fn submit(
         return false;
     }
     let classified = classify(&value, &app.completion.skills);
-    if !matches!(&classified, ClassifiedInput::SlashCommand { .. })
-        && reject_while_shell_runs(app, &value)
-    {
-        return false;
+    if !matches!(&classified, ClassifiedInput::SlashCommand { .. }) {
+        if reject_while_shell_runs(app, &value) {
+            return false;
+        }
+        if app.vibe_code_project.pending {
+            reject_input(
+                app,
+                &value,
+                "Wait for the project request to finish.".into(),
+            );
+            return false;
+        }
     }
     match classified {
         ClassifiedInput::SlashCommand { command } => {
@@ -142,11 +155,11 @@ pub fn submit(
             if message_queue::mutation_in_flight(app) {
                 if message_queue::defer_prompt(app, command) {
                     clear_and_remember(app, &value);
-                    super::skill::record_usage(app, client, name);
+                    super::usage::record_usage(app, client, name, "skill");
                 }
             } else {
                 clear_and_remember(app, &value);
-                super::skill::record_usage(app, client, name);
+                super::usage::record_usage(app, client, name, "skill");
                 message_queue::enqueue_prompt(app, client, command);
                 message_queue::resume(app, client);
             }
@@ -217,6 +230,7 @@ fn reject_hint(app: &App) -> Option<&'static str> {
     // Compaction runs in Python's `_agent_task`, so it counts as a busy job too.
     if matches!(app.session.status, Status::Generating { .. })
         || app.compacting
+        || app.vibe_code_project.pending
         || !app.queue.is_empty()
     {
         return Some("wait for the current job to finish.");

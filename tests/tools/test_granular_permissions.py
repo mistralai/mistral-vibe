@@ -36,6 +36,7 @@ from vibe.core.tools.permissions import (
     wildcard_match,
 )
 from vibe.core.tools.utils import DEFAULT_SENSITIVE_PATTERNS, matches_sensitive_pattern
+from vibe.permissions import path_pattern_matches
 from vibe.utils import paths
 
 
@@ -334,6 +335,45 @@ class TestReadGranularPermissions:
         ]
         assert len(outside) == 1
 
+    def test_readable_outside_directory_offers_a_recursive_grant(
+        self, tmp_path, monkeypatch
+    ):
+        workdir = tmp_path / "workdir"
+        target = tmp_path / "outside"
+        workdir.mkdir()
+        target.mkdir()
+        monkeypatch.chdir(workdir)
+
+        result = self._read().resolve_permission(ReadFileArgs(file_path=str(target)))
+
+        assert isinstance(result, PermissionContext)
+        [outside] = [
+            rp
+            for rp in result.required_permissions
+            if rp.scope is PermissionScope.OUTSIDE_DIRECTORY
+        ]
+        assert outside.path_scope_root == str(target.resolve())
+
+    def test_unreadable_outside_directory_stays_an_exact_path(
+        self, tmp_path, monkeypatch
+    ):
+        workdir = tmp_path / "workdir"
+        target = tmp_path / "outside"
+        workdir.mkdir()
+        target.mkdir()
+        monkeypatch.chdir(workdir)
+        monkeypatch.setattr("vibe.core.tools.utils.os.access", lambda *_args: False)
+
+        result = self._read().resolve_permission(ReadFileArgs(file_path=str(target)))
+
+        assert isinstance(result, PermissionContext)
+        [outside] = [
+            rp
+            for rp in result.required_permissions
+            if rp.scope is PermissionScope.OUTSIDE_DIRECTORY
+        ]
+        assert outside.path_scope_root is None
+
     def test_sensitive_env_file_returns_permission_context(self):
         (self.workdir / ".env").touch()
         tool = self._read()
@@ -538,7 +578,11 @@ class TestApprovalFlowSimulation:
         return any(
             rule.tool_name == tool_name
             and rule.scope == rp.scope
-            and wildcard_match(rp.invocation_pattern, rule.session_pattern)
+            and (
+                path_pattern_matches(rp.invocation_pattern, rule.session_pattern)
+                if rp.scope is PermissionScope.OUTSIDE_DIRECTORY
+                else wildcard_match(rp.invocation_pattern, rule.session_pattern)
+            )
             for rule in rules
         )
 

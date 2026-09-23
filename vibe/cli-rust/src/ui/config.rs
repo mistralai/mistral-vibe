@@ -5,7 +5,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{config_edit, config_options, scrollbar, theme};
@@ -49,6 +49,12 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let w = ((area.width as u32 * 96 / 100) as u16).min(92);
     let h = (area.height as u32 * 96 / 100) as u16;
     if w < 20 || h < 8 {
+        config_edit::draw_too_small(
+            app,
+            f,
+            area,
+            "Enlarge terminal to browse settings. Esc Close",
+        );
         return;
     }
     let bx = area.x + (area.width - w) / 2;
@@ -87,27 +93,24 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         } else {
             &app.config_screen.query
         },
-        Style::default()
-            .fg(theme::primary())
-            .bg(theme::surface())
-            .add_modifier(Modifier::DIM),
+        if app.config_screen.query.is_empty() {
+            primary.add_modifier(Modifier::DIM)
+        } else {
+            primary
+        },
     );
 
     draw_options(app, f, bx, cy + 2, w, by + h - 2);
-    draw_help(f, cx, by + h - 2);
-    if let Some((surface, region)) = config_edit::draw(app, f, area) {
-        crate::mouse::register_region(app, surface, crate::mouse::MouseTarget::Blocked);
-        if let Some(region) = region {
-            crate::mouse::register_region(app, region, crate::mouse::MouseTarget::ConfigEditor);
-        }
-    }
+    draw_help(f, Rect::new(cx, by + h - 2, w - 6, 1));
+    config_edit::draw(app, f, area);
 }
 
 /// The option list: a `$background` panel of section headers and field rows.
 fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y: u16) {
-    let opt_x = bx + 3 + (w - 6 - OPT_W) / 2;
+    let opt_width = OPT_W.min(w.saturating_sub(6));
+    let opt_x = bx + 3 + w.saturating_sub(6 + OPT_W) / 2;
     let visible = help_y.saturating_sub(top + 1);
-    let region = Rect::new(opt_x, top, OPT_W, visible);
+    let region = Rect::new(opt_x, top, opt_width, visible);
     crate::mouse::register_region(app, region, crate::mouse::MouseTarget::Config);
     f.buffer_mut()
         .set_style(region, Style::default().bg(theme::background()));
@@ -124,12 +127,13 @@ fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y:
         let y = top + row as u16;
         match line {
             Opt::Blank => {}
-            Opt::Section(label) => draw_section(f, opt_x, y, label, bg),
+            Opt::Section(label) => draw_section(f, Rect::new(opt_x, y, opt_width, 1), label, bg),
             Opt::Header(text) => {
-                f.buffer_mut().set_string(
+                f.buffer_mut().set_stringn(
                     opt_x,
                     y,
                     text,
+                    opt_width as usize,
                     Style::default()
                         .fg(theme::muted())
                         .bg(bg)
@@ -156,7 +160,7 @@ fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y:
                     opt_x + CURSOR_W as u16,
                     y,
                     name,
-                    NAME_W,
+                    NAME_W.min(opt_width.saturating_sub(CURSOR_W as u16) as usize),
                     Style::default()
                         .fg(theme::foreground())
                         .bg(bg)
@@ -166,7 +170,8 @@ fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y:
                     opt_x + (CURSOR_W + NAME_W + GAP) as u16,
                     y,
                     value,
-                    VALUE_W,
+                    VALUE_W
+                        .min(opt_width.saturating_sub((CURSOR_W + NAME_W + GAP) as u16) as usize),
                     (if *selected {
                         Style::default().add_modifier(Modifier::BOLD)
                     } else {
@@ -182,7 +187,7 @@ fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y:
 
     // Scrollbar in the stable gutter (last column) when the list overflows.
     if total > visible {
-        let bar = Rect::new(opt_x + OPT_W - 1, top, 1, visible);
+        let bar = Rect::new(opt_x + opt_width - 1, top, 1, visible);
         scrollbar::draw(
             app,
             f,
@@ -218,70 +223,46 @@ fn reconcile_scroll(app: &mut App, lines: &[Opt], visible: u16) -> usize {
 }
 
 /// A centered section rule with the dim dashes and a brighter bold label.
-fn draw_section(f: &mut Frame, opt_x: u16, y: u16, label: &str, bg: Color) {
+fn draw_section(f: &mut Frame, area: Rect, label: &str, bg: Color) {
     let pad = ROW_W.saturating_sub(label.chars().count() + 2);
     let left = pad / 2;
-    let dashes_l = "─".repeat(left);
-    let mid = format!(" {label} ");
-    let dashes_r = "─".repeat(pad - left);
-    let buf = f.buffer_mut();
-    buf.set_string(
-        opt_x,
-        y,
-        &dashes_l,
-        Style::default()
-            .fg(theme::muted())
-            .bg(bg)
-            .add_modifier(Modifier::DIM),
-    );
-    let mx = opt_x + dashes_l.chars().count() as u16;
-    buf.set_string(
-        mx,
-        y,
-        &mid,
-        Style::default()
-            .fg(theme::foreground())
-            .bg(bg)
-            .add_modifier(Modifier::BOLD),
-    );
-    let rx = mx + mid.chars().count() as u16;
-    buf.set_string(
-        rx,
-        y,
-        &dashes_r,
-        Style::default()
-            .fg(theme::muted())
-            .bg(bg)
-            .add_modifier(Modifier::DIM),
-    );
+    let dim = Style::default()
+        .fg(theme::muted())
+        .bg(bg)
+        .add_modifier(Modifier::DIM);
+    let line = Line::from(vec![
+        Span::styled("─".repeat(left), dim),
+        Span::styled(
+            format!(" {label} "),
+            Style::default()
+                .fg(theme::foreground())
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("─".repeat(pad - left), dim),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
 }
 
-/// The bottom shortcut hint: `$primary` keys, muted labels, on the surface.
-fn draw_help(f: &mut Frame, cx: u16, y: u16) {
-    let mut x = cx;
-    for (i, (key, label)) in HELP.iter().enumerate() {
-        if i > 0 {
-            x += 2;
+fn draw_help(f: &mut Frame, area: Rect) {
+    let mut spans = Vec::new();
+    for (index, (key, label)) in HELP.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
         }
-        f.buffer_mut().set_string(
-            x,
-            y,
-            key,
+        spans.push(Span::styled(
+            *key,
             Style::default()
                 .fg(theme::primary())
-                .bg(theme::surface())
                 .add_modifier(Modifier::BOLD),
-        );
-        x += key.chars().count() as u16 + 1;
-        f.buffer_mut().set_string(
-            x,
-            y,
-            label,
-            Style::default()
-                .fg(theme::muted())
-                .bg(theme::surface())
-                .add_modifier(Modifier::DIM),
-        );
-        x += label.chars().count() as u16;
+        ));
+        spans.push(Span::styled(
+            format!(" {label}"),
+            theme::dim(theme::muted()),
+        ));
     }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::surface())),
+        area,
+    );
 }

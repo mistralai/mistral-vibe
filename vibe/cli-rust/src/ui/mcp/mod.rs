@@ -1,8 +1,9 @@
 //! `/mcp` browser bottom-app: title, source/tool option list, shortcut hint.
 
 mod layout;
+mod search;
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
@@ -24,18 +25,18 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
 
     let loading_height = if app.view.transcript.is_empty() { 3 } else { 2 };
     let lines = visual_lines(app, area);
-    let chunks = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(loading_height),
-        Constraint::Length(box_height(app, lines.len(), area.height)),
-        Constraint::Length(1),
-    ])
-    .split(area);
+    let chunks = super::bottom_app_chunks(
+        app,
+        area,
+        loading_height,
+        box_height(app, lines.len(), area.height),
+    );
 
     transcript::draw(app, f, chunks[0]);
     loading::draw(app, f, chunks[1]);
     crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Blocked);
     draw_box(app, f, chunks[2], &lines);
+    super::todo::draw_row(app, f, chunks[4]);
     bottom_bar::draw(app, f, chunks[3]);
 }
 
@@ -43,12 +44,17 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
 fn visual_lines(app: &App, area: Rect) -> Vec<VisualLine> {
     let rows = rows::rows(&app.mcp);
     let width = area.width.saturating_sub(GUTTER) as usize;
-    let lines = layout::lines(&rows, app.mcp.selected, width);
+    let selected = if app.mcp.search.focused {
+        usize::MAX
+    } else {
+        app.mcp.selected
+    };
+    let lines = layout::lines(&rows, selected, width);
     if lines.len() <= visible_lines(lines.len(), area.height) {
         return lines;
     }
     let width = area.width.saturating_sub(SCROLLBAR_GUTTER) as usize;
-    layout::lines(&rows, app.mcp.selected, width)
+    layout::lines(&rows, selected, width)
 }
 
 /// Total box height: 2 borders + header + options + help.
@@ -98,7 +104,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[VisualLine]) {
 
     let header = header_height(app);
     if header > 1 {
-        draw_search(f, area);
+        search::draw(app, f, area);
     }
     let visible = area.height.saturating_sub(header + 3) as usize;
     let top = area.y + 1 + header;
@@ -132,19 +138,6 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[VisualLine]) {
     }
 
     draw_help(app, f, area.x + 2, area.y + area.height - 2);
-}
-
-/// The empty fuzzy-search row under the title, showing only its placeholder.
-fn draw_search(f: &mut Frame, area: Rect) {
-    let dim = theme::dim(theme::text_muted()).bg(theme::background());
-    // `padding-left: 1` past the title column, then the icon's width and margin.
-    f.buffer_mut().set_string(area.x + 3, area.y + 2, "🔍", dim);
-    f.buffer_mut().set_string(
-        area.x + 6,
-        area.y + 2,
-        "Search servers and connectors (← to focus)",
-        dim,
-    );
 }
 
 fn draw_line(f: &mut Frame, area: Rect, y: u16, line: &VisualLine, overflows: bool) {

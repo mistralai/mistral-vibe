@@ -1,5 +1,7 @@
 """Session-owned connector route planning and gateway execution."""
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Awaitable, Iterable
 
@@ -98,7 +100,9 @@ class ConnectorRuntime:
             self._guard_open()
             await self._accept(self._snapshot)
 
-    async def suspend(self, *, alias: str, tool_name: str | None) -> ConnectorRouteSnapshot:
+    async def suspend(
+        self, *, alias: str, tool_name: str | None
+    ) -> ConnectorRouteSnapshot:
         async with self._lock:
             self._guard_open()
             self._source(alias)
@@ -107,9 +111,12 @@ class ConnectorRuntime:
             if tool_name is None:
                 source_overrides[alias] = "disabled"
             else:
-                if not any(tool.raw_name == tool_name for tool in self._connector(alias).tools):
+                if not any(
+                    tool.raw_name == tool_name for tool in self._connector(alias).tools
+                ):
                     raise ConnectorRuntimeFailure(
-                        "connector_unknown_tool", "Connector tool is not in the accepted catalog"
+                        "connector_unknown_tool",
+                        "Connector tool is not in the accepted catalog",
                     )
                 suspended_tools.add((alias, tool_name))
             candidate = build_connector_snapshot(
@@ -126,11 +133,7 @@ class ConnectorRuntime:
             return candidate
 
     async def execute(
-        self,
-        *,
-        group_name: str,
-        tool_name: str,
-        arguments: JsonObject,
+        self, *, group_name: str, tool_name: str, arguments: JsonObject
     ) -> ConnectorNormalizedResult:
         async with self._lock:
             self._guard_open()
@@ -165,7 +168,9 @@ class ConnectorRuntime:
             )
             raise
 
-    async def publish_pending_authorization(self, *, group_name: str, tool_name: str) -> None:
+    async def publish_pending_authorization(
+        self, *, group_name: str, tool_name: str
+    ) -> None:
         async with self._lock:
             signal = self._pending_authorization.pop((group_name, tool_name), None)
         if signal is None or self._event_sink is None:
@@ -194,7 +199,9 @@ class ConnectorRuntime:
             if current is None or current.route_revision != route_revision:
                 return
             connector = next(
-                item for item in self._catalog.connectors if item.raw_id == current.raw_connector_id
+                item
+                for item in self._catalog.connectors
+                if item.raw_id == current.raw_connector_id
             )
             source_overrides = {**self._source_overrides, connector.alias: "needs_auth"}
             candidate = build_connector_snapshot(
@@ -235,7 +242,9 @@ class ConnectorRuntime:
 
     def _guard_open(self) -> None:
         if self._closed:
-            raise ConnectorRuntimeFailure("connector_runtime_closed", "Connector Runtime is closed")
+            raise ConnectorRuntimeFailure(
+                "connector_runtime_closed", "Connector Runtime is closed"
+            )
 
     async def _accept(self, snapshot: ConnectorRouteSnapshot) -> None:
         if self._accept_snapshot is not None:
@@ -274,7 +283,9 @@ def _validate_configuration(
         raw_ids.add(connector.raw_id)
         aliases.add(connector.alias)
         tool_names = [tool.raw_name for tool in connector.tools]
-        if any(not name for name in tool_names) or len(tool_names) != len(set(tool_names)):
+        if any(not name for name in tool_names) or len(tool_names) != len(
+            set(tool_names)
+        ):
             raise ConnectorRuntimeFailure(
                 "connector_invalid_configuration",
                 "Connector tool names must be non-empty and unique per source",

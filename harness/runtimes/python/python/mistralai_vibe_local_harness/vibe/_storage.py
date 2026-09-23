@@ -2,13 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import logging
-import os
-import re
-import secrets
-import shutil
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager, suppress
@@ -16,11 +9,17 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+import hashlib
+import json
+import logging
+import os
 from pathlib import Path
+import re
+import secrets
+import shutil
 from threading import RLock
 from typing import Annotated, Any, Literal, Self, cast
 
-import rfc8785
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -30,12 +29,13 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+import rfc8785
 
 from mistralai_vibe_local_harness import HarnessSession
 from mistralai_vibe_local_harness.protocol import (
     RustAcceptedApplyResult,
-    RustAudioContentBlock,
     RustActionsNextAction,
+    RustAudioContentBlock,
     RustCapabilitiesChange,
     RustDispatchActionDirective,
     RustEmbeddedResourceContentBlock,
@@ -70,7 +70,9 @@ from mistralai_vibe_local_harness.vibe._errors import (
 from mistralai_vibe_local_harness.vibe._file_image_fallback import (
     export_file_image_fallback,
 )
-from mistralai_vibe_local_harness.vibe._process_actions import process_id as expected_process_id
+from mistralai_vibe_local_harness.vibe._process_actions import (
+    process_id as expected_process_id,
+)
 from mistralai_vibe_local_harness.vibe._subagents import (
     ActiveSessionLifecycle,
     ForkSessionIdentity,
@@ -106,6 +108,8 @@ _CHUNK_CACHE_BYTES = 16 * 1024 * 1024
 _CHECKPOINT_MESSAGES_PATH = ("context", "messages")
 _PROJECTION_HISTORY_PATH = ("snapshot", "history", "entries")
 _GENERATION_PATTERN = re.compile(r"^[0-9]{16}$")
+_MAX_GENERATION = 9_999_999_999_999_999
+_RUNTIME_STATE_VERSION = 3
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _TIMESTAMP_PATTERN = re.compile(
@@ -267,7 +271,9 @@ class CommandReceiptV1(_StoredModel):
 
 class RuntimeActionV1(_StoredModel):
     action_id: str
-    kind: Literal["completion", "tool", "hook", "process", "callback", "child", "filesystem"]
+    kind: Literal[
+        "completion", "tool", "hook", "process", "callback", "child", "filesystem"
+    ]
     state: Literal["pending", "running", "succeeded", "failed"]
     request_sha256: Sha256
     request: JsonValue
@@ -387,7 +393,7 @@ class ManagedProcessV1(_StoredModel):
     finished_at: Timestamp | None
 
     @model_validator(mode="after")
-    def validate_lifecycle(self) -> Self:
+    def validate_lifecycle(self) -> Self:  # noqa: PLR0912 - one branch per lifecycle invariant
         if self.start_outcome == "accepted":
             if (
                 self.start_failure_stage is not None
@@ -414,7 +420,10 @@ class ManagedProcessV1(_StoredModel):
 
         if self.pty_backend == "posix" and self.command_environment != "unix":
             raise ValueError("POSIX PTY requires a Unix command environment")
-        if self.pty_backend in {"ConPTY", "WinPTY"} and self.command_environment == "unix":
+        if (
+            self.pty_backend in {"ConPTY", "WinPTY"}
+            and self.command_environment == "unix"
+        ):
             raise ValueError("Windows PTY requires a Windows command environment")
         if self.status == "running":
             if self.finished_at is not None or self.exit_code is not None:
@@ -530,13 +539,17 @@ class _RuntimeStateBase(_StoredModel):
             "client command ID",
         )
         _require_sorted_unique(self.actions, lambda item: item.action_id, "action ID")
-        _require_sorted_unique(self.callbacks, lambda item: item.callback_id, "callback ID")
+        _require_sorted_unique(
+            self.callbacks, lambda item: item.callback_id, "callback ID"
+        )
         _require_sorted_unique(
             self.provider_operations,
             lambda item: item.operation_id,
             "provider operation ID",
         )
-        _require_sorted_unique(self.processes, lambda item: item.process_id, "process ID")
+        _require_sorted_unique(
+            self.processes, lambda item: item.process_id, "process ID"
+        )
         _require_unique(
             self.processes, lambda item: item.start_action_id, "process start Action ID"
         )
@@ -551,9 +564,13 @@ class _RuntimeStateBase(_StoredModel):
             process = processes.get(submitted.process_id)
             if process is None or process.status == "running":
                 raise ValueError("process notification must name a terminal process")
-            if submitted.notification_id != _process_notification_id(process.process_id):
+            if submitted.notification_id != _process_notification_id(
+                process.process_id
+            ):
                 raise ValueError("process notification has an invalid identity")
-        _require_sorted_unique(self.children, lambda item: item.session_id, "child session ID")
+        _require_sorted_unique(
+            self.children, lambda item: item.session_id, "child session ID"
+        )
         return self
 
     @property
@@ -563,7 +580,8 @@ class _RuntimeStateBase(_StoredModel):
             or any(action.state in {"pending", "running"} for action in self.actions)
             or any(callback.state == "pending" for callback in self.callbacks)
             or any(
-                operation.state in {"pending", "running"} for operation in self.provider_operations
+                operation.state in {"pending", "running"}
+                for operation in self.provider_operations
             )
             or any(process.status == "running" for process in self.processes)
             or any(
@@ -575,7 +593,8 @@ class _RuntimeStateBase(_StoredModel):
                 for process in self.processes
             )
             or any(
-                child.stateful and child.state in {"pending", "running"} for child in self.children
+                child.stateful and child.state in {"pending", "running"}
+                for child in self.children
             )
         )
 
@@ -626,30 +645,30 @@ class RuntimeStateV3(_RuntimeStateBase):
         ):
             raise ValueError("Runtime identity and session metadata disagree")
         if isinstance(self.identity, SubagentSessionIdentity):
-            if not all(
-                (
-                    metadata.subagent_spawn_key,
-                    metadata.subagent_template_digest,
-                    metadata.subagent_policy_ceiling_digest,
+            if not all((
+                metadata.subagent_spawn_key,
+                metadata.subagent_template_digest,
+                metadata.subagent_policy_ceiling_digest,
+            )):
+                raise ValueError(
+                    "a subagent requires its durable Host binding identity"
                 )
-            ):
-                raise ValueError("a subagent requires its durable Host binding identity")
             if self.subagents is not None:
                 raise ValueError("a depth-one subagent cannot own subagents")
             if not isinstance(self.lifecycle, ActiveSessionLifecycle):
                 raise ValueError("a subagent cannot own root tree-deletion state")
         elif self.parent_command_receipts:
             raise ValueError("a root or fork cannot retain parent command receipts")
-        elif any(
-            (
-                metadata.subagent_spawn_key,
-                metadata.subagent_template_digest,
-                metadata.subagent_policy_ceiling_digest,
-            )
-        ):
+        elif any((
+            metadata.subagent_spawn_key,
+            metadata.subagent_template_digest,
+            metadata.subagent_policy_ceiling_digest,
+        )):
             raise ValueError("a root or fork cannot carry a subagent Host binding")
         if list(self.parent_command_receipts) != sorted(self.parent_command_receipts):
-            raise ValueError("parent command receipts must be stored in lexical key order")
+            raise ValueError(
+                "parent command receipts must be stored in lexical key order"
+            )
         if any(
             operation_key != receipt.operation_key
             for operation_key, receipt in self.parent_command_receipts.items()
@@ -730,17 +749,25 @@ class SetHistoryEntriesOp(_StoredModel):
 
 
 ProjectionOp = Annotated[
-    AppendEntryOp | ReplaceEntryOp | RemoveEntryOp | SetEnvelopeOp | SetHistoryEntriesOp,
+    AppendEntryOp
+    | ReplaceEntryOp
+    | RemoveEntryOp
+    | SetEnvelopeOp
+    | SetHistoryEntriesOp,
     Field(discriminator="op"),
 ]
 ProjectionDelta = tuple[ProjectionOp, ...]
 
 
 def _projection_envelope(state: PublicSessionState) -> PublicSessionState:
-    return state.model_copy(update={"history": state.history.model_copy(update={"entries": []})})
+    return state.model_copy(
+        update={"history": state.history.model_copy(update={"entries": []})}
+    )
 
 
-def compute_projection_delta(prior: PublicSessionState, new: PublicSessionState) -> ProjectionDelta:
+def compute_projection_delta(
+    prior: PublicSessionState, new: PublicSessionState
+) -> ProjectionDelta:
     """Describe how ``new`` differs from ``prior`` as structured operations.
 
     Ops are derived from the independently authored ``new`` snapshot, so a
@@ -779,7 +806,9 @@ def compute_projection_delta(prior: PublicSessionState, new: PublicSessionState)
     # same id, and the second finds nothing to remove — so any failure to
     # reconstruct ``new`` is treated as "fall back", never propagated.
     try:
-        reconstructs = apply_projection_delta(prior, entry_ops).history.entries == list(new_entries)
+        reconstructs = apply_projection_delta(prior, entry_ops).history.entries == list(
+            new_entries
+        )
     except ValueError:
         reconstructs = False
     if not reconstructs:
@@ -846,8 +875,7 @@ class LegacyInteropSourceV1(_StoredModel):
 
 
 InteropSourceV1 = Annotated[
-    UnifiedInteropSourceV1 | LegacyInteropSourceV1,
-    Field(discriminator="backend"),
+    UnifiedInteropSourceV1 | LegacyInteropSourceV1, Field(discriminator="backend")
 ]
 
 
@@ -980,7 +1008,9 @@ def transition_shape(transition: RustSessionTransition) -> TransitionShapeV1:
                     directives.append("keep")
     return TransitionShapeV1(
         turn=transition.turn.status,
-        next="actions" if isinstance(transition.next, RustActionsNextAction) else "none",
+        next="actions"
+        if isinstance(transition.next, RustActionsNextAction)
+        else "none",
         directives=directives,
         observations=[observation.type for observation in transition.observations],
     )
@@ -1027,7 +1057,9 @@ class CoreInputPayloadV1(_StoredModel):
 
 class ActionIntentPayloadV1(_StoredModel):
     action_id: str
-    kind: Literal["completion", "tool", "hook", "process", "callback", "child", "filesystem"]
+    kind: Literal[
+        "completion", "tool", "hook", "process", "callback", "child", "filesystem"
+    ]
     request_sha256: Sha256
     request: JsonValue
     recovery_mode: Literal[
@@ -1295,7 +1327,11 @@ class StoredSession:
     def _checkpoint_payload(self) -> CoreInputPayloadV1 | None:
         """The payload carrying this generation's configuration baseline."""
         return next(
-            (record.payload for record in self.journal if isinstance(record, CoreInputRecordV1)),
+            (
+                record.payload
+                for record in self.journal
+                if isinstance(record, CoreInputRecordV1)
+            ),
             None,
         )
 
@@ -1350,7 +1386,9 @@ class StoredSession:
             pinned["plugins"] = list(self.checkpoint_plugins)
         return config.model_copy(update=pinned, deep=True) if pinned else config
 
-    def replayed_capabilities(self, fallback: RustHarnessCapabilitySet) -> RustHarnessCapabilitySet:
+    def replayed_capabilities(
+        self, fallback: RustHarnessCapabilitySet
+    ) -> RustHarnessCapabilitySet:
         """Return the capability set in force after this generation's journal."""
         capabilities = self.checkpoint_capabilities or fallback
         for record in self.journal:
@@ -1389,7 +1427,7 @@ class StoredSession:
                         updates["plugins"] = list(value)
         return replayed.model_copy(update=updates, deep=True) if updates else replayed
 
-    def truncated_at(self, sequence: int) -> "StoredSession":
+    def truncated_at(self, sequence: int) -> StoredSession:
         """This generation with every record from ``sequence`` onward dropped.
 
         Replay is a fold, so a prefix of the journal is itself a consistent
@@ -1402,9 +1440,12 @@ class StoredSession:
         base_projection = self.published_projection_state
         if base_runtime is None or base_projection is None:
             raise HarnessInvalidSessionStoreError(
-                self.manifest.session_id, "generation was read without its published state"
+                self.manifest.session_id,
+                "generation was read without its published state",
             )
-        runtime_state, projection_state = _apply_journal(base_runtime, base_projection, prefix)
+        runtime_state, projection_state = _apply_journal(
+            base_runtime, base_projection, prefix
+        )
         return StoredSession(
             manifest=self.manifest,
             checkpoint=self.checkpoint,
@@ -1436,10 +1477,10 @@ class StoredSession:
                     ).decode()
                 )
             )
-            if isinstance(result, RustAcceptedApplyResult) and _transition_matches_recorded_digest(
-                result.transition,
-                record.payload,
-                self.runtime_state.actions,
+            if isinstance(
+                result, RustAcceptedApplyResult
+            ) and _transition_matches_recorded_digest(
+                result.transition, record.payload, self.runtime_state.actions
             ):
                 transitions.append(result.transition)
                 continue
@@ -1451,7 +1492,9 @@ class StoredSession:
                 else {"rejected": result.rejection.code}
             )
             core.close()
-            error = HarnessReplayDivergenceError(self.manifest.session_id, record.sequence)
+            error = HarnessReplayDivergenceError(
+                self.manifest.session_id, record.sequence
+            )
             if error.details is not None:
                 # Without this the only report is "diverged at N", and naming the
                 # differing decision has so far meant re-recording the run by hand.
@@ -1683,7 +1726,7 @@ class _ChunkCache:
             self._size -= len(self._bodies.popitem(last=False)[1])
 
 
-class UnifiedSessionStore:
+class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
     def __init__(self, root: Path, session_id: str) -> None:
         _validate_session_id(session_id)
         self.root = root
@@ -1714,7 +1757,7 @@ class UnifiedSessionStore:
         if self.session_root.exists():
             shutil.rmtree(self.session_root)
 
-    def write_generation(
+    def write_generation(  # noqa: PLR0914, PLR0915 - one cohesive generation write
         self,
         *,
         checkpoint: dict[str, JsonValue],
@@ -1771,7 +1814,10 @@ class UnifiedSessionStore:
             checkpoint_plan = self._plan_transcript("checkpoint", checkpoint_transcript)
             projection_plan = self._plan_transcript("projection", projection_transcript)
             chunk_stats = sum(
-                (_write_chunks(chunk_root, plan) for plan in (checkpoint_plan, projection_plan)),
+                (
+                    _write_chunks(chunk_root, plan)
+                    for plan in (checkpoint_plan, projection_plan)
+                ),
                 ChunkPublicationStats(),
             )
             _fsync_directory(chunk_root)
@@ -1798,7 +1844,9 @@ class UnifiedSessionStore:
                 generation=generation,
                 created_at=_timestamp(),
                 snapshot_sequence=sequence,
-                execution_state=("quiescent" if runtime_state.quiescent else "recoverable"),
+                execution_state=(
+                    "quiescent" if runtime_state.quiescent else "recoverable"
+                ),
                 checkpoint=StoredCheckpointV1(
                     path=checkpoint_record.path,
                     sha256=checkpoint_record.sha256,
@@ -1872,7 +1920,9 @@ class UnifiedSessionStore:
         )
         return manifest
 
-    def _plan_transcript(self, key: str, transcript: list[JsonValue] | None) -> _ChunkPlan | None:
+    def _plan_transcript(
+        self, key: str, transcript: list[JsonValue] | None
+    ) -> _ChunkPlan | None:
         if transcript is None:
             return None
         return _plan_chunks(transcript, self._chunk_plans.get(key))
@@ -1945,7 +1995,12 @@ class UnifiedSessionStore:
         except (OSError, ValueError):
             # Anything found here, `load` finds too, and reports it the usual way.
             return
-        if not settled or key is None or key.current != current or key.journal_size != 0:
+        if (
+            not settled
+            or key is None
+            or key.current != current
+            or key.journal_size != 0
+        ):
             return
         with self._cache_lock:
             self._cache = _CachedGeneration(
@@ -1981,7 +2036,7 @@ class UnifiedSessionStore:
             journal_mtime_ns=stat.st_mtime_ns,
         )
 
-    def _load(self) -> tuple[StoredSession, _GenerationCacheKey]:
+    def _load(self) -> tuple[StoredSession, _GenerationCacheKey]:  # noqa: PLR0914 - one cohesive generation load
         _reject_symlink_components(self.root, self.session_root)
         current_path = self.session_root / "CURRENT"
         current_value, current_canonical = _read_document_bytes(current_path)
@@ -2010,16 +2065,25 @@ class UnifiedSessionStore:
             dict[str, JsonValue],
             _read_referenced_document(generation_dir, manifest.checkpoint),
         )
-        if checkpoint.get("checkpoint_version") != manifest.checkpoint.checkpoint_version:
+        if (
+            checkpoint.get("checkpoint_version")
+            != manifest.checkpoint.checkpoint_version
+        ):
             raise ValueError("Core checkpoint version mismatch")
         if manifest.checkpoint.chunks is not None:
             _attach_transcript(
                 checkpoint,
                 _CHECKPOINT_MESSAGES_PATH,
-                _read_chunked_transcript(chunk_root, manifest.checkpoint.chunks, self._chunk_cache),
+                _read_chunked_transcript(
+                    chunk_root, manifest.checkpoint.chunks, self._chunk_cache
+                ),
             )
-        runtime_state_value = _read_referenced_document(generation_dir, manifest.runtime_state)
-        projection_value = _read_referenced_document(generation_dir, manifest.projection_state)
+        runtime_state_value = _read_referenced_document(
+            generation_dir, manifest.runtime_state
+        )
+        projection_value = _read_referenced_document(
+            generation_dir, manifest.projection_state
+        )
         if manifest.projection_state.chunks is not None:
             _attach_transcript(
                 projection_value,
@@ -2050,7 +2114,9 @@ class UnifiedSessionStore:
         # key look stale and forces a reload, whereas sampling afterwards could
         # record a size that already covers records this load never saw.
         journal_stat = os.lstat(journal_path)
-        journal = _read_journal(journal_path, manifest.recovery_journal_segment.first_sequence)
+        journal = _read_journal(
+            journal_path, manifest.recovery_journal_segment.first_sequence
+        )
         effective_runtime, effective_projection = _apply_journal(
             runtime_state, projection_state, journal
         )
@@ -2105,7 +2171,9 @@ class UnifiedSessionStore:
         # prefix clears any stale one.
         if inspection.get("status") in {"running", "compacting"}:
             pending_transition = (
-                transitions[-1] if transitions else truncated.runtime_state.pending_transition
+                transitions[-1]
+                if transitions
+                else truncated.runtime_state.pending_transition
             )
         else:
             pending_transition = None
@@ -2133,7 +2201,9 @@ class UnifiedSessionStore:
             }
         )
         projection_state = _record_recovery_in_history(
-            truncated.projection_state.model_copy(update={"snapshot_sequence": sequence}),
+            truncated.projection_state.model_copy(
+                update={"snapshot_sequence": sequence}
+            ),
             discarded=(
                 len(stored.projection_state.snapshot.history.entries)
                 - len(truncated.projection_state.snapshot.history.entries)
@@ -2179,7 +2249,9 @@ class UnifiedSessionStore:
         with self._journal_capacity_lock:
             return self._append_record_locked(record_type, payload)
 
-    def _append_record_locked(self, record_type: str, payload: _StoredModel) -> JournalRecordV1:
+    def _append_record_locked(
+        self, record_type: str, payload: _StoredModel
+    ) -> JournalRecordV1:
         expected_type = _PAYLOAD_TYPES.get(record_type)
         if expected_type is None or not isinstance(payload, expected_type):
             raise TypeError(f"invalid payload for recovery record {record_type!r}")
@@ -2194,23 +2266,37 @@ class UnifiedSessionStore:
             "recovery_journal_record_version": 1,
             "sequence": sequence,
             "type": record_type,
-            "previous_record_sha256": (previous.record_sha256 if previous is not None else None),
+            "previous_record_sha256": (
+                previous.record_sha256 if previous is not None else None
+            ),
             "payload": payload.model_dump(mode="json", by_alias=True),
         }
         envelope["record_sha256"] = sha256_json(envelope)
         record = _JOURNAL_RECORD_ADAPTER.validate_python(envelope)
         journal_path = self.session_root / stored.manifest.recovery_journal_segment.path
         owner = self._journal_reservation_owner.get()
-        owner_bytes = self._journal_capacity_reservations.get(owner, 0) if owner is not None else 0
-        protected_bytes = sum(self._journal_capacity_reservations.values()) - owner_bytes
-        written = _append_journal_record(journal_path, record, protected_bytes=protected_bytes)
+        owner_bytes = (
+            self._journal_capacity_reservations.get(owner, 0)
+            if owner is not None
+            else 0
+        )
+        protected_bytes = (
+            sum(self._journal_capacity_reservations.values()) - owner_bytes
+        )
+        written = _append_journal_record(
+            journal_path, record, protected_bytes=protected_bytes
+        )
         self._extend_cache(stored, record, journal_path, written)
         if owner is not None and owner in self._journal_capacity_reservations:
             self._journal_capacity_reservations[owner] = max(0, owner_bytes - written)
         return record
 
     def _extend_cache(
-        self, stored: StoredSession, record: JournalRecordV1, journal_path: Path, written: int
+        self,
+        stored: StoredSession,
+        record: JournalRecordV1,
+        journal_path: Path,
+        written: int,
     ) -> None:
         """Fold a freshly appended record into the cached generation.
 
@@ -2273,22 +2359,33 @@ class UnifiedSessionStore:
             raise ValueError("required journal capacity cannot be negative")
         with self._journal_capacity_lock:
             reserved = sum(self._journal_capacity_reservations.values())
-            return self.journal_bytes() + reserved + required_bytes <= _MAX_DOCUMENT_BYTES
+            return (
+                self.journal_bytes() + reserved + required_bytes <= _MAX_DOCUMENT_BYTES
+            )
 
     def reserve_journal_capacity(self, reservations: dict[str, int]) -> None:
-        if any(not owner or required_bytes < 0 for owner, required_bytes in reservations.items()):
-            raise ValueError("journal capacity reservations require an owner and nonnegative bytes")
+        if any(
+            not owner or required_bytes < 0
+            for owner, required_bytes in reservations.items()
+        ):
+            raise ValueError(
+                "journal capacity reservations require an owner and nonnegative bytes"
+            )
         with self._journal_capacity_lock:
             if set(reservations) & self._journal_capacity_reservations.keys():
                 raise ValueError("journal capacity reservation already exists")
             required = sum(reservations.values())
             if not self.has_journal_capacity(required):
-                raise HarnessStoreCapacityError("insufficient reserved journal capacity")
+                raise HarnessStoreCapacityError(
+                    "insufficient reserved journal capacity"
+                )
             self._journal_capacity_reservations.update(reservations)
 
     def restore_journal_capacity(self, owner: str, required_bytes: int) -> None:
         if not owner or required_bytes < 0:
-            raise ValueError("journal capacity reservations require an owner and nonnegative bytes")
+            raise ValueError(
+                "journal capacity reservations require an owner and nonnegative bytes"
+            )
         with self._journal_capacity_lock:
             if owner in self._journal_capacity_reservations:
                 raise ValueError("journal capacity reservation already exists")
@@ -2333,7 +2430,9 @@ class UnifiedSessionStore:
                 # An abandoned receipt already has its outcome. Reserving over it
                 # would leave the journal with a success for a command that is
                 # not reserved, which no reader can fold.
-                raise HarnessCommandConflictError(client_command_id, "already abandoned")
+                raise HarnessCommandConflictError(
+                    client_command_id, "already abandoned"
+                )
             return CommandReservation(
                 newly_reserved=False,
                 completed=existing.state == "succeeded",
@@ -2393,7 +2492,9 @@ class UnifiedSessionStore:
             params=dict(receipt.params),
         )
 
-    def orphaned_internal_commands(self, namespace: str) -> tuple[OrphanedInternalCommand, ...]:
+    def orphaned_internal_commands(
+        self, namespace: str
+    ) -> tuple[OrphanedInternalCommand, ...]:
         """The namespace's open reservations no caller can finish.
 
         One shape qualifies: a reservation folded into a snapshot by a build
@@ -2429,13 +2530,17 @@ class UnifiedSessionStore:
     ) -> ReceiptSucceededRecordV1:
         record = self.append_record(
             "receipt_succeeded",
-            ReceiptSucceededPayloadV1(client_command_id=client_command_id, response=response),
+            ReceiptSucceededPayloadV1(
+                client_command_id=client_command_id, response=response
+            ),
         )
         if not isinstance(record, ReceiptSucceededRecordV1):
             raise TypeError("journal record parser returned the wrong type")
         return record
 
-    def fail_command(self, client_command_id: str, reason: str) -> ReceiptFailedRecordV1:
+    def fail_command(
+        self, client_command_id: str, reason: str
+    ) -> ReceiptFailedRecordV1:
         """Settle a reservation whose command will never be applied.
 
         The outcome of an abandoned command is as durable as the outcome of one
@@ -2489,7 +2594,9 @@ class UnifiedSessionStore:
             input=input,
             transition_sha256=transition_sha256(transition),
             replay_transition_sha256=_replay_transition_sha256(transition),
-            checkpoint_capabilities=checkpoint_capabilities if opens_generation else None,
+            checkpoint_capabilities=checkpoint_capabilities
+            if opens_generation
+            else None,
             checkpoint_settings=checkpoint_settings if opens_generation else None,
             checkpoint_plugins=(
                 list(checkpoint_plugins)
@@ -2502,7 +2609,10 @@ class UnifiedSessionStore:
             record = self.append_record("core_input", payload)
         except Exception:
             for existing in reversed(self.load().journal):
-                if isinstance(existing, CoreInputRecordV1) and existing.payload == payload:
+                if (
+                    isinstance(existing, CoreInputRecordV1)
+                    and existing.payload == payload
+                ):
                     return existing
             raise
         if not isinstance(record, CoreInputRecordV1):
@@ -2513,7 +2623,9 @@ class UnifiedSessionStore:
         self,
         *,
         action_id: str,
-        kind: Literal["completion", "tool", "hook", "process", "callback", "child", "filesystem"],
+        kind: Literal[
+            "completion", "tool", "hook", "process", "callback", "child", "filesystem"
+        ],
         request: JsonValue,
         recovery_mode: Literal[
             "reconnect_or_fail", "redeliver", "idempotent_retry", "reconcile", "fail"
@@ -2551,7 +2663,12 @@ class UnifiedSessionStore:
         )
         stored = self.load()
         action = next(
-            (item for item in stored.runtime_state.actions if item.action_id == action_id), None
+            (
+                item
+                for item in stored.runtime_state.actions
+                if item.action_id == action_id
+            ),
+            None,
         )
         if action is not None and action.process_manager_instance_id is not None:
             if (
@@ -2576,7 +2693,11 @@ class UnifiedSessionStore:
         except Exception:
             stored = self.load()
             action = next(
-                (item for item in stored.runtime_state.actions if item.action_id == action_id),
+                (
+                    item
+                    for item in stored.runtime_state.actions
+                    if item.action_id == action_id
+                ),
                 None,
             )
             if (
@@ -2599,7 +2720,9 @@ class UnifiedSessionStore:
             raise TypeError("journal record parser returned the wrong type")
         return record
 
-    def record_process_state(self, process: ManagedProcessV1) -> ProcessStateChangedRecordV1 | None:
+    def record_process_state(
+        self, process: ManagedProcessV1
+    ) -> ProcessStateChangedRecordV1 | None:
         stored = self.load()
         existing_process = next(
             (
@@ -2648,7 +2771,9 @@ class UnifiedSessionStore:
                 update={
                     "status": "orphaned",
                     "exit_code": None,
-                    "finished_at": max(_timestamp(), process.started_at or process.created_at),
+                    "finished_at": max(
+                        _timestamp(), process.started_at or process.created_at
+                    ),
                 }
             )
             for process in stored.runtime_state.processes
@@ -2699,7 +2824,8 @@ class UnifiedSessionStore:
         if submitted is not None:
             if submitted.notification_id != notification_id:
                 raise HarnessInvalidSessionStoreError(
-                    self.session_id, "conflicting process notification persistence retry"
+                    self.session_id,
+                    "conflicting process notification persistence retry",
                 )
             return next(
                 (
@@ -2715,7 +2841,8 @@ class UnifiedSessionStore:
         except Exception:
             stored = self.load()
             if any(
-                item.process_id == process_id and item.notification_id == notification_id
+                item.process_id == process_id
+                and item.notification_id == notification_id
                 for item in stored.runtime_state.submitted_process_notifications
             ):
                 return next(
@@ -2755,10 +2882,18 @@ class UnifiedSessionStore:
         except Exception:
             stored = self.load()
             action = next(
-                (item for item in stored.runtime_state.actions if item.action_id == action_id),
+                (
+                    item
+                    for item in stored.runtime_state.actions
+                    if item.action_id == action_id
+                ),
                 None,
             )
-            if action is not None and action.state == payload.state and action.result == result:
+            if (
+                action is not None
+                and action.state == payload.state
+                and action.result == result
+            ):
                 return next(
                     (
                         existing
@@ -2778,7 +2913,9 @@ class UnifiedSessionStore:
     ) -> CallbackRegisteredRecordV1:
         record = self.append_record(
             "callback_registered",
-            CallbackRegisteredPayloadV1(callback_id=callback_id, kind=kind, routing=routing),
+            CallbackRegisteredPayloadV1(
+                callback_id=callback_id, kind=kind, routing=routing
+            ),
         )
         if not isinstance(record, CallbackRegisteredRecordV1):
             raise TypeError("journal record parser returned the wrong type")
@@ -2827,7 +2964,7 @@ class UnifiedSessionStore:
         return record
 
 
-def empty_runtime_state(
+def empty_runtime_state(  # noqa: PLR0913 - explicit Runtime state fields
     session_id: str,
     *,
     snapshot_sequence: int,
@@ -2848,8 +2985,7 @@ def empty_runtime_state(
     if identity is None:
         identity = (
             RootSessionIdentity(
-                session_id=session_id,
-                root_session_id=resolved_root_session_id,
+                session_id=session_id, root_session_id=resolved_root_session_id
             )
             if parent_session_id is None
             else ForkSessionIdentity(
@@ -2884,11 +3020,13 @@ def empty_runtime_state(
     )
 
 
-def _load_runtime_state(value: JsonValue, _projection: ProjectionStateV1) -> RuntimeStateV3:
+def _load_runtime_state(
+    value: JsonValue, _projection: ProjectionStateV1
+) -> RuntimeStateV3:
     if not isinstance(value, dict):
         raise ValueError("runtime state must be an object")
     version = value.get("runtime_state_version")
-    if version != 3:
+    if version != _RUNTIME_STATE_VERSION:
         raise ValueError(f"unsupported Runtime state version: {version!r}")
     return RuntimeStateV3.model_validate(value)
 
@@ -2897,7 +3035,10 @@ def history_fingerprint(history: list[InteropHistoryMessageV1]) -> str:
     return sha256_json(
         cast(
             JsonValue,
-            [item.model_dump(mode="json", by_alias=True, exclude_none=True) for item in history],
+            [
+                item.model_dump(mode="json", by_alias=True, exclude_none=True)
+                for item in history
+            ],
         )
     )
 
@@ -2962,15 +3103,20 @@ def committed_history_from_checkpoint(
                 (
                     {
                         "type": "content",
-                        "content": export_file_image_fallback(cast(dict[str, JsonValue], part)),
+                        "content": export_file_image_fallback(
+                            cast(dict[str, JsonValue], part)
+                        ),
                     }
-                    if isinstance(part, dict) and part.get("type") in _CONTENT_PART_TYPES
+                    if isinstance(part, dict)
+                    and part.get("type") in _CONTENT_PART_TYPES
                     else part
                 )
                 for part in cast(list[JsonValue], raw_parts)
             ]
         normalized.append(cast(JsonValue, message))
-    return committed_history(source, _INTEROP_HISTORY_ADAPTER.validate_python(normalized))
+    return committed_history(
+        source, _INTEROP_HISTORY_ADAPTER.validate_python(normalized)
+    )
 
 
 def canonical_json(value: JsonValue) -> bytes:
@@ -3031,20 +3177,25 @@ def transition_sha256(transition: RustSessionTransition) -> str:
 
 
 def _replay_transition_sha256(transition: RustSessionTransition) -> str:
-    return _digest_with_llm_actions_normalized(transition, _normalize_llm_action_for_replay)
+    return _digest_with_llm_actions_normalized(
+        transition, _normalize_llm_action_for_replay
+    )
 
 
-def _replay_transition_sha256_with_model_input(transition: RustSessionTransition) -> str:
+def _replay_transition_sha256_with_model_input(
+    transition: RustSessionTransition,
+) -> str:
     return _digest_with_llm_actions_normalized(
         transition, _normalize_llm_action_for_replay_with_model_input
     )
 
 
 def _digest_with_llm_actions_normalized(
-    transition: RustSessionTransition,
-    normalize: Callable[[dict[str, JsonValue]], None],
+    transition: RustSessionTransition, normalize: Callable[[dict[str, JsonValue]], None]
 ) -> str:
-    value = cast(dict[str, JsonValue], transition.model_dump(mode="json", by_alias=True))
+    value = cast(
+        dict[str, JsonValue], transition.model_dump(mode="json", by_alias=True)
+    )
     next_action = value.get("next")
     if not isinstance(next_action, dict) or next_action.get("type") != "actions":
         return sha256_json(value)
@@ -3079,11 +3230,12 @@ def _transition_matches_recorded_digest(
     return legacy_digest == payload.transition_sha256
 
 
-def _legacy_transition_sha256(
-    transition: RustSessionTransition,
-    durable_actions: list[RuntimeActionV1],
+def _legacy_transition_sha256(  # noqa: PLR0911 - one return per legacy transition shape
+    transition: RustSessionTransition, durable_actions: list[RuntimeActionV1]
 ) -> str | None:
-    value = cast(dict[str, JsonValue], transition.model_dump(mode="json", by_alias=True))
+    value = cast(
+        dict[str, JsonValue], transition.model_dump(mode="json", by_alias=True)
+    )
     next_action = value.get("next")
     if not isinstance(next_action, dict) or next_action.get("type") != "actions":
         return None
@@ -3114,11 +3266,12 @@ def _legacy_transition_sha256(
             recorded = RustLLMCallAction.model_validate(durable.request)
         except ValueError:
             return None
-        if _llm_action_replay_identity(current) != _llm_action_replay_identity(recorded):
+        if _llm_action_replay_identity(current) != _llm_action_replay_identity(
+            recorded
+        ):
             return None
         directive["action"] = cast(
-            JsonValue,
-            recorded.model_dump(mode="json", by_alias=True),
+            JsonValue, recorded.model_dump(mode="json", by_alias=True)
         )
         replaced = True
     return sha256_json(value) if replaced else None
@@ -3138,7 +3291,9 @@ def _normalize_llm_action_for_replay(action: dict[str, JsonValue]) -> None:
     action.pop("model_input", None)
 
 
-def _normalize_llm_action_for_replay_with_model_input(action: dict[str, JsonValue]) -> None:
+def _normalize_llm_action_for_replay_with_model_input(
+    action: dict[str, JsonValue],
+) -> None:
     action.pop("max_iterations", None)
     model_input = action.get("model_input")
     if not isinstance(model_input, dict):
@@ -3213,8 +3368,13 @@ def _prune_settled_completions(
     A process Action therefore does read its own result back, and pruning that
     kind would turn the idempotent retry into a spurious mismatch.
     """
-    actions = [_prune_settled_completion(action, core_action_ids) for action in runtime.actions]
-    if all(pruned is original for pruned, original in zip(actions, runtime.actions, strict=True)):
+    actions = [
+        _prune_settled_completion(action, core_action_ids) for action in runtime.actions
+    ]
+    if all(
+        pruned is original
+        for pruned, original in zip(actions, runtime.actions, strict=True)
+    ):
         return runtime
     return runtime.model_copy(update={"actions": actions})
 
@@ -3252,18 +3412,22 @@ def _discard_provider_operation_results(runtime: RuntimeStateV3) -> RuntimeState
     extras, so generations already carrying a result must still validate.
     """
     operations = [
-        operation.model_copy(update={"result": None}) if operation.result is not None else operation
+        operation.model_copy(update={"result": None})
+        if operation.result is not None
+        else operation
         for operation in runtime.provider_operations
     ]
     if all(
         stripped is original
-        for stripped, original in zip(operations, runtime.provider_operations, strict=True)
+        for stripped, original in zip(
+            operations, runtime.provider_operations, strict=True
+        )
     ):
         return runtime
     return runtime.model_copy(update={"provider_operations": operations})
 
 
-def _apply_journal(
+def _apply_journal(  # noqa: PLR0912, PLR0914, PLR0915 - one branch per journal record
     runtime: RuntimeStateV3,
     projection: ProjectionStateV1,
     records: tuple[JournalRecordV1, ...],
@@ -3271,7 +3435,9 @@ def _apply_journal(
     receipts = {item.client_command_id: item for item in runtime.command_receipts}
     actions = {item.action_id: item for item in runtime.actions}
     callbacks = {item.callback_id: item for item in runtime.callbacks}
-    provider_operations = {item.operation_id: item for item in runtime.provider_operations}
+    provider_operations = {
+        item.operation_id: item for item in runtime.provider_operations
+    }
     processes = {item.process_id: item for item in runtime.processes}
     submitted_process_notifications = {
         item.process_id: item for item in runtime.submitted_process_notifications
@@ -3295,7 +3461,11 @@ def _apply_journal(
                 if receipt is None or receipt.state != "reserved":
                     raise ValueError("successful receipt has no unique reservation")
                 receipts[payload.client_command_id] = receipt.model_copy(
-                    update={"state": "succeeded", "response": payload.response, "params": None}
+                    update={
+                        "state": "succeeded",
+                        "response": payload.response,
+                        "params": None,
+                    }
                 )
             case ReceiptFailedRecordV1(payload=payload):
                 receipt = receipts.get(payload.client_command_id)
@@ -3331,9 +3501,7 @@ def _apply_journal(
                 action_name = _action_name(payload.request)
                 if payload.kind == "child" and action_name == "subagent.spawn":
                     children[payload.action_id] = ChildDependencyV1(
-                        session_id=payload.action_id,
-                        stateful=True,
-                        state="running",
+                        session_id=payload.action_id, stateful=True, state="running"
                     )
             case ActionResultRecordV1(payload=payload):
                 action = actions.get(payload.action_id)
@@ -3353,17 +3521,31 @@ def _apply_journal(
                     )
                 if child := children.get(payload.action_id):
                     children[payload.action_id] = child.model_copy(
-                        update={"state": ("failed" if payload.state == "failed" else "completed")}
+                        update={
+                            "state": (
+                                "failed" if payload.state == "failed" else "completed"
+                            )
+                        }
                     )
             case ProcessOperationDispatchedRecordV1(payload=payload):
                 action = actions.get(payload.action_id)
-                if action is None or action.kind != "process" or action.state != "pending":
+                if (
+                    action is None
+                    or action.kind != "process"
+                    or action.state != "pending"
+                ):
                     raise ValueError("process dispatch has no pending process Action")
                 operation = _action_name(action.request)
                 if operation not in {"process.start", "process.write", "process.stop"}:
-                    raise ValueError("read-only process Action cannot have a dispatch marker")
-                if (operation == "process.start") != (payload.prepared_start is not None):
-                    raise ValueError("process start dispatch descriptor is missing or unexpected")
+                    raise ValueError(
+                        "read-only process Action cannot have a dispatch marker"
+                    )
+                if (operation == "process.start") != (
+                    payload.prepared_start is not None
+                ):
+                    raise ValueError(
+                        "process start dispatch descriptor is missing or unexpected"
+                    )
                 if payload.prepared_start is not None:
                     prepared = payload.prepared_start
                     if (
@@ -3371,7 +3553,9 @@ def _apply_journal(
                         or prepared.start_call_id != _action_call_id(action.request)
                         or prepared.manager_instance_id != payload.manager_instance_id
                     ):
-                        raise ValueError("prepared process start disagrees with its Action")
+                        raise ValueError(
+                            "prepared process start disagrees with its Action"
+                        )
                 actions[payload.action_id] = action.model_copy(
                     update={
                         "state": "running",
@@ -3430,14 +3614,18 @@ def _apply_journal(
                     session_id=current_projection.session_id,
                     snapshot_sequence=record.sequence,
                     watermark=payload.watermark,
-                    snapshot=apply_projection_delta(current_projection.snapshot, payload.delta),
+                    snapshot=apply_projection_delta(
+                        current_projection.snapshot, payload.delta
+                    ),
                 )
             case CoreInputRecordV1():
                 pass
     sequence = records[-1].sequence if records else runtime.snapshot_sequence
     effective_actions = sorted(actions.values(), key=lambda item: item.action_id)
     effective_processes = sorted(processes.values(), key=lambda item: item.process_id)
-    _validate_process_relationships(runtime.session_id, effective_actions, effective_processes)
+    _validate_process_relationships(
+        runtime.session_id, effective_actions, effective_processes
+    )
     return (
         runtime.model_copy(
             update={
@@ -3446,13 +3634,16 @@ def _apply_journal(
                     receipts.values(), key=lambda item: item.client_command_id
                 ),
                 "actions": effective_actions,
-                "callbacks": sorted(callbacks.values(), key=lambda item: item.callback_id),
+                "callbacks": sorted(
+                    callbacks.values(), key=lambda item: item.callback_id
+                ),
                 "provider_operations": sorted(
                     provider_operations.values(), key=lambda item: item.operation_id
                 ),
                 "processes": effective_processes,
                 "submitted_process_notifications": sorted(
-                    submitted_process_notifications.values(), key=lambda item: item.process_id
+                    submitted_process_notifications.values(),
+                    key=lambda item: item.process_id,
                 ),
                 "children": sorted(children.values(), key=lambda item: item.session_id),
             }
@@ -3528,11 +3719,14 @@ def _validate_process_relationships(
             raise ValueError("process disagrees with its prepared start descriptor")
 
 
-def _apply_process_state(processes: dict[str, ManagedProcessV1], process: ManagedProcessV1) -> None:
+def _apply_process_state(
+    processes: dict[str, ManagedProcessV1], process: ManagedProcessV1
+) -> None:
     existing = processes.get(process.process_id)
     if existing is None:
         if any(
-            candidate.start_action_id == process.start_action_id for candidate in processes.values()
+            candidate.start_action_id == process.start_action_id
+            for candidate in processes.values()
         ):
             raise ValueError("process start Action belongs to another process")
         processes[process.process_id] = process
@@ -3555,7 +3749,9 @@ def _apply_process_state(processes: dict[str, ManagedProcessV1], process: Manage
         "created_at",
         "started_at",
     }
-    if any(getattr(existing, name) != getattr(process, name) for name in immutable_fields):
+    if any(
+        getattr(existing, name) != getattr(process, name) for name in immutable_fields
+    ):
         raise ValueError("process terminal state changes launch identity")
     processes[process.process_id] = process
 
@@ -3583,7 +3779,9 @@ def _read_journal(path: Path, first_sequence: int) -> tuple[JournalRecordV1, ...
             value = json.loads(raw)
             record = _JOURNAL_RECORD_ADAPTER.validate_python(value)
         except Exception as exc:
-            raise ValueError(f"invalid recovery journal record {expected_sequence}") from exc
+            raise ValueError(
+                f"invalid recovery journal record {expected_sequence}"
+            ) from exc
         canonical_without_digest = dict(value)
         stored_digest = canonical_without_digest.pop("record_sha256", None)
         if stored_digest != sha256_json(canonical_without_digest):
@@ -3600,7 +3798,9 @@ def _read_journal(path: Path, first_sequence: int) -> tuple[JournalRecordV1, ...
     return tuple(records)
 
 
-def _append_journal_record(path: Path, record: JournalRecordV1, *, protected_bytes: int = 0) -> int:
+def _append_journal_record(
+    path: Path, record: JournalRecordV1, *, protected_bytes: int = 0
+) -> int:
     _reject_symlink(path)
     data = canonical_json(record.model_dump(mode="json", by_alias=True)) + b"\n"
     with path.open("r+b", buffering=0) as file:
@@ -3648,7 +3848,7 @@ def _detach_transcript(
         return document, None
     envelope = dict(nodes[-1])
     envelope[path[-1]] = []
-    for node, key in zip(reversed(nodes[:-1]), reversed(path[:-1])):
+    for node, key in zip(reversed(nodes[:-1]), reversed(path[:-1]), strict=True):
         parent = dict(node)
         parent[key] = envelope
         envelope = parent
@@ -3673,11 +3873,17 @@ def _detach_projection_history(
     envelope_state = projection_state.model_copy(
         update={"snapshot": _projection_envelope(projection_state.snapshot)}
     )
-    envelope = cast(dict[str, JsonValue], envelope_state.model_dump(mode="json", by_alias=True))
-    return envelope, cast(list[JsonValue], list(projection_state.snapshot.history.entries))
+    envelope = cast(
+        dict[str, JsonValue], envelope_state.model_dump(mode="json", by_alias=True)
+    )
+    return envelope, cast(
+        list[JsonValue], list(projection_state.snapshot.history.entries)
+    )
 
 
-def _attach_transcript(document: JsonValue, path: tuple[str, ...], items: list[JsonValue]) -> None:
+def _attach_transcript(
+    document: JsonValue, path: tuple[str, ...], items: list[JsonValue]
+) -> None:
     node = document
     for key in path[:-1]:
         if not isinstance(node, dict):
@@ -3725,7 +3931,9 @@ def _split_chunks(items: list[JsonValue]) -> Iterator[_Chunk]:
         yield _seal_chunk(pending, encoded, sealed=False)
 
 
-def _seal_chunk(items: list[JsonValue], encoded: list[bytes], *, sealed: bool) -> _Chunk:
+def _seal_chunk(
+    items: list[JsonValue], encoded: list[bytes], *, sealed: bool
+) -> _Chunk:
     body = _encode_chunk_body(encoded)
     return _Chunk(items=list(items), sha256=_sha256(body), sealed=sealed, body=body)
 
@@ -3847,7 +4055,9 @@ def _write_document(path: Path, value: JsonValue) -> bytes:
     """
     canonical = canonical_json(value)
     if len(canonical) + 1 > _MAX_DOCUMENT_BYTES:
-        raise HarnessStoreCapacityError(f"stored JSON document is at capacity: {path.name}")
+        raise HarnessStoreCapacityError(
+            f"stored JSON document is at capacity: {path.name}"
+        )
     path.touch(mode=0o600, exist_ok=False)
     with path.open("wb") as file:
         file.write(canonical + b"\n")
@@ -3880,10 +4090,14 @@ def _verify_published_documents(
     for descriptor in descriptors:
         body = _read_document_body(generation_dir / descriptor.path)
         if _sha256(body) != descriptor.sha256:
-            raise ValueError(f"published document does not match its digest: {descriptor.path}")
+            raise ValueError(
+                f"published document does not match its digest: {descriptor.path}"
+            )
 
 
-def _read_referenced_document(generation_dir: Path, descriptor: StoredFileV1) -> JsonValue:
+def _read_referenced_document(
+    generation_dir: Path, descriptor: StoredFileV1
+) -> JsonValue:
     path = generation_dir / descriptor.path
     body = _read_document_body(path)
     # Digesting the bytes as they sit on disk pins them to exactly what
@@ -3958,7 +4172,9 @@ def _record_recovery_in_history(
         "message": "Recovered after an interrupted session",
         "details": {"discardedEntries": discarded},
     }
-    history = snapshot.history.model_copy(update={"entries": [*snapshot.history.entries, entry]})
+    history = snapshot.history.model_copy(
+        update={"entries": [*snapshot.history.entries, entry]}
+    )
     return projection.model_copy(
         update={"snapshot": snapshot.model_copy(update={"history": history})}
     )
@@ -4010,7 +4226,7 @@ def _reject_symlink_components(root: Path, path: Path) -> None:
     current = root
     _reject_symlink(current)
     for part in relative.parts:
-        current = current / part
+        current /= part
         _reject_symlink(current)
 
 
@@ -4026,7 +4242,11 @@ def _discard_all_but_newest(
     # What survives an error stays unreachable and the next publication collects it.
     try:
         entries = sorted(
-            (path for path in directory.iterdir() if pattern.fullmatch(path.name) is not None),
+            (
+                path
+                for path in directory.iterdir()
+                if pattern.fullmatch(path.name) is not None
+            ),
             key=lambda path: path.name,
         )
     except OSError:
@@ -4052,7 +4272,7 @@ def _next_generation(generation_root: Path, snapshot_sequence: int) -> str:
         else []
     )
     generation = max(snapshot_sequence, max(existing, default=-1) + 1)
-    if generation > 9_999_999_999_999_999:
+    if generation > _MAX_GENERATION:
         raise ValueError("Unified session generation is exhausted")
     return f"{generation:016d}"
 
@@ -4136,9 +4356,7 @@ def _windows_replace(source: Path, target: Path) -> None:
     movefile_replace_existing = 0x1
     movefile_write_through = 0x8
     if not move_file_ex(
-        str(source),
-        str(target),
-        movefile_replace_existing | movefile_write_through,
+        str(source), str(target), movefile_replace_existing | movefile_write_through
     ):
         raise windows_ctypes.WinError(windows_ctypes.get_last_error())
 
@@ -4152,7 +4370,9 @@ def _validate_session_id(session_id: str) -> None:
         raise ValueError(f"invalid session ID: {session_id!r}")
 
 
-def _require_sorted_unique[ItemT](items: Iterable[ItemT], key: Any, description: str) -> None:
+def _require_sorted_unique[ItemT](
+    items: Iterable[ItemT], key: Any, description: str
+) -> None:
     values = [key(item) for item in items]
     if values != sorted(values) or len(values) != len(set(values)):
         raise ValueError(f"{description} values must be sorted and unique")
@@ -4210,12 +4430,12 @@ __all__ = [
     "ReplaceEntryOp",
     "RuntimeActionV1",
     "RuntimeStateV3",
-    "SessionMetadataV1",
     "SessionLease",
+    "SessionMetadataV1",
+    "SessionPin",
     "SetEnvelopeOp",
     "SetHistoryEntriesOp",
     "StoredSession",
-    "SessionPin",
     "SubmittedProcessNotificationV1",
     "UnifiedInteropSourceV1",
     "UnifiedSessionStore",

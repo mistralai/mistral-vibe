@@ -60,6 +60,7 @@ impl TrustFolders {
 
 /// Open the gate on the details the handshake read, selecting "Trust folder".
 pub fn open(app: &mut App, details: WorkspaceTrustDetails) {
+    app.selection = Default::default();
     app.trust.details = Some(details);
     app.trust.options = build_options(&app.trust);
     app.trust.selected = app
@@ -86,13 +87,24 @@ fn build_options(trust: &TrustFolders) -> Vec<(&'static str, String)> {
 /// Ctrl+C / Ctrl+Q, the only keys the pre-session window answers.
 fn is_quit(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::SHIFT)
         && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q'))
 }
 
-/// Move the detected-files region by `delta` rows, clamped to what it can show.
-fn scroll_by(app: &mut App, delta: isize) {
-    let scroll = app.trust.scroll as isize + delta;
-    app.trust.scroll = scroll.clamp(0, app.trust.scroll_max as isize) as usize;
+/// Move the detected-files region by `delta` rows and return the applied (clamped) delta.
+pub(crate) fn scroll_by(app: &mut App, delta: i16) -> i32 {
+    let old_scroll = app.trust.scroll;
+    let amount = usize::from(delta.unsigned_abs());
+    app.trust.scroll = if delta < 0 {
+        old_scroll.saturating_sub(amount)
+    } else {
+        old_scroll.saturating_add(amount).min(app.trust.scroll_max)
+    };
+    if app.trust.scroll >= old_scroll {
+        i32::try_from(app.trust.scroll - old_scroll).unwrap_or(i32::MAX)
+    } else {
+        -i32::try_from(old_scroll - app.trust.scroll).unwrap_or(i32::MAX)
+    }
 }
 
 /// Scroll the detected-files region by one wheel notch.
@@ -102,11 +114,20 @@ pub(crate) fn wheel(app: &mut App, up: bool) {
 
 /// Handle one key; `true` quits the client, as Python's Ctrl+C/Ctrl+Q do.
 pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
+    if crate::input::handle_copy_key(app, &key) {
+        return false;
+    }
     let count = app.trust.options.len();
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return is_quit(key);
     }
     match key.code {
+        KeyCode::Up => {
+            scroll_by(app, -1);
+        }
+        KeyCode::Down => {
+            scroll_by(app, 1);
+        }
         KeyCode::Left => app.trust.selected = (app.trust.selected + count - 1) % count,
         KeyCode::Right => app.trust.selected = (app.trust.selected + 1) % count,
         KeyCode::Enter => decide(app, app.trust.selected),
@@ -118,18 +139,43 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     false
 }
 
+/// Map horizontal margin presses onto text without crossing vertical selection zones.
+pub fn selection_position(app: &App, at: (u16, u16)) -> (u16, u16) {
+    let region = app.view.selection_region;
+    if region.area.contains(at.into()) {
+        return at;
+    }
+    let scroll = region.scroll_area;
+    let area = if at.1 >= scroll.y && at.1 < scroll.bottom() {
+        scroll
+    } else {
+        region.area
+    };
+    if area.is_empty() {
+        return at;
+    }
+    (at.0.clamp(area.x, area.right() - 1), at.1)
+}
+
 /// The gate answers only with keys, so the mouse just drives text selection.
 pub fn handle_mouse(app: &mut App, event: MouseEvent) {
     let at = (event.column, event.row);
     match event.kind {
         MouseEventKind::Moved => app.view.mouse_position = Some(at),
-        MouseEventKind::Down(MouseButton::Left) => selection::press_including_padding(app, at),
+        MouseEventKind::Down(MouseButton::Left) => {
+            let at = selection_position(app, at);
+            selection::press_including_padding(app, at);
+        }
         MouseEventKind::Drag(MouseButton::Left) => selection::drag(app, at),
         MouseEventKind::Up(MouseButton::Left) => {
             selection::release(app);
         }
-        MouseEventKind::ScrollUp => scroll_by(app, -2),
-        MouseEventKind::ScrollDown => scroll_by(app, 2),
+        MouseEventKind::ScrollUp => {
+            scroll_by(app, -2);
+        }
+        MouseEventKind::ScrollDown => {
+            scroll_by(app, 2);
+        }
         _ => {}
     }
 }
@@ -146,6 +192,7 @@ fn decide(app: &mut App, option: usize) {
             app.set_status(Status::Failed);
         }
     }
+    app.selection = Default::default();
     app.trust.open = false;
     app.trust.details = None;
 }

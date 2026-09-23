@@ -25,6 +25,7 @@ pub mod notice;
 pub mod pulse;
 pub mod question_app;
 mod question_layout;
+mod question_rows;
 pub mod recording_indicator;
 pub mod resume_picker;
 pub mod rewind;
@@ -36,9 +37,14 @@ pub mod theme;
 pub mod theme_picker;
 pub mod thinking_picker;
 pub mod toast;
+pub mod todo;
 pub mod transcript;
 pub mod trust_folders;
+mod trust_folders_layout;
 mod trust_folders_paint;
+pub(crate) mod trust_folders_selection;
+mod trust_folders_text;
+pub mod vibe_code_project;
 
 use ratatui::layout::{Constraint, Layout};
 use ratatui::Frame;
@@ -70,6 +76,35 @@ fn draw_active_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect)
         trust_folders::draw(app, f, area);
         return;
     }
+    // Docked, not an overlay: reserving the column first lets bottom-apps reflow into the rest.
+    let (main, sidebar) = todo::split(app, area);
+    app.todo_sidebar.visible = sidebar.is_some();
+    draw_session_screen(app, f, main);
+    if let Some(sidebar) = sidebar {
+        f.buffer_mut().set_style(sidebar, theme::screen_style());
+        todo::draw_sidebar(app, f, sidebar);
+    }
+}
+
+/// The stack every bottom-app shares as `[transcript, loading, box, bottom_bar, todo_row]`: the row sits above the box, but last here so the shared indices hold.
+pub(crate) fn bottom_app_chunks(
+    app: &App,
+    area: ratatui::layout::Rect,
+    loading_height: u16,
+    box_height: u16,
+) -> [ratatui::layout::Rect; 5] {
+    let chunks = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(loading_height),
+        Constraint::Length(todo::row_height(app)),
+        Constraint::Length(box_height),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    [chunks[0], chunks[1], chunks[3], chunks[4], chunks[2]]
+}
+
+fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
     // Approval callbacks block the server and take the input box before pickers.
     if app.approval.open {
         approval::draw(app, f, area);
@@ -99,6 +134,10 @@ fn draw_active_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect)
     }
     if app.thinking_picker.open {
         thinking_picker::draw(app, f, area);
+        return;
+    }
+    if app.vibe_code_project.open {
+        vibe_code_project::draw(app, f, area);
         return;
     }
     if app.resume_picker.open {
@@ -139,7 +178,7 @@ pub fn input_box_height(app: &App, area_width: u16, area_height: u16) -> u16 {
     lines.clamp(3, max_content) + 2
 }
 
-/// Render the main chat UI (chat, loading, popup, input, footer).
+/// Render the main chat UI (chat, loading, popup, todo, input, footer).
 fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
     // Paint the theme background on every cell first, since widgets set only fg.
     f.buffer_mut().set_style(area, theme::screen_style());
@@ -150,25 +189,34 @@ fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
     completion_popup::reconcile_scroll(app, area.width);
     let popup_height = completion_popup::popup_height(app, area.width);
     let chunks = Layout::vertical([
-        Constraint::Min(1),                 // #chat — height: 1fr
-        Constraint::Length(loading_height), // #loading-area — height: auto
-        Constraint::Length(popup_height),   // #completion-popup — height: auto, max 12
+        Constraint::Min(1),                        // #chat — height: 1fr
+        Constraint::Length(loading_height),        // #loading-area — height: auto
+        Constraint::Length(popup_height),          // #completion-popup — height: auto, max 12
+        Constraint::Length(todo::row_height(app)), // pinned todo line — height: 1
         Constraint::Length(input_box_height(app, area.width, area.height)), // #input-box (grows with rendered rows)
         Constraint::Length(1), // #bottom-bar — height: auto
     ])
     .split(area);
 
-    app.view.input_area = chunks[3];
+    app.view.input_area = chunks[4];
     transcript::draw(app, f, chunks[0]);
     if popup_height > 0 {
         crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Completion);
         completion_popup::draw(app, f, chunks[2]);
     }
-    crate::mouse::register_region(app, chunks[3], crate::mouse::MouseTarget::Composer);
-    chat_input::draw(app, f, chunks[3]);
-    bottom_bar::draw(app, f, chunks[4]);
+    todo::draw_row(app, f, chunks[3]);
+    crate::mouse::register_region(app, chunks[4], crate::mouse::MouseTarget::Composer);
+    chat_input::draw(app, f, chunks[4]);
+    bottom_bar::draw(app, f, chunks[5]);
     selection::overlay(app, f);
+    draw_loading_area(app, f, chunks[1]);
+    selection::loading_region(app, f, chunks[1]);
+}
 
+/// Python's `#loading-area` row, mounted on every screen that keeps it: the
+/// narrator status, the loading spinner, the inline notice and the feedback
+/// bar, laid out left to right.
+pub(crate) fn draw_loading_area(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
     let notice_width = notice::width(app);
     let feedback_width = feedback_bar::width(app);
     // Python's `#loading-area` lays the narrator row out before the loading
@@ -180,7 +228,7 @@ fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
         Constraint::Length(u16::from(feedback_width > 0)),
         Constraint::Length(feedback_width),
     ])
-    .split(chunks[1]);
+    .split(area);
 
     narrator::draw(app, f, loading_chunks[0]);
     loading::draw(app, f, loading_chunks[1]);

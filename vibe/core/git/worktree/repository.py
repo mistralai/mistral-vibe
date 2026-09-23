@@ -192,6 +192,7 @@ class WorktreeReleaseOutcome(StrEnum):
     KEPT_DIRTY = auto()
     KEPT_IN_USE = auto()
     KEPT_UNMANAGED = auto()
+    KEPT_CANCELLED = auto()
     NOT_FOUND = auto()
 
 
@@ -768,22 +769,27 @@ class ManagedWorktree:
             cls._reclaim_abandoned_reservations()
             claimed = sorted(
                 (
-                    (record.claimed_at, claim)
+                    (record, claim)
                     for claim in WorktreeClaim.all()
                     if (record := claim.read()) is not None
                     and record.base_commit is not None
                 ),
-                key=lambda item: (item[0], item[1].bucket, item[1].name),
+                key=lambda item: (item[0].claimed_at, item[1].bucket, item[1].name),
             )
-            excess = len(claimed) - limit
+            excess = max(0, len(claimed) - limit)
             removed = 0
-            for _, claim in claimed:
-                if excess <= 0:
-                    break
+            for record, claim in claimed:
+                if not record.reap_requested and excess <= 0:
+                    continue
                 if claim.is_starting():
                     continue
                 try:
-                    release = cls(claim=claim)._prune_with_snapshot()
+                    managed = cls(claim=claim)
+                    release = (
+                        managed.reap_if_requested()
+                        if record.reap_requested
+                        else managed._prune_with_snapshot()
+                    )
                 except (GitError, OSError) as exc:
                     logger.warning(
                         "Keeping managed worktree %s/%s: retention cleanup failed",
@@ -792,10 +798,16 @@ class ManagedWorktree:
                         exc_info=exc,
                     )
                     continue
-                if release.outcome in {
-                    WorktreeReleaseOutcome.REMOVED,
-                    WorktreeReleaseOutcome.NOT_FOUND,
-                }:
+                if release is None:
+                    continue
+                if (
+                    release.outcome
+                    in {
+                        WorktreeReleaseOutcome.REMOVED,
+                        WorktreeReleaseOutcome.NOT_FOUND,
+                    }
+                    and excess > 0
+                ):
                     excess -= 1
                 if release.outcome is WorktreeReleaseOutcome.REMOVED:
                     removed += 1
@@ -880,6 +892,90 @@ class ManagedWorktree:
             )
 
         return self._release_unheld(record)
+
+    def reap(
+        self, *, requester_id: str | None = None, request_id: str | None = None
+    ) -> WorktreeRelease:
+        """Snapshot and remove this managed worktree once it is unheld."""
+        if (requester_id is None) != (request_id is None):
+            raise ValueError("requester_id and request_id must be provided together")
+        with self.claim.locked():
+            record = self.claim.read()
+            if record is None:
+                return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
+            if requester_id is not None and request_id is not None:
+                if request_id in record.reap_cancellations:
+                    return WorktreeRelease(
+                        WorktreeReleaseOutcome.KEPT_CANCELLED,
+                        root=self.root,
+                        branch=record.branch,
+                    )
+                requests = {**record.reap_requests, requester_id: request_id}
+                if not record.reap_requested or requests != record.reap_requests:
+                    record = record.model_copy(
+                        update={"reap_requested": True, "reap_requests": requests}
+                    )
+                    self.claim.write(record)
+            elif not record.reap_requested:
+                record = record.model_copy(update={"reap_requested": True})
+                self.claim.write(record)
+        return self._reap_requested(record)
+
+    def reap_if_requested(self) -> WorktreeRelease | None:
+        """Complete a previously requested reap after the final holder exits."""
+        record = self.claim.read()
+        if record is None or not record.reap_requested:
+            return None
+        return self._reap_requested(record)
+
+    def cancel_reap(
+        self, *, requester_id: str | None = None, request_id: str | None = None
+    ) -> None:
+        """Cancel a pending reap while the worktree still exists."""
+        if requester_id is None and request_id is not None:
+            raise ValueError("request_id requires requester_id")
+        with self.claim.locked():
+            record = self.claim.read()
+            if record is None:
+                return
+            if requester_id is None:
+                if not record.reap_requested:
+                    return
+                self.claim.write(
+                    record.model_copy(
+                        update={"reap_requested": False, "reap_requests": {}}
+                    )
+                )
+                return
+
+            requests = dict(record.reap_requests)
+            current_request_id = requests.get(requester_id)
+            cancelled_request_id = request_id or current_request_id
+            cancellations = set(record.reap_cancellations)
+            if cancelled_request_id is not None:
+                cancellations.add(cancelled_request_id)
+            if (
+                current_request_id is not None
+                and current_request_id == cancelled_request_id
+            ):
+                requests.pop(requester_id)
+
+            updated = record.model_copy(
+                update={
+                    "reap_requested": bool(requests),
+                    "reap_requests": requests,
+                    "reap_cancellations": cancellations,
+                }
+            )
+            if updated != record:
+                self.claim.write(updated)
+
+    def _reap_requested(self, record: WorktreeRecord) -> WorktreeRelease:
+        if self.claim.is_starting() or self.claim.holders():
+            return WorktreeRelease(
+                WorktreeReleaseOutcome.KEPT_IN_USE, branch=record.branch
+            )
+        return self._release_unheld(record, snapshot_before_removal=True)
 
     def _discard_retained_snapshot(self, recovery: WorktreeRecoveryRecord) -> None:
         self.claim.delete_recovery()
@@ -1010,7 +1106,9 @@ class ManagedWorktree:
         )
         return True
 
-    def _release_unheld(self, record: WorktreeRecord) -> WorktreeRelease:
+    def _release_unheld(
+        self, record: WorktreeRecord, *, snapshot_before_removal: bool = False
+    ) -> WorktreeRelease:
         root = self.root
         if not root.is_dir():
             self.claim.delete()
@@ -1034,7 +1132,7 @@ class ManagedWorktree:
         )
         state = prepared.inspect_for_cleanup()
         snapshot: str | None = None
-        if not state.is_clean:
+        if snapshot_before_removal or not state.is_clean:
             # Work left behind is a reason to save it, not a reason to keep the
             # directory. Keeping was safe and unbounded: a session deleted after
             # writing one uncommitted file left a worktree nothing would ever
@@ -1048,7 +1146,7 @@ class ManagedWorktree:
                     "Keeping worktree %s on branch %s: %s could not be saved (%s)",
                     root,
                     record.branch,
-                    ", ".join(state.reasons),
+                    ", ".join(state.reasons) or "its current state",
                     exc,
                 )
                 return WorktreeRelease(
@@ -1065,16 +1163,33 @@ class ManagedWorktree:
         # remove() itself still loses. Losing means a live session in a deleted
         # directory, so the check is worth the extra stat even though it is not
         # a guarantee.
+        kept_outcome: WorktreeReleaseOutcome | None = None
+        kept_branch = record.branch
         if late := self.claim.holders():
             logger.info(
                 "Keeping worktree %s: %d session(s) joined during inspection",
                 root,
                 len(late),
             )
-            return WorktreeRelease(
-                WorktreeReleaseOutcome.KEPT_IN_USE, root=root, branch=record.branch
-            )
+            kept_outcome = WorktreeReleaseOutcome.KEPT_IN_USE
+        elif snapshot_before_removal:
+            current = self.claim.read()
+            if current is None:
+                kept_outcome = WorktreeReleaseOutcome.KEPT_UNMANAGED
+                kept_branch = None
+            elif not current.reap_requested:
+                kept_outcome = WorktreeReleaseOutcome.KEPT_CANCELLED
+                kept_branch = current.branch
+            else:
+                record = current
 
+        if kept_outcome is not None:
+            return WorktreeRelease(kept_outcome, root=root, branch=kept_branch)
+
+        if snapshot_before_removal and snapshot is not None:
+            self.claim.write_recovery(
+                WorktreeRecoveryRecord.new(record, snapshot_ref=snapshot)
+            )
         prepared.remove(delete_branch=record.branch_created)
         self.claim.delete()
         if snapshot is not None:
@@ -1083,10 +1198,10 @@ class ManagedWorktree:
             # back. `git branch -D` above orphans any commits the session made;
             # the ref is what keeps them reachable.
             logger.info(
-                "Removed worktree %s, which still had %s. Recover it with: "
+                "Removed worktree %s after saving %s. Recover it with: "
                 "git -C %s switch -c %s %s",
                 root,
-                ", ".join(state.reasons),
+                ", ".join(state.reasons) or "its current state",
                 record.repo_root,
                 self.claim.name,
                 snapshot,

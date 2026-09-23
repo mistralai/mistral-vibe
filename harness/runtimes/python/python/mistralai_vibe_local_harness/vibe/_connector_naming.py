@@ -1,5 +1,7 @@
 """Deterministic Core identities for Runtime-owned connector tools."""
 
+from __future__ import annotations
+
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from fnmatch import fnmatch
@@ -11,8 +13,8 @@ from types import MappingProxyType
 
 from mistralai_vibe_local_harness.vibe._connector_models import (
     ConnectorRouteSnapshot,
-    ConnectorSourceStatus,
     ConnectorSourceState,
+    ConnectorSourceStatus,
     ConnectorToolDescriptor,
     ConnectorToolGroup,
     ConnectorToolRoute,
@@ -45,7 +47,9 @@ def build_connector_snapshot(
 
     for connector in connectors:
         source_enabled = connector_source_enabled(selection, connector.alias)
-        status = _source_status(connector, source_enabled, overrides.get(connector.alias))
+        status = _source_status(
+            connector, source_enabled, overrides.get(connector.alias)
+        )
         tool_names = _tool_names([tool.raw_name for tool in connector.tools])
         descriptors = tuple(
             ConnectorToolDescriptor(
@@ -54,15 +58,15 @@ def build_connector_snapshot(
                 remote_name=tool.raw_name,
                 group_name=group_names[connector.raw_id],
                 programmatic_name=tool_names[tool.raw_name],
-                display_name=_normalize_identifier(f"connector_{connector.alias}_{tool.raw_name}"),
+                display_name=_normalize_identifier(
+                    f"connector_{connector.alias}_{tool.raw_name}"
+                ),
                 description=tool.description or f"Connector tool {tool.raw_name}.",
                 input_schema=dict(tool.input_schema),
                 enabled=(
                     status == "connected"
                     and connector_tool_enabled(
-                        selection,
-                        alias=connector.alias,
-                        raw_tool_name=tool.raw_name,
+                        selection, alias=connector.alias, raw_tool_name=tool.raw_name
                     )
                     and (connector.alias, tool.raw_name) not in suspended
                 ),
@@ -99,7 +103,9 @@ def build_connector_snapshot(
             )
         )
 
-    route_revision = _route_revision(catalog.revision, groups, route_inputs, sources=sources)
+    route_revision = _route_revision(
+        catalog.revision, groups, route_inputs, sources=sources
+    )
     routes = {
         (group_name, tool_name): ConnectorToolRoute(
             group_name=group_name,
@@ -124,8 +130,12 @@ def build_connector_snapshot(
 def connector_source_enabled(selection: ResolvedConnectorSelection, alias: str) -> bool:
     if not selection.enable_connectors:
         return False
-    setting = next((item for item in selection.connector_settings if item.alias == alias), None)
-    return selection.implicit_source_enabled if setting is None else not setting.disabled
+    setting = next(
+        (item for item in selection.connector_settings if item.alias == alias), None
+    )
+    return (
+        selection.implicit_source_enabled if setting is None else not setting.disabled
+    )
 
 
 def connector_tool_enabled(
@@ -133,18 +143,23 @@ def connector_tool_enabled(
 ) -> bool:
     if not connector_source_enabled(selection, alias):
         return False
-    setting = next((item for item in selection.connector_settings if item.alias == alias), None)
+    setting = next(
+        (item for item in selection.connector_settings if item.alias == alias), None
+    )
     if setting is not None and raw_tool_name in setting.disabled_tools:
         return False
     published_name = f"connector_{alias}_{raw_tool_name}"
-    if selection.enabled_tools and not _name_matches(published_name, selection.enabled_tools):
+    if selection.enabled_tools and not _name_matches(
+        published_name, selection.enabled_tools
+    ):
         return False
     return not (
-        selection.disabled_tools and _name_matches(published_name, selection.disabled_tools)
+        selection.disabled_tools
+        and _name_matches(published_name, selection.disabled_tools)
     )
 
 
-def _source_status(
+def _source_status(  # noqa: PLR0911 - one return per source status
     connector: ResolvedConnector, source_enabled: bool, override: str | None
 ) -> ConnectorSourceStatus:
     if not source_enabled:
@@ -166,7 +181,9 @@ def _source_status(
     return "unavailable"
 
 
-def _group_names(connectors: list[ResolvedConnector], claimed: set[str]) -> dict[str, str]:
+def _group_names(
+    connectors: list[ResolvedConnector], claimed: set[str]
+) -> dict[str, str]:
     candidates = {
         connector.raw_id: f"connector_{_normalize_segment(connector.alias)}"
         for connector in connectors
@@ -178,12 +195,20 @@ def _group_names(connectors: list[ResolvedConnector], claimed: set[str]) -> dict
     used = set(claimed)
     for connector in connectors:
         candidate = candidates[connector.raw_id]
-        if candidate not in claimed and len(owners[candidate]) == 1 and candidate not in used:
+        if (
+            candidate not in claimed
+            and len(owners[candidate]) == 1
+            and candidate not in used
+        ):
             result[connector.raw_id] = candidate
             used.add(candidate)
             continue
-        digest = hashlib.sha256(b"connector\0" + connector.raw_id.encode("utf-8")).hexdigest()
-        result[connector.raw_id] = _unique_digest_name(candidate, digest, used | claimed)
+        digest = hashlib.sha256(
+            b"connector\0" + connector.raw_id.encode("utf-8")
+        ).hexdigest()
+        result[connector.raw_id] = _unique_digest_name(
+            candidate, digest, used | claimed
+        )
         used.add(result[connector.raw_id])
     return result
 
@@ -225,7 +250,8 @@ def _resolve_normalized_names(
 
 def _normalize_segment(value: str) -> str:
     normalized = "".join(
-        character if _IDENTIFIER_CHARACTER.fullmatch(character) else "_" for character in value
+        character if _IDENTIFIER_CHARACTER.fullmatch(character) else "_"
+        for character in value
     )
     return normalized or "_"
 
@@ -301,7 +327,9 @@ def _route_revision(
             for source in sources
         ],
     }
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 

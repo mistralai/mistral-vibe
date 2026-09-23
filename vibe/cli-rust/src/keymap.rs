@@ -27,7 +27,7 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         KeyCode::Char('a') if ctrl && !alt => Some(Action::CursorLineStart),
         KeyCode::Char('e') if ctrl && !alt => Some(Action::CursorLineEnd),
         KeyCode::Char('u') if ctrl && !alt => Some(Action::DeleteToStartOfLine),
-        KeyCode::Char('k') if ctrl && shift && !alt => Some(Action::DeleteLine),
+        KeyCode::Char('k' | 'K') if ctrl && shift && !alt => Some(Action::DeleteLine),
         KeyCode::Char('k') if ctrl && !alt => Some(Action::DeleteToEndOfLine),
         KeyCode::Char('w') if ctrl && !alt => Some(Action::DeleteWordLeft),
         // Alt+b / Alt+f: emacs word nav. macOS terminals (Terminal.app, iTerm
@@ -36,10 +36,10 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         // Ctrl+Left / Ctrl+Right (see its _ansi_sequences), so mirror that.
         KeyCode::Char('b') if alt && !ctrl => Some(Action::CursorWordLeft),
         KeyCode::Char('f') if alt && !ctrl => Some(Action::CursorWordRight),
-        // Any other Ctrl/Alt-modified char has no chat input binding; swallow it so
-        // it does not self-insert.
-        KeyCode::Char(_) if ctrl || alt => None,
-        KeyCode::Char(c) => Some(Action::Insert(c)),
+        KeyCode::Char(c) if (k.modifiers - KeyModifiers::SHIFT).is_empty() => {
+            Some(Action::Insert(c))
+        }
+        KeyCode::Char(_) => None,
         KeyCode::Backspace if word => Some(Action::DeleteWordLeft),
         KeyCode::Backspace => Some(Action::DeleteLeft),
         KeyCode::Delete if word => Some(Action::DeleteWordRight),
