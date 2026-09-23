@@ -1,15 +1,231 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 import json
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.tools.base import BaseTool
-from vibe.core.types import AvailableTool, LLMMessage, Role, StrToolChoice
+from vibe.core.types import (
+    AvailableTool,
+    FunctionCall,
+    LLMMessage,
+    Role,
+    StrToolChoice,
+    ToolCall,
+)
+from vibe.core.utils.tags import CancellationReason, get_user_cancellation_message
 
 if TYPE_CHECKING:
     from vibe.core.tools.manager import ToolManager
+
+_BRIDGE_ASSISTANT_CONTENT = "."
+
+
+def _is_empty_assistant(message: LLMMessage) -> bool:
+    return (
+        message.role == Role.assistant
+        and not (message.content or "").strip()
+        and not message.tool_calls
+        and not (message.reasoning_content or "").strip()
+    )
+
+
+def _pair_orphaned_tool_results(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """Give tool results whose assistant call was dropped a call turn.
+
+    Compaction keeps the tail of history, so a tool result whose call sat just
+    before the boundary can follow a user message. Mistral Small 4's role-order
+    template rejects ``user`` -> ``tool``; the synthesized call turn carries the
+    ids and names the results already declare, so no response is invented.
+    """
+    paired: list[LLMMessage] = []
+    declared: set[str] = set()
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.role == Role.assistant:
+            declared = {tool_call.id or "" for tool_call in message.tool_calls or []}
+            paired.append(message)
+            index += 1
+            continue
+        if message.role == Role.tool and (message.tool_call_id or "") not in declared:
+            orphaned: list[LLMMessage] = []
+            while (
+                index < len(messages)
+                and messages[index].role == Role.tool
+                and (messages[index].tool_call_id or "") not in declared
+            ):
+                orphaned.append(messages[index])
+                index += 1
+            paired.append(
+                LLMMessage(
+                    role=Role.assistant,
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id=result.tool_call_id or "",
+                            index=position,
+                            function=FunctionCall(
+                                name=result.name or "tool", arguments="{}"
+                            ),
+                        )
+                        for position, result in enumerate(orphaned)
+                    ],
+                )
+            )
+            paired.extend(orphaned)
+            declared = {result.tool_call_id or "" for result in orphaned}
+            continue
+        paired.append(message)
+        index += 1
+    return paired
+
+
+def missing_tool_response_insertions(
+    messages: Sequence[LLMMessage],
+) -> list[tuple[int, LLMMessage]]:
+    """Synthesized responses for tool calls that never got one.
+
+    Returns ``(insert_at, message)`` pairs in order; callers apply them to
+    whatever container they own (a plain list or an observable MessageList).
+    """
+    insertions: list[tuple[int, LLMMessage]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.role != Role.assistant or not message.tool_calls:
+            index += 1
+            continue
+
+        responded_ids: set[str] = set()
+        next_index = index + 1
+        while next_index < len(messages) and messages[next_index].role == Role.tool:
+            tool_call_id = messages[next_index].tool_call_id
+            if tool_call_id is not None:
+                responded_ids.add(tool_call_id)
+            next_index += 1
+
+        insertion_point = next_index
+        for tool_call in message.tool_calls:
+            if (tool_call.id or "") in responded_ids:
+                continue
+            insertions.append((
+                insertion_point,
+                LLMMessage(
+                    role=Role.tool,
+                    tool_call_id=tool_call.id or "",
+                    name=(
+                        (tool_call.function.name or "") if tool_call.function else ""
+                    ),
+                    content=str(
+                        get_user_cancellation_message(
+                            CancellationReason.TOOL_NO_RESPONSE
+                        )
+                    ),
+                ),
+            ))
+            insertion_point += 1
+
+        index = next_index
+    return insertions
+
+
+def fill_missing_tool_responses(messages: list[LLMMessage]) -> list[LLMMessage]:
+    filled = list(messages)
+    for offset, (at, synthesized) in enumerate(
+        missing_tool_response_insertions(filled)
+    ):
+        filled.insert(at + offset, synthesized)
+    return filled
+
+
+def normalize_messages_for_chat_template(
+    messages: Sequence[LLMMessage],
+) -> list[LLMMessage]:
+    """Normalize history for strict chat templates (Mistral Jinja / llama.cpp).
+
+    Middleware and synthetic tool-call rounds can leave consecutive user turns,
+    missing tool responses, or a user message immediately after tool results.
+    Those shapes break templates that require alternating user/assistant roles.
+    """
+    normalized = [
+        message.model_copy(deep=True)
+        for message in messages
+        if not _is_empty_assistant(message)
+    ]
+    normalized = _pair_orphaned_tool_results(normalized)
+    normalized = fill_missing_tool_responses(normalized)
+
+    merged: list[LLMMessage] = []
+    for message in normalized:
+        if (
+            merged
+            and message.role == Role.user
+            and merged[-1].role == Role.user
+            and not merged[-1].images
+            and not message.images
+        ):
+            # One message cannot represent two turns' text/image interleaving.
+            merged[-1] = merged[-1].model_copy(
+                update={
+                    "content": (merged[-1].content or "")
+                    + "\n\n"
+                    + (message.content or "")
+                }
+            )
+            continue
+        if (
+            merged
+            and message.role == Role.assistant
+            and merged[-1].role == Role.assistant
+            and not merged[-1].tool_calls
+            and not message.tool_calls
+        ):
+            merged[-1] += message
+            continue
+        merged.append(message)
+
+    bridged: list[LLMMessage] = []
+    index = 0
+    while index < len(merged):
+        message = merged[index]
+        if message.role != Role.tool:
+            bridged.append(message)
+            index += 1
+            continue
+
+        while index < len(merged) and merged[index].role == Role.tool:
+            bridged.append(merged[index])
+            index += 1
+
+        if index < len(merged) and merged[index].role == Role.user:
+            bridged.append(
+                LLMMessage(
+                    role=Role.assistant,
+                    content=_BRIDGE_ASSISTANT_CONTENT,
+                    injected=True,
+                )
+            )
+
+    # Devstral rejects an empty assistant bridge.
+    alternated: list[LLMMessage] = []
+    for message in bridged:
+        if (
+            alternated
+            and message.role == Role.user
+            and alternated[-1].role == Role.user
+        ):
+            alternated.append(
+                LLMMessage(
+                    role=Role.assistant,
+                    content=_BRIDGE_ASSISTANT_CONTENT,
+                    injected=True,
+                )
+            )
+        alternated.append(message)
+    return alternated
 
 
 class ParsedToolCall(BaseModel):

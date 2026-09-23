@@ -67,6 +67,8 @@ from vibe.core.llm.format import (
     FailedToolCall,
     ResolvedMessage,
     ResolvedToolCall,
+    missing_tool_response_insertions,
+    normalize_messages_for_chat_template,
 )
 from vibe.core.llm.types import BackendLike
 from vibe.core.llm.utility_completion import is_fast_utility_model
@@ -3076,7 +3078,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         # Keep every tool_use adjacent to its tool_result: a message steered
         # into a running turn mid-tool-call can otherwise sit in that gap and
         # make the provider reject the request.
-        messages = reorder_for_tool_adjacency(select_model_context(messages))
+        messages = normalize_messages_for_chat_template(
+            reorder_for_tool_adjacency(select_model_context(messages))
+        )
         if active_model.supports_images:
             return messages
         if not any(m.images for m in messages):
@@ -3371,51 +3375,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._fill_missing_tool_responses()
 
     def _fill_missing_tool_responses(self) -> None:
-        i = 1
-        while i < len(self.messages):  # noqa: PLR1702
-            msg = self.messages[i]
-
-            if msg.role == "assistant" and msg.tool_calls:
-                expected_responses = len(msg.tool_calls)
-
-                if expected_responses > 0:
-                    responded_ids: set[str] = set()
-                    j = i + 1
-                    while j < len(self.messages) and self.messages[j].role == "tool":
-                        tool_call_id = self.messages[j].tool_call_id
-                        if tool_call_id is not None:
-                            responded_ids.add(tool_call_id)
-                        j += 1
-
-                    if len(responded_ids) < expected_responses:
-                        insertion_point = j
-
-                        for tool_call_data in msg.tool_calls:
-                            if (tool_call_data.id or "") in responded_ids:
-                                continue
-
-                            empty_response = LLMMessage(
-                                role=Role.tool,
-                                tool_call_id=tool_call_data.id or "",
-                                name=(
-                                    (tool_call_data.function.name or "")
-                                    if tool_call_data.function
-                                    else ""
-                                ),
-                                content=str(
-                                    get_user_cancellation_message(
-                                        CancellationReason.TOOL_NO_RESPONSE
-                                    )
-                                ),
-                            )
-
-                            self.messages.insert(insertion_point, empty_response)
-                            insertion_point += 1
-
-                    i = i + 1 + expected_responses
-                    continue
-
-            i += 1
+        for offset, (at, synthesized) in enumerate(
+            missing_tool_response_insertions(list(self.messages))
+        ):
+            self.messages.insert(at + offset, synthesized)
 
     async def _reset_session(self, keep_parent: bool = True) -> None:
         old_session_id = self.session_id
