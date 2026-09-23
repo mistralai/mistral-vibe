@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 import vibe.core.session.session_lease as lease_module
-from vibe.core.session.session_lease import SessionBusyError, SessionLease
+from vibe.core.session.session_lease import (
+    RegistryLockTimeoutError,
+    SessionBusyError,
+    SessionLease,
+)
 
 SESSION_ID = "019ffb1e-741d-7f90-84df-ef66011876ca"
 
@@ -95,3 +99,18 @@ def test_session_lease_rejects_a_symlinked_active_namespace(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="symbolic link"):
         SessionLease(tmp_path, SESSION_ID).acquire()
+
+
+def test_registry_lock_times_out_when_held(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A wedged .registry lock must fail fast instead of blocking forever."""
+    active = tmp_path / "active"
+    active.mkdir()
+    registry = active / ".registry"
+    registry.touch()
+    with registry.open("a+b") as held:
+        lease_module._acquire_file_lock(held, blocking=True)
+        monkeypatch.setattr(lease_module, "REGISTRY_LOCK_TIMEOUT_SECONDS", 0.1)
+        with pytest.raises(RegistryLockTimeoutError, match="Timed out after 0.1s"):
+            SessionLease(tmp_path, SESSION_ID).acquire()

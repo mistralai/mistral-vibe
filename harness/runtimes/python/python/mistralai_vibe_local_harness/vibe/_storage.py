@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+import time
 from threading import RLock
 from typing import Annotated, Any, Literal, Self, cast
 
@@ -63,6 +64,7 @@ from mistralai_vibe_local_harness.session_protocol import JsonObject, PublicSess
 from mistralai_vibe_local_harness.vibe._errors import (
     HarnessCommandConflictError,
     HarnessInvalidSessionStoreError,
+    HarnessRegistryLockTimeoutError,
     HarnessReplayDivergenceError,
     HarnessSessionBusyError,
     HarnessStoreRequiresNewerReaderError,
@@ -108,6 +110,8 @@ _PROJECTION_HISTORY_PATH = ("snapshot", "history", "entries")
 _GENERATION_PATTERN = re.compile(r"^[0-9]{16}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
+_REGISTRY_LOCK_POLL_INTERVAL_SECONDS = 0.05
 _TIMESTAMP_PATTERN = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$"
 )
@@ -4063,7 +4067,11 @@ def _lease_directory_lock(directory: Path) -> Iterator[None]:
     registry.touch(mode=0o600, exist_ok=True)
     file = registry.open("a+b")
     try:
-        _acquire_file_lock(file, blocking=True)
+        _acquire_file_lock(
+            file,
+            blocking=True,
+            timeout=REGISTRY_LOCK_TIMEOUT_SECONDS,
+        )
     except BaseException:
         file.close()
         raise
@@ -4074,7 +4082,20 @@ def _lease_directory_lock(directory: Path) -> Iterator[None]:
         file.close()
 
 
-def _acquire_file_lock(file: Any, *, blocking: bool = False) -> None:
+def _acquire_file_lock(
+    file: Any, *, blocking: bool = False, timeout: float | None = None
+) -> None:
+    if blocking and timeout is not None:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                _acquire_file_lock(file, blocking=False)
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise HarnessRegistryLockTimeoutError(timeout)
+                time.sleep(_REGISTRY_LOCK_POLL_INTERVAL_SECONDS)
+        return
     if _is_windows():
         msvcrt = cast(Any, __import__("msvcrt"))
 

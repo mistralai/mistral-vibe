@@ -7,15 +7,28 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any, Self, cast
 
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
+_REGISTRY_LOCK_POLL_INTERVAL_SECONDS = 0.05
 
 
 class SessionBusyError(RuntimeError):
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
         super().__init__(f"Session is already open: {session_id}")
+
+
+class RegistryLockTimeoutError(RuntimeError):
+    def __init__(self, timeout_seconds: float) -> None:
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"Timed out after {timeout_seconds}s waiting for the session registry "
+            "lock (.registry). Another process may be stuck holding it; check for "
+            "orphaned vibe processes."
+        )
 
 
 class SessionLease:
@@ -126,7 +139,11 @@ def _lease_directory_lock(directory: Path) -> Iterator[None]:
     registry.touch(mode=0o600, exist_ok=True)
     file = registry.open("a+b")
     try:
-        _acquire_file_lock(file, blocking=True)
+        _acquire_file_lock(
+            file,
+            blocking=True,
+            timeout=REGISTRY_LOCK_TIMEOUT_SECONDS,
+        )
     except BaseException:
         file.close()
         raise
@@ -137,7 +154,20 @@ def _lease_directory_lock(directory: Path) -> Iterator[None]:
         file.close()
 
 
-def _acquire_file_lock(file: Any, *, blocking: bool = False) -> None:
+def _acquire_file_lock(
+    file: Any, *, blocking: bool = False, timeout: float | None = None
+) -> None:
+    if blocking and timeout is not None:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                _acquire_file_lock(file, blocking=False)
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RegistryLockTimeoutError(timeout)
+                time.sleep(_REGISTRY_LOCK_POLL_INTERVAL_SECONDS)
+        return
     if _is_windows():
         msvcrt = cast(Any, __import__("msvcrt"))
 
@@ -189,4 +219,9 @@ def _timestamp() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-__all__ = ["SessionBusyError", "SessionLease"]
+__all__ = [
+    "REGISTRY_LOCK_TIMEOUT_SECONDS",
+    "RegistryLockTimeoutError",
+    "SessionBusyError",
+    "SessionLease",
+]
