@@ -496,3 +496,31 @@ class TestAdaptiveBackoff:
         items = [item async for item in gen()]
         assert items == [1]
         assert sleeps == [4.0]
+
+
+class TestRetryReasonCarriesTheServerDirectedWait:
+    """The retry itself already honors `Retry-After`. It is carried on the
+    reason so that pacing of *subsequent* calls can use the same number instead
+    of guessing at a limit the server just described."""
+
+    def test_rate_limit_with_a_retry_after_header(self) -> None:
+        error = httpx.HTTPStatusError(
+            "rate limited",
+            request=httpx.Request("POST", "https://api.test/v1/chat"),
+            response=httpx.Response(429, headers={"retry-after": "17"}),
+        )
+        reason = RetryReason.from_error(error)
+        assert reason.category is RetryCategory.RATE_LIMITED
+        assert reason.retry_after_seconds == 17.0
+
+    def test_rate_limit_without_the_header(self) -> None:
+        error = httpx.HTTPStatusError(
+            "rate limited",
+            request=httpx.Request("POST", "https://api.test/v1/chat"),
+            response=httpx.Response(429),
+        )
+        assert RetryReason.from_error(error).retry_after_seconds is None
+
+    def test_transport_error_has_no_server_to_ask(self) -> None:
+        reason = RetryReason.from_error(httpx.ConnectError("boom"))
+        assert reason.retry_after_seconds is None
