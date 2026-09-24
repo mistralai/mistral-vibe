@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import asyncio
+import copy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -136,6 +137,24 @@ class ConfigLayer[S: BaseModel](ABC):
 
         self._state: _LayerState[S] = _LayerState()
         self._lock = asyncio.Lock()
+
+    def __deepcopy__(self, memo: dict[int, object]) -> ConfigLayer[S]:
+        # An orchestrator copy (e.g. the agent/mode-switch config preview in
+        # ConfigBuilder.copy()) deep-copies its layers. The per-layer asyncio.Lock
+        # is event-loop-bound: once it has a pending waiter it holds an
+        # asyncio.Future, and deepcopy falls back to pickling it, raising
+        # "cannot pickle '_asyncio.Future' object". Recreate the lock fresh on the
+        # independent copy instead. Subclasses with extra asyncio primitives or
+        # bespoke copy semantics override this (see ProjectConfigLayer).
+        cls = type(self)
+        new = cls.__new__(cls)
+        memo[id(self)] = new
+        for key, value in self.__dict__.items():
+            if isinstance(value, asyncio.Lock):
+                new.__dict__[key] = asyncio.Lock()
+            else:
+                new.__dict__[key] = copy.deepcopy(value, memo)
+        return new
 
     # --- Overridable ---
 
