@@ -750,8 +750,35 @@ def test_tool_call_completes_streamed_text_before_adding_effect() -> None:
     assert message.generation_status == "completed"
     assert effect.generation_status == "in_progress"
 
-    with pytest.raises(ValueError, match="frozen"):
-        projector.project(ReasoningEvent(content="late", message_id="reasoning-1"))
+    # The backend can keep reusing the same message_id for reasoning/text
+    # that streams in after the tool call already completed that entry (seen
+    # with reasoning + speculative decoding on some OpenAI-compatible
+    # backends). That must start a fresh entry, not patch the frozen one.
+    late_updates = projector.project(
+        ReasoningEvent(content="late", message_id="reasoning-1")
+    )
+    assert [update.method for update in late_updates] == ["history/entryAdded"]
+    *_, late_reasoning = projector.history
+    assert isinstance(late_reasoning, PublicReasoningEntry)
+    assert late_reasoning.id != reasoning.id
+    assert late_reasoning.text == "late"
+    assert late_reasoning.generation_status == "in_progress"
+
+
+def test_assistant_text_after_tool_call_reusing_message_id_starts_a_new_entry() -> None:
+    projector = EventProjector("session-1", "turn-1")
+    projector.project(AssistantEvent(content="answer", message_id="message-1"))
+    projector.project(_read_call())
+
+    updates = projector.project(AssistantEvent(content="more", message_id="message-1"))
+
+    assert [update.method for update in updates] == ["history/entryAdded"]
+    message, _effect, late_message = projector.history
+    assert isinstance(message, PublicMessageEntry)
+    assert isinstance(late_message, PublicMessageEntry)
+    assert late_message.id != message.id
+    assert late_message.content[0].text == "more"
+    assert late_message.generation_status == "in_progress"
 
 
 def test_event_sequence_rejects_gaps_and_read_resynchronizes() -> None:
