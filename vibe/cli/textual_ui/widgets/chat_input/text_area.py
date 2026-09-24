@@ -646,6 +646,7 @@ class ChatTextArea(TextArea):
         if event.key == "shift+enter":
             event.prevent_default()
             event.stop()
+            self.action_insert_newline()
             return
 
         if (
