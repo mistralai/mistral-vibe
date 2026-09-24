@@ -234,6 +234,10 @@ def _build_unified_system_instructions(
     instructions = base or build_vibe_code_system_instructions(
         variant=config.system_prompt_id
     )
+    if config.include_model_info:
+        instructions = (
+            f"{instructions}\n\nYour model name is: `{config.get_active_model().alias}`"
+        )
     if extra:
         instructions = f"{instructions}\n\n{extra}"
     if config.include_project_context:

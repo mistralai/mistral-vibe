@@ -5757,6 +5757,39 @@ def test_unified_system_instructions_use_the_selected_prompt_variant(
     assert all(phrase in instructions for phrase in expected_phrases)
 
 
+@pytest.mark.parametrize("include_model_info", [True, False])
+def test_unified_system_instructions_respect_include_model_info(
+    tmp_path: Path, include_model_info: bool
+) -> None:
+    """*Prepare*: Model info is enabled or disabled in Vibe configuration.
+    *Do*: Compose unified system instructions with agent-provided text.
+    *Assert*: The active model alias is conditional and precedes agent extras.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.core.config import ModelConfig
+    from vibe.core.config.harness_files import HarnessFilesManager
+
+    config = build_test_vibe_config(
+        include_model_info=include_model_info,
+        models=[ModelConfig(name="test-model", provider="mistral", alias="test alias")],
+        active_model="test-model",
+    )
+    harness_files = HarnessFilesManager(sources=("user", "project")).for_session(
+        tmp_path
+    )
+
+    instructions = runtime_module._build_unified_system_instructions(
+        config, harness_files, cwd=tmp_path, base="Base prompt", extra="Agent extra"
+    )
+
+    model_info = "Your model name is: `test alias`"
+    if include_model_info:
+        assert model_info in instructions
+        assert instructions.index(model_info) < instructions.index("Agent extra")
+    else:
+        assert model_info not in instructions
+
+
 def test_unified_system_instructions_include_agents_md_docs(
     tmp_path: Path, config_dir: Path
 ) -> None:
