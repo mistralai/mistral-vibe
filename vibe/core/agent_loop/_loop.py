@@ -100,6 +100,7 @@ from vibe.core.skills.registry._service import (
     refresh_registry_skills,
 )
 from vibe.core.subagents import SubagentRunnerPort
+from vibe.core.superfast_gate import shadow_log_turn
 from vibe.core.system_prompt import get_universal_system_prompt
 from vibe.core.telemetry.build_metadata import (
     build_attachment_counts,
@@ -2065,6 +2066,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             injected=injected,
         ):
             yield event
+
+        # Superfast Decision Gate (shadow mode, off by default). Classifies the
+        # raw user turn in the background and logs only the recommended route and
+        # latency. It never changes routing, never skips the model call, and
+        # fails open, so the real turn sees no added latency and no behaviour
+        # change unless SUPERFAST_ENABLED is explicitly set.
+        shadow_log_turn(user_msg)
 
         try:
             should_break_loop = False
