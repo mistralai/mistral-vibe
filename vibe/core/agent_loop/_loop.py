@@ -759,7 +759,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             available_tools=lambda: self.format_handler.get_available_tools(
                 self.tool_manager
             ),
-            tool_choice=self.format_handler.get_tool_choice,
             save=self._save_messages,
             telemetry_client=self.telemetry_client,
             session_ids=lambda: (self.session_id, self.parent_session_id),
