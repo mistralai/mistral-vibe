@@ -3388,6 +3388,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                         j += 1
 
                     if len(responded_ids) < expected_responses:
+                        # A message steered in mid-tool-call can sit between the
+                        # call and its result, so also count results found later.
+                        responded_ids.update(
+                            m.tool_call_id
+                            for m in self.messages[j:]
+                            if m.role == "tool" and m.tool_call_id is not None
+                        )
                         insertion_point = j
 
                         for tool_call_data in msg.tool_calls:
