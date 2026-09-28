@@ -9,6 +9,7 @@ from vibe.app_server._patch import apply_json_patch, make_json_patch
 from vibe.app_server.models import (
     JsonPatchOperation,
     PublicCallbackEntry,
+    PublicChildSession,
     PublicEntryGenerationStatus,
     PublicHistoryEntry,
     PublicQueuedTurn,
@@ -20,6 +21,7 @@ from vibe.app_server.models import (
     validate_history_entry,
 )
 from vibe.app_server.protocol import (
+    ChildSessionUpdatedParams,
     ConnectorAuthRequiredParams,
     HistoryEntryAddedParams,
     HistoryEntryUpdatedParams,
@@ -94,6 +96,11 @@ class StatsUpdated:
 
 
 @dataclass(frozen=True, slots=True)
+class ChildSessionUpdated:
+    child_session: PublicChildSession
+
+
+@dataclass(frozen=True, slots=True)
 class CallbackRequested:
     callback: PublicCallbackEntry
 
@@ -136,6 +143,7 @@ type AppServerEvent = (
     | TurnCompleted
     | TurnQueueUpdated
     | StatsUpdated
+    | ChildSessionUpdated
     | CallbackRequested
     | TurnRetrying
     | ServerWarning
@@ -229,6 +237,12 @@ def reconcile_snapshot(
             events.append(TurnCompleted(current_turn))
     if previous.turn_queue != current.turn_queue:
         events.append(TurnQueueUpdated(current.turn_queue))
+    previous_children = {child.id: child for child in previous.child_sessions}
+    events.extend(
+        ChildSessionUpdated(child)
+        for child in current.child_sessions
+        if previous_children.get(child.id) != child
+    )
     return events
 
 
@@ -239,6 +253,7 @@ type _KnownEventParams = (
     | SessionCompactedParams
     | SessionContextClearedParams
     | SessionUpdatedParams
+    | ChildSessionUpdatedParams
     | StatsUpdatedParams
     | TurnCompletedParams
     | TurnQueueUpdatedParams
@@ -266,23 +281,24 @@ def parse_server_event(
 ):
     match notification.method:
         case "warning":
-            return ServerWarning(
+            event = ServerWarning(
                 validate_wire(ServerWarningParams, notification.params)
             )
         case "error":
-            return ServerError(validate_wire(ServerErrorParams, notification.params))
+            event = ServerError(validate_wire(ServerErrorParams, notification.params))
         case "turn/retrying":
-            return TurnRetrying(validate_wire(TurnRetryingParams, notification.params))
+            event = TurnRetrying(validate_wire(TurnRetryingParams, notification.params))
         case "mcp_catalog/authRequired":
-            return MCPAuthorizationRequiredEvent(
+            event = MCPAuthorizationRequiredEvent(
                 validate_wire(MCPAuthRequiredParams, notification.params)
             )
         case "connector_catalog/authRequired":
-            return ConnectorAuthorizationRequiredEvent(
+            event = ConnectorAuthorizationRequiredEvent(
                 validate_wire(ConnectorAuthRequiredParams, notification.params)
             )
         case _:
-            return None
+            event = None
+    return event
 
 
 class ClientProjection:
@@ -424,6 +440,9 @@ class ClientProjection:
             case StatsUpdatedParams():
                 self.state.session.token_usage = params.stats.token_usage
                 event = StatsUpdated(params)
+            case ChildSessionUpdatedParams():
+                self._replace_child_session(params.child_session)
+                event = ChildSessionUpdated(params.child_session)
             case SessionCompactedParams() | SessionContextClearedParams():
                 raise AssertionError("Session handoffs are reduced before events")
         return event
@@ -582,6 +601,14 @@ class ClientProjection:
         self._remember_removed_queue_items(self.state.turn_queue, queue)
         self.state.turn_queue = queue
 
+    def _replace_child_session(self, child_session: PublicChildSession) -> None:
+        for index, existing in enumerate(self.state.child_sessions):
+            if existing.id == child_session.id:
+                self.state.child_sessions[index] = child_session
+                return
+        self.state.child_sessions.append(child_session)
+        self.state.child_sessions.sort(key=lambda child: (child.created_at, child.id))
+
     def _remember_removed_queue_items(
         self, previous: PublicTurnQueue, current: PublicTurnQueue
     ) -> None:
@@ -632,6 +659,8 @@ def _parse_event_params(notification: Notification) -> _KnownEventParams:
             params = validate_wire(TurnQueueUpdatedParams, notification.params)
         case "session/statsUpdated":
             params = validate_wire(StatsUpdatedParams, notification.params)
+        case "session/childSessionUpdated":
+            params = validate_wire(ChildSessionUpdatedParams, notification.params)
         case _:
             raise UnknownNotificationError(
                 f"Unknown app-server notification: {notification.method}"

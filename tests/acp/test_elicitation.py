@@ -53,9 +53,13 @@ def _elicitation_capable_client() -> ClientCapabilities:
 
 
 def _agent(
-    backend: FakeBackend, *, captured_options: dict[str, object] | None = None
+    backend: FakeBackend,
+    *,
+    captured_options: dict[str, object] | None = None,
+    experimental_harness: bool = False,
 ) -> tuple[VibeAcpAgent, FakeClient]:
     async def start_session(options: LocalHarnessOptions) -> AppServerSession:
+        assert options.experimental_harness is experimental_harness
         if captured_options is not None:
             captured_options["disabled_tools"] = list(
                 options.session_options.disabled_tools
@@ -72,7 +76,9 @@ def _agent(
             client_tool_handler=options.client_tool_handler,
         )
 
-    agent = VibeAcpAgent(session_starter=start_session)
+    agent = VibeAcpAgent(
+        session_starter=start_session, experimental_harness=experimental_harness
+    )
     client = FakeClient()
     agent.on_connect(client)
     client.on_connect(agent)
@@ -81,7 +87,7 @@ def _agent(
 
 @pytest.mark.asyncio
 async def test_ask_user_question_round_trips_through_acp_elicitation(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, experimental_harness: bool
 ) -> None:
     """With elicitation support, ask_user_question is returned to the model and
     its answers round-trip through ACP elicitation back into the turn.
@@ -93,6 +99,7 @@ async def test_ask_user_question_round_trips_through_acp_elicitation(
             [mock_llm_chunk(content="Shipped.")],
         ]),
         captured_options=captured_options,
+        experimental_harness=experimental_harness,
     )
     captured: dict[str, object] = {}
 
@@ -145,7 +152,7 @@ async def test_ask_user_question_round_trips_through_acp_elicitation(
 
 @pytest.mark.asyncio
 async def test_declined_elicitation_cancels_the_question_without_failing_the_turn(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, experimental_harness: bool
 ) -> None:
     """A declined elicitation cancels the question; the turn still completes."""
     captured_options: dict[str, object] = {}
@@ -155,6 +162,7 @@ async def test_declined_elicitation_cancels_the_question_without_failing_the_tur
             [mock_llm_chunk(content="Never mind.")],
         ]),
         captured_options=captured_options,
+        experimental_harness=experimental_harness,
     )
     monkeypatch.setattr(
         client,
@@ -181,7 +189,7 @@ async def test_declined_elicitation_cancels_the_question_without_failing_the_tur
 
 @pytest.mark.asyncio
 async def test_malformed_elicitation_response_fails_the_turn(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, experimental_harness: bool
 ) -> None:
     """An accept whose content violates the schema is a client error: the turn
     fails and the error reaches the client, rather than silently cancelling.
@@ -190,7 +198,8 @@ async def test_malformed_elicitation_response_fails_the_turn(
         FakeBackend([
             [mock_llm_chunk(content="", tool_calls=[_ask_user_question_tool_call()])],
             [mock_llm_chunk(content="Shipped.")],
-        ])
+        ]),
+        experimental_harness=experimental_harness,
     )
     monkeypatch.setattr(
         client,
@@ -216,7 +225,9 @@ async def test_malformed_elicitation_response_fails_the_turn(
 
 
 @pytest.mark.asyncio
-async def test_tools_are_gated_by_elicitation_capability() -> None:
+async def test_tools_are_gated_by_elicitation_capability(
+    experimental_harness: bool,
+) -> None:
     """Without elicitation support the interactive tools are disabled and the
     client advertises only approval callbacks; with it, neither holds.
     """
@@ -224,6 +235,7 @@ async def test_tools_are_gated_by_elicitation_capability() -> None:
     agent_without, _client = _agent(
         FakeBackend([[mock_llm_chunk(content="ok")]]),
         captured_options=captured_disabled,
+        experimental_harness=experimental_harness,
     )
     try:
         await agent_without.initialize(
@@ -241,7 +253,9 @@ async def test_tools_are_gated_by_elicitation_capability() -> None:
 
     captured_enabled: dict[str, object] = {}
     agent_with, _client = _agent(
-        FakeBackend([[mock_llm_chunk(content="ok")]]), captured_options=captured_enabled
+        FakeBackend([[mock_llm_chunk(content="ok")]]),
+        captured_options=captured_enabled,
+        experimental_harness=experimental_harness,
     )
     try:
         await agent_with.initialize(

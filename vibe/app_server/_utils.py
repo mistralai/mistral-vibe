@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 import time
@@ -54,6 +56,28 @@ class DecodedInput:
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _parse_time_ms(value: str) -> int | None:
+    try:
+        return int(datetime.fromisoformat(value).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def optional_time_ms(value: str | None) -> int | None:
+    if value is None:
+        return None
+    return _parse_time_ms(value)
+
+
+def time_ms(value: str, *, fallback: Callable[[], int] = now_ms) -> int:
+    timestamp = _parse_time_ms(value)
+    return timestamp if timestamp is not None else fallback()
+
+
+def iso_from_time_ms(value: int) -> str:
+    return datetime.fromtimestamp(value / 1000, UTC).isoformat()
 
 
 def decode_input(

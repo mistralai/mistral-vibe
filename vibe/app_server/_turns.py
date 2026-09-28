@@ -10,6 +10,10 @@ from uuid import uuid4
 
 from pydantic import JsonValue
 
+from vibe.app_server._approval_permissions import (
+    approval_grant_permissions,
+    available_path_scopes,
+)
 from vibe.app_server._execution import (
     ActiveSessionExecution,
     SessionExecution,
@@ -856,6 +860,7 @@ class TurnController:  # noqa: PLR0904
         detail = ApprovalCallbackDetail(
             effect=projector.effect_detail(event.tool_call_id),
             required_permissions=list(event.required_permissions or []),
+            path_scope_choices=available_path_scopes(event.required_permissions or []),
             related_entry_id=event.tool_call_id,
         )
         output = await self._open_callback(
@@ -870,7 +875,7 @@ class TurnController:  # noqa: PLR0904
         }:
             await self._agent_loop.approve_always(
                 event.tool_name,
-                detail.required_permissions or None,
+                approval_grant_permissions(detail, output.decision) or None,
                 save_permanently=decision is ApprovalDecisionType.APPROVE_PERMANENTLY,
             )
         approved = decision in {

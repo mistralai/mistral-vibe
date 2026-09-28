@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import sys
 from threading import Lock
@@ -14,11 +13,8 @@ _LEGACY_KEYRING_SERVICES = ("vibe",)
 _DISABLE_KEYRING_ENV_VAR = "VIBE_TEST_DISABLE_KEYRING"
 _cache_lock = Lock()
 _api_key_cache: dict[str, str | None] = {}
+# Substring in security's output when an item doesn't exist.
 _SECURITY_NOT_FOUND = "could not be found"
-
-
-class _PasswordNotFoundError(KeyringError):
-    pass
 
 
 def _is_keyring_disabled() -> bool:
@@ -29,16 +25,10 @@ def _should_use_macos_security() -> bool:
     return sys.platform == "darwin"
 
 
-def _run_security(
-    args: list[str], *, input_text: str | None = None
-) -> subprocess.CompletedProcess[str]:
+def _run_security(args: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
-            ["/usr/bin/security", *args],
-            input=input_text,
-            text=True,
-            capture_output=True,
-            check=True,
+            ["/usr/bin/security", *args], text=True, capture_output=True, check=True
         )
     except FileNotFoundError as exc:
         raise KeyringError("Can't run macOS Keychain security command") from exc
@@ -70,18 +60,17 @@ def _set_password(service: str, username: str, password: str) -> None:
         _delete_macos_password(service, username)
     except PasswordDeleteError:
         pass
-    command = shlex.join([
-        "add-generic-password",
-        "-s",
-        service,
-        "-a",
-        username,
-        "-w",
-        password,
-        "-A",
-    ])
     try:
-        _run_security(["-i"], input_text=f"{command}\n")
+        _run_security([
+            "add-generic-password",
+            "-s",
+            service,
+            "-a",
+            username,
+            "-w",
+            password,
+            "-A",
+        ])
     except subprocess.CalledProcessError as exc:
         raise KeyringError("Can't store password in macOS Keychain") from exc
 
@@ -99,7 +88,7 @@ def _get_password(service: str, username: str) -> str | None:
             ])
         except subprocess.CalledProcessError as exc:
             if _is_security_not_found(exc):
-                raise _PasswordNotFoundError() from exc
+                return None
             raise KeyringError("Can't get password from macOS Keychain") from exc
         return result.stdout.removesuffix("\n")
 
@@ -139,12 +128,14 @@ def _delete_legacy_passwords(username: str) -> None:
             pass
 
 
-def _get_uncached_password(username: str) -> str | None:
-    for service in (_KEYRING_SERVICE, *_LEGACY_KEYRING_SERVICES):
-        try:
-            api_key = _get_password(service, username)
-        except _PasswordNotFoundError:
-            continue
+def _get_uncached_password(
+    username: str, *, search_legacy_services: bool
+) -> str | None:
+    services = (_KEYRING_SERVICE, *_LEGACY_KEYRING_SERVICES)
+    if not search_legacy_services:
+        services = (_KEYRING_SERVICE,)
+    for service in services:
+        api_key = _get_password(service, username)
         if api_key is None:
             continue
         if service != _KEYRING_SERVICE:
@@ -153,7 +144,15 @@ def _get_uncached_password(username: str) -> str | None:
     return None
 
 
-def get_api_key_from_keyring(env_key: str) -> str | None:
+def get_api_key_from_keyring(
+    env_key: str, *, search_legacy_services: bool = True
+) -> str | None:
+    """Read a secret, optionally without the pre-rename service-name fallback.
+
+    Callers whose secrets were never written under the legacy service names pass
+    ``search_legacy_services=False``: on macOS every service tried is a separate
+    ``security`` subprocess, and a miss otherwise pays for all of them.
+    """
     if not env_key:
         return None
     if _is_keyring_disabled():
@@ -164,10 +163,16 @@ def get_api_key_from_keyring(env_key: str) -> str | None:
             return _api_key_cache[env_key]
 
     try:
-        api_key = _get_uncached_password(env_key)
+        api_key = _get_uncached_password(
+            env_key, search_legacy_services=search_legacy_services
+        )
     except KeyringError:
         return None
 
+    # Keyed on the name alone, not on the flag: a miss cached by a caller that
+    # skipped the legacy services would otherwise be served to one that wanted
+    # them. Safe only because the two sets of names are disjoint -- env var keys
+    # on one side, MCP OAuth aliases on the other.
     with _cache_lock:
         return _api_key_cache.setdefault(env_key, api_key)
 

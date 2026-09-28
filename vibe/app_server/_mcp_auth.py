@@ -331,9 +331,13 @@ class MCPAuthenticationService(MCPAuthorizationProvider):
     ) -> MCPAuthorizationResult:
         try:
             current_fingerprint = Fingerprint.compute(server)
-            saved_fingerprint = await Fingerprint.load(server.name)
             storage = KeyringTokenStorage(alias=server.name)
-            tokens = await storage.get_tokens()
+            # Two independent keyring reads, and on macOS each is its own
+            # `security` subprocess. Awaited one after the other they serialise
+            # on every configured server the session starts up with.
+            saved_fingerprint, tokens = await asyncio.gather(
+                Fingerprint.load(server.name), storage.get_tokens()
+            )
         except MCPOAuthHeadlessError:
             return self._required(server.name, "missing")
         if saved_fingerprint != current_fingerprint:

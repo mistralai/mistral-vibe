@@ -32,6 +32,25 @@ if TYPE_CHECKING:
 
 _HONEST_USER_AGENT = "vibe-cli"
 _HTTP_FORBIDDEN = 403
+_MAX_REDIRECTS = 20
+
+
+def _url_origin(url: str) -> str:
+    try:
+        parsed = httpx.URL(url)
+    except httpx.InvalidURL as error:
+        raise ToolError(f"Invalid redirect URL: {url}") from error
+
+    if parsed.scheme not in {"http", "https"} or not parsed.raw_host:
+        raise ToolError(f"Invalid redirect URL: {url}")
+
+    host = parsed.raw_host.decode("ascii")
+    if ":" in host:
+        host = f"[{host}]"
+
+    default_port = 443 if parsed.scheme == "https" else 80
+    port_suffix = "" if parsed.port in {None, default_port} else f":{parsed.port}"
+    return f"{parsed.scheme}://{host}{port_suffix}"
 
 
 @functools.cache
@@ -97,9 +116,10 @@ class WebFetch(
         if self.config.permission in {ToolPermission.ALWAYS, ToolPermission.NEVER}:
             return PermissionContext(permission=self.config.permission)
 
-        parsed = urlparse(self._normalize_url(args.url))
-        domain = parsed.netloc or parsed.path.split("/")[0]
-        if not domain:
+        normalized_url = self._normalize_url(args.url)
+        try:
+            origin = _url_origin(normalized_url)
+        except ToolError:
             return None
 
         return PermissionContext(
@@ -107,9 +127,9 @@ class WebFetch(
             required_permissions=[
                 RequiredPermission(
                     scope=PermissionScope.URL_PATTERN,
-                    invocation_pattern=domain,
-                    session_pattern=domain,
-                    label=f"fetching from {domain}",
+                    invocation_pattern=origin,
+                    session_pattern=origin,
+                    label=f"fetching from {origin}",
                 )
             ],
         )
@@ -123,7 +143,7 @@ class WebFetch(
         url = self._normalize_url(args.url)
         timeout = self._resolve_timeout(args.timeout)
 
-        content, content_type = await self._fetch_url(url, timeout)
+        final_url, content, content_type = await self._fetch_url(url, timeout)
 
         if "text/html" in content_type:
             content = _html_to_markdown(content)
@@ -137,7 +157,7 @@ class WebFetch(
             content += "\n\n[Content truncated due to size limit]"
 
         yield WebFetchResult(
-            url=url,
+            url=final_url,
             content=content,
             content_type=content_type,
             was_truncated=was_truncated,
@@ -166,7 +186,7 @@ class WebFetch(
             return self.config.default_timeout
         return min(timeout, self.config.max_timeout)
 
-    async def _fetch_url(self, url: str, timeout: int) -> tuple[str, str]:
+    async def _fetch_url(self, url: str, timeout: int) -> tuple[str, str, str]:
         headers = {
             "User-Agent": self.config.user_agent,
             "Accept": (
@@ -190,27 +210,46 @@ class WebFetch(
 
         content_type = response.headers.get("Content-Type", "text/plain")
 
-        return response.text, content_type
+        return str(response.url), response.text, content_type
 
     async def _do_fetch(
         self, url: str, timeout: int, headers: dict[str, str]
     ) -> httpx.Response:
+        approved_origin = _url_origin(url)
+
         async with VibeAsyncHTTPClient(
-            follow_redirects=True,
+            follow_redirects=False,
             timeout=httpx.Timeout(timeout),
             verify=build_ssl_context(),
         ) as client:
-            response = await client.get(url, headers=headers)
+            current_url = url
+            for redirect_count in range(_MAX_REDIRECTS + 1):
+                response = await client.get(current_url, headers=headers)
 
-            # In case we are hitting bot detection retry once honestly
-            if (
-                response.status_code == _HTTP_FORBIDDEN
-                and response.headers.get("cf-mitigated") == "challenge"
-            ):
-                headers["User-Agent"] = _HONEST_USER_AGENT
-                response = await client.get(url, headers=headers)
+                # In case we are hitting bot detection retry once honestly
+                if (
+                    response.status_code == _HTTP_FORBIDDEN
+                    and response.headers.get("cf-mitigated") == "challenge"
+                ):
+                    headers["User-Agent"] = _HONEST_USER_AGENT
+                    response = await client.get(current_url, headers=headers)
 
-            return response
+                if not response.has_redirect_location:
+                    return response
+
+                if redirect_count == _MAX_REDIRECTS:
+                    raise ToolError(f"Too many redirects (maximum {_MAX_REDIRECTS})")
+
+                redirect_url = str(response.url.join(response.headers["location"]))
+                if _url_origin(redirect_url) != approved_origin:
+                    raise ToolError(
+                        "Redirect target requires a separate web_fetch approval: "
+                        f"{redirect_url}"
+                    )
+
+                current_url = redirect_url
+
+        raise AssertionError("redirect loop must return or raise")
 
     @classmethod
     def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:

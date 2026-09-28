@@ -1,0 +1,18 @@
+[
+ {
+  "method": "config/write",
+  "params": {
+   "ops": [
+    {
+     "op": "set",
+     "path": "/models/mistral-medium-3.5/thinking",
+     "targetLayer": null,
+     "value": "high"
+    }
+   ],
+   "reason": "app-server thinking update",
+   "reloadRuntime": false,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

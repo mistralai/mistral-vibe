@@ -22,7 +22,7 @@ from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
 from vibe.cli.textual_ui.widgets.chat_input.paste_path import (
-    maybe_prepend_at_for_image_path,
+    maybe_prepend_at_for_path,
     rewrite_bare_image_paths_in_text,
 )
 from vibe.cli.textual_ui.widgets.vscode_compat import patch_vscode_space
@@ -100,6 +100,9 @@ class ChatTextArea(TextArea):
     class HistoryNext(Message):
         pass
 
+    class NavigateBelow(Message):
+        pass
+
     class HistoryReset(Message):
         """Message sent when history navigation should be reset."""
 
@@ -172,6 +175,7 @@ class ChatTextArea(TextArea):
         self._cursor_moved_since_load: bool = False
         self._completion_manager: MultiCompletionManager | None = None
         self._app_has_focus: bool = True
+        self._focus_relinquished: bool = False
         self._voice_manager = voice_manager
         self._last_keystroke_time: float = 0.0
         self._click_chain: int = 0
@@ -194,13 +198,18 @@ class ChatTextArea(TextArea):
         # app.clear_selection() and wipe an in-progress selection elsewhere.
         self.set_reactive(TextArea.selection, Selection.cursor(self.cursor_location))
         self.refresh()
-        if self._app_has_focus:
+        if self._app_has_focus and not self._focus_relinquished:
             self.call_after_refresh(self.focus)
+
+    def on_focus(self) -> None:
+        self._focus_relinquished = False
 
     def set_app_focus(self, has_focus: bool) -> None:
         self._app_has_focus = has_focus
         self.cursor_blink = has_focus
-        if has_focus and not self.has_focus:
+        if has_focus and self.has_focus:
+            self._focus_relinquished = False
+        if has_focus and not self.has_focus and not self._focus_relinquished:
             self.call_after_refresh(self.focus)
 
     def on_click(self, event: events.Click) -> None:
@@ -375,7 +384,7 @@ class ChatTextArea(TextArea):
         # second time and double-insert). TextArea._on_paste in the same
         # MRO still runs inside this dispatch cycle and performs the
         # single insertion using the mutated text.
-        event.text = maybe_prepend_at_for_image_path(event.text)
+        event.text = maybe_prepend_at_for_path(event.text)
         # Empty paste = either truly empty clipboard, or clipboard holds
         # image bytes the terminal cannot deliver as text. The app handler
         # peeks the OS clipboard in a worker and, if it finds image bytes,
@@ -673,6 +682,15 @@ class ChatTextArea(TextArea):
         if event.key == "down" and self._handle_history_down():
             event.prevent_default()
             event.stop()
+            return
+
+        if event.key == "down" and self.navigator.is_last_wrapped_line(
+            self.cursor_location
+        ):
+            event.prevent_default()
+            event.stop()
+            self._focus_relinquished = True
+            self.post_message(self.NavigateBelow())
             return
 
         patch_vscode_space(event)

@@ -486,9 +486,9 @@ class ProjectLinksController:
 
     async def _build_service(self, repo_root: Path) -> VibeCodeProjectPickerService:
         config = await self._load_config()
-        api_key = config.vibe_code_api_key
+        api_key = config.resolve_mistral_api_key()
         if not api_key:
-            raise ProjectLinksAuthError(f"{config.vibe_code_api_key_env_var} not set.")
+            raise ProjectLinksAuthError("Mistral API key not set.")
         return VibeCodeProjectPickerService(
             base_url=config.vibe_code_sessions_base_url,
             api_key=api_key,

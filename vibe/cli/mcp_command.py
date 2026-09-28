@@ -41,6 +41,7 @@ class MCPCommandError(ValueError):
 class _MCPAddCommand:
     server: MCPHttp | MCPStreamableHttp | MCPStdio
     login: bool
+    allow_insecure_http: bool = False
 
 
 def run_mcp_cli(argv: list[str]) -> None:
@@ -138,6 +139,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Persist an OAuth server without starting browser login.",
     )
     add_parser.add_argument(
+        "--allow-insecure-http",
+        action="store_true",
+        help=(
+            "Allow a plaintext http:// URL to a non-localhost host (e.g. a "
+            "server on the LAN). Credentials and headers are sent unencrypted."
+        ),
+    )
+    add_parser.add_argument(
         "--startup-timeout-sec",
         type=float,
         metavar="SECONDS",
@@ -203,7 +212,9 @@ def _build_remote_add_command(args: argparse.Namespace) -> _MCPAddCommand:
 
     server = _build_remote_server(args, auth)
     return _MCPAddCommand(
-        server=server, login=isinstance(auth, MCPOAuth) and not args.no_login
+        server=server,
+        login=isinstance(auth, MCPOAuth) and not args.no_login,
+        allow_insecure_http=args.allow_insecure_http,
     )
 
 
@@ -226,6 +237,7 @@ async def _add_mcp_server(command: _MCPAddCommand) -> str:
             on_persisted=(lambda persisted: print(_add_result_message(persisted)))
             if command.login
             else None,
+            allow_insecure_http=command.allow_insecure_http,
         )
     except MCPOAuthError as exc:
         # The server is persisted; login is best-effort and can be retried.
@@ -292,6 +304,7 @@ def _build_stdio_server(args: argparse.Namespace) -> MCPStdio:
             ("--api-key-header", args.api_key_header),
             ("--api-key-format", args.api_key_format),
             ("--no-login", args.no_login),
+            ("--allow-insecure-http", args.allow_insecure_http),
         )
         if value
     ]

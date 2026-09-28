@@ -31,6 +31,8 @@ class SessionInfo(TypedDict):
     title: str | None
     start_time: str | None
     end_time: str | None
+    bumped_at: str | None
+    pinned_at: str | None
     updated_at: str
 
 
@@ -77,6 +79,18 @@ def _build_info(
             start_time = _convert_to_utc_iso(start_time)
         except (ValueError, OSError):
             start_time = None
+    bumped_at = metadata.get("bumped_at")
+    if bumped_at:
+        try:
+            bumped_at = _convert_to_utc_iso(bumped_at)
+        except (ValueError, OSError):
+            bumped_at = None
+    pinned_at = metadata.get("pinned_at")
+    if pinned_at:
+        try:
+            pinned_at = _convert_to_utc_iso(pinned_at)
+        except (ValueError, OSError):
+            pinned_at = None
 
     origin_directory = metadata.get("origin_directory")
 
@@ -90,6 +104,8 @@ def _build_info(
         "title": metadata.get("title"),
         "start_time": start_time,
         "end_time": end_time,
+        "bumped_at": bumped_at,
+        "pinned_at": pinned_at,
         "updated_at": end_time or start_time or fallback_updated_at,
     }
 
@@ -114,6 +130,12 @@ def _entry_from_payload(payload: Any) -> _Entry | None:
         "title": payload.get("title"),
         "start_time": payload.get("start_time"),
         "end_time": payload.get("end_time"),
+        "bumped_at": (
+            payload["bumped_at"] if isinstance(payload.get("bumped_at"), str) else None
+        ),
+        "pinned_at": (
+            payload["pinned_at"] if isinstance(payload.get("pinned_at"), str) else None
+        ),
         "updated_at": (
             payload["updated_at"]
             if isinstance(payload.get("updated_at"), str) and payload["updated_at"]
@@ -154,6 +176,8 @@ class SessionIndex:
                     title=entry.info["title"],
                     start_time=entry.info["start_time"],
                     end_time=entry.info["end_time"],
+                    bumped_at=entry.info["bumped_at"],
+                    pinned_at=entry.info["pinned_at"],
                     updated_at=entry.info["updated_at"],
                 )
                 for entry in self._entries.values()

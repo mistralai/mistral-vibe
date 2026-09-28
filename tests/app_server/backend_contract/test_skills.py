@@ -15,8 +15,11 @@ from tests.app_server.backend_contract.conftest import BackendContractConnection
 from vibe.app_server._model import validate_wire
 from vibe.app_server.protocol import (
     SessionOptions,
+    SkillsInstalledParams,
+    SkillsInstalledResponse,
     SkillsListParams,
     SkillsListResponse,
+    SkillsSetEnabledParams,
 )
 from vibe.app_server.session import AppServerSession
 
@@ -131,3 +134,49 @@ async def test_reload_picks_up_a_skill_written_after_the_session_opened(
     skill = backend_contract_session.resources.runtime.get_skill("release-notes")
     assert skill is not None
     assert skill.description == "Draft release notes."
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_skill_stays_listed_so_it_can_be_turned_back_on(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+) -> None:
+    """Prepare a session with a workspace skill.
+
+    Do turn it off with ``skills/setEnabled``, then read ``skills/installed``.
+
+    Assert the row is still there and reports itself off. A backend that filters
+    disabled skills out of the browser leaves no row to switch back on, so the
+    skill becomes unreachable the moment it is turned off.
+    """
+    session_id = backend_contract_session.state.session.id
+
+    await backend_contract_connection.client.request(
+        "skills/setEnabled",
+        SkillsSetEnabledParams(
+            session_id=session_id, name="code-review", enabled=False
+        ),
+    )
+    installed = validate_wire(
+        SkillsInstalledResponse,
+        await backend_contract_connection.client.request(
+            "skills/installed", SkillsInstalledParams(session_id=session_id)
+        ),
+    )
+
+    rows = {skill.name: skill for skill in installed.skills}
+    assert "code-review" in rows
+    assert rows["code-review"].enabled is False
+
+    await backend_contract_connection.client.request(
+        "skills/setEnabled",
+        SkillsSetEnabledParams(session_id=session_id, name="code-review", enabled=True),
+    )
+    restored = validate_wire(
+        SkillsInstalledResponse,
+        await backend_contract_connection.client.request(
+            "skills/installed", SkillsInstalledParams(session_id=session_id)
+        ),
+    )
+
+    assert {s.name: s for s in restored.skills}["code-review"].enabled is True

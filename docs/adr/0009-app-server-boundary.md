@@ -140,6 +140,13 @@ Both transports use bounded queues. Stdio has one writer that preserves message
 order and applies backpressure. In stdio mode, stdout is reserved for JSON-RPC;
 human logs use the configured log file or stderr.
 
+The client's hand-off from its reader task to `incoming()` is unbounded, and has
+to stay that way. That reader is the only thing that resolves request futures,
+while `incoming()` consumers issue requests mid-message — `_resync` on an event
+gap. Bounding the hand-off lets a notification burst park the reader on a full
+queue, so the response that would release the consumer is never dispatched and
+the connection deadlocks. Backpressure belongs at the transports.
+
 ### Initialization and attachment
 
 Every connection follows this order:

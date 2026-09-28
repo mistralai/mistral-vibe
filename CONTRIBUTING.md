@@ -72,6 +72,18 @@ This section is for developers who want to set up the repository for local devel
 
    Pre-commit hooks will automatically run checks before each commit.
 
+### Building distributions
+
+`uv build --wheel` produces one platform-specific wheel containing the Python
+CLI, the Rust terminal, and the Unified Harness runtime. The build requires a
+working Rust toolchain and fails if either native component cannot be built.
+On Linux, set `CARGO_BUILD_FLAGS=--no-default-features` to build without ALSA.
+
+`VIBE_SKIP_RUST_TUI=1` may be used by development-only checks that do not need
+the terminal binary. Public releases always build both native components. Vibe
+does not publish a source distribution because installing it would require end
+users to compile both Rust components locally.
+
 ### Logging Configuration
 
 Logs are written to `~/.vibe/logs/vibe.log` by default. Control logging via environment variables:

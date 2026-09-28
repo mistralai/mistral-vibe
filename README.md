@@ -100,7 +100,7 @@ pip install mistral-vibe
   - Manage a `todo` list to track the agent's work.
   - Ask interactive questions to gather user input (`ask_user_question`).
   - Delegate tasks to subagents for parallel work (`task`).
-- **Project-Aware Context**: Vibe automatically scans your project's file structure and Git status to provide relevant context to the agent, improving its understanding of your codebase.
+- **Project-Aware Context**: Vibe automatically provides your project's location, Git branch, and recent commit history to the agent, improving its understanding of your codebase.
 - **Advanced CLI Experience**: Built with modern libraries for a smooth and efficient workflow.
   - Autocompletion for slash commands (`/`) and file paths (`@`).
   - Image attachments via `@` mentions — `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` files are sent to vision-capable models (e.g. Mistral Medium 3.5) as native multimodal content.
@@ -156,6 +156,26 @@ The `task` tool allows the agent to delegate work to subagents:
 ```
 
 Create custom subagents by adding `agent_type = "subagent"` to your agent configuration. Vibe comes with a built-in subagent called `explore`, a read-only subagent for codebase exploration and skill loading used internally for delegation.
+
+When the Unified Harness is active, the interactive prompt shows each known
+subagent's name, type, live status, and latest measured context size. Opening a
+subagent also shows its active status above the prompt and its context use in the
+bottom-right gauge. With an empty or locally edited prompt, press Down from its
+last line to focus the list;
+unsent text stays in the prompt. Use Up and Down to highlight a row, then press
+Enter to open it; with the mouse, hover to highlight and click to open. Select **Main
+conversation** to return, or press Escape from a subagent view. Ctrl+C adds a
+local-only, error-styled user message explaining that subagents cannot be
+controlled directly; return to Main and ask the main agent to stop one. Press
+Ctrl+C again to quit Vibe. After
+opening Main conversation, press Up from its row to focus the prompt. While a
+subagent view is open, Up stops at the Main row. Idle subagents remain listed as
+**ready** because the main agent can send them more instructions. Explicitly
+stopped subagents leave the list after you return to Main. The first subagent
+update does not add a local information message. When a subagent becomes ready,
+its transcript shows a local information message explaining how to give it a
+new goal or stop it from Main. Set `show_subagent_status_list = false` in
+`config.toml`, or change it through `/config`, to hide this UI.
 
 ### Interactive User Questions
 
@@ -232,7 +252,7 @@ Most modern terminals should work, but older or minimal terminal emulators may h
 Simply run `vibe` to enter the interactive chat loop.
 
 - **Multi-line Input**: Press `Ctrl+J` or `Shift+Enter` for select terminals to insert a newline.
-- **File Paths**: Reference files in your prompt using the `@` symbol for smart autocompletion (e.g., `> Read the file @src/agent.py`).
+- **File Paths**: Reference files in your prompt using the `@` symbol for smart autocompletion (e.g., `> Read the file @src/agent.py`). A bare `@` quickly lists immediate non-hidden entries; after a path character, Git workspaces suggest tracked and non-ignored files. Pasting a standalone existing absolute or home-relative file or folder also creates a mention.
 - **Shell Commands**: Prefix any command with `!` to execute it directly in your shell, bypassing the agent (e.g., `> !ls -l`).
 - **External Editor**: Press `Ctrl+G` to edit your current input in an external editor.
 - **Tool Output Toggle**: Press `Ctrl+O` to toggle the tool output view.
@@ -257,7 +277,7 @@ vibe "Refactor the main function in cli/main.py to be more modular."
 
 Vibe includes a trust folder system to ensure you only run the agent in directories you trust. When you first run Vibe in a new directory which contains a `.vibe` subfolder, it may ask you to confirm whether you trust the folder.
 
-Trusted folders are remembered for future sessions. You can manage trusted folders through its configuration file `~/.vibe/trusted_folders.toml`.
+Trusted folders are remembered for future sessions. You can manage trusted folders through its configuration file `~/.vibe/trusted_folders.toml`. In the trust prompt, use Up/Down or the mouse wheel to scroll the detected-file list. Text is selectable there too: double-click selects a word, triple-click selects a paragraph, and dragging near the list edges scrolls while extending the selection.
 
 This safety feature helps prevent accidental execution in sensitive directories.
 
@@ -392,6 +412,25 @@ allowed-tools:
 
 This skill helps analyze code quality and suggest improvements.
 ```
+
+By default, both the user and the model can invoke a skill. Invocation controls
+are independent:
+
+- `user-invocable: false` hides the skill from the `/` menu and prevents direct
+  `/skill-name` invocation while still allowing the model to load it.
+- `disable-model-invocation: true` follows the Claude Code convention and makes
+  the skill explicit-only: users can still invoke `/skill-name`, but the model
+  does not see or invoke it automatically.
+- Skills using OpenAI's `agents/openai.yaml` convention can express the same
+  explicit-only behavior. Vibe applies this policy regardless of active model or provider:
+
+  ```yaml
+  policy:
+    allow_implicit_invocation: false
+  ```
+
+  If the policy metadata is malformed or contains an unknown policy field,
+  Vibe reports the issue and keeps the skill explicit-only.
 
 ### Skill Discovery
 
@@ -664,6 +703,13 @@ for the complete command reference. `vibe mcp remove <name>` removes the server
 from the user configuration. Removing an OAuth server also deletes its stored
 tokens, client information, and configuration fingerprint when available.
 
+With `VIBE_CLI=rust`, shell `mcp add` uses the OAuth-only `/mcp add` syntax:
+`vibe mcp add https://mcp.linear.app/mcp --name linear --no-login`.
+It accepts `--scope` (repeatable), `--transport`, and `--allow-insecure-http`;
+without `--no-login`, it starts browser login. Both `add` and `remove NAME`
+update the user configuration without opening a chat session. For stdio or
+static-auth additions, use `VIBE_CLI=python vibe mcp add` with the flags above.
+
 Hosted OAuth MCP servers can also be added from inside Vibe:
 
 ```text
@@ -926,6 +972,12 @@ The app-server never removes a worktree on its own. Closing a session does not c
 Two things are cleaned up without asking, neither of which is a worktree you could have worked in. A session whose very first turn never completed has its worktree rolled back, because such a session is never published and leaves no session file — there is nothing to return to. And a reservation that never became a worktree, an empty directory left by a claim whose `git worktree add` did not land, is discarded the next time a session starts in that repo.
 
 The cost of that conservatism is that a worktree whose app-server was killed outright stays on disk, holding a marker for a session that no longer exists. Removing it is a judgement about whether you are finished with the work, which only you can make.
+
+On Windows, Vibe resolves an absolute Git executable for automatic repository
+inspection and ignores executables inside the current project. Set
+`GIT_PYTHON_GIT_EXECUTABLE` to an absolute path when using a custom or portable
+Git installation. Vibe still starts when no trusted Git executable is available;
+only Git-dependent metadata and features are unavailable.
 
 ### Update Settings
 

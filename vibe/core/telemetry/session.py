@@ -66,6 +66,7 @@ class SessionTelemetry:
         nb_context_messages: int,
         nb_prompt_chars: int,
         call_type: TelemetryCallType,
+        message_id: str | None = None,
     ) -> None:
         self._client.send_request_sent(
             model=model,
@@ -73,6 +74,7 @@ class SessionTelemetry:
             nb_context_messages=nb_context_messages,
             nb_prompt_chars=nb_prompt_chars,
             call_type=call_type,
+            message_id=message_id,
         )
 
     def record_tool_call_finished(
@@ -84,6 +86,11 @@ class SessionTelemetry:
         nb_files_created: int,
         nb_files_modified: int,
         file_extension: str | None,
+        message_id: str | None = None,
+        decision: Literal["execute", "skip"] | None = None,
+        approval_type: Literal["always", "never", "ask"] | None = None,
+        approval_source: Literal["config", "smart", "user", "bypass", "never"]
+        | None = None,
     ) -> None:
         send_unified_tool_call_finished(
             self._client,
@@ -94,6 +101,10 @@ class SessionTelemetry:
             nb_files_created=nb_files_created,
             nb_files_modified=nb_files_modified,
             file_extension=file_extension,
+            message_id=message_id,
+            decision=decision,
+            approval_type=approval_type,
+            approval_source=approval_source,
         )
 
     def record_subagent_tool_call_finished(
@@ -102,6 +113,7 @@ class SessionTelemetry:
         operation: SubagentOperation,
         outcome: SubagentOutcome,
         profile_source: SubagentProfileSource | None,
+        message_id: str | None = None,
     ) -> None:
         send_unified_subagent_tool_call_finished(
             self._client,
@@ -109,6 +121,7 @@ class SessionTelemetry:
             outcome=outcome,
             model=self._model,
             profile_source=profile_source,
+            message_id=message_id,
         )
 
     def record_auto_compact_triggered(

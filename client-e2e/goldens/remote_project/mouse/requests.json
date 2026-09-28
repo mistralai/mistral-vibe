@@ -1,0 +1,17 @@
+[
+ {
+  "method": "vibeCode/projects/open",
+  "params": {
+   "prompt": null,
+   "purpose": "configure",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "vibeCode/projects/unlink",
+  "params": {
+   "pickerId": "picker-1",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

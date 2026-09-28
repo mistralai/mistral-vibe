@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from enum import StrEnum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
 
@@ -132,6 +133,12 @@ class UserMessageAttachment(Horizontal):
                 )
 
 
+class UserMessageSeverity(StrEnum):
+    INFO = auto()
+    WARNING = auto()
+    ERROR = auto()
+
+
 class UserMessage(Static):
     PROMPT_CHAR: ClassVar[str] = ">"
     SHOW_SEPARATOR: ClassVar[bool] = True
@@ -142,13 +149,18 @@ class UserMessage(Static):
         pending: bool = False,
         history_entry_id: str | None = None,
         images: list[ImageAttachment] | None = None,
+        severity: UserMessageSeverity | None = None,
     ) -> None:
         super().__init__()
         self.add_class("user-message")
         self._content = content
         self._pending = pending
         self._images = images or []
+        self.severity = severity
         self.history_entry_id = history_entry_id
+        if severity is not None:
+            self.add_class("user-message-severity")
+            self.add_class(f"user-message-{severity.value}")
 
     def get_content(self) -> str:
         return self._content
@@ -168,15 +180,16 @@ class UserMessage(Static):
     def compose(self) -> ComposeResult:
         with Vertical(classes="user-message-wrapper"):
             with Horizontal(classes="user-message-container"):
-                yield NonSelectableStatic(
-                    f"{self.PROMPT_CHAR} ", classes="user-message-prompt"
-                )
+                if self.severity is None:
+                    yield NonSelectableStatic(
+                        f"{self.PROMPT_CHAR} ", classes="user-message-prompt"
+                    )
                 yield NoMarkupStatic(self._content, classes="user-message-content")
             if self._images:
                 with Vertical(classes="user-message-attachments"):
                     for image in self._images:
                         yield UserMessageAttachment(image)
-            if self.SHOW_SEPARATOR:
+            if self.SHOW_SEPARATOR and self.severity is None:
                 yield ExpandingSeparator(classes="user-message-separator")
             if self._pending:
                 self.add_class("pending")

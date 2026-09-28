@@ -455,6 +455,46 @@ def test_mcp_add_works_without_provider_api_key(
     assert len(_persisted_servers(config_dir)) == 1
 
 
+def test_mcp_add_rejects_lan_http_without_flag(
+    capsys: pytest.CaptureFixture[str], config_dir: Path
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        _run_mcp(
+            "add",
+            "gitlab-local",
+            "--transport",
+            "http",
+            "--header",
+            "Authorization=Bearer test",
+            "--url",
+            "http://192.168.0.8:3002/",
+        )
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 2
+    assert "unless it points to localhost" in captured.err
+    assert _persisted_servers(config_dir) == []
+
+
+def test_mcp_add_allows_lan_http_with_flag(
+    capsys: pytest.CaptureFixture[str], config_dir: Path
+) -> None:
+    _run_mcp(
+        "add",
+        "gitlab-local",
+        "--transport",
+        "http",
+        "--header",
+        "Authorization=Bearer test",
+        "--url",
+        "http://192.168.0.8:3002/",
+        "--allow-insecure-http",
+    )
+
+    assert capsys.readouterr().out == "Added MCP server `gitlab-local`.\n"
+    assert _persisted_servers(config_dir)[0]["url"] == "http://192.168.0.8:3002/"
+
+
 def test_mcp_remove_deletes_static_server(
     capsys: pytest.CaptureFixture[str], config_dir: Path
 ) -> None:

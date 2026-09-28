@@ -22,9 +22,7 @@ from vibe.app_server._skills import (
 from vibe.core.skills.models import SkillInfo, SkillScope, SkillSource
 
 if TYPE_CHECKING:
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
-        RustPluginContextDefinition,
-    )
+    from mistralai_vibe_local_harness.protocol import RustPluginContextDefinition
 
 pytest.importorskip("mistralai_vibe_local_harness.protocol")
 
@@ -35,6 +33,7 @@ def _skill(
     path: Path | None = None,
     description: str = "Does a thing.",
     source: SkillSource = SkillSource.LOCAL,
+    model_invocable: bool = True,
 ) -> SkillInfo:
     return SkillInfo(
         name=name,
@@ -43,6 +42,7 @@ def _skill(
         prompt=f"Body of {name}.",
         source=source,
         scope=SkillScope.PROJECT,
+        model_invocable=model_invocable,
     )
 
 
@@ -55,7 +55,7 @@ def _write_skill(root: Path, name: str) -> Path:
 
 def _plugin_context(*skills: tuple[str, str]) -> RustPluginContextDefinition:
     """A ``toolkit`` plugin context owning ``(alias, path)`` skills."""
-    from mistralai_vibe_local_harness.protocol import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.protocol import (
         RustHarnessCapabilitySet,
         RustPluginContextDefinition,
         RustSkillDefinition,
@@ -101,6 +101,39 @@ def test_every_advertised_skill_has_a_body_the_runtime_can_serve(
     assert set(projection.payloads) == {"review", "toolkit:deploy"}
     assert "Body of review." in projection.payloads["review"]
     assert "Body of deploy." in projection.payloads["toolkit:deploy"]
+
+
+def test_explicit_only_skills_stay_in_catalogue_but_not_model_capabilities(
+    tmp_path: Path,
+) -> None:
+    automatic_path = _write_skill(tmp_path / "root", "automatic")
+    root_explicit_path = _write_skill(tmp_path / "root", "root-explicit")
+    plugin_explicit_path = _write_skill(tmp_path / "plugin", "plugin-explicit")
+    plugin_alias = "toolkit:plugin-explicit"
+
+    projection = project_core_skills(
+        {
+            "automatic": _skill("automatic", path=automatic_path),
+            "root-explicit": _skill(
+                "root-explicit", path=root_explicit_path, model_invocable=False
+            ),
+        },
+        plugin_skills={
+            plugin_alias: _skill(
+                plugin_alias,
+                path=plugin_explicit_path,
+                source=SkillSource.PLUGIN,
+                model_invocable=False,
+            )
+        },
+        plugin_contexts=[_plugin_context((plugin_alias, str(plugin_explicit_path)))],
+    )
+
+    assert [definition.name for definition in projection.definitions] == ["automatic"]
+    assert projection.plugin_contexts[0].capabilities.skills == []
+    assert set(projection.model_payloads) == {"automatic"}
+    assert set(projection.payloads) == {"automatic", "root-explicit", plugin_alias}
+    assert {skill.name for skill in projection.catalogue} == set(projection.payloads)
 
 
 def test_a_plugin_skill_is_offered_to_the_client_under_its_alias(

@@ -14,6 +14,7 @@ so worktrees from different repos never collide.
 $VIBE_HOME/worktrees/
   .claims/<bucket>/<name>/          # claim records and holder markers
     record.json                     # metadata: branch, base_commit, branch_created, claimed_at
+    recovery.json                   # snapshot metadata for a retained chat
     holders/                        # one empty file per live session
   <bucket>/<name>/                  # the actual git worktree checkout
 ```
@@ -69,18 +70,18 @@ must not be lost).
 
 ## Snapshotting
 
-When removing a dirty worktree, save its state to a ref first so the work
-is recoverable: stage all files (including untracked, excluding ignored)
-and commit to `refs/vibe/reaped/<name>`. Use a separate index file so the
-worktree's own index is untouched. Recovery: `git switch -c <name> <ref>`.
+Before retention removes an inactive worktree, save its state to a ref: stage
+all files (including untracked, excluding ignored) and commit to
+`refs/vibe/reaped/<name>`. Use a separate index file so the worktree's own
+index is untouched. Keep `recovery.json` after removing the active claim so
+reopening a chat can recreate the checkout automatically.
 
-## Sweeping
+## Retention
 
-The background sweep removes worktrees whose sessions no longer exist. It
-skips claims made within the last 10 minutes, worktrees with active holders,
-and worktrees that saved sessions would resume into. Reservations without a
-`base_commit` (mkdir claim that never became a worktree) are discarded only
-if empty.
+Keep the newest configured number of managed worktrees across repositories.
+Skip active worktrees. Snapshot each inactive excess worktree before removal;
+if snapshotting fails, keep it. Reservations without a `base_commit` are
+discarded only if empty and no creation process still holds their marker.
 
 Creation, attachment, and retention transitions use a cross-process lock so a
 worktree cannot be removed while another process is claiming or attaching it.

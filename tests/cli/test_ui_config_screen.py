@@ -219,6 +219,24 @@ async def test_config_screen_toggles_bool_and_persists() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_config_screen_hides_subagent_status_list() -> None:
+    app, agent_loop = _app(build_test_vibe_config(show_subagent_status_list=True))
+    async with app.run_test() as pilot:
+        screen = await _open_config(app, pilot)
+        await _filter_to(pilot, screen, "subagent status", "show_subagent_status_list")
+        await _open_editor(app, pilot)
+        await pilot.press("down")  # move from True (current) to False
+        await pilot.press("enter")
+
+        assert await wait_until(
+            pilot,
+            lambda: (
+                agent_loop.config_orchestrator.config.show_subagent_status_list is False
+            ),
+        )
+
+
 async def _orchestrator_with_enforced_theme(
     theme: str,
 ) -> ConfigOrchestrator[VibeConfigSchema]:

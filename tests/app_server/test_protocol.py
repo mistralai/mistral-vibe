@@ -11,8 +11,12 @@ import pytest
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.stubs.app_server import build_test_app_server, legacy_backend
 from vibe.app_server._dispatch import DispatchResult
-from vibe.app_server._session_backend_port import SessionBackendError
+from vibe.app_server._session_backend_port import (
+    SessionBackendError,
+    SessionBackendResult,
+)
 from vibe.app_server.client import AppServerClient, AppServerConnectionClosed
+from vibe.app_server.models import PublicTurn, PublicTurnStatus
 from vibe.app_server.protocol import (
     AppServerResponseError,
     CallbackCallResponse,
@@ -25,6 +29,7 @@ from vibe.app_server.protocol import (
     ProtocolErrorCode,
     ServerRequest,
     SessionUpdatedParams,
+    TurnStartResponse,
     validate_json_rpc_envelope,
 )
 from vibe.app_server.server import CallbackDelivery, InitializationState
@@ -267,31 +272,51 @@ async def test_failed_compact_releases_deferred_events_after_its_error_response(
 
 @pytest.mark.asyncio
 async def test_response_write_failure_abandons_deferred_backend_work() -> None:
-    """*Prepare*: A successful backend result whose response write will fail.
-    *Do*: Dispatch that result through the server.
-    *Assert*: The abandonment callback releases the backend reservation.
-    """
+    """An undelivered turn/start response releases its backend reservation."""
+
+    class DeferredStartBackend:
+        session_id = "session-1"
+
+        def guard_request(self) -> None:
+            return None
+
+        async def start_turn(self, _params: object) -> object:
+            return SessionBackendResult(
+                response=TurnStartResponse(
+                    turn=PublicTurn(
+                        id="turn-1",
+                        session_id=self.session_id,
+                        status=PublicTurnStatus.IN_PROGRESS,
+                        started_at=0,
+                    ),
+                    last_event_id=0,
+                ),
+                on_response_abandoned=abandon,
+            )
+
     # Prepare
     client_transport, server_transport = memory_transport_pair()
     agent_loop = build_test_agent_loop()
     server = build_test_app_server(agent_loop, server_transport)
     abandon = Mock()
-
-    async def dispatch(_request: ServerRequest) -> DispatchResult:
-        return DispatchResult(
-            response=CallbackCallResponse(callback_id="callback-1"),
-            on_response_abandoned=abandon,
-        )
-
-    server._dispatch_or_error = dispatch  # type: ignore[method-assign]
+    server._root = cast(Any, DeferredStartBackend())
+    server._initialization = InitializationState.INITIALIZED
     server._send = AsyncMock(side_effect=ConnectionError("connection closed"))
 
     # Do / Assert
     with pytest.raises(ConnectionError, match="connection closed"):
         await server._handle_request_once(
-            ServerRequest(id="result", method="test/result", params={})
+            ServerRequest(
+                id="start",
+                method="turn/start",
+                params={
+                    "sessionId": "session-1",
+                    "message": [{"type": "text", "text": "hello"}],
+                },
+            )
         )
     abandon.assert_called_once_with()
+    server._root = None
     await server.close()
     await client_transport.close()
     await agent_loop.aclose()

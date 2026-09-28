@@ -72,6 +72,7 @@ class AdaptedSkill:
     source_path: Path
     allowed_tools: tuple[str, ...] = ()
     user_invocable: bool = True
+    model_invocable: bool = True
     license: str | None = None
     compatibility: str | None = None
     metadata: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))

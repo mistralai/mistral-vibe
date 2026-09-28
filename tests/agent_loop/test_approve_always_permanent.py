@@ -13,6 +13,7 @@ from tests.conftest import (
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.builtins.bash import _get_default_allowlist
 from vibe.core.tools.permissions import PermissionScope, RequiredPermission
+from vibe.permissions import PathGrantScope, path_grant_pattern
 
 
 def _read_persisted_config(config_dir: Path) -> dict:
@@ -232,3 +233,26 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
         assert persisted["tools"]["bash"]["allowlist"] == _expected_bash_allowlist(
             "/tmp/*", "npm install"
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name", ["bash", "read_file"])
+    async def test_typed_outside_path_grant_is_persisted_for_shell_and_file_tools(
+        self, config_dir: Path, tool_name: str
+    ) -> None:
+        agent = build_test_agent_loop()
+        path = "/outside/shared/config.json"
+        pattern = path_grant_pattern(path, PathGrantScope.EXACT)
+        permissions = [
+            RequiredPermission(
+                scope=PermissionScope.OUTSIDE_DIRECTORY,
+                invocation_pattern=path,
+                session_pattern=pattern,
+                label=path,
+            )
+        ]
+
+        await agent.approve_always(tool_name, permissions, save_permanently=True)
+
+        persisted = _read_persisted_config(config_dir)
+        assert pattern in persisted["tools"][tool_name]["allowlist"]
+        assert agent._permission_store.covers(tool_name, permissions[0])

@@ -128,6 +128,37 @@ def test_load_whats_new_content_handles_os_error(tmp_path: Path) -> None:
     assert result is None
 
 
+def test_load_whats_new_content_env_override_reads_the_override_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    override = tmp_path / "override.md"
+    override.write_text("# Override content")
+
+    monkeypatch.setenv("VIBE_WHATS_NEW_FILE", str(override))
+    result = load_whats_new_content()
+
+    assert result == "# Override content"
+
+
+def test_load_whats_new_content_env_override_returns_none_when_file_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBE_WHATS_NEW_FILE", str(tmp_path / "missing.md"))
+
+    assert load_whats_new_content() is None
+
+
+def test_load_whats_new_content_env_override_returns_none_when_file_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    override = tmp_path / "override.md"
+    override.write_text("   \n  \n")
+
+    monkeypatch.setenv("VIBE_WHATS_NEW_FILE", str(override))
+
+    assert load_whats_new_content() is None
+
+
 @pytest.mark.asyncio
 async def test_mark_version_as_seen_creates_new_cache_when_repository_is_empty() -> (
     None

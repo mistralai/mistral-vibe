@@ -22,5 +22,9 @@
   "python.testing.pytestArgs": ["tests"],
   "python.testing.pytestEnabled": true,
   "ruff.enable": true,
-  "ruff.organizeImports": true
+  "ruff.organizeImports": true,
+  "rust-analyzer.linkedProjects": ["vibe/cli-rust/Cargo.toml"],
+  "files.watcherExclude": {
+    "**/cli-rust/target/**": true
+  }
 }

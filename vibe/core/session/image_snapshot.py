@@ -70,12 +70,15 @@ def snapshot_image(
 
     _check_size(data)
 
-    # Session logging disabled: no snapshot copy is made; the attachment
-    # points to the original source. Resume is not possible in this mode so
-    # snapshot stability is not required.
+    # No session dir means the attachment cannot be persisted next to the
+    # session transcript. Keep the bytes inline: a file source would point
+    # outside the workspace or session attachments and be rejected by turn
+    # input validation.
     if session_dir is None:
         return ImageAttachment(
-            source=FileImageSource(path=source_abs), alias=alias, mime_type=mime_type
+            source=InlineImageSource(data=base64.b64encode(data).decode("ascii")),
+            alias=alias,
+            mime_type=mime_type,
         )
 
     return ImageAttachment(

@@ -36,6 +36,7 @@ from vibe.core.tools.permissions import (
     wildcard_match,
 )
 from vibe.core.tools.utils import DEFAULT_SENSITIVE_PATTERNS, matches_sensitive_pattern
+from vibe.permissions import path_pattern_matches
 from vibe.utils import paths
 
 
@@ -334,6 +335,45 @@ class TestReadGranularPermissions:
         ]
         assert len(outside) == 1
 
+    def test_readable_outside_directory_offers_a_recursive_grant(
+        self, tmp_path, monkeypatch
+    ):
+        workdir = tmp_path / "workdir"
+        target = tmp_path / "outside"
+        workdir.mkdir()
+        target.mkdir()
+        monkeypatch.chdir(workdir)
+
+        result = self._read().resolve_permission(ReadFileArgs(file_path=str(target)))
+
+        assert isinstance(result, PermissionContext)
+        [outside] = [
+            rp
+            for rp in result.required_permissions
+            if rp.scope is PermissionScope.OUTSIDE_DIRECTORY
+        ]
+        assert outside.path_scope_root == str(target.resolve())
+
+    def test_unreadable_outside_directory_stays_an_exact_path(
+        self, tmp_path, monkeypatch
+    ):
+        workdir = tmp_path / "workdir"
+        target = tmp_path / "outside"
+        workdir.mkdir()
+        target.mkdir()
+        monkeypatch.chdir(workdir)
+        monkeypatch.setattr("vibe.core.tools.utils.os.access", lambda *_args: False)
+
+        result = self._read().resolve_permission(ReadFileArgs(file_path=str(target)))
+
+        assert isinstance(result, PermissionContext)
+        [outside] = [
+            rp
+            for rp in result.required_permissions
+            if rp.scope is PermissionScope.OUTSIDE_DIRECTORY
+        ]
+        assert outside.path_scope_root is None
+
     def test_sensitive_env_file_returns_permission_context(self):
         (self.workdir / ".env").touch()
         tool = self._read()
@@ -538,7 +578,11 @@ class TestApprovalFlowSimulation:
         return any(
             rule.tool_name == tool_name
             and rule.scope == rp.scope
-            and wildcard_match(rp.invocation_pattern, rule.session_pattern)
+            and (
+                path_pattern_matches(rp.invocation_pattern, rule.session_pattern)
+                if rp.scope is PermissionScope.OUTSIDE_DIRECTORY
+                else wildcard_match(rp.invocation_pattern, rule.session_pattern)
+            )
             for rule in rules
         )
 
@@ -722,7 +766,7 @@ class TestWebFetchPermissions:
     def _make_webfetch(self) -> WebFetch:
         return WebFetch(config_getter=lambda: WebFetchConfig(), state=BaseToolState())
 
-    def test_returns_url_pattern_with_domain(self):
+    def test_returns_url_pattern_with_origin(self):
         wf = self._make_webfetch()
         result = wf.resolve_permission(
             WebFetchArgs(url="https://docs.python.org/3/library")
@@ -731,51 +775,51 @@ class TestWebFetchPermissions:
         assert len(result.required_permissions) == 1
         rp = result.required_permissions[0]
         assert rp.scope is PermissionScope.URL_PATTERN
-        assert rp.invocation_pattern == "docs.python.org"
-        assert rp.session_pattern == "docs.python.org"
-        assert "docs.python.org" in rp.label
+        assert rp.invocation_pattern == "https://docs.python.org"
+        assert rp.session_pattern == "https://docs.python.org"
+        assert "https://docs.python.org" in rp.label
 
     def test_http_url(self):
         wf = self._make_webfetch()
         result = wf.resolve_permission(WebFetchArgs(url="http://example.com/page"))
         assert isinstance(result, PermissionContext)
         rp = result.required_permissions[0]
-        assert rp.invocation_pattern == "example.com"
+        assert rp.invocation_pattern == "http://example.com"
 
     def test_url_without_scheme(self):
         wf = self._make_webfetch()
         result = wf.resolve_permission(WebFetchArgs(url="github.com/anthropics"))
         assert isinstance(result, PermissionContext)
         rp = result.required_permissions[0]
-        assert rp.invocation_pattern == "github.com"
+        assert rp.invocation_pattern == "https://github.com"
 
     def test_url_with_port(self):
         wf = self._make_webfetch()
         result = wf.resolve_permission(WebFetchArgs(url="http://localhost:8080/api"))
         assert isinstance(result, PermissionContext)
         rp = result.required_permissions[0]
-        assert rp.invocation_pattern == "localhost:8080"
+        assert rp.invocation_pattern == "http://localhost:8080"
 
     def test_url_without_scheme_with_port(self):
         wf = self._make_webfetch()
         result = wf.resolve_permission(WebFetchArgs(url="example.com:3000/path"))
         assert isinstance(result, PermissionContext)
         rp = result.required_permissions[0]
-        assert rp.invocation_pattern == "example.com:3000"
+        assert rp.invocation_pattern == "https://example.com:3000"
 
     def test_different_domains_not_covered(self):
         rules = [
             ApprovedRule(
                 tool_name="web_fetch",
                 scope=PermissionScope.URL_PATTERN,
-                session_pattern="docs.python.org",
+                session_pattern="https://docs.python.org",
             )
         ]
         rp = RequiredPermission(
             scope=PermissionScope.URL_PATTERN,
-            invocation_pattern="evil.com",
-            session_pattern="evil.com",
-            label="fetching from evil.com",
+            invocation_pattern="https://evil.com",
+            session_pattern="https://evil.com",
+            label="fetching from https://evil.com",
         )
         covered = any(
             rule.tool_name == "web_fetch"
@@ -790,14 +834,14 @@ class TestWebFetchPermissions:
             ApprovedRule(
                 tool_name="web_fetch",
                 scope=PermissionScope.URL_PATTERN,
-                session_pattern="docs.python.org",
+                session_pattern="https://docs.python.org",
             )
         ]
         rp = RequiredPermission(
             scope=PermissionScope.URL_PATTERN,
-            invocation_pattern="docs.python.org",
-            session_pattern="docs.python.org",
-            label="fetching from docs.python.org",
+            invocation_pattern="https://docs.python.org",
+            session_pattern="https://docs.python.org",
+            label="fetching from https://docs.python.org",
         )
         covered = any(
             rule.tool_name == "web_fetch"
@@ -812,7 +856,7 @@ class TestWebFetchPermissions:
         result = wf.resolve_permission(WebFetchArgs(url="//cdn.example.com/lib.js"))
         assert isinstance(result, PermissionContext)
         rp = result.required_permissions[0]
-        assert rp.invocation_pattern == "cdn.example.com"
+        assert rp.invocation_pattern == "https://cdn.example.com"
 
     def test_config_permission_always_honored(self):
         wf = WebFetch(
@@ -832,14 +876,56 @@ class TestWebFetchPermissions:
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.NEVER
 
-    def test_config_permission_ask_falls_through_to_domain(self):
+    def test_config_permission_ask_falls_through_to_origin(self):
         wf = WebFetch(
             config_getter=lambda: WebFetchConfig(permission=ToolPermission.ASK),
             state=BaseToolState(),
         )
         result = wf.resolve_permission(WebFetchArgs(url="https://example.com"))
         assert isinstance(result, PermissionContext)
-        assert result.required_permissions[0].invocation_pattern == "example.com"
+        assert (
+            result.required_permissions[0].invocation_pattern == "https://example.com"
+        )
+
+    def test_different_schemes_have_different_permission_scopes(self):
+        wf = self._make_webfetch()
+
+        https_result = wf.resolve_permission(
+            WebFetchArgs(url="https://example.com/page")
+        )
+        http_result = wf.resolve_permission(WebFetchArgs(url="http://example.com/page"))
+
+        assert isinstance(https_result, PermissionContext)
+        assert isinstance(http_result, PermissionContext)
+        assert (
+            https_result.required_permissions[0].invocation_pattern
+            != http_result.required_permissions[0].invocation_pattern
+        )
+
+    def test_unicode_host_uses_httpx_idna_origin(self):
+        wf = self._make_webfetch()
+
+        unicode_result = wf.resolve_permission(WebFetchArgs(url="https://faß.example"))
+        punycode_result = wf.resolve_permission(
+            WebFetchArgs(url="https://xn--fa-hia.example")
+        )
+        ascii_result = wf.resolve_permission(WebFetchArgs(url="https://fass.example"))
+
+        assert isinstance(unicode_result, PermissionContext)
+        assert isinstance(punycode_result, PermissionContext)
+        assert isinstance(ascii_result, PermissionContext)
+        assert (
+            unicode_result.required_permissions[0].invocation_pattern
+            == "https://xn--fa-hia.example"
+        )
+        assert (
+            unicode_result.required_permissions[0].invocation_pattern
+            == punycode_result.required_permissions[0].invocation_pattern
+        )
+        assert (
+            unicode_result.required_permissions[0].invocation_pattern
+            != ascii_result.required_permissions[0].invocation_pattern
+        )
 
 
 class TestCollectOutsideDirs:

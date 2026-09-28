@@ -37,6 +37,7 @@ class UtilityPrompt(Prompt):
     PROJECT_CONTEXT = auto()
     SESSION_TITLE = auto()
     TURN_SUMMARY = auto()
+    VISION_DESCRIBE = auto()
     WORKTREE_NAME = auto()
 
 

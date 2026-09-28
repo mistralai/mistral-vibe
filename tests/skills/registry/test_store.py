@@ -66,6 +66,22 @@ async def test_materialize_strips_embedded_frontmatter() -> None:
 
 
 @pytest.mark.asyncio
+async def test_materialize_preserves_model_invocation_policy() -> None:
+    body = (
+        "---\nname: ignored\ndescription: ignored\n"
+        "disable-model-invocation: true\n---\n\n# Real"
+    )
+    dest = await _store.materialize(
+        make_item(skill_id="explicit-only", body=body), "explicit-only"
+    )
+    assert dest is not None
+
+    frontmatter, _ = parse_skill_markdown((dest / "SKILL.md").read_text())
+
+    assert frontmatter["disable-model-invocation"] is True
+
+
+@pytest.mark.asyncio
 async def test_materialize_rejects_traversal_assets() -> None:
     item = make_item(
         skill_id="s",
@@ -93,6 +109,23 @@ async def test_export_local_strips_registry_frontmatter(tmp_path: Path) -> None:
     frontmatter, _ = parse_skill_markdown((target / "SKILL.md").read_text())
     assert frontmatter["name"] == "exported"
     assert "metadata" not in frontmatter
+
+
+@pytest.mark.asyncio
+async def test_export_local_preserves_model_invocation_policy(tmp_path: Path) -> None:
+    body = (
+        "---\nname: exported\ndescription: exported\n"
+        "disable-model-invocation: true\n---\n\n# Real"
+    )
+    await _store.materialize(
+        make_item(skill_id="explicit-export", name="exported", body=body), "exported"
+    )
+    target = tmp_path / "exported"
+
+    await _store.export_local("explicit-export", 1, target)
+
+    frontmatter, _ = parse_skill_markdown((target / "SKILL.md").read_text())
+    assert frontmatter["disable-model-invocation"] is True
 
 
 def test_skill_dir_rejects_unsafe_id() -> None:

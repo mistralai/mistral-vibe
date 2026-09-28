@@ -14,12 +14,14 @@ from textual.containers import (
     VerticalScroll,
 )
 from textual.message import Message
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Static
 
 from vibe.app_server.models import WorkspaceTrustDecision, WorkspaceTrustDetails
+from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.word_selection import SelectableScreen
 
 
 class TrustDialogQuitException(Exception):
@@ -35,6 +37,8 @@ class TrustFolderDialog(CenterMiddle):
 
     # Number keys 1-3 cover up to three options; extras no-op.
     BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("up", "scroll_up", "Scroll up", show=False),
+        Binding("down", "scroll_down", "Scroll down", show=False),
         Binding("left", "move_left", "Left", show=False),
         Binding("right", "move_right", "Right", show=False),
         Binding("enter", "select", "Select", show=False),
@@ -170,7 +174,8 @@ class TrustFolderDialog(CenterMiddle):
 
                 yield NoMarkupStatic(
                     shortcut_hint(
-                        f"{shortcut('←→')} navigate  {shortcut('Enter')} select"
+                        f"{shortcut('↑↓')} scroll  {shortcut('←→')} navigate  "
+                        f"{shortcut('Enter')} select"
                     ),
                     classes="trust-dialog-help",
                 )
@@ -209,6 +214,16 @@ class TrustFolderDialog(CenterMiddle):
             else:
                 widget.add_class("trust-option-selected")
 
+    def action_scroll_up(self) -> None:
+        self.query_one("#trust-dialog-content", VerticalScroll).scroll_relative(
+            y=-1, animate=False
+        )
+
+    def action_scroll_down(self) -> None:
+        self.query_one("#trust-dialog-content", VerticalScroll).scroll_relative(
+            y=1, animate=False
+        )
+
     def action_move_left(self) -> None:
         self.selected_option = (self.selected_option - 1) % len(self._options)
         self._update_options()
@@ -238,6 +253,8 @@ class TrustFolderApp(App[TrustDecision | None]):
     CSS_PATH = "trust_folder_dialog.tcss"
 
     BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("ctrl+y", "copy_selection", "Copy", show=False, priority=True),
+        Binding("ctrl+shift+c", "copy_selection", "Copy", show=False, priority=True),
         Binding("ctrl+q", "quit_without_saving", "Quit", show=False, priority=True),
         Binding("ctrl+c", "quit_without_saving", "Quit", show=False, priority=True),
     ]
@@ -251,6 +268,7 @@ class TrustFolderApp(App[TrustDecision | None]):
         offer_repo_trust: bool = False,
         repo_explicitly_untrusted: bool = False,
         settings_path: str | None = None,
+        autocopy_to_clipboard: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -261,11 +279,15 @@ class TrustFolderApp(App[TrustDecision | None]):
         self.detected_files = detected_files
         self.repo_detected_files = repo_detected_files or []
         self.settings_path = settings_path
+        self.autocopy_to_clipboard = autocopy_to_clipboard
         self._result: TrustDecision | None = None
         self._quit_without_saving = False
 
     def on_mount(self) -> None:
         self.theme = "ansi-dark"
+
+    def get_default_screen(self) -> Screen:
+        return SelectableScreen(id="_default")
 
     def compose(self) -> ComposeResult:
         yield TrustFolderDialog(
@@ -281,6 +303,14 @@ class TrustFolderApp(App[TrustDecision | None]):
     def action_quit_without_saving(self) -> None:
         self._quit_without_saving = True
         self.exit(result=None)
+
+    def action_copy_selection(self) -> None:
+        copy_selection_to_clipboard(self)
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if not self.autocopy_to_clipboard:
+            return
+        copy_selection_to_clipboard(self)
 
     def on_trust_folder_dialog_decided(
         self, message: TrustFolderDialog.Decided
@@ -340,6 +370,7 @@ def ask_trust_folder(
     repo_detected_files: list[str] | None = None,
     offer_repo_trust: bool = False,
     repo_explicitly_untrusted: bool = False,
+    autocopy_to_clipboard: bool = True,
 ) -> TrustDecision | None:
     app = TrustFolderApp(
         cwd,
@@ -348,5 +379,6 @@ def ask_trust_folder(
         repo_detected_files=repo_detected_files,
         offer_repo_trust=offer_repo_trust,
         repo_explicitly_untrusted=repo_explicitly_untrusted,
+        autocopy_to_clipboard=autocopy_to_clipboard,
     )
     return app.run_trust_dialog()

@@ -55,8 +55,11 @@ async def persist_oauth_mcp_server(
     name: str | None = None,
     scopes: list[str] | None = None,
     transport: MCPAddTransport = "streamable-http",
+    allow_insecure_http: bool = False,
 ) -> PersistedMCPServerResult[MCPHttp | MCPStreamableHttp]:
-    normalized_url = normalize_mcp_server_url(url)
+    normalized_url = normalize_mcp_server_url(
+        url, allow_insecure_http=allow_insecure_http
+    )
     requested_name = normalize_mcp_server_name(name) if name is not None else None
     if name is not None and not requested_name:
         raise MCPServerAddError("MCP server name must contain letters or numbers.")
@@ -87,15 +90,23 @@ async def persist_oauth_mcp_server(
         })
     except ValidationError as exc:
         raise MCPServerAddError(f"Invalid MCP server configuration: {exc}") from exc
-    return await persist_remote_mcp_server(orchestrator, server)
+    return await persist_remote_mcp_server(
+        orchestrator, server, allow_insecure_http=allow_insecure_http
+    )
 
 
 async def persist_remote_mcp_server(
     orchestrator: ConfigOrchestrator[VibeConfigSchema],
     server: MCPHttp | MCPStreamableHttp,
+    *,
+    allow_insecure_http: bool = False,
 ) -> PersistedMCPServerResult[MCPHttp | MCPStreamableHttp]:
     normalized_server = server.model_copy(
-        update={"url": normalize_mcp_server_url(server.url)}
+        update={
+            "url": normalize_mcp_server_url(
+                server.url, allow_insecure_http=allow_insecure_http
+            )
+        }
     )
     current_servers = list(orchestrator.config.mcp_servers)
     if existing := _find_server_name(current_servers, normalized_server.name):
@@ -213,8 +224,8 @@ def _serialize_mcp_server(server: MCPServer) -> dict[str, object]:
     return data
 
 
-def normalize_mcp_server_url(value: str) -> str:
-    parsed = _parse_mcp_server_url(value)
+def normalize_mcp_server_url(value: str, *, allow_insecure_http: bool = False) -> str:
+    parsed = _parse_mcp_server_url(value, allow_insecure_http=allow_insecure_http)
     return _url_with_normalized_host(parsed, trim_trailing_slash=False)
 
 
@@ -257,7 +268,9 @@ def _resolve_new_server_name(
     return requested_name
 
 
-def _parse_mcp_server_url(value: str) -> SplitResult:
+def _parse_mcp_server_url(
+    value: str, *, allow_insecure_http: bool = False
+) -> SplitResult:
     raw_url = value.strip()
     if not raw_url:
         raise MCPServerAddError("MCP server URL is required.")
@@ -278,9 +291,10 @@ def _parse_mcp_server_url(value: str) -> SplitResult:
         raise MCPServerAddError("MCP server URL must not include a fragment.")
     if parsed.username is not None or parsed.password is not None:
         raise MCPServerAddError("MCP server URL must not include credentials.")
-    if scheme == "http" and not _is_loopback_host(host):
+    if scheme == "http" and not allow_insecure_http and not _is_loopback_host(host):
         raise MCPServerAddError(
-            "MCP server URL must use https unless it points to localhost."
+            "MCP server URL must use https unless it points to localhost. "
+            "Pass --allow-insecure-http to use a plaintext http:// URL anyway."
         )
     return parsed
 

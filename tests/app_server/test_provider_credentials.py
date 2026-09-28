@@ -32,7 +32,7 @@ pytest.importorskip("mistralai_vibe_local_harness.vibe")
 # port at module scope -- the service implements it, so importing the service
 # is importing it. `mistralai-vibe-local-harness` is an optional extra, and an
 # environment without it must skip this module rather than fail to collect it.
-from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+from mistralai_vibe_local_harness.vibe import (
     ProviderAuthRequired,
     ProviderCredentialSnapshot,
     invalid_api_key_message,
@@ -183,6 +183,22 @@ async def test_a_missing_key_is_a_state_not_a_failure(
     assert result.reason == "missing"
     assert result.provider == "primary"
     assert "PRIMARY_KEY" in result.message
+
+
+@pytest.mark.asyncio
+async def test_a_provider_without_a_key_requirement_resolves_empty_credentials() -> (
+    None
+):
+    """A keyless local provider resolves without asking the client to sign in."""
+    provider = _provider("local", api_key_env_var="")
+    service = ProviderCredentialService(_orchestrator(_config(provider)))
+
+    result = await service.resolve()
+
+    assert isinstance(result, ProviderCredentialSnapshot)
+    assert result.token is None
+    assert dict(result.headers) == {}
+    assert result.api_key_source is None
 
 
 @pytest.mark.asyncio

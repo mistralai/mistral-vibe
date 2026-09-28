@@ -6,6 +6,7 @@ import pytest
 from vibe.app_server._patch import apply_json_patch
 from vibe.app_server._projector import EventProjector
 from vibe.app_server.events import (
+    ChildSessionUpdated,
     ClientProjection,
     EventSequenceError,
     HistoryEntryAdded,
@@ -26,6 +27,7 @@ from vibe.app_server.models import (
     CompletedEffectState,
     IdleSessionStatus,
     PublicCallbackEntry,
+    PublicChildSession,
     PublicEffectEntry,
     PublicEntryGenerationStatus,
     PublicError,
@@ -40,9 +42,12 @@ from vibe.app_server.models import (
     PublicTurnQueue,
     PublicTurnStatus,
     ResourceContentBlock,
+    RunningSessionStatus,
     TextContentBlock,
+    TokenUsage,
 )
 from vibe.app_server.protocol import (
+    ChildSessionUpdatedParams,
     HistoryEntryAddedParams,
     JsonPatchOperation,
     MCPAuthRequiredParams,
@@ -148,6 +153,79 @@ def test_mcp_authorization_required_notification_is_typed() -> None:
     )
 
     assert event == MCPAuthorizationRequiredEvent(params)
+
+
+def test_child_session_update_notification_is_typed() -> None:
+    child = PublicChildSession(
+        id="child-1",
+        name="test-audit",
+        agent_type="explore",
+        status=RunningSessionStatus(active_turn_id="turn-child-1"),
+        created_at=1,
+        updated_at=2,
+        token_usage=TokenUsage(input_tokens=800, output_tokens=200, total_tokens=1_000),
+    )
+    params = ChildSessionUpdatedParams(
+        event_id=1, session_id="session-1", emitted_at=3, child_session=child
+    )
+    notification = Notification(
+        method="session/childSessionUpdated",
+        params=params.model_dump(mode="json", by_alias=True),
+    )
+
+    projection = _projection()
+    event = projection.consume(notification)
+
+    assert event == ChildSessionUpdated(child)
+    assert projection.state.child_sessions == [child]
+    assert projection.last_event_id == 1
+
+
+def test_child_session_update_participates_in_root_event_sequence() -> None:
+    projection = _projection()
+    child = PublicChildSession(
+        id="child-1",
+        name="test-audit",
+        agent_type="explore",
+        status=IdleSessionStatus(),
+        created_at=1,
+        updated_at=1,
+    )
+    params = ChildSessionUpdatedParams(
+        event_id=1, session_id="session-1", emitted_at=3, child_session=child
+    )
+    projection.consume(
+        Notification(
+            method="session/childSessionUpdated",
+            params=params.model_dump(mode="json", by_alias=True),
+        )
+    )
+    with pytest.raises(EventSequenceError, match="expected 2, received 3"):
+        projection.consume(
+            Notification(
+                method="session/childSessionUpdated",
+                params=params.model_copy(update={"event_id": 3}).model_dump(
+                    mode="json", by_alias=True
+                ),
+            )
+        )
+
+
+def test_snapshot_reconciliation_replays_child_session_summaries() -> None:
+    previous = _projection().state
+    child = PublicChildSession(
+        id="child-1",
+        name="test-audit",
+        agent_type="explore",
+        status=IdleSessionStatus(),
+        created_at=1,
+        updated_at=1,
+    )
+    current = previous.model_copy(update={"child_sessions": [child]}, deep=True)
+
+    events = reconcile_snapshot(previous, current)
+
+    assert ChildSessionUpdated(child) in events
 
 
 class PrivateRuntimeEvent(BaseEvent):

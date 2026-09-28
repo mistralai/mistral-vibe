@@ -11,7 +11,7 @@ from vibe.app_server.transport import (
     StdioJsonRpcTransport,
 )
 from vibe.core.config.harness_files import init_harness_files_manager
-from vibe.core.paths import LOG_FILE
+from vibe.core.paths import LOG_FILE, bootstrap_vibe_home
 from vibe.observability.logging import init_file_logging
 
 
@@ -56,13 +56,37 @@ def main() -> None:
     )
 
     silence_proactor_transport_teardown_warnings()
+    # The gate must run before the harness files manager and file logging:
+    # their mkdir(parents=True) calls are otherwise the first to materialize
+    # ~/.vibe, at permissive modes.
+    bootstrap_vibe_home()
     args = parse_arguments()
     init_harness_files_manager("user", "project")
     init_file_logging(LOG_FILE.path)
     load_dotenv_values()
-    asyncio.run(
-        serve_stdio(
-            experimental_harness=args.experimental_harness,
-            legacy_harness=args.legacy_harness,
+    try:
+        asyncio.run(
+            serve_stdio(
+                experimental_harness=args.experimental_harness,
+                legacy_harness=args.legacy_harness,
+            )
         )
-    )
+    finally:
+        _neutralize_stdout()
+
+
+def _neutralize_stdout() -> None:
+    """Prevent a disconnected client from breaking the interpreter's final flush."""
+    import os
+    import sys
+
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return
+    try:
+        os.dup2(devnull, sys.stdout.fileno())
+    except (OSError, ValueError):
+        pass
+    finally:
+        os.close(devnull)

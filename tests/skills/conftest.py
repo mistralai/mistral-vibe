@@ -32,6 +32,7 @@ def create_skill(
     metadata: dict[str, str] | None = None,
     allowed_tools: str | None = None,
     user_invocable: bool | None = None,
+    disable_model_invocation: bool | None = None,
     body: str = "## Instructions\n\nTest instructions here.",
 ) -> Path:
     skill_dir = skills_dir / name
@@ -48,6 +49,8 @@ def create_skill(
         frontmatter["allowed-tools"] = allowed_tools
     if user_invocable is not None:
         frontmatter["user-invocable"] = user_invocable
+    if disable_model_invocation is not None:
+        frontmatter["disable-model-invocation"] = disable_model_invocation
 
     yaml_str = yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)
     content = f"---\n{yaml_str}---\n\n{body}"

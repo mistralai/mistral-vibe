@@ -47,6 +47,11 @@ def _make_skill_manager(skills: dict[str, SkillInfo]) -> SkillManager:
     manager = MagicMock(spec=SkillManager)
     manager.available_skills = skills
     manager.get_skill.side_effect = lambda n: skills.get(n)
+    manager.get_model_invocable_skill.side_effect = lambda n: (
+        skill
+        if (skill := skills.get(n)) is not None and skill.model_invocable
+        else None
+    )
     return manager
 
 
@@ -256,6 +261,19 @@ class TestSkillErrors:
 
         with pytest.raises(ToolError, match="alpha, beta"):
             await collect_result(skill_tool.run(SkillArgs(name="missing"), ctx=ctx))
+
+    @pytest.mark.asyncio
+    async def test_rejects_skill_that_is_not_model_invocable(
+        self, tmp_path: Path, skill_tool: Skill
+    ) -> None:
+        info = _make_skill_dir(tmp_path)
+        info = info.model_copy(update={"model_invocable": False})
+        manager = _make_skill_manager({"my-skill": info})
+
+        with pytest.raises(ToolError, match='Skill "my-skill" not found'):
+            await collect_result(
+                skill_tool.run(SkillArgs(name="my-skill"), _make_ctx(manager))
+            )
 
     @pytest.mark.asyncio
     async def test_ignores_unreadable_file_when_prompt_is_available(

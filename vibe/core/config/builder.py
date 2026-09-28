@@ -17,6 +17,21 @@ from vibe.core.config.layer import (
     UntrustedLayerError,
 )
 from vibe.core.config.schema import ConfigFragment, ConfigSchema, MergeFieldMetadata
+from vibe.core.utils.merge import MergeStrategy
+
+
+class ConfigMergeError(ValueError):
+    def __init__(
+        self, field_name: str, layer_name: str, expected_type: str, value: Any
+    ) -> None:
+        actual_type = "dictionary" if isinstance(value, dict) else type(value).__name__
+        message = (
+            f"Invalid configuration: {field_name} from {layer_name} must be a "
+            f"{expected_type}, not a {actual_type}."
+        )
+        if field_name == "mcp_servers" and isinstance(value, dict):
+            message += " Use [[mcp_servers]] instead of [mcp_servers.<name>]."
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +141,12 @@ class ConfigBuilder[S: ConfigSchema]:
                         fragment_value = self._apply_model_before_validators(
                             fragment_key, fragment_field, fragment_value
                         )
+                        self._validate_merge_value(
+                            f"{key}.{fragment_key}",
+                            ld.name,
+                            fragment_meta.merge_strategy,
+                            fragment_value,
+                        )
                         accumulated[key][fragment_key] = (
                             fragment_meta.merge_strategy.apply(
                                 accumulated[key].get(fragment_key),
@@ -143,12 +164,62 @@ class ConfigBuilder[S: ConfigSchema]:
                     continue
 
                 value = self._apply_model_before_validators(key, field_info, value)
-                accumulated[key] = meta.merge_strategy.apply(
-                    accumulated.get(key), value, key_fn=self._make_key_fn(meta)
+                accumulated[key] = self._merge_value(
+                    key, meta, accumulated, value, layer_name=ld.name
                 )
                 origins[key] = ld.name
 
         return accumulated, origins
+
+    def _validate_merge_value(
+        self, field_name: str, layer_name: str, strategy: MergeStrategy, value: Any
+    ) -> None:
+        if value is None:
+            return
+        if strategy in {MergeStrategy.CONCAT, MergeStrategy.UNION}:
+            if isinstance(value, list) or isinstance(value, dict) and not value:
+                return
+            raise ConfigMergeError(field_name, layer_name, "list", value)
+        if strategy in {
+            MergeStrategy.MERGE,
+            MergeStrategy.DEEP_MERGE,
+        } and not isinstance(value, dict):
+            raise ConfigMergeError(field_name, layer_name, "dictionary", value)
+
+    def _merge_value(
+        self,
+        key: str,
+        meta: MergeFieldMetadata,
+        accumulated: dict[str, Any],
+        value: Any,
+        *,
+        layer_name: str,
+    ) -> Any:
+        """Combine one field across layers, reporting a shape clash as user error.
+
+        A strategy raises ``TypeError`` when the layers disagree on shape, which
+        in practice means a setting was typed as a scalar where a table or list
+        belongs. That is the user's config, not a bug, so it is re-raised as a
+        ``ValueError`` naming the field and the layer -- the startup path prints
+        that and exits, instead of showing a traceback.
+
+        Neither swallowing it nor keeping one side is safe: the schema coerces
+        several of these fields rather than rejecting them, so a mistyped
+        ``tools`` would validate as ``{}`` and silently drop the permissions a
+        lower layer had set.
+        """
+        try:
+            return meta.merge_strategy.apply(
+                accumulated.get(key), value, key_fn=self._make_key_fn(meta)
+            )
+        except TypeError as error:
+            if key == "mcp_servers" and isinstance(value, dict):
+                raise ConfigMergeError(key, layer_name, "list", value) from error
+            raise ValueError(
+                f"Invalid configuration for '{key}' in the {layer_name} layer: "
+                f"it is a {type(value).__name__}, which cannot be combined with "
+                f"the value another layer provides. Fix or remove that setting."
+            ) from error
 
     def _apply_model_before_validators(
         self, field_name: str, field_info: FieldInfo, value: Any

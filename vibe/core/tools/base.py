@@ -28,6 +28,7 @@ from vibe.core.config.harness_files import (
     get_harness_files_manager,
 )
 from vibe.core.tools.models import (
+    PermissionScope,
     ToolPermission,
     ToolPermissionError as ToolPermissionError,
 )
@@ -170,6 +171,11 @@ class BaseTool[
     # builtin shell tools only so custom tool availability stays config-only.
     shell_rollout: ClassVar[str | None] = None
     local_managed_shell_only: ClassVar[bool] = False
+
+    # A shell matches its ``allowlist`` against command prefixes and a file tool
+    # against paths, so an "always" grant persisted outside these scopes becomes
+    # an entry the tool never reads back.
+    allowlist_scopes: ClassVar[frozenset[PermissionScope]] = frozenset(PermissionScope)
 
     def __init__(
         self,

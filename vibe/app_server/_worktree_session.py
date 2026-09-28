@@ -21,7 +21,13 @@ from pathlib import Path
 
 from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server.protocol import ProtocolErrorCode, SessionOptions
-from vibe.core.git.worktree import ManagedWorktree, PendingSessionHold, PreparedWorktree
+from vibe.core.git.errors import GitError
+from vibe.core.git.worktree import (
+    ManagedWorktree,
+    PendingSessionHold,
+    PreparedWorktree,
+    RetainedRepositoryMapping,
+)
 from vibe.core.paths import dedup_paths
 from vibe.core.session.worktrees import (
     CreateNamedWorktree,
@@ -111,7 +117,7 @@ class SessionWorktrees:
         move: MoveSession,
         requested: SessionOptions,
         started_in: SessionOptions,
-    ) -> None:
+    ) -> WorktreeResolution:
         """Raise the worktree the session asked for and move it in.
 
         Raises rather than logging: the caller holds the session's turns behind
@@ -135,12 +141,30 @@ class SessionWorktrees:
         # was is bookkeeping, and must not be the reason its turns are refused.
         with suppress(Exception):
             self.release(previous, session_id)
+        return resolution
 
     async def cleanup(self, resolution: WorktreeResolution) -> None:
         """Undo what this start did, and only that."""
         await self._lifecycle.cleanup(
             resolution.prepared_worktree, resolution.pending_hold
         )
+
+    async def restore(self, cwd: Path) -> bool:
+        try:
+            return await self._lifecycle.restore(cwd)
+        except GitError as exc:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
+
+    @staticmethod
+    def retained_repository_mapping(cwd: Path) -> RetainedRepositoryMapping | None:
+        managed = ManagedWorktree.at(cwd)
+        if managed is None:
+            return None
+        return managed.retained_repository_mapping(cwd)
+
+    @staticmethod
+    def is_managed(cwd: Path) -> bool:
+        return ManagedWorktree.at(cwd) is not None
 
     @staticmethod
     def reject_input(options: SessionOptions) -> None:
@@ -177,6 +201,20 @@ class SessionWorktrees:
     @staticmethod
     def release(cwd: Path, session_id: str) -> None:
         WorktreeLifecycle.release(cwd, session_id)
+
+    @staticmethod
+    def reap_if_requested(cwd: Path) -> None:
+        managed = ManagedWorktree.at(cwd)
+        if managed is not None:
+            managed.reap_if_requested()
+
+    @staticmethod
+    def cancel_reap(
+        cwd: Path, requester_id: str | None = None, request_id: str | None = None
+    ) -> None:
+        managed = ManagedWorktree.at(cwd)
+        if managed is not None:
+            managed.cancel_reap(requester_id=requester_id, request_id=request_id)
 
 
 def _requested(options: SessionOptions) -> WorktreeRequest | None:

@@ -10,6 +10,7 @@ from pydantic import (
     StrictInt,
     StrictStr,
     TypeAdapter,
+    field_validator,
     model_validator,
 )
 
@@ -57,6 +58,7 @@ from vibe.app_server.models import (
     PluginInfo,
     PreparedPrompt,
     PublicCallbackEntry,
+    PublicChildSession,
     PublicError,
     PublicHistoryEntry,
     PublicRetryCategory,
@@ -109,6 +111,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "config/fields/read",
     "config/proxy/read",
     "config/proxy/write",
+    "config/model/write",
     "config/read",
     "config/reload",
     "config/schema",
@@ -175,6 +178,9 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/history/list",
     "session/list",
     "session/log/read",
+    "session/markAsSeen",
+    "session/pin",
+    "session/archive",
     "session/read",
     "session/ready/read",
     "session/ready/wait",
@@ -199,6 +205,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "skills/list",
     "skills/remove",
     "skills/setAlias",
+    "skills/setEnabled",
     "skills/setLatest",
     "skills/setVersion",
     "skills/updates",
@@ -229,6 +236,8 @@ SERVER_METHODS: tuple[str, ...] = (
     "workspace/git/worktrees/limit/update",
     "workspace/git/worktrees/list",
     "workspace/git/worktrees/prune",
+    "workspace/git/worktrees/reap",
+    "workspace/git/worktrees/reap/cancel",
     "workspace/git/worktrees/remove",
     "workspace/prompt/prepare",
     "workspace/trust/decision",
@@ -354,6 +363,16 @@ class AgentConfig(ProtocolModel):
     trust_workspace: bool = False
     mcp_servers: list[SessionMCPServer] = Field(default_factory=list)
 
+    @field_validator("cwd", "workdir")
+    @classmethod
+    def _reject_empty_cwd(cls, value: str | None) -> str | None:
+        # An empty cwd would silently resolve to the server process cwd,
+        # making a directory the caller never named trustable. A client
+        # that wants the default omits the field instead.
+        if value == "":
+            raise ValueError("Session cwd must not be empty")
+        return value
+
 
 SessionOptions = AgentConfig
 
@@ -471,6 +490,12 @@ class SessionListParams(ProtocolModel):
     root_session_id: str | None = None
     parent_session_id: str | None = None
     cwd: str | None = None
+    # Union of `cwd` matching over several checkouts.
+    cwds: list[str] | None = None
+    # ``True`` keeps only pinned sessions, ``False`` only unpinned ones, and
+    # ``None`` asks for both.
+    pinned: bool | None = None
+    include_archived: bool = False
 
 
 class SessionListResponse(ProtocolModel):
@@ -491,6 +516,15 @@ class SessionDeleteParams(ProtocolModel):
     session_id: str
 
 
+class SessionArchiveParams(ProtocolModel):
+    session_id: str
+    archived: bool
+
+
+class SessionArchiveResponse(ProtocolModel):
+    archived_at: int | None = None
+
+
 class SessionTitleUpdateParams(ProtocolModel):
     session_id: str
     title: str
@@ -500,6 +534,22 @@ class SessionTitleUpdateResponse(ProtocolModel):
     title: str
     updated_at: str | None = None
     last_event_id: int | None = None
+
+
+class SessionPinParams(ProtocolModel):
+    session_id: str
+    pinned: bool
+
+
+class SessionPinResponse(ProtocolModel):
+    # Absent while the session is unpinned, so the response says both whether
+    # the session is pinned and, when it is, how it should sort against the
+    # rest of the shelf.
+    pinned_at: int | None = None
+
+
+class SessionMarkAsSeenParams(ProtocolModel):
+    session_id: str
 
 
 class SessionHistoryListParams(ProtocolModel):
@@ -814,8 +864,26 @@ class RuntimeReadResponse(ProtocolModel):
     ready: bool
 
 
+class RuntimeMutationStatus(StrEnum):
+    APPLIED = auto()
+    PENDING = auto()
+
+
 class RuntimeMutationResponse(ProtocolModel):
+    """What the mutation produced, and whether the session is running it yet.
+
+    ``runtime`` is always the configuration the mutation produced, so a client
+    can render what the user asked for. ``PENDING`` says the session is still
+    running the previous one until the turn it is in ends: the Core reads its
+    settings when a turn starts, so what it holds cannot be replaced under it.
+    """
+
     runtime: RuntimeSnapshot
+    status: RuntimeMutationStatus = RuntimeMutationStatus.APPLIED
+
+    @property
+    def applied(self) -> bool:
+        return self.status is RuntimeMutationStatus.APPLIED
 
 
 class RuntimeUpdatedParams(ProtocolModel):
@@ -888,6 +956,14 @@ class ConfigWriteOpWire(ProtocolModel):
     target_layer: str | None = None
 
 
+class ModelConfigWriteParams(ProtocolModel):
+    """A model pick: which model answers, and how hard it thinks."""
+
+    session_id: str
+    model_alias: str | None = None
+    reasoning_effort: str | None = None
+
+
 class ConfigWriteParams(ProtocolModel):
     session_id: str
     ops: list[ConfigWriteOpWire]
@@ -898,6 +974,10 @@ class ConfigWriteParams(ProtocolModel):
 class ConfigWriteResponse(ConfigMutationResponse):
     rejected: bool = False
     failures: list[str] = Field(default_factory=list)
+
+    @property
+    def applied(self) -> bool:
+        return super().applied and not self.rejected and not self.failures
 
 
 class ConfigReadParams(ProtocolModel):
@@ -1012,6 +1092,12 @@ class SkillsRemoveParams(ProtocolModel):
     session_id: str
     name: str
     scope: SkillScopeArg = "global"
+
+
+class SkillsSetEnabledParams(ProtocolModel):
+    session_id: str
+    name: str
+    enabled: bool
 
 
 class SkillsConvertLocalParams(ProtocolModel):
@@ -1216,6 +1302,7 @@ class ConnectorCatalogReadResponse(ProtocolModel):
     catalog: ConnectorCatalogView
     selections: list[ConnectorSelectionView] = Field(default_factory=list)
     session: SessionConnectorStateView | None = None
+    manage_url: str | None = None
 
 
 class ConnectorCatalogRefreshParams(ProtocolModel):
@@ -1321,6 +1408,7 @@ class MCPAddParams(ProtocolModel):
     name: str | None = None
     scopes: list[str] = Field(default_factory=list)
     transport: MCPAddTransport = "streamable-http"
+    allow_insecure_http: bool = False
 
 
 class MCPAddResponse(ProtocolModel):
@@ -1456,6 +1544,14 @@ class WorkspaceWorktreeListResponse(ProtocolModel):
     # must take this rather than joining the root itself, because a path this
     # omits is one a move would refuse.
     repository_cwd: str | None = None
+    # The same repository-relative position without requiring it to exist in
+    # the main checkout. Used to associate retained sessions with projects;
+    # unlike repository_cwd, it is not necessarily a valid move destination.
+    repository_mapped_cwd: str | None = None
+    # The repository the listing was taken from. Pair with
+    # repository_mapped_cwd so a nested repository is not treated as part of
+    # a parent project just because its path sits underneath it.
+    repository_root: str | None = None
 
 
 class WorkspaceWorktreePruneParams(ProtocolModel):
@@ -1494,6 +1590,7 @@ type WorktreeRemoveOutcome = Literal[
     "kept_error",
     "not_found",
 ]
+type WorktreeReapOutcome = WorktreeRemoveOutcome | Literal["kept_cancelled"]
 
 
 class WorkspaceWorktreeRemoveResponse(ProtocolModel):
@@ -1504,6 +1601,36 @@ class WorkspaceWorktreeRemoveResponse(ProtocolModel):
     branch: str | None = None
     branch_deleted: bool = False
     reasons: list[str] = Field(default_factory=list)
+
+
+class WorkspaceWorktreeReapParams(WorkspaceWorktreeRemoveParams):
+    requester_id: str | None = Field(default=None, min_length=1)
+    request_id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_request_identity(self) -> Self:
+        if (self.requester_id is None) != (self.request_id is None):
+            raise ValueError("requesterId and requestId must be provided together")
+        return self
+
+
+class WorkspaceWorktreeReapResponse(ProtocolModel):
+    outcome: WorktreeReapOutcome
+    root: str | None = None
+    branch: str | None = None
+    branch_deleted: bool = False
+    reasons: list[str] = Field(default_factory=list)
+
+
+class WorkspaceWorktreeReapCancelParams(WorkspaceWorktreeRemoveParams):
+    requester_id: str | None = Field(default=None, min_length=1)
+    request_id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_request_identity(self) -> Self:
+        if self.requester_id is None and self.request_id is not None:
+            raise ValueError("requestId requires requesterId")
+        return self
 
 
 class WorkspaceGitCheckoutsParams(ProtocolModel):
@@ -1748,6 +1875,7 @@ class FeedbackShouldShowParams(ProtocolModel):
 
 class FeedbackShouldShowResponse(ProtocolModel):
     show: bool
+    snooze_duration_seconds: int | None = None
 
 
 class FeedbackRecordParams(ProtocolModel):
@@ -2018,6 +2146,10 @@ class TurnCompletedParams(EventNotificationParams):
 class StatsUpdatedParams(EventNotificationParams):
     stats: AgentStatsSnapshot
     context_window: int
+
+
+class ChildSessionUpdatedParams(EventNotificationParams):
+    child_session: PublicChildSession
 
 
 class Notification(ProtocolModel):

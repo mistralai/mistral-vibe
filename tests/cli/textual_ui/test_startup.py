@@ -44,13 +44,18 @@ async def test_trust_is_resolved_before_session_open(
         return session
 
     host.open_session = open_session
-    monkeypatch.setattr(
-        TrustFolderApp, "run_trust_dialog_async", AsyncMock(return_value="trust_cwd")
-    )
+    seen_autocopy: list[bool] = []
+
+    async def run_trust_dialog(dialog: TrustFolderApp) -> str:
+        seen_autocopy.append(dialog.autocopy_to_clipboard)
+        return "trust_cwd"
+
+    monkeypatch.setattr(TrustFolderApp, "run_trust_dialog_async", run_trust_dialog)
 
     opened = await startup.open_textual_session(
         host,
         prompt_for_workspace_trust=True,
+        autocopy_to_clipboard=False,
         show_resume_picker=False,
         initially_resuming=False,
     )
@@ -60,6 +65,7 @@ async def test_trust_is_resolved_before_session_open(
     assert opened.showed_trust_prompt is True
     assert opened.showed_resume_picker is False
     assert calls == ["trust_status", "trust_decision", "open_session"]
+    assert seen_autocopy == [False]
 
 
 @pytest.mark.asyncio

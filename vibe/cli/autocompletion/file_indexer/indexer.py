@@ -56,7 +56,9 @@ class FileIndexer:
     def stats(self) -> FileIndexStats:
         return self._stats
 
-    def get_index(self, root: Path) -> list[IndexEntry]:
+    def get_index(
+        self, root: Path, should_cancel: Callable[[], bool] | None = None
+    ) -> list[IndexEntry]:
         resolved_root = root.resolve()
 
         with self._lock:  # read current root without blocking rebuild bookkeeping
@@ -68,20 +70,23 @@ class FileIndexer:
             self._watcher.stop()
             with self._rebuild_lock:  # cancel rebuilds targeting other roots
                 self._target_root = resolved_root
-                for other_root, task in self._active_rebuilds.items():
+                for other_root, task in list(self._active_rebuilds.items()):
                     if other_root != resolved_root:
                         task.cancel_event.set()
                         task.done_event.set()
                         self._active_rebuilds.pop(other_root, None)
 
         with self._lock:
-            needs_rebuild = self._store.root != resolved_root
+            needs_rebuild = self._store.root != resolved_root or self._store.is_dirty
 
         if needs_rebuild:
             with self._rebuild_lock:
                 self._target_root = resolved_root
             self._start_background_rebuild(resolved_root)
-            self._wait_for_rebuild(resolved_root)
+            self._wait_for_rebuild(resolved_root, should_cancel)
+
+        if should_cancel and should_cancel():
+            return []
 
         if self._should_enable_watcher():
             self._watcher.start(resolved_root)
@@ -167,11 +172,14 @@ class FileIndexer:
         finally:
             task.done_event.set()
 
-    def _wait_for_rebuild(self, root: Path) -> None:
+    def _wait_for_rebuild(
+        self, root: Path, should_cancel: Callable[[], bool] | None = None
+    ) -> None:
         with self._rebuild_lock:
             task = self._active_rebuilds.get(root)
-        if task:
-            task.done_event.wait()
+        while task and not task.done_event.wait(timeout=0.01):
+            if should_cancel and should_cancel():
+                return
 
     def _handle_watch_changes(
         self, root: Path, raw_changes: Iterable[tuple[Change, str]]

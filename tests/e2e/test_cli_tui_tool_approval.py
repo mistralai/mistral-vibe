@@ -10,7 +10,7 @@ from tests.e2e.common import (
     send_ctrl_c_until_quit_confirmation,
     wait_for_main_screen,
     wait_for_rendered_text,
-    wait_for_request_count,
+    wait_for_request_count_while_draining_child_output,
 )
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
@@ -76,8 +76,12 @@ def test_spawn_cli_asks_bash_permission_and_shows_tool_output_after_approval(
         child.send("Run a shell command")
         child.send("\r")
 
-        wait_for_request_count(
-            lambda: len(streaming_mock_server.requests), expected_count=1, timeout=10
+        wait_for_request_count_while_draining_child_output(
+            child,
+            captured,
+            lambda: len(streaming_mock_server.requests),
+            expected_count=1,
+            timeout=10,
         )
         wait_for_rendered_text(
             child, captured, needle="Permission for the bash tool", timeout=10

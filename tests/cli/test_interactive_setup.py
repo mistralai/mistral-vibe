@@ -54,11 +54,12 @@ def captured_startup(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return call
 
 
-def _run(args: argparse.Namespace) -> None:
+def _run(args: argparse.Namespace, *, autocopy_to_clipboard: bool = True) -> None:
     cli_mod._run_interactive_mode(
         args=args,
         stdin_prompt=None,
         update_cache_repository=FakeUpdateCacheRepository(),
+        autocopy_to_clipboard=autocopy_to_clipboard,
     )
 
 
@@ -66,6 +67,12 @@ def test_trust_prompt_is_shown_by_default(captured_startup: dict[str, Any]) -> N
     _run(_make_args())
 
     assert captured_startup["startup"].prompt_for_workspace_trust is True
+
+
+def test_autocopy_setting_is_forwarded(captured_startup: dict[str, Any]) -> None:
+    _run(_make_args(), autocopy_to_clipboard=False)
+
+    assert captured_startup["startup"].autocopy_to_clipboard is False
 
 
 def test_worktree_skips_the_trust_prompt(captured_startup: dict[str, Any]) -> None:

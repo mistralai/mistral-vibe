@@ -632,6 +632,18 @@ class LegacySessionRuntimeController:
     ) -> OpenedRuntime:
         options = params.agent_config.model_copy(update={"cwd": params.cwd})
         try:
+            if session_id is not None or continue_latest:
+                target = await self._host_handler.legacy_open_target(
+                    session_id, options.cwd
+                )
+                if target is not None:
+                    target_id, stored_cwd = target
+                    if stored_cwd is not None:
+                        await self._worktrees.restore(Path(stored_cwd))
+                        options = options.model_copy(update={"cwd": stored_cwd})
+                    session_id = target_id
+                    if continue_latest:
+                        continue_latest = False
             worktree_resolution = await self._worktrees.resolve_for_start(options)
             try:
                 agent_loop = await self._open_root(
@@ -655,7 +667,7 @@ class LegacySessionRuntimeController:
                 str(exc),
                 data={"provider": exc.provider},
             ) from exc
-        except RuntimeConfigurationError as exc:
+        except (RuntimeConfigurationError, ValueError) as exc:
             raise RequestFailure(
                 ProtocolErrorCode.INVALID_PARAMS,
                 str(exc),

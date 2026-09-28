@@ -49,15 +49,16 @@ def test_snapshot_image_is_idempotent_on_same_bytes(tmp_path: Path) -> None:
     assert sum(1 for _ in (session_dir / "attachments").iterdir()) == 1
 
 
-def test_snapshot_image_returns_source_when_session_dir_is_none(tmp_path: Path) -> None:
+def test_snapshot_image_inlines_when_session_dir_is_none(tmp_path: Path) -> None:
     src = tmp_path / "screenshot.png"
     src.write_bytes(PNG_BYTES)
 
     att = snapshot_image(src, alias="screenshot.png", session_dir=None)
 
-    assert isinstance(att.source, FileImageSource)
-    assert att.source.path == src.resolve()
+    assert isinstance(att.source, InlineImageSource)
+    assert base64.b64decode(att.source.data) == PNG_BYTES
     assert att.alias == "screenshot.png"
+    assert att.mime_type == "image/png"
 
 
 def test_snapshot_image_rejects_non_image_extension(tmp_path: Path) -> None:

@@ -5,7 +5,6 @@ import base64
 from collections.abc import Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
-from datetime import datetime
 from functools import lru_cache
 import hashlib
 import json
@@ -28,13 +27,14 @@ from vibe.app_server._projection import (
 )
 from vibe.app_server._session_model import active_model_is_pinned
 from vibe.app_server._state import build_stored_public_state, history_page
-from vibe.app_server._utils import now_ms
+from vibe.app_server._utils import now_ms, optional_time_ms, time_ms
 from vibe.app_server._workspace import (
     WorkspaceTrustError,
     decide_workspace_trust,
     read_untrusted_config_dirs,
     read_workspace_trust,
 )
+from vibe.app_server._worktree_session import SessionWorktrees
 from vibe.app_server.models import ConfigIssue, IdleSessionStatus, PublicSession
 from vibe.app_server.protocol import (
     AgentsListParams,
@@ -88,6 +88,9 @@ from vibe.app_server.protocol import (
     WorkspaceWorktreeListResponse,
     WorkspaceWorktreePruneParams,
     WorkspaceWorktreePruneResponse,
+    WorkspaceWorktreeReapCancelParams,
+    WorkspaceWorktreeReapParams,
+    WorkspaceWorktreeReapResponse,
     WorkspaceWorktreeRemoveParams,
     WorkspaceWorktreeRemoveResponse,
     WorktreeRemoveOutcome,
@@ -119,6 +122,7 @@ from vibe.core.session.saved_sessions import (
     relocate_saved_session,
     update_saved_session_title,
 )
+from vibe.core.session.session_interop import resolve_legacy_session_reference
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.skills.manager import SkillManager
 from vibe.core.skills.models import SkillSource
@@ -154,6 +158,8 @@ _HOST_METHODS = frozenset({
     "workspace/git/worktrees/limit/update",
     "workspace/git/worktrees/list",
     "workspace/git/worktrees/prune",
+    "workspace/git/worktrees/reap",
+    "workspace/git/worktrees/reap/cancel",
     "workspace/git/worktrees/remove",
 })
 
@@ -172,6 +178,27 @@ class HostRequestHandler:
 
     def handles(self, method: str) -> bool:
         return method in _HOST_METHODS
+
+    async def legacy_open_target(
+        self, session_id: str | None, cwd: str | None
+    ) -> tuple[str, str | None] | None:
+        config = await self._load_config(None if session_id is not None else cwd)
+        if session_id is not None:
+            reference = await asyncio.to_thread(
+                resolve_legacy_session_reference, session_id, config.session_logging
+            )
+            if reference is None:
+                return None
+            return reference.session_id, reference.cwd or None
+
+        sessions = await asyncio.to_thread(_continue_resume_sessions, config, cwd)
+        target_id = _continue_session_id(config, sessions)
+        if target_id is None:
+            return None
+        target = next(
+            session for session in sessions if session.session_id == target_id
+        )
+        return target.session_id, target.cwd or None
 
     async def dispatch(self, method: str, raw_params: dict[str, Any]) -> DispatchResult:
         try:
@@ -282,7 +309,7 @@ class HostRequestHandler:
         orchestrator = await self._load_orchestrator(None)
         agents = AgentManager(
             orchestrator,
-            orchestrator.config.default_agent,
+            orchestrator.config.resolve_default_agent(),
             harness_files=self._harness_files.for_session(self._cwd(None)),
         )
         active, available = project_unified_agent_summaries(
@@ -447,6 +474,23 @@ class HostRequestHandler:
                     ManagedWorktree.prune, orchestrator.config.worktree_limit
                 )
                 response = WorkspaceWorktreePruneResponse(removed=removed)
+            case "workspace/git/worktrees/reap":
+                params = validate_wire(WorkspaceWorktreeReapParams, raw_params)
+                response = await asyncio.to_thread(
+                    worktree_reap_response,
+                    self._cwd(params.cwd),
+                    params.requester_id,
+                    params.request_id,
+                )
+            case "workspace/git/worktrees/reap/cancel":
+                params = validate_wire(WorkspaceWorktreeReapCancelParams, raw_params)
+                await asyncio.to_thread(
+                    SessionWorktrees.cancel_reap,
+                    self._cwd(params.cwd),
+                    params.requester_id,
+                    params.request_id,
+                )
+                response = EmptyResponse()
             case "workspace/git/checkouts":
                 checkouts = validate_wire(WorkspaceGitCheckoutsParams, raw_params)
                 response = await asyncio.to_thread(
@@ -576,7 +620,13 @@ class HostRequestHandler:
         self, cwd: str | None
     ) -> ConfigOrchestrator[VibeConfigSchema]:
         session_files = self._harness_files.for_session(self._cwd(cwd))
-        return await build_default_orchestrator(harness_files=session_files)
+        orchestrator = await build_default_orchestrator(harness_files=session_files)
+        # Match the session path so host reads (agents/list) see rollout flags
+        # like smart_approve_available. Lazy import: _runtime imports _host.
+        from vibe.app_server._runtime import _apply_cached_experiment_variants
+
+        await _apply_cached_experiment_variants(orchestrator)
+        return orchestrator
 
     @staticmethod
     def _cwd(value: str | None) -> Path:
@@ -597,7 +647,16 @@ def config_schema_response() -> ConfigSchemaReadResponse:
 def project_session_list(
     config: VibeConfigSchema, params: SessionListParams
 ) -> SessionListResponse:
-    sessions = list_local_resume_sessions(config, params.cwd)
+    # `cwds` is the union of what `cwd` matches for each entry, so an explicit
+    # empty list matches nothing and an absent one keeps the single-cwd search.
+    requested = params.cwds if params.cwds is not None else [params.cwd]
+    sessions = list(
+        {
+            session.session_id: session
+            for cwd in requested
+            for session in _continue_resume_sessions(config, cwd)
+        }.values()
+    )
     roots = _session_roots(sessions)
     filtered = [
         session
@@ -627,8 +686,11 @@ def project_session_list(
                     session.session_id, config.session_logging
                 ),
                 status=IdleSessionStatus(),
-                created_at=_time_ms(session.start_time or session.updated_at),
-                updated_at=_time_ms(session.updated_at),
+                created_at=time_ms(
+                    session.start_time or session.updated_at, fallback=now_ms
+                ),
+                updated_at=time_ms(session.updated_at, fallback=now_ms),
+                bumped_at=optional_time_ms(session.bumped_at),
                 cwd=session.cwd or None,
             )
             for session in page
@@ -653,6 +715,42 @@ def _continue_session_id(
     if pointer_id is not None and pointer_id in candidate_ids:
         return pointer_id
     return filtered[0].session_id
+
+
+def _continue_resume_sessions(
+    config: VibeConfigSchema, cwd: str | None
+) -> list[ResumeSessionInfo]:
+    sessions = list_local_resume_sessions(config, cwd)
+    if cwd is None:
+        return sessions
+
+    requested = Path(cwd).expanduser().resolve()
+    listed_ids = {session.session_id for session in sessions}
+    sessions.extend(
+        session
+        for session in list_local_resume_sessions(config, None)
+        if session.session_id not in listed_ids
+        and _resume_session_cwd_matches(session.cwd, requested)
+    )
+    sessions.sort(
+        key=lambda session: (session.updated_at, session.session_id), reverse=True
+    )
+    return sessions
+
+
+def _resume_session_cwd_matches(session_cwd: str, requested_cwd: Path) -> bool:
+    cwd = Path(session_cwd).expanduser().resolve()
+    if cwd == requested_cwd:
+        return True
+    managed = ManagedWorktree.at(cwd)
+    if managed is None:
+        return False
+    mapping = managed.retained_repository_mapping(cwd)
+    return (
+        mapping is not None
+        and requested_cwd.is_relative_to(mapping.root)
+        and mapping.cwd.is_relative_to(requested_cwd)
+    )
 
 
 def _session_roots(sessions: list[ResumeSessionInfo]) -> dict[str, str]:
@@ -696,24 +794,35 @@ def _session_cursor_index(sessions: list[ResumeSessionInfo], cursor: str | None)
     )
 
 
-def _time_ms(value: str) -> int:
-    try:
-        return int(datetime.fromisoformat(value).timestamp() * 1000)
-    except ValueError:
-        return now_ms()
-
-
 def worktree_list_response(
     cwd: Path, include_details: bool = False
 ) -> WorkspaceWorktreeListResponse:
     repository_cwd: Path | None = None
+    repository_mapped_cwd: Path | None = None
+    repository_root: Path | None = None
+    listing_cwd = cwd
     try:
-        with WorktreeRepository.open(cwd) as repository:
+        with ExitStack() as stack:
+            managed = ManagedWorktree.at(cwd)
+            mapping = (
+                managed.retained_repository_mapping(cwd)
+                if managed is not None
+                else None
+            )
+            if mapping is not None:
+                listing_cwd = mapping.cwd
+                repository = stack.enter_context(
+                    WorktreeRepository.open(mapping.cwd, repository_root=mapping.root)
+                )
+            else:
+                repository = stack.enter_context(WorktreeRepository.open(cwd))
             worktrees = repository.linked()
             # Not gated behind the details flag: it is two stat calls on a
             # repository that is already open, where the details cost a merge
             # base per branch and a second repository object.
             repository_cwd = repository.repository_counterpart
+            repository_mapped_cwd = repository.repository_mapped_cwd
+            repository_root = repository.root
     except GitRepositoryNotFoundError:
         logger.debug("Skipping worktree listing for non-git path=%s", cwd)
         worktrees = ()
@@ -724,12 +833,18 @@ def worktree_list_response(
         worktrees = ()
 
     details = (
-        _worktree_details(cwd, worktrees) if include_details and worktrees else None
+        _worktree_details(listing_cwd, worktrees)
+        if include_details and worktrees
+        else None
     )
     changes = details.changes if details else {}
     return WorkspaceWorktreeListResponse(
         repository_branch=details.repository_branch if details else None,
         repository_cwd=str(repository_cwd) if repository_cwd is not None else None,
+        repository_mapped_cwd=(
+            str(repository_mapped_cwd) if repository_mapped_cwd is not None else None
+        ),
+        repository_root=str(repository_root) if repository_root is not None else None,
         worktrees=[
             WorkspaceLinkedWorktree(
                 name=worktree.name,
@@ -813,6 +928,31 @@ def worktree_remove_response(cwd: Path) -> WorkspaceWorktreeRemoveResponse:
 
     return WorkspaceWorktreeRemoveResponse(
         outcome=_WORKTREE_REMOVE_OUTCOMES[release.outcome],
+        root=None if release.root is None else str(release.root),
+        branch=release.branch,
+        branch_deleted=release.branch_deleted,
+        reasons=list(release.reasons),
+    )
+
+
+def worktree_reap_response(
+    cwd: Path, requester_id: str | None = None, request_id: str | None = None
+) -> WorkspaceWorktreeReapResponse:
+    managed = ManagedWorktree.at(cwd)
+    if managed is None:
+        return WorkspaceWorktreeReapResponse(outcome="kept_unmanaged")
+    try:
+        release = managed.reap(requester_id=requester_id, request_id=request_id)
+    except (GitError, OSError) as exc:
+        logger.warning("Failed to reap worktree cwd=%s: %s", cwd, exc)
+        return WorkspaceWorktreeReapResponse(outcome="kept_error", reasons=[str(exc)])
+
+    return WorkspaceWorktreeReapResponse(
+        outcome=(
+            "kept_cancelled"
+            if release.outcome is WorktreeReleaseOutcome.KEPT_CANCELLED
+            else _WORKTREE_REMOVE_OUTCOMES[release.outcome]
+        ),
         root=None if release.root is None else str(release.root),
         branch=release.branch,
         branch_deleted=release.branch_deleted,

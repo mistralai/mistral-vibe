@@ -1,0 +1,36 @@
+#todo-overlay-screen {
+    align: center middle;
+}
+
+#todo-overlay-content {
+    layout: vertical;
+    width: 82%;
+    max-width: 86;
+    height: auto;
+    max-height: 80%;
+    background: $surface;
+    border: round $primary;
+    border-title-align: left;
+    border-title-color: $primary;
+    border-title-style: bold;
+    padding: 1 2 0 2;
+}
+
+#todo-overlay-list {
+    width: 100%;
+    height: auto;
+    max-height: 100%;
+}
+
+#todo-overlay-list > Static {
+    width: 100%;
+    height: auto;
+    padding-bottom: 1;
+}
+
+#todo-overlay-hint {
+    width: 100%;
+    height: 1;
+    color: $text-muted;
+    text-align: right;
+}

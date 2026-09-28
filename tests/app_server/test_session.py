@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from datetime import datetime
 import json
 from pathlib import Path
 import time
@@ -586,6 +587,41 @@ async def test_completed_turn_refreshes_runtime_projection() -> None:
         await agent_loop.aclose()
 
     assert session.resources.config.current.theme == "server-updated-theme"
+
+
+@pytest.mark.asyncio
+async def test_legacy_accepted_turn_persists_and_projects_bumped_at(
+    tmp_path: Path,
+) -> None:
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    backend = FakeBackend([mock_llm_chunk(content="done")])
+    agent_loop = build_test_agent_loop(
+        config=config, backend=backend, enable_streaming=True
+    )
+    session = await create_test_app_server_session(agent_loop)
+    session_dir: Path | None = None
+
+    try:
+        assert session.state.session.bumped_at is None
+        await _consume(session.act("hello", client_message_id="user-1"))
+        session_dir = agent_loop.session_logger.session_dir
+        assert session_dir is not None
+        async with asyncio.timeout(2):
+            while session.state.session.bumped_at is None:
+                await asyncio.sleep(0)
+        projected_bumped_at = session.state.session.bumped_at
+    finally:
+        await session.close()
+
+    metadata = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
+    persisted_bumped_at = int(
+        datetime.fromisoformat(metadata["bumped_at"]).timestamp() * 1000
+    )
+    assert projected_bumped_at == persisted_bumped_at
 
 
 @pytest.mark.asyncio
@@ -2287,6 +2323,47 @@ async def test_interrupt_ignores_already_settled_turn_errors(
     )
 
     await session.interrupt()
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_interrupt_still_lets_a_cancelled_turn_unwind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibe.app_server.session._INTERRUPT_ON_CANCEL_TIMEOUT_SECONDS", 0.05
+    )
+    started = asyncio.Event()
+    agent_loop = build_test_agent_loop()
+
+    async def blocking_act(*_args, **_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+        yield AssistantEvent(content="unreachable", message_id="assistant-1")
+
+    agent_loop.act = blocking_act
+    session = await _create_reconnectable_session(agent_loop)
+
+    async def stuck_interrupt() -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(session, "interrupt", stuck_interrupt)
+
+    stream = session.act("hello")
+    consumer = asyncio.create_task(_consume(stream))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        # Without a bound on the teardown interrupt, `act()` never re-raises and the
+        # canceller hangs with it.
+        consumer.cancel()
+        await asyncio.wait({consumer}, timeout=1)
+        assert consumer.cancelled()
+    finally:
+        if not consumer.done():
+            consumer.cancel()
+            with suppress(asyncio.CancelledError):
+                await consumer
+        await session.close()
 
 
 @pytest.mark.asyncio

@@ -121,6 +121,7 @@ from vibe.acp.utils import (
     is_jetbrains_client,
     make_thinking_response,
 )
+from vibe.acp.voice import VoiceController
 from vibe.app_server._integration_resources import MCPResource
 from vibe.app_server._project_links import (
     ProjectLinksAuthError,
@@ -128,6 +129,7 @@ from vibe.app_server._project_links import (
     ProjectLinksInternalError,
     ProjectLinksInvalidRequest,
 )
+from vibe.app_server.config import ConfigView
 from vibe.app_server.events import (
     AppServerEvent,
     CallbackRequested,
@@ -151,6 +153,7 @@ from vibe.app_server.models import (
     ApprovalDecisionType,
     ImageAttachment,
     MentionStats,
+    PathGrantScope,
     PublicCallbackEntry,
     PublicRetryCategory,
     PublicTurnStatus,
@@ -339,7 +342,30 @@ class SessionDeleteRequest(BaseModel):
     session_id: str = Field(alias="sessionId", min_length=1)
 
 
+class LoopsListRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+    session_id: str = Field(alias="sessionId", min_length=1)
+
+
 class SessionIdRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+    session_id: str = Field(alias="sessionId", min_length=1)
+
+
+class LoopsCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+    session_id: str = Field(alias="sessionId", min_length=1)
+    interval: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+
+
+class LoopsDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+    session_id: str = Field(alias="sessionId", min_length=1)
+    loop_id: str = Field(alias="loopId", min_length=1)
+
+
+class LoopsClearRequest(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
     session_id: str = Field(alias="sessionId", min_length=1)
 
@@ -391,10 +417,14 @@ class VibeAcpAgent(AcpAgent):
         credentials_persister: CredentialsPersister | None = None,
         tenant_domain_resolver: TenantDomainResolver | None = None,
         environ_before_dotenv_load: Mapping[str, str] | None = None,
+        experimental_harness: bool = False,
+        legacy_harness: bool = False,
     ) -> None:
         self.sessions: dict[str, AcpSession] = {}
         self.client_capabilities: ClientCapabilities | None = None
         self.client_info: Implementation | None = None
+        self._experimental_harness = experimental_harness
+        self._legacy_harness = legacy_harness
         self._harness_host = LocalHarnessHost()
         self._start_session = session_starter or self._harness_host.start
         self._passive_host: AppServerHost | None = None
@@ -416,6 +446,7 @@ class VibeAcpAgent(AcpAgent):
         self._command_controller = AcpCommandController(
             lambda: self.client, self._send_config_options
         )
+        self._voice = VoiceController(lambda: self.client)
 
     @override
     async def initialize(
@@ -578,6 +609,8 @@ class VibeAcpAgent(AcpAgent):
                     ),
                     session=intent,
                     client_tool_handler=client_tool_handler,
+                    experimental_harness=self._experimental_harness,
+                    legacy_harness=self._legacy_harness,
                 )
             )
         except AppServerResponseError as exc:
@@ -595,9 +628,7 @@ class VibeAcpAgent(AcpAgent):
             raise ConfigurationError(str(exc)) from exc
         session_id = acp_session_id or app_server.session_id
         client_tool_handler.bind_session(session_id)
-        commands = AcpCommandRegistry(
-            vibe_code_enabled=app_server.resources.config.current.vibe_code_enabled
-        )
+        commands = AcpCommandRegistry()
         session = AcpSession(
             session_id=session_id,
             app_server=app_server,
@@ -748,7 +779,13 @@ class VibeAcpAgent(AcpAgent):
         content = project_prompt(prompt)
         text = content.text
         message_id = str(uuid4())
-        match await self._command_controller.execute(session, text, message_id):
+        try:
+            command_result = await self._command_controller.execute(
+                session, text, message_id
+            )
+        except AppServerResponseError as exc:
+            raise InvalidRequestError(exc.error.message) from exc
+        match command_result:
             case PromptResponse() as response:
                 return response
             case InjectedPrompt(text=injected_text):
@@ -831,9 +868,12 @@ class VibeAcpAgent(AcpAgent):
             tool_call=ToolCallUpdate(
                 tool_call_id=detail.related_entry_id or detail.effect.tool_name
             ),
-            options=build_permission_options(detail.required_permissions),
+            options=build_permission_options(
+                detail.required_permissions, detail.path_scope_choices
+            ),
         )
         decision = ApprovalDecisionType.DENY
+        path_scope: PathGrantScope | None = None
         feedback: str | None = None
         if isinstance(response.outcome, AllowedOutcome):
             match response.outcome.option_id:
@@ -843,6 +883,24 @@ class VibeAcpAgent(AcpAgent):
                     decision = ApprovalDecisionType.APPROVE_FOR_SESSION
                 case ToolOption.ALLOW_ALWAYS_PERMANENT:
                     decision = ApprovalDecisionType.APPROVE_PERMANENTLY
+                case (
+                    ToolOption.ALLOW_SESSION_EXACT
+                    | ToolOption.ALLOW_SESSION_DIRECTORY_RECURSIVE
+                ):
+                    decision = ApprovalDecisionType.APPROVE_FOR_SESSION
+                    path_scope = {
+                        ToolOption.ALLOW_SESSION_EXACT: PathGrantScope.EXACT,
+                        ToolOption.ALLOW_SESSION_DIRECTORY_RECURSIVE: PathGrantScope.DIRECTORY_RECURSIVE,
+                    }[ToolOption(response.outcome.option_id)]
+                case (
+                    ToolOption.ALLOW_PERMANENT_EXACT
+                    | ToolOption.ALLOW_PERMANENT_DIRECTORY_RECURSIVE
+                ):
+                    decision = ApprovalDecisionType.APPROVE_PERMANENTLY
+                    path_scope = {
+                        ToolOption.ALLOW_PERMANENT_EXACT: PathGrantScope.EXACT,
+                        ToolOption.ALLOW_PERMANENT_DIRECTORY_RECURSIVE: PathGrantScope.DIRECTORY_RECURSIVE,
+                    }[ToolOption(response.outcome.option_id)]
                 case ToolOption.REJECT_ONCE:
                     session.app_server.resources.telemetry.record(
                         "vibe.user_cancelled_action", {"action": "reject_approval"}
@@ -853,7 +911,8 @@ class VibeAcpAgent(AcpAgent):
         await session.app_server.respond_to_callback(
             callback.callback_id,
             ApprovalCallbackOutput(
-                decision=ApprovalDecision(type=decision), feedback=feedback
+                decision=ApprovalDecision(type=decision, path_scope=path_scope),
+                feedback=feedback,
             ),
         )
 
@@ -925,6 +984,7 @@ class VibeAcpAgent(AcpAgent):
             await self._passive_host.close()
             self._passive_host = None
         await self._harness_host.close()
+        await self._voice.close()
 
     @override
     async def list_sessions(
@@ -1112,6 +1172,8 @@ class VibeAcpAgent(AcpAgent):
                     ),
                 )
                 result = {}
+            case _ if method.startswith("loops/"):
+                result = await self._loops_extension(method, params)
             case "session/delete":
                 try:
                     request = SessionDeleteRequest.model_validate(params)
@@ -1142,9 +1204,64 @@ class VibeAcpAgent(AcpAgent):
                 result = await self._whoami_extension(method, params)
             case _ if method.startswith("logLevel/"):
                 result = await self._log_level_extension(method, params)
+            case _ if method.startswith("voice/"):
+                result = await self._voice_extension(method, params)
             case _:
                 raise NotImplementedMethodError(method)
         return result
+
+    async def _voice_extension(self, method: str, params: dict) -> dict:
+        # Voice features need the current session's app server resources
+        # (ConfigView, NarrationResource, telemetry) to construct the
+        # CLI's VoiceManager and NarratorManager.
+        #
+        # The webview gates on VS Code settings (voice.enabled /
+        # voiceNarration.enabled) before calling narrate/transcribeStart, so by
+        # the time we get here the user has explicitly opted in. The CLI's own
+        # narrator_enabled / voice_mode_enabled flags come from the CLI config
+        # file and are unrelated to the VS Code toggles, so we force them to True
+        # to let the CLI managers actually materialize and run.
+        try:
+            session = next(iter(self.sessions.values()), None)
+
+            def config_getter() -> ConfigView:
+                assert session is not None
+                return session.app_server.resources.config.current.model_copy(
+                    update={"narrator_enabled": True, "voice_mode_enabled": True}
+                )
+
+            narration_resource = (
+                session.app_server.resources.narration if session else None
+            )
+            telemetry = session.app_server.resources.telemetry if session else None
+
+            match method:
+                case "voice/transcribeStart":
+                    return await self._voice.transcribe_start(
+                        language=params.get("language", "en"),
+                        config_getter=config_getter,
+                        narration_resource=narration_resource,
+                        telemetry=telemetry,
+                    )
+                case "voice/transcribeStop":
+                    return await self._voice.transcribe_stop()
+                case "voice/transcribeCancel":
+                    return await self._voice.transcribe_cancel()
+                case "voice/narrate":
+                    return await self._voice.narrate(
+                        user_message=params.get("userMessage", ""),
+                        assistant_text=params.get("assistantText", ""),
+                        config_getter=config_getter,
+                        narration_resource=narration_resource,
+                        telemetry=telemetry,
+                    )
+                case "voice/narrateCancel":
+                    return await self._voice.narrate_cancel()
+                case _:
+                    raise NotImplementedMethodError(method)
+        except Exception:
+            logger.error("voice extension method %s failed", method, exc_info=True)
+            raise
 
     async def _config_schema(self) -> dict[str, Any]:
         response = await (await self._host_resources()).read_config_schema()
@@ -1352,6 +1469,8 @@ class VibeAcpAgent(AcpAgent):
                     LocalHarnessOptions(
                         client=self._client_descriptor(),
                         session_options=SessionOptions(cwd=str(Path.cwd())),
+                        experimental_harness=self._experimental_harness,
+                        legacy_harness=self._legacy_harness,
                     )
                 )
         return self._passive_host
@@ -1363,29 +1482,30 @@ class VibeAcpAgent(AcpAgent):
             if isinstance(requested_session, str)
             else None
         )
-        if session is not None:
-            if method == "trust/status":
+        if method == "trust/status":
+            if session is not None:
                 response = await session.app_server.resources.workspace.trust_status(
                     params.get("cwd")
                 )
             else:
-                decision = params.get("decision")
-                if decision not in {"trust_repo", "trust_cwd", "decline"}:
-                    raise InvalidRequestError(f"Unknown trust decision: {decision}")
-                response = await session.app_server.resources.workspace.decide_trust(
-                    cast(Any, decision), cwd=params.get("cwd")
-                )
-        else:
-            host = await self._host_resources()
-            if method == "trust/status":
+                host = await self._host_resources()
                 response = await host.trust_status(params.get("cwd"))
-            else:
-                decision = params.get("decision")
-                if decision not in {"trust_repo", "trust_cwd", "decline"}:
-                    raise InvalidRequestError(f"Unknown trust decision: {decision}")
-                response = await host.decide_trust(
-                    cast(Any, decision), cwd=params.get("cwd")
+        else:
+            # A trust decision is a persistent write to the trust store, so an
+            # untrusted ACP peer's claim must be anchored to a session Vibe
+            # itself created: a session-less claim is rejected outright, and
+            # the session-scoped backend route pins the decision to the
+            # session's own working directory.
+            if session is None:
+                raise InvalidRequestError("Trust decisions require a valid sessionId")
+            try:
+                response = await session.app_server.resources.workspace.decide_trust(
+                    cast(Any, params.get("decision")), cwd=params.get("cwd")
                 )
+            except ValidationError as exc:
+                raise InvalidRequestError(str(exc)) from exc
+            except AppServerResponseError as exc:
+                raise InvalidRequestError(exc.error.message) from exc
         return {
             "trust_status": response.status,
             "details": (
@@ -1394,6 +1514,47 @@ class VibeAcpAgent(AcpAgent):
                 else None
             ),
         }
+
+    async def _loops_extension(self, method: str, params: dict[str, Any]) -> dict:
+        try:
+            if method == "loops/list":
+                request: (
+                    LoopsListRequest
+                    | LoopsCreateRequest
+                    | LoopsDeleteRequest
+                    | LoopsClearRequest
+                ) = LoopsListRequest.model_validate(params)
+            elif method == "loops/create":
+                request = LoopsCreateRequest.model_validate(params)
+            elif method == "loops/delete":
+                request = LoopsDeleteRequest.model_validate(params)
+            else:
+                request = LoopsClearRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(f"Invalid ACP loops request: {exc}") from exc
+
+        session = self._find_live_session(request.session_id)
+        if session is None or session.app_server is None:
+            raise SessionNotFoundError(request.session_id)
+
+        loops = session.app_server.resources.loops
+        try:
+            if method == "loops/list":
+                result = await loops.list()
+                return {"loops": [loop.model_dump(mode="json") for loop in result]}
+            elif method == "loops/create":
+                assert isinstance(request, LoopsCreateRequest)
+                loop = await loops.create(request.interval, request.prompt)
+                return {"loop": loop.model_dump(mode="json")}
+            elif method == "loops/delete":
+                assert isinstance(request, LoopsDeleteRequest)
+                loop = await loops.delete(request.loop_id)
+                return {"loop": loop.model_dump(mode="json")}
+            else:
+                count = await loops.clear()
+                return {"count": count}
+        except AppServerResponseError as exc:
+            raise InvalidRequestError(exc.error.message) from exc
 
     async def _rewind_extension(self, method: str, params: dict[str, Any]) -> dict:
         session_id = params.get("sessionId") or params.get("session_id")
@@ -1659,9 +1820,16 @@ async def _serve_acp_agent(agent: VibeAcpAgent) -> None:
 
 
 def run_acp_server(
-    *, environ_before_dotenv_load: Mapping[str, str] | None = None
+    *,
+    environ_before_dotenv_load: Mapping[str, str] | None = None,
+    experimental_harness: bool = False,
+    legacy_harness: bool = False,
 ) -> None:
-    agent = VibeAcpAgent(environ_before_dotenv_load=environ_before_dotenv_load)
+    agent = VibeAcpAgent(
+        environ_before_dotenv_load=environ_before_dotenv_load,
+        experimental_harness=experimental_harness,
+        legacy_harness=legacy_harness,
+    )
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
 
     def handle_sigterm(_signum: int, _frame: Any) -> None:

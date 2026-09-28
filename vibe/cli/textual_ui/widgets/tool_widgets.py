@@ -152,12 +152,14 @@ class ToolResultWidget[TResult: BaseModel](Static):
         success: bool,
         message: str,
         warnings: list[str] | None = None,
+        approval_note: str | None = None,
     ) -> None:
         super().__init__()
         self.result = result
         self.success = success
         self.message = message
         self.warnings = warnings or []
+        self.approval_note = approval_note
         self.border_row_colors: dict[int, str] = {}
         self.add_class("tool-result-widget")
 
@@ -165,11 +167,21 @@ class ToolResultWidget[TResult: BaseModel](Static):
         if extra:
             yield NoMarkupStatic(extra, classes="tool-result-hint")
 
-    def _yield_warnings(self) -> Iterable[Widget]:
-        # Approval notes (e.g. smart approve's "Auto-approved: <reason>") and other
-        # per-result advisories, shown at the top of the unfolded body.
-        for warning in self.warnings:
-            yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
+    def _advisories(self) -> list[tuple[str, str]]:
+        # Shown at the top of the unfolded body, as (text, css class). The
+        # approval note says the call was allowed to run, so it must not carry
+        # the warning glyph.
+        advisories: list[tuple[str, str]] = []
+        if self.approval_note:
+            advisories.append((self.approval_note, "tool-result-approval-note"))
+        advisories.extend(
+            (f"⚠ {warning}", "tool-result-warning") for warning in self.warnings
+        )
+        return advisories
+
+    def _yield_advisories(self) -> Iterable[Widget]:
+        for text, classes in self._advisories():
+            yield NoMarkupStatic(text, classes=classes)
 
     def _yield_text(
         self, content: str, *, classes: str = "tool-result-detail"
@@ -185,7 +197,7 @@ class ToolResultWidget[TResult: BaseModel](Static):
             yield Markdown(_fenced_code_block(content.strip("\n"), ext))
 
     def compose(self) -> ComposeResult:
-        yield from self._yield_warnings()
+        yield from self._yield_advisories()
         if self.result:
             lines = [
                 f"{field_name}: {value}"
@@ -200,7 +212,7 @@ class ToolResultWidget[TResult: BaseModel](Static):
 
 class GenericToolResultWidget(ToolResultWidget[GenericToolData]):
     def compose(self) -> ComposeResult:
-        yield from self._yield_warnings()
+        yield from self._yield_advisories()
         if self.result and (text := _format_generic_result(self.result.data)):
             yield from self._yield_text(text)
         yield from self._footer()
@@ -327,7 +339,7 @@ class BashResultWidget(ToolResultWidget[ShellOutput]):
         return self.result.transcript.strip("\n") if self.result else ""
 
     def compose(self) -> ComposeResult:
-        yield from self._yield_warnings()
+        yield from self._yield_advisories()
         if not self.result:
             yield from self._footer()
             return
@@ -358,7 +370,7 @@ class WriteFileResultWidget(ToolResultWidget[FileWriteOutput]):
     COLLAPSIBLE = False
 
     def compose(self) -> ComposeResult:
-        yield from self._yield_warnings()
+        yield from self._yield_advisories()
         if not self.result:
             yield from self._footer()
             return
@@ -457,8 +469,9 @@ class EditResultWidget(ToolResultWidget[FileEditOutput]):
         success: bool,
         message: str,
         warnings: list[str] | None = None,
+        approval_note: str | None = None,
     ) -> None:
-        super().__init__(result, success, message, warnings)
+        super().__init__(result, success, message, warnings, approval_note)
         self._diff_view = DiffView([], ansi=False, dark=True)
         self._requested_render_theme: tuple[bool, bool] | None = None
         self._render_worker: Worker[None] | None = None
@@ -480,16 +493,14 @@ class EditResultWidget(ToolResultWidget[FileEditOutput]):
         if not self.result:
             yield from self._footer()
             return
-        warnings = [
-            NoMarkupStatic(f"⚠ {w}", classes="tool-result-warning")
-            for w in self.warnings
-        ]
         # Wrap the diff in a horizontal-scroll container so wide lines can be
         # scrolled instead of clipped (overflow-x is `auto`, so the scrollbar
         # only shows when a line overruns the width). For a diff taller than the
         # viewport the bar sits at the bottom -- the same trade-off write_file's
         # code fence makes -- but that beats silently truncating long lines.
-        yield Vertical(*warnings, self._diff_view, classes="diff-scroll")
+        yield Vertical(
+            *self._yield_advisories(), self._diff_view, classes="diff-scroll"
+        )
         yield from self._footer()
 
     def on_mount(self) -> None:
@@ -524,10 +535,11 @@ class EditResultWidget(ToolResultWidget[FileEditOutput]):
             if rendered_theme != self._requested_render_theme:
                 continue
             self._diff_view.set_render_data(lines, ansi=ansi, dark=dark)
-            # Border rows sit below the warning lines, so shift the diff's own row
-            # colors down by the number of warnings.
+            # Border rows sit below the advisory lines, so shift the diff's own
+            # row colors down by however many were rendered.
+            advisory_count = len(self._advisories())
             self.border_row_colors = {
-                len(self.warnings) + row: color
+                advisory_count + row: color
                 for row, color in self._diff_view.border_row_colors.items()
             }
             self.post_message(self.BorderColorsChanged(self))
@@ -595,8 +607,7 @@ class ReadResultWidget(ToolResultWidget[FileReadOutput]):
         if not self.result:
             yield from self._footer()
             return
-        for warning in self.warnings:
-            yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
+        yield from self._yield_advisories()
         if self.result.content:
             ext = Path(self.result.file_path).suffix.lstrip(".") or "text"
             yield from self._yield_markdown(
@@ -619,8 +630,7 @@ class GrepApprovalWidget(ToolApprovalWidget[FileSearchInput]):
 
 class GrepResultWidget(ToolResultWidget[FileSearchOutput]):
     def compose(self) -> ComposeResult:
-        for warning in self.warnings:
-            yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
+        yield from self._yield_advisories()
         if not self.result or not self.result.matches:
             yield from self._footer()
             return
@@ -735,6 +745,7 @@ def get_result_widget(
     success: bool,
     message: str,
     warnings: list[str] | None = None,
+    approval_note: str | None = None,
 ) -> ToolResultWidget:
     widgets = EFFECT_WIDGETS.get(detail.kind, EffectWidgets())
     if result is None:
@@ -743,7 +754,7 @@ def get_result_widget(
         parsed = widgets.output_model.model_validate(result)
     else:
         parsed = GenericToolData(data=result)
-    return widgets.result(parsed, success, message, warnings)
+    return widgets.result(parsed, success, message, warnings, approval_note)
 
 
 def linkify_effect_result(detail: EffectDetail) -> bool:

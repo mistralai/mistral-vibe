@@ -24,6 +24,7 @@ from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.mcp_app import (
     _LIST_VIEW_HELP_AUTH,
     _LIST_VIEW_HELP_TOOLS,
+    _MANAGE_CONNECTORS_OPTION_ID,
     _REFRESHING_LABEL,
     MCPApp,
     MCPOptionList,
@@ -39,6 +40,7 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 def _source(
     name: str,
     *,
+    display_name: str = "",
     kind: MCPSourceKind = MCPSourceKind.SERVER,
     status: MCPSourceStatus = MCPSourceStatus.CONNECTED,
     tools: list[MCPToolSummary] | None = None,
@@ -46,6 +48,7 @@ def _source(
 ) -> MCPSourceSummary:
     return MCPSourceSummary(
         name=name,
+        display_name=display_name,
         kind=kind,
         transport="connector" if kind is MCPSourceKind.CONNECTOR else "stdio",
         status=status,
@@ -113,6 +116,19 @@ def test_source_sorting_puts_nonempty_sources_first_and_sorts_each_group() -> No
         "zulu tools",
         "Alpha Empty",
         "Zulu Empty",
+    ]
+
+
+def test_source_sorting_orders_by_display_name_not_alias() -> None:
+    # Aliases sort the opposite way to the titles the rows actually show.
+    sources = [
+        _source("zeta", display_name="Alpha Wiki", kind=MCPSourceKind.CONNECTOR),
+        _source("alpha", display_name="Zebra Docs", kind=MCPSourceKind.CONNECTOR),
+    ]
+
+    assert [source.name for source in _sort_sources_for_menu(sources)] == [
+        "zeta",
+        "alpha",
     ]
 
 
@@ -335,6 +351,23 @@ def test_connector_detail_shows_bootstrap_error() -> None:
     assert "Slack OAuth token expired" in labels
 
 
+def test_connector_detail_uses_title() -> None:
+    source = _source(
+        "company_wiki",
+        display_name="Company Wiki",
+        kind=MCPSourceKind.CONNECTOR,
+        tools=[MCPToolSummary(name="search", description="Search docs", enabled=True)],
+    )
+    app = MCPApp(_state(source))
+    app.query_one = MagicMock()
+    app._set_help_text = MagicMock()
+    option_list = MagicMock()
+
+    app._show_detail_view(option_list, source)
+
+    app.query_one.return_value.update.assert_any_call("Connector: Company Wiki")
+
+
 def test_connector_detail_shows_error_over_needs_auth() -> None:
     source = _source(
         "slack",
@@ -446,6 +479,24 @@ def test_start_refresh_dispatches_one_worker() -> None:
     assert app.run_worker.call_args.kwargs["exit_on_error"] is False
 
 
+def test_refresh_action_starts_refresh_when_callback_present() -> None:
+    app = MCPApp(_state(), refresh_callback=AsyncMock(return_value="Refreshed"))
+    app._start_refresh = MagicMock()
+
+    app.action_refresh()
+
+    app._start_refresh.assert_called_once()
+
+
+def test_refresh_action_is_noop_without_callback() -> None:
+    app = MCPApp(_state())
+    app._start_refresh = MagicMock()
+
+    app.action_refresh()
+
+    app._start_refresh.assert_not_called()
+
+
 def test_mount_waits_for_interval_before_refreshing() -> None:
     app = MCPApp(_state(), refresh_callback=AsyncMock(return_value="Refreshed"))
     app._refresh_view = MagicMock()
@@ -525,11 +576,50 @@ def test_unavailable_connector_with_no_tools_keeps_tool_count_label() -> None:
     app = MCPApp(_state(source))
     option_list = MagicMock()
 
-    app._add_source_group(option_list, "Workspace Connectors", [source])
+    app._add_source_group(option_list, "Available Connectors", [source])
 
     calls = option_list.add_option.call_args_list
     source_label = calls[1].args[0].prompt
     assert "tool discovery failed" not in source_label.plain
+
+
+@pytest.mark.asyncio
+async def test_manage_connectors_row_shown_and_opens_url() -> None:
+    url = "https://console.mistral.ai/build/connectors?shareContext=%7B%7D"
+    app = MCPAppHarness(
+        MCPState(
+            sources=[_source("gmail", kind=MCPSourceKind.CONNECTOR)],
+            manage_connectors_url=url,
+        )
+    )
+
+    async with app.run_test() as pilot:
+        app.open_url = MagicMock()
+        option_list = app.query_one(MCPOptionList)
+        ids = [option.id for option in option_list.options]
+        assert _MANAGE_CONNECTORS_OPTION_ID in ids
+
+        # The manage row sits directly under the header, above the connectors.
+        assert ids.index(_MANAGE_CONNECTORS_OPTION_ID) < ids.index("connector:gmail")
+        # The initial cursor lands on the connector, not the manage action.
+        assert option_list.get_option_at_index(option_list.highlighted or 0).id == (
+            "connector:gmail"
+        )
+
+        option_list.highlighted = ids.index(_MANAGE_CONNECTORS_OPTION_ID)
+        await pilot.press("enter")
+
+        app.open_url.assert_called_once_with(url)
+
+
+@pytest.mark.asyncio
+async def test_manage_connectors_row_hidden_without_url() -> None:
+    app = MCPAppHarness(_state(_source("gmail", kind=MCPSourceKind.CONNECTOR)))
+
+    async with app.run_test():
+        option_list = app.query_one(MCPOptionList)
+        ids = [option.id for option in option_list.options]
+        assert _MANAGE_CONNECTORS_OPTION_ID not in ids
 
 
 def test_detail_view_unavailable_server_shows_discovery_failed() -> None:

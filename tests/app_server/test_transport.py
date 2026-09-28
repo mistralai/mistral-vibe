@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 from contextlib import suppress
 from io import BytesIO
@@ -57,6 +58,38 @@ class CountingWriter(BytesIO):
     def flush(self) -> None:
         self.flush_count += 1
         super().flush()
+
+
+def test_stdio_main_neutralizes_stdout_after_serving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    neutralized = False
+
+    def run(coroutine: Any) -> None:
+        coroutine.close()
+
+    def neutralize_stdout() -> None:
+        nonlocal neutralized
+        neutralized = True
+
+    monkeypatch.setattr(
+        stdio,
+        "parse_arguments",
+        lambda: argparse.Namespace(experimental_harness=False, legacy_harness=False),
+    )
+    monkeypatch.setattr(stdio, "init_harness_files_manager", lambda *_: None)
+    monkeypatch.setattr(stdio, "init_file_logging", lambda _: None)
+    monkeypatch.setattr(stdio.asyncio, "run", run)
+    monkeypatch.setattr(stdio, "_neutralize_stdout", neutralize_stdout)
+    monkeypatch.setattr("vibe.core.config.load_dotenv_values", lambda: None)
+    monkeypatch.setattr(
+        "vibe.core.utils.windows_asyncio.silence_proactor_transport_teardown_warnings",
+        lambda: None,
+    )
+
+    stdio.main()
+
+    assert neutralized
 
 
 @pytest.mark.asyncio

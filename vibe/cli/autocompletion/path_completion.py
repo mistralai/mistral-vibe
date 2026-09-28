@@ -13,8 +13,6 @@ from vibe.cli.autocompletion.base import (
 )
 from vibe.cli.autocompletion.completers import PathCompleter
 
-MAX_SUGGESTIONS_COUNT = 10
-
 
 class PathCompletionController:
     _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="path-completion")
@@ -27,6 +25,7 @@ class PathCompletionController:
         self._pending_future: Future | None = None
         self._last_query: tuple[str, int] | None = None
         self._query_lock = Lock()
+        self._generation = 0
 
     def can_handle(self, text: str, cursor_index: int) -> bool:
         if cursor_index < 0 or cursor_index > len(text):
@@ -45,7 +44,6 @@ class PathCompletionController:
             return False
 
         fragment = before_cursor[at_index:cursor_index]
-        # fragment must not be empty (including @) and not contain any spaces
         return bool(fragment) and " " not in fragment
 
     def is_showing(self) -> bool:
@@ -53,6 +51,7 @@ class PathCompletionController:
 
     def reset(self) -> None:
         with self._query_lock:
+            self._generation += 1
             if self._pending_future and not self._pending_future.done():
                 self._pending_future.cancel()
             self._pending_future = None
@@ -79,43 +78,52 @@ class PathCompletionController:
                 self._pending_future.cancel()
 
             self._last_query = query
+            self._generation += 1
+            generation = self._generation
 
         app = getattr(self._view, "app", None)
         if app:
             with self._query_lock:
                 self._pending_future = self._executor.submit(
-                    self._compute_completions, text, cursor_index
+                    self._compute_completions, text, cursor_index, generation
                 )
                 self._pending_future.add_done_callback(
-                    lambda f: self._handle_completion_result(f, query)
+                    lambda f: self._handle_completion_result(f, query, generation)
                 )
         else:
-            suggestions = self._compute_completions(text, cursor_index)
+            suggestions = self._compute_completions(text, cursor_index, generation)
             self._update_suggestions(suggestions)
 
     def _compute_completions(
-        self, text: str, cursor_index: int
+        self, text: str, cursor_index: int, generation: int
     ) -> list[CompletionEntry]:
-        return self._completer.get_completion_items(text, cursor_index)
+        return self._completer.get_completion_items(
+            text, cursor_index, should_cancel=lambda: self._is_stale(generation)
+        )
 
-    def _handle_completion_result(self, future: Future, query: tuple[str, int]) -> None:
+    def _is_stale(self, generation: int) -> bool:
+        with self._query_lock:
+            return generation != self._generation
+
+    def _handle_completion_result(
+        self, future: Future, query: tuple[str, int], generation: int
+    ) -> None:
         if future.cancelled():
             return
 
         try:
             suggestions = future.result()
             with self._query_lock:
-                if query == self._last_query:
+                if query == self._last_query and generation == self._generation:
                     self._update_suggestions(suggestions)
+                    if suggestions:
+                        self._pending_future = None
         except Exception:
             with self._query_lock:
                 self._pending_future = None
                 self._last_query = None
 
     def _update_suggestions(self, suggestions: list[CompletionEntry]) -> None:
-        if len(suggestions) > MAX_SUGGESTIONS_COUNT:
-            suggestions = suggestions[:MAX_SUGGESTIONS_COUNT]
-
         app = getattr(self._view, "app", None)
 
         if suggestions:
@@ -136,21 +144,29 @@ class PathCompletionController:
                     self._suggestions, self._selected_index
                 )
         elif app:
-            app.call_after_refresh(self.reset)
+            app.call_after_refresh(self._reset_if_current, self._generation)
         else:
+            self.reset()
+
+    def _reset_if_current(self, generation: int) -> None:
+        if not self._is_stale(generation):
             self.reset()
 
     def on_key(
         self, event: events.Key, text: str, cursor_index: int
     ) -> CompletionResult:
+        if self._pending_future is not None and event.key in {"tab", "enter"}:
+            return CompletionResult.HANDLED
         if not self._suggestions:
             return CompletionResult.IGNORED
 
         match event.key:
             case "tab" | "enter":
-                if self._apply_selected_completion(text, cursor_index):
-                    return CompletionResult.HANDLED
-                return CompletionResult.IGNORED
+                return (
+                    CompletionResult.HANDLED
+                    if self._apply_selected_completion(text, cursor_index)
+                    else CompletionResult.IGNORED
+                )
             case "down":
                 self._move_selection(1)
                 return CompletionResult.HANDLED

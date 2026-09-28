@@ -321,6 +321,7 @@ class MCPCatalogService:
                 name=params.name,
                 scopes=params.scopes,
                 transport=params.transport,
+                allow_insecure_http=params.allow_insecure_http,
             )
         except ConcurrencyConflictError as exc:
             raise RequestFailure(ProtocolErrorCode.CONFLICT, str(exc)) from exc
@@ -411,6 +412,10 @@ class MCPCatalogService:
                 name=params.name, tool_name=None, reason="remove"
             )
         try:
+            if context.control is None:
+                await self._authentication.bind_catalog(
+                    context.orchestrator.config.mcp_servers, owner=context.catalog_owner
+                )
             result = await _remove_server_with_credentials(
                 self._authentication,
                 context.orchestrator,
@@ -843,12 +848,15 @@ class SessionlessMCPCatalog:
         login: bool,
         on_oauth_url: Callable[[str], Awaitable[None]],
         on_persisted: Callable[[PersistedMCPServerResult[Any]], None] | None = None,
+        allow_insecure_http: bool = False,
     ) -> PersistedMCPServerResult[Any]:
         orchestrator = await self._service.sessionless_orchestrator()
         result = (
             await persist_stdio_mcp_server(orchestrator, server)
             if isinstance(server, MCPStdio)
-            else await persist_remote_mcp_server(orchestrator, server)
+            else await persist_remote_mcp_server(
+                orchestrator, server, allow_insecure_http=allow_insecure_http
+            )
         )
         await self._service.authentication.bind_catalog(orchestrator.config.mcp_servers)
         if on_persisted is not None:

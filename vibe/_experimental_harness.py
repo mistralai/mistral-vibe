@@ -37,7 +37,7 @@ def add_experimental_harness_argument(
         action="store_true",
         default=False,
         help=(
-            "Use the experimental Unified Harness backend. Requires an "
+            "Use the Unified Harness backend. Requires an "
             "internal Unified Harness installation."
             if experimental_harness_available()
             else argparse.SUPPRESS
@@ -52,7 +52,7 @@ def add_smart_approve_argument(parser: argparse.ArgumentParser) -> None:
         default=False,
         help=(
             "Classify each tool call and auto-run the safe ones, prompting only for "
-            "risky ones. Requires --experimental-harness."
+            "risky ones. Requires the Unified Harness."
             if experimental_harness_available()
             else argparse.SUPPRESS
         ),

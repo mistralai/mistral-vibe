@@ -115,48 +115,13 @@ class TestStartRecording:
     async def test_start_no_backend_preserves_underlying_detail(self) -> None:
         def raise_no_backend(*a, **kw):
             raise AudioBackendUnavailableError(
-                "sounddevice is not available: some driver error"
+                "miniaudio is not available: some driver error"
             )
 
         manager, recorder, _ = _make_manager()
         recorder.start = raise_no_backend
         with pytest.raises(RecordingStartError, match="some driver error"):
             manager.start_recording()
-
-    @pytest.mark.asyncio
-    async def test_start_no_backend_appends_hint_only_for_portaudio(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "vibe.cli.voice_manager.voice_manager.portaudio_install_hint",
-            lambda: " INSTALL_HINT",
-        )
-
-        def raise_portaudio(*a, **kw):
-            raise AudioBackendUnavailableError("PortAudio library not found")
-
-        manager, recorder, _ = _make_manager()
-        recorder.start = raise_portaudio
-        with pytest.raises(RecordingStartError, match="INSTALL_HINT"):
-            manager.start_recording()
-
-    @pytest.mark.asyncio
-    async def test_start_no_backend_omits_hint_for_non_portaudio(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "vibe.cli.voice_manager.voice_manager.portaudio_install_hint",
-            lambda: " INSTALL_HINT",
-        )
-
-        def raise_other(*a, **kw):
-            raise AudioBackendUnavailableError("some other driver failure")
-
-        manager, recorder, _ = _make_manager()
-        recorder.start = raise_other
-        with pytest.raises(RecordingStartError) as excinfo:
-            manager.start_recording()
-        assert "INSTALL_HINT" not in str(excinfo.value)
 
     @pytest.mark.asyncio
     async def test_start_raises_when_no_transcribe_client(self) -> None:

@@ -76,6 +76,29 @@ async def test_ui_navigation_restores_partially_typed_draft_after_round_trip(
 
 
 @pytest.mark.asyncio
+async def test_ui_down_moves_cursor_after_restoring_the_live_draft(
+    vibe_app: VibeApp, history_file: Path
+) -> None:
+    async with vibe_app.run_test() as pilot:
+        inject_history_file(vibe_app, history_file)
+        chat_input = vibe_app.query_one(ChatInputContainer)
+        textarea = chat_input.input_widget
+        assert textarea is not None
+
+        draft = "top\nbottom"
+        textarea.insert(draft)
+        textarea.move_cursor((0, 0))
+
+        await pilot.press("up")
+        assert chat_input.value == "how are you?"
+        await pilot.press("down")
+        assert chat_input.value == draft
+        await pilot.press("down")
+
+        assert textarea.cursor_location[0] == 1
+
+
+@pytest.mark.asyncio
 async def test_ui_does_nothing_if_command_completion_is_active(
     vibe_app: VibeApp, history_file: Path
 ) -> None:

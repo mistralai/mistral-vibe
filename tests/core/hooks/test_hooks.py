@@ -246,7 +246,9 @@ class TestConfigLoading:
         assert result.hooks == []
         assert len(result.issues) == 1
 
-    def test_backslash_command_is_skipped(self, config_dir: Path) -> None:
+    def test_backslash_command_is_loaded(self, config_dir: Path) -> None:
+        # Both executors run the command through a shell, so a backslash path is
+        # the shell's to interpret -- the loader must not pre-emptively drop it.
         _write_hooks_toml(
             config_dir / "hooks.toml",
             [
@@ -259,12 +261,8 @@ class TestConfigLoading:
             ],
         )
         result = load_hooks_from_fs()
-        assert len(result.hooks) == 1
-        assert result.hooks[0].name == "good-hook"
-        assert len(result.issues) == 1
-        assert "win-hook" in result.issues[0].message
-        assert "skipped" in result.issues[0].message.lower()
-        assert "forward slash" in result.issues[0].message.lower()
+        assert [hook.name for hook in result.hooks] == ["good-hook", "win-hook"]
+        assert result.issues == []
 
     def test_forward_slash_command_no_warning(self, config_dir: Path) -> None:
         _write_hooks_toml(

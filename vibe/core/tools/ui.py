@@ -190,13 +190,5 @@ class ToolUIDataAdapter:
         if self.ui_data_class is not None and event.result is not None:
             projected_output = self.ui_data_class.project_result(event.result)
         return ToolResultPresentation(
-            kind=self.effect_kind,
-            display=ToolResultDisplay(
-                success=display.success,
-                verb=display.verb,
-                message=display.message,
-                warnings=display.warnings,
-                suffix=display.suffix,
-            ),
-            projected_output=projected_output,
+            kind=self.effect_kind, display=display, projected_output=projected_output
         )

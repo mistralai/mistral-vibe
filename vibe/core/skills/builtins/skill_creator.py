@@ -29,8 +29,8 @@ skill.
 A skill is a directory containing a `SKILL.md` file with YAML frontmatter plus
 Markdown instructions. The model loads it on demand via the `skill` tool; a
 user-invocable skill is also reachable by typing `/skill-name`. The `description`
-is always visible for routing — the body is loaded only after the skill is
-selected.
+is visible for routing unless model invocation is disabled — the body is loaded
+only after the skill is selected.
 
 ## Where skills live (discovery order, first match wins)
 
@@ -77,6 +77,8 @@ Frontmatter fields:
   the only text the model sees before selecting it.
 - `user-invocable` (optional, default `true`): when `false` the skill is
   model-only — hidden from the `/` menu and not reachable via `/skill-name`.
+- `disable-model-invocation` (optional, default `false`): when `true`, the skill
+  is hidden from the model but remains available via `/skill-name`.
 - `allowed-tools` (optional, experimental): space-delimited list of pre-approved
   tools.
 - `license`, `compatibility`, `metadata` (optional): metadata only. `metadata`

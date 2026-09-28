@@ -39,6 +39,7 @@ from vibe.app_server.models import (
     ImageContentBlock,
     MentionStats,
     PublicCallbackEntry,
+    PublicChildSession,
     PublicError,
     PublicHistoryEntry,
     PublicQueuedTurn,
@@ -126,6 +127,13 @@ class _PublishedEvent:
 type _QueuedEvent = _PublishedEvent | _StreamClosed
 
 _EVENT_QUEUE_MAX_SIZE = 256
+
+# Only the cancellation path is bounded, and not to make a wedged interrupt succeed --
+# it cannot. `act()` awaits `interrupt()` from inside `except CancelledError`, so a
+# teardown that never returns also never re-raises, and the canceller waiting on the
+# task wedges too. The deadline keeps one stuck turn from spreading up the call chain.
+# Callers that are not unwinding await `interrupt()` unbounded, on purpose.
+_INTERRUPT_ON_CANCEL_TIMEOUT_SECONDS = 5.0
 
 
 class AppServerTurnError(RuntimeError):
@@ -292,6 +300,10 @@ class AppServerSession:  # noqa: PLR0904
         return self.state.turn_queue
 
     @property
+    def child_sessions(self) -> tuple[PublicChildSession, ...]:
+        return tuple(self.state.child_sessions)
+
+    @property
     def turn_active(self) -> bool:
         return self._starting_turn or any(
             turn.status is PublicTurnStatus.IN_PROGRESS
@@ -372,7 +384,9 @@ class AppServerSession:  # noqa: PLR0904
                 yield event
         except asyncio.CancelledError:
             with suppress(Exception):
-                await self.interrupt()
+                await asyncio.wait_for(
+                    self.interrupt(), timeout=_INTERRUPT_ON_CANCEL_TIMEOUT_SECONDS
+                )
             raise
         finally:
             if self._consumed_turn_id == turn.id:

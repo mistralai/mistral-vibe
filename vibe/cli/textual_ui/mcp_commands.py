@@ -10,13 +10,15 @@ MCPSubcommandName = Literal["add", "login", "logout", "status"]
 
 MCP_ADD_USAGE = (
     "Usage: /mcp add <url> [--name <alias>] [--scope <scope> ...] "
-    "[--transport <http|streamable-http>] [--no-login]"
+    "[--transport <http|streamable-http>] [--no-login] [--allow-insecure-http]"
 )
 MCP_ADD_HELP = f"""{MCP_ADD_USAGE}
 
 OAuth-only shortcut for hosted MCP servers.
 Defaults to streamable-http; pass --transport http for servers documented with
 HTTP transport.
+Pass --allow-insecure-http to allow a plaintext http:// URL on a non-localhost
+host, such as a server on the LAN.
 For API-key/static auth, edit config.toml."""
 
 
@@ -33,6 +35,7 @@ class MCPAddArgs:
     scopes: list[str]
     transport: MCPAddTransport
     login: bool
+    allow_insecure_http: bool
 
 
 def parse_mcp_subcommand(raw_args: str) -> MCPSubcommand | None:
@@ -64,12 +67,16 @@ def parse_mcp_add_args(raw_args: str) -> MCPAddArgs:
     transport: MCPAddTransport = "streamable-http"
     transport_seen = False
     login = True
+    allow_insecure_http = False
     index = 0
     while index < len(tokens):
         token = tokens[index]
         match token:
             case "--no-login":
                 login = False
+                index += 1
+            case "--allow-insecure-http":
+                allow_insecure_http = True
                 index += 1
             case "--name":
                 if name is not None:
@@ -103,7 +110,12 @@ def parse_mcp_add_args(raw_args: str) -> MCPAddArgs:
         raise ValueError(MCP_ADD_USAGE)
 
     return MCPAddArgs(
-        url=url, name=name, scopes=scopes, transport=transport, login=login
+        url=url,
+        name=name,
+        scopes=scopes,
+        transport=transport,
+        login=login,
+        allow_insecure_http=allow_insecure_http,
     )
 
 

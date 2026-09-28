@@ -13,11 +13,17 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from vibe.app_server.config import ConfigView
-from vibe.app_server.models import EffectDetail, RequiredPermission, effect_input_json
+from vibe.app_server.models import (
+    EffectDetail,
+    PathGrantScope,
+    RequiredPermission,
+    effect_input_json,
+)
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tool_widgets import get_approval_widget
 from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
+from vibe.utils.tool_presentation import path_scope_label
 
 _INPUT_GRACE_PERIOD_S = 0.5
 
@@ -25,8 +31,6 @@ _INPUT_GRACE_PERIOD_S = 0.5
 class ApprovalApp(VimNavigationMixin, Container):
     can_focus = True
     can_focus_children = False
-
-    NUM_OPTIONS = 4
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "move_up", "Up", show=False),
@@ -37,7 +41,7 @@ class ApprovalApp(VimNavigationMixin, Container):
         Binding("2", "select_2", "Always Tool Session", show=False),
         Binding("3", "select_3", "Always Permanent", show=False),
         Binding("4", "select_4", "No", show=False),
-        Binding("n", "select_4", "No", show=False),
+        Binding("n", "reject", "No", show=False),
     ]
 
     class ApprovalGranted(Message):
@@ -52,11 +56,13 @@ class ApprovalApp(VimNavigationMixin, Container):
             tool_name: str,
             tool_args: JsonValue,
             required_permissions: list[RequiredPermission],
+            path_scope: PathGrantScope | None = None,
         ) -> None:
             super().__init__()
             self.tool_name = tool_name
             self.tool_args = tool_args
             self.required_permissions = required_permissions
+            self.path_scope = path_scope
 
     class ApprovalGrantedAlwaysPermanent(Message):
         def __init__(
@@ -64,11 +70,13 @@ class ApprovalApp(VimNavigationMixin, Container):
             tool_name: str,
             tool_args: JsonValue,
             required_permissions: list[RequiredPermission],
+            path_scope: PathGrantScope | None = None,
         ) -> None:
             super().__init__()
             self.tool_name = tool_name
             self.tool_args = tool_args
             self.required_permissions = required_permissions
+            self.path_scope = path_scope
 
     class ApprovalRejected(Message):
         def __init__(self, tool_name: str, tool_args: JsonValue) -> None:
@@ -81,6 +89,7 @@ class ApprovalApp(VimNavigationMixin, Container):
         effect: EffectDetail,
         config: ConfigView,
         required_permissions: list[RequiredPermission] | None = None,
+        path_scope_choices: list[PathGrantScope] | None = None,
         reason: str | None = None,
     ) -> None:
         super().__init__(id="approval-app")
@@ -89,6 +98,8 @@ class ApprovalApp(VimNavigationMixin, Container):
         self.tool_args = effect_input_json(effect)
         self.config = config
         self.required_permissions = required_permissions or []
+        self.path_scope_choices = path_scope_choices or []
+        self.options = self._build_options()
         self.reason = reason
         self.selected_option = 0
         self.content_container: Vertical | None = None
@@ -114,7 +125,7 @@ class ApprovalApp(VimNavigationMixin, Container):
 
         with Vertical(id="approval-options"):
             yield NoMarkupStatic("")
-            for _ in range(self.NUM_OPTIONS):
+            for _ in self.options:
                 widget = NoMarkupStatic("", classes="approval-option")
                 self.option_widgets.append(widget)
                 yield widget
@@ -178,15 +189,12 @@ class ApprovalApp(VimNavigationMixin, Container):
         await self.tool_info_container.mount(approval_widget)
 
     def _update_options(self) -> None:
-        options = [
-            ("Allow once", "yes"),
-            ("Allow for remainder of this session", "yes"),
-            ("Always allow", "yes"),
-            ("Deny", "no"),
-        ]
-
         for idx, ((text, color_type), widget) in enumerate(
-            zip(options, self.option_widgets, strict=True)
+            zip(
+                [(text, color) for text, color, _, _ in self.options],
+                self.option_widgets,
+                strict=True,
+            )
         ):
             is_selected = idx == self.selected_option
 
@@ -214,15 +222,15 @@ class ApprovalApp(VimNavigationMixin, Container):
                     widget.add_class("approval-option-no")
 
     def action_move_up(self) -> None:
-        self.selected_option = (self.selected_option - 1) % self.NUM_OPTIONS
+        self.selected_option = (self.selected_option - 1) % len(self.options)
         self._update_options()
 
     def action_move_down(self) -> None:
-        self.selected_option = (self.selected_option + 1) % self.NUM_OPTIONS
+        self.selected_option = (self.selected_option + 1) % len(self.options)
         self._update_options()
 
     def _select_if_unguarded(self, option: int) -> None:
-        if self.is_within_grace_period():
+        if self.is_within_grace_period() or not 0 <= option < len(self.options):
             return
         self.selected_option = option
         self._handle_selection(option)
@@ -240,36 +248,70 @@ class ApprovalApp(VimNavigationMixin, Container):
         self._select_if_unguarded(2)
 
     def action_select_4(self) -> None:
-        self._select_if_unguarded(3)
+        self._select_if_unguarded(len(self.options) - 1)
 
     def action_reject(self) -> None:
-        self._select_if_unguarded(3)
+        self._select_if_unguarded(len(self.options) - 1)
+
+    def _build_options(self) -> list[tuple[str, str, str, PathGrantScope | None]]:
+        if not self.path_scope_choices:
+            return [
+                ("Allow once", "yes", "once", None),
+                ("Allow for remainder of this session", "yes", "session", None),
+                ("Always allow", "yes", "permanent", None),
+                ("Deny", "no", "deny", None),
+            ]
+        return [
+            ("Allow once", "yes", "once", None),
+            *[
+                (
+                    f"Allow {path_scope_label(self.required_permissions, scope, for_session=True)} for this session",
+                    "yes",
+                    "session",
+                    scope,
+                )
+                for scope in self.path_scope_choices
+            ],
+            *[
+                (
+                    f"Always allow {path_scope_label(self.required_permissions, scope, for_session=False)}",
+                    "yes",
+                    "permanent",
+                    scope,
+                )
+                for scope in self.path_scope_choices
+            ],
+            ("Deny", "no", "deny", None),
+        ]
 
     def _handle_selection(self, option: int) -> None:
-        match option:
-            case 0:
+        _, _, action, path_scope = self.options[option]
+        match action:
+            case "once":
                 self.post_message(
                     self.ApprovalGranted(
                         tool_name=self.tool_name, tool_args=self.tool_args
                     )
                 )
-            case 1:
+            case "session":
                 self.post_message(
                     self.ApprovalGrantedAlwaysTool(
                         tool_name=self.tool_name,
                         tool_args=self.tool_args,
                         required_permissions=self.required_permissions,
+                        path_scope=path_scope,
                     )
                 )
-            case 2:
+            case "permanent":
                 self.post_message(
                     self.ApprovalGrantedAlwaysPermanent(
                         tool_name=self.tool_name,
                         tool_args=self.tool_args,
                         required_permissions=self.required_permissions,
+                        path_scope=path_scope,
                     )
                 )
-            case 3:
+            case "deny":
                 self.post_message(
                     self.ApprovalRejected(
                         tool_name=self.tool_name, tool_args=self.tool_args

@@ -8,8 +8,10 @@ patchelf_version="${PATCHELF_VERSION:-0.18.0}"
 
 uv python install "${python_version}"
 
-# manylinux_2_28 is AlmaLinux-based; keep zip as an explicit build dependency.
-yum install -y zip
+# The combined package builds two Rust targets. The manylinux images include a
+# compiler toolchain, while the old-glibc AlmaLinux coverage image does not.
+# Keep the requirements explicit so both images can compile and link them.
+yum install -y clang cmake gcc gcc-c++ make perl zip
 
 arch="$(uname -m)"
 

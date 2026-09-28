@@ -9,10 +9,12 @@ from textual.app import App, ComposeResult
 from tests.stubs.app_config import build_test_app_config
 from vibe.app_server.models import (
     EffectCallDisplay,
+    PathGrantScope,
     ShellEffectDetail,
     ShellEffectInput,
 )
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
+from vibe.permissions import PermissionScope, RequiredPermission
 
 _TEST_GRACE_PERIOD_S = 0.5
 
@@ -158,3 +160,97 @@ class TestReasonRendering:
             await pilot.pause()
 
             assert not approval.query(".approval-reason")
+
+
+class TestPathScopeOptions:
+    @pytest.fixture
+    def scoped_approval(self) -> ApprovalApp:
+        return ApprovalApp(
+            effect=ShellEffectDetail(
+                tool_name="bash",
+                input=ShellEffectInput(command="cat /outside/config.json"),
+                display=EffectCallDisplay(summary="bash", status_text="Running"),
+            ),
+            config=build_test_app_config(),
+            required_permissions=[
+                RequiredPermission(
+                    scope=PermissionScope.OUTSIDE_DIRECTORY,
+                    invocation_pattern="/outside/config.json",
+                    session_pattern="vibe-path:exact:/outside/config.json",
+                    label="outside workdir (/outside/config.json)",
+                )
+            ],
+            path_scope_choices=[PathGrantScope.EXACT],
+        )
+
+    def test_builds_exact_file_session_and_permanent_choices(
+        self, scoped_approval: ApprovalApp
+    ) -> None:
+        assert [option[0] for option in scoped_approval.options] == [
+            "Allow once",
+            "Allow this file only for this session",
+            "Always allow this file",
+            "Deny",
+        ]
+
+    def test_builds_recursive_folder_session_and_permanent_choices(
+        self, scoped_approval: ApprovalApp
+    ) -> None:
+        scoped_approval.path_scope_choices = [PathGrantScope.DIRECTORY_RECURSIVE]
+
+        assert [option[0] for option in scoped_approval._build_options()] == [
+            "Allow once",
+            "Allow this folder for this session",
+            "Always allow this folder",
+            "Deny",
+        ]
+
+    def test_builds_plural_recursive_choices_for_multiple_targets(
+        self, scoped_approval: ApprovalApp
+    ) -> None:
+        scoped_approval.required_permissions.append(
+            RequiredPermission(
+                scope=PermissionScope.OUTSIDE_DIRECTORY,
+                invocation_pattern="/var/log",
+                session_pattern="vibe-path:exact:/var/log",
+                label="outside workdir (/var/log)",
+                path_scope_root="/var/log",
+            )
+        )
+        scoped_approval.path_scope_choices = [PathGrantScope.DIRECTORY_RECURSIVE]
+
+        assert [option[0] for option in scoped_approval._build_options()] == [
+            "Allow once",
+            "Allow these folders for this session",
+            "Always allow these folders",
+            "Deny",
+        ]
+
+    def test_number_four_always_selects_deny(
+        self, scoped_approval: ApprovalApp
+    ) -> None:
+        scoped_approval.path_scope_choices = list(PathGrantScope)
+        scoped_approval.options = scoped_approval._build_options()
+
+        with patch.object(scoped_approval, "post_message") as posted:
+            scoped_approval.action_select_4()
+
+        assert isinstance(posted.call_args.args[0], ApprovalApp.ApprovalRejected)
+
+    def test_scoped_choices_post_the_selected_typed_scope(
+        self, scoped_approval: ApprovalApp
+    ) -> None:
+        with patch.object(scoped_approval, "post_message") as posted:
+            scoped_approval.action_select_2()
+            scoped_approval.action_select_3()
+            scoped_approval.action_reject()
+
+        session_message = posted.call_args_list[0].args[0]
+        permanent_message = posted.call_args_list[1].args[0]
+        assert isinstance(session_message, ApprovalApp.ApprovalGrantedAlwaysTool)
+        assert session_message.path_scope is PathGrantScope.EXACT
+        assert isinstance(permanent_message, ApprovalApp.ApprovalGrantedAlwaysPermanent)
+        assert permanent_message.path_scope is PathGrantScope.EXACT
+        assert isinstance(
+            posted.call_args_list[2].args[0], ApprovalApp.ApprovalRejected
+        )

@@ -124,6 +124,9 @@ class AgentManager:
     def _install_profile(self, profile: AgentProfile) -> None:
         apply_profile_overrides(self._orchestrator, profile.overrides)
 
+    def is_known_agent(self, name: str) -> bool:
+        return name in self._discovered
+
     def get_agent(self, name: str) -> AgentProfile:
         if agent := self.available_agents.get(name):
             return agent

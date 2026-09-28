@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 import pytest
@@ -248,7 +249,7 @@ async def test_account_read_reports_a_missing_key_after_the_key_disappears(
 
 @pytest.mark.parametrize(
     ("plan_name", "title", "teleport_eligible"),
-    [("TEAM", "[Subscription] Pro", True), ("FREE", "Free", False)],
+    [("TEAM", "[Subscription] Pro", True), ("FREE", "Free", True)],
 )
 @pytest.mark.asyncio
 async def test_account_read_projects_the_plan_and_teleport_eligibility(
@@ -289,6 +290,54 @@ async def test_account_read_projects_the_plan_and_teleport_eligibility(
     if not teleport_eligible:
         assert account.plan_offer is not None
         assert account.plan_offer.kind is AccountActionKind.UPGRADE_TO_PRO
+
+
+@pytest.mark.parametrize("plan_name", ["F", "E"])
+@pytest.mark.parametrize("prompt_switching_to_pro_plan", [False, True])
+@pytest.mark.asyncio
+async def test_codestral_teleport_is_rejected_with_switch_key_guidance(
+    experimental_harness: bool,
+    backend_contract_mistral_api: respx.Route,
+    plan_name: str,
+    prompt_switching_to_pro_plan: bool,
+    telemetry_events: list[dict[str, Any]],
+) -> None:
+    gateway = FakeAccountGateway(
+        WhoAmIResult(
+            plan_type=AccountPlanKind.MISTRAL_CODE,
+            plan_name=plan_name,
+            prompt_switching_to_pro_plan=prompt_switching_to_pro_plan,
+        )
+    )
+    async with _connected(experimental_harness, account_gateway=gateway) as connection:
+        session = await connection.host.open_session()
+        try:
+            account = await session.resources.account.read()
+            assert not account.teleport_eligible
+            assert account.teleport_action is not None
+            assert account.teleport_action.kind is AccountActionKind.SWITCH_API_KEY
+
+            with pytest.raises(AppServerResponseError) as exc_info:
+                await session.resources.vibe_code.open_projects(
+                    for_teleport=True, prompt="Continue this task"
+                )
+        finally:
+            await session.close()
+
+    assert exc_info.value.error.code is ProtocolErrorCode.FORBIDDEN
+    assert str(exc_info.value) == (
+        "Teleport does not support Codestral API keys. "
+        "Switch to a Vibe or workspace API key: "
+        f"{account.teleport_action.url}"
+    )
+    failures = [
+        event
+        for event in telemetry_events
+        if event.get("event_name") == "vibe.teleport_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["properties"]["stage"] == "ineligible"
+    assert failures[0]["properties"]["error_class"] == "TeleportIneligibleError"
 
 
 @pytest.mark.asyncio

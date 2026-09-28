@@ -12,7 +12,6 @@ from vibe.cli.autocompletion.file_indexer.store import (
 )
 from vibe.cli.autocompletion.fuzzy import fuzzy_match
 
-DEFAULT_MAX_ENTRIES_TO_PROCESS = 32000
 DEFAULT_TARGET_MATCHES = 100
 
 
@@ -117,7 +116,7 @@ class PathCompleter(Completer):
 
     def __init__(
         self,
-        max_entries_to_process: int = DEFAULT_MAX_ENTRIES_TO_PROCESS,
+        max_entries_to_process: int | None = None,
         target_matches: int = DEFAULT_TARGET_MATCHES,
         watcher_enabled_getter: Callable[[], bool] | None = None,
     ) -> None:
@@ -307,13 +306,21 @@ class PathCompleter(Completer):
         return entries
 
     def _score_matches(
-        self, entries: list[IndexEntry], context: _SearchContext
+        self,
+        entries: list[IndexEntry],
+        context: _SearchContext,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> list[tuple[str, PathCompleter.MatchRank]]:
         scored_matches: list[tuple[str, PathCompleter.MatchRank]] = []
         entries = self._prioritize_exact_directory_prefix(entries, context)
 
         for i, entry in enumerate(entries):
-            if i >= self._max_entries_to_process:
+            if should_cancel and i % 128 == 0 and should_cancel():
+                return []
+            if (
+                self._max_entries_to_process is not None
+                and i >= self._max_entries_to_process
+            ):
                 break
 
             if not self._matches_prefix(entry, context):
@@ -376,7 +383,10 @@ class PathCompleter(Completer):
         matched: list[str] = []
         try:
             for child in target_dir.iterdir():
-                if len(matched) >= self._max_entries_to_process:
+                if (
+                    self._max_entries_to_process is not None
+                    and len(matched) >= self._max_entries_to_process
+                ):
                     break
                 name = child.name
                 if name.startswith(".") and not suffix.startswith("."):
@@ -423,11 +433,46 @@ class PathCompleter(Completer):
             parent, Path(dir_portion).parent.as_posix(), target_dir.name
         )
 
-    def _collect_matches(self, text: str, cursor_pos: int) -> list[str]:
+    def _list_current_directory(
+        self, should_cancel: Callable[[], bool] | None = None
+    ) -> list[str]:
+        entries: list[Path] = []
+        try:
+            for entry in Path(".").iterdir():
+                if should_cancel and should_cancel():
+                    return []
+                if not entry.name.startswith("."):
+                    entries.append(entry)
+        except (OSError, PermissionError):
+            return []
+
+        entries.sort(key=lambda entry: entry.name.lower())
+        matches: list[str] = []
+        for entry in entries:
+            if should_cancel and should_cancel():
+                return []
+            try:
+                suffix = "/" if entry.is_dir() else ""
+            except OSError:
+                continue
+            matches.append(f"@{entry.name}{suffix}")
+            if len(matches) >= self._target_matches:
+                break
+        return matches
+
+    def _collect_matches(
+        self,
+        text: str,
+        cursor_pos: int,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> list[str]:
         before_cursor = text[:cursor_pos]
         partial_path = self._extract_partial(before_cursor)
         if partial_path is None:
             return []
+
+        if not partial_path:
+            return self._list_current_directory(should_cancel)
 
         outside_matches = self._collect_filesystem_matches(partial_path)
         if outside_matches is not None:
@@ -437,11 +482,11 @@ class PathCompleter(Completer):
 
         try:
             # TODO (Vince): doing the assumption that "." is the root directory... Reliable?
-            file_index = self._indexer.get_index(Path("."))
+            file_index = self._indexer.get_index(Path("."), should_cancel)
         except (OSError, RuntimeError):
             return []
 
-        scored_matches = self._score_matches(file_index, context)
+        scored_matches = self._score_matches(file_index, context, should_cancel)
 
         if not scored_matches and partial_path.endswith("/"):
             # Keep the trailing slash as a literal fuzzy anchor rather than
@@ -468,6 +513,7 @@ class PathCompleter(Completer):
                             partial_path
                         ),
                     ),
+                    should_cancel,
                 )
 
         return [path for path, _ in scored_matches]
@@ -475,8 +521,13 @@ class PathCompleter(Completer):
     def get_completions(self, text: str, cursor_pos: int) -> list[str]:
         return self._collect_matches(text, cursor_pos)
 
-    def get_completion_items(self, text: str, cursor_pos: int) -> list[CompletionEntry]:
-        matches = self._collect_matches(text, cursor_pos)
+    def get_completion_items(
+        self,
+        text: str,
+        cursor_pos: int,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> list[CompletionEntry]:
+        matches = self._collect_matches(text, cursor_pos, should_cancel)
         return [CompletionEntry(completion, "") for completion in matches]
 
     def get_replacement_range(

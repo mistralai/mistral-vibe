@@ -181,6 +181,13 @@ class SessionWorktrees:
         if managed := ManagedWorktree.at(worktree.root):
             managed.forget()
 
+    @staticmethod
+    async def restore(cwd: Path) -> bool:
+        managed = ManagedWorktree.at(cwd)
+        if managed is None:
+            return False
+        return await asyncio.to_thread(managed.restore, cwd)
+
     # -- who is standing in it ---------------------------------------------
 
     @staticmethod

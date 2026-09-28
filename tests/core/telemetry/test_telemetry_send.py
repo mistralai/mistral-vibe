@@ -23,6 +23,7 @@ from vibe.core.telemetry.send import (
     TelemetryClient,
     _extract_file_extension,
     send_unified_subagent_tool_call_finished,
+    send_unified_tool_call_finished,
 )
 from vibe.core.telemetry.types import (
     AttachmentKind,
@@ -326,6 +327,35 @@ class TestTelemetryClient:
         assert "agent_type" not in properties
         assert "child_session_id" not in properties
         assert "prompt" not in properties
+
+    def test_send_unified_tool_call_finished_carries_decision_and_approval_type(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        """*Prepare*: A telemetry client tagged unified.
+        *Do*: Record a unified tool call with decision=execute, approval_type=ask.
+        *Assert*: The event carries the actual decision and approval_type.
+        """
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(
+            config_getter=lambda: config, harness_backend=ExperimentSurface.UNIFIED
+        )
+
+        send_unified_tool_call_finished(
+            client,
+            tool_name="write_file",
+            status="success",
+            model="mistral-vibe-cli-latest",
+            agent_profile_name="default",
+            decision="execute",
+            approval_type="ask",
+            approval_source="user",
+        )
+
+        assert len(telemetry_events) == 1
+        props = telemetry_events[0]["properties"]
+        assert props["decision"] == "execute"
+        assert props["approval_type"] == "ask"
+        assert props["approval_source"] == "user"
 
     def test_harness_backend_rides_every_event_without_experiments(self) -> None:
         """*Prepare*: A client tagged legacy with no experiment snapshot.

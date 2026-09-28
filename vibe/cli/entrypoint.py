@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 
 if sys.argv[1:2] == ["--internal-posix-pty-helper"]:
-    from mistralai_vibe_local_harness.vibe._processes._posix_helper import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.vibe._processes._posix_helper import (
         main as _pty_helper_main,
     )
 
@@ -395,6 +395,13 @@ def main() -> None:
     )
 
     silence_proactor_transport_teardown_warnings()
+
+    # The gate must run before the mcp subcommand and init_file_logging: their
+    # mkdir(parents=True) calls are otherwise the first to materialize
+    # ~/.vibe, at permissive modes.
+    from vibe.core.paths import bootstrap_vibe_home
+
+    bootstrap_vibe_home()
 
     if sys.argv[1:2] == ["mcp"]:
         from vibe.cli.mcp_command import run_mcp_cli

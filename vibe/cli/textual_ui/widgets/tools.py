@@ -489,10 +489,17 @@ class ToolCallMessage(StatusMessage):
 
 class ToolResultMessage(ClickWithoutDragMixin, Static):
     def __init__(
-        self, entry: PublicEffectEntry, call_widget: ToolCallMessage | None = None
+        self,
+        entry: PublicEffectEntry,
+        call_widget: ToolCallMessage | None = None,
+        *,
+        todo_delta: str | None = None,
     ) -> None:
         self._entry = entry
         self._call_widget = call_widget
+        # Set only by the unified harness, where the live list is pinned under the
+        # input and history reports the change rather than restating it.
+        self._todo_delta = todo_delta
         self._tool_name = entry.detail.tool_name
         self._content_container: Vertical | None = None
         self._result_widget: ToolResultWidget | None = None
@@ -618,8 +625,13 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
         if isinstance(self._state, SkippedEffectState | CancelledEffectState):
             return "", f"{self._tool_name}: skipped", ""
         if display := self._result_display():
-            return display.verb, display.message, display.suffix
+            return display.verb, display.message, self._header_suffix(display.suffix)
         return "", f"{self._tool_name} completed", ""
+
+    def _header_suffix(self, suffix: str) -> str:
+        # The todo change belongs in the header, not the body: results collapse by
+        # default, so a change reported only on unfold would never be read.
+        return " ".join(part for part in (suffix, self._todo_delta or "") if part)
 
     def _get_result_text(self) -> str:
         verb, message, _ = self._get_result_parts()
@@ -711,6 +723,7 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
                     success=display.success,
                     message=display.message,
                     warnings=display.warnings,
+                    approval_note=display.approval_note,
                 )
                 self._result_widget = widget
             return Horizontal(
@@ -720,14 +733,19 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             )
 
         # The header is inert only when there is genuinely nothing to unfold: no
-        # structured output, no fallback text, and no warnings.
-        has_body = not (output is None and not fallback_text and not display.warnings)
+        # structured output, no fallback text, and no advisories.
+        has_body = not (
+            output is None
+            and not fallback_text
+            and not display.warnings
+            and display.approval_note is None
+        )
         is_failure = not display.success
         section = HeaderCollapsibleSection(
             build_result_body,
             header_text=display.message,
             header_verb=display.verb,
-            header_suffix=display.suffix,
+            header_suffix=self._header_suffix(display.suffix),
             header_muted=is_failure,
             header_success=display.success,
             collapsible=has_body,
@@ -805,6 +823,7 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             success=display.success,
             message=display.message,
             warnings=display.warnings,
+            approval_note=display.approval_note,
         )
         await self._content_container.mount(widget)
         self._result_widget = widget

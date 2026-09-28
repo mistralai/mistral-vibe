@@ -1,0 +1,51 @@
+[
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "hi",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "callback/result",
+  "params": {
+   "result": {
+    "callbackId": "callback-ask_user_question",
+    "output": {
+     "result": {
+      "answers": [
+       {
+        "answer": "SQLite Enterprise",
+        "isOther": true,
+        "question": "Which database should we use for this project?"
+       }
+      ],
+      "cancelled": false
+     },
+     "type": "user_input"
+    }
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

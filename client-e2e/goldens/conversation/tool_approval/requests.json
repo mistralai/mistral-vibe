@@ -1,0 +1,97 @@
+[
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "hi",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "callback/result",
+  "params": {
+   "result": {
+    "callbackId": "callback-approve-once",
+    "error": null,
+    "output": {
+     "decision": {
+      "type": "approve"
+     },
+     "feedback": null,
+     "type": "approval"
+    }
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000002"
+  }
+ },
+ {
+  "method": "callback/result",
+  "params": {
+   "result": {
+    "callbackId": "callback-approve-session",
+    "error": null,
+    "output": {
+     "decision": {
+      "type": "approve_for_session"
+     },
+     "feedback": null,
+     "type": "approval"
+    }
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000002"
+  }
+ },
+ {
+  "method": "callback/result",
+  "params": {
+   "result": {
+    "callbackId": "callback-approve-permanently",
+    "error": null,
+    "output": {
+     "decision": {
+      "type": "approve_permanently"
+     },
+     "feedback": null,
+     "type": "approval"
+    }
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000002"
+  }
+ },
+ {
+  "method": "callback/result",
+  "params": {
+   "result": {
+    "callbackId": "callback-deny",
+    "error": null,
+    "output": {
+     "decision": {
+      "type": "deny"
+     },
+     "feedback": null,
+     "type": "approval"
+    }
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000002"
+  }
+ }
+]

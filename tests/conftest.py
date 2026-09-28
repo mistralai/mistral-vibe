@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import keyring
@@ -64,7 +65,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--experimental-harness",
         action="store_true",
         default=False,
-        help="Run backend contract tests with the experimental Unified Harness backend.",
+        help="Run backend contract tests with the Unified Harness backend.",
     )
 
 
@@ -255,7 +256,11 @@ def _scratchpad_dir(
         d.mkdir(parents=True, exist_ok=True)
         return str(d)
 
-    monkeypatch.setattr("vibe.core.scratchpad.tempfile.mkdtemp", _fake_mkdtemp)
+    # Replace Scratchpad's module reference instead of mutating the process-wide
+    # tempfile module, which would also affect build-backend tests.
+    monkeypatch.setattr(
+        "vibe.core.scratchpad.tempfile", SimpleNamespace(mkdtemp=_fake_mkdtemp)
+    )
 
     yield scratchpad_root
 

@@ -22,7 +22,16 @@ from vibe.core.plugins._compatibility import (
     typescript_identifier,
 )
 from vibe.core.skills.models import SkillScope
+from vibe.core.skills.parser import (
+    OPENAI_SKILL_METADATA_FILENAME,
+    SkillParseError,
+    parse_openai_skill_metadata,
+)
 from vibe.utils.io import read_safe
+
+# Only ``openai.yaml`` is executable metadata in Codex. ``openai.yml`` is
+# scanned so the compatibility report can identify it as retained-but-unsupported.
+_CODEX_AGENT_METADATA_FILENAMES = (OPENAI_SKILL_METADATA_FILENAME, "openai.yml")
 
 
 class _CodexPluginManifest(BaseModel):
@@ -456,7 +465,7 @@ class CodexPluginAdapter:
             except OSError:
                 continue
             for skill_dir in skill_dirs:
-                for filename in ("openai.yaml", "openai.yml"):
+                for filename in _CODEX_AGENT_METADATA_FILENAMES:
                     candidate = skill_dir / "agents" / filename
                     if candidate.exists() or candidate.is_symlink():
                         candidates.add(candidate)
@@ -488,6 +497,16 @@ class CodexPluginAdapter:
                     )
                 )
                 continue
+            if candidate.name == OPENAI_SKILL_METADATA_FILENAME:
+                try:
+                    metadata = parse_openai_skill_metadata(
+                        read_safe(resolved, raise_on_error=True).text
+                    )
+                except (OSError, SkillParseError):
+                    pass
+                else:
+                    if not metadata.has_unhandled_fields:
+                        continue
             diagnostics.append(
                 PluginAdapterDiagnostic(
                     severity="info",

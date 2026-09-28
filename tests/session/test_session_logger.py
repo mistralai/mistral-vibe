@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import json
 import os
 from pathlib import Path
+import stat
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -512,6 +513,89 @@ class TestSessionLoggerTitleManagement:
         metadata = SessionLoader.load_metadata(logger.session_dir)
         assert metadata.title == "Reviewed session"
         assert metadata.title_source == "manual"
+
+    @pytest.mark.asyncio
+    async def test_persist_bumped_at_updates_memory_and_disk_monotonically(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+        await logger.save_interaction(
+            [LLMMessage(role=Role.user, content="hi")],
+            stats=AgentStats(),
+            config=build_test_vibe_config(),
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        older = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+        newer = datetime(2026, 9, 10, 12, 5, tzinfo=UTC)
+
+        assert await logger.persist_bumped_at(newer) == newer
+        assert await logger.persist_bumped_at(older) == newer
+
+        assert logger.session_metadata is not None
+        assert logger.session_metadata.bumped_at == "2026-09-10T12:05:00+00:00"
+        assert logger.session_dir is not None
+        metadata = SessionLoader.load_metadata(logger.session_dir)
+        assert metadata.bumped_at == "2026-09-10T12:05:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_failed_bump_can_be_retried(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+        await logger.save_interaction(
+            [LLMMessage(role=Role.user, content="hi")],
+            stats=AgentStats(),
+            config=build_test_vibe_config(),
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+        bumped_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+        with patch.object(
+            SessionLogger, "persist_metadata", side_effect=OSError("disk full")
+        ):
+            with pytest.raises(OSError, match="disk full"):
+                await logger.persist_bumped_at(bumped_at)
+
+        assert logger.session_metadata is not None
+        assert logger.session_metadata.bumped_at is None
+        assert await logger.persist_bumped_at(bumped_at) == bumped_at
+        assert logger.session_dir is not None
+        assert (
+            SessionLoader.load_metadata(logger.session_dir).bumped_at
+            == bumped_at.isoformat()
+        )
+
+    @pytest.mark.asyncio
+    async def test_save_interaction_persists_in_memory_bumped_at(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+        bumped_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+
+        assert await logger.persist_bumped_at(bumped_at) == bumped_at
+
+        await logger.save_interaction(
+            [LLMMessage(role=Role.user, content="hi")],
+            stats=AgentStats(),
+            config=build_test_vibe_config(),
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        assert logger.session_dir is not None
+        metadata = SessionLoader.load_metadata(logger.session_dir)
+        assert metadata.bumped_at == "2026-09-10T12:00:00+00:00"
 
     @pytest.mark.asyncio
     async def test_apply_manual_title_rejects_empty(
@@ -1330,6 +1414,52 @@ class TestSessionLoggerSaveInteraction:
         loaded, metadata = SessionLoader.load_session(logger.session_dir)
         assert loaded == []
         assert metadata["total_messages"] == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+class TestSessionLogPermissions:
+    @pytest.mark.asyncio
+    async def test_new_session_log_is_owner_only(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfigSchema,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        """A fresh session lands with an owner-only directory and files."""
+        logger = SessionLogger(session_config, "perm-session")
+        messages = [
+            LLMMessage(role=Role.user, content="hello"),
+            LLMMessage(role=Role.assistant, content="hi"),
+        ]
+        await logger.save_interaction(
+            messages=messages,
+            stats=AgentStats(steps=1),
+            config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+        assert logger.session_dir is not None
+        assert stat.S_IMODE(logger.session_dir.stat().st_mode) & 0o077 == 0
+        messages_mode = stat.S_IMODE(
+            (logger.session_dir / "messages.jsonl").stat().st_mode
+        )
+        assert messages_mode & 0o077 == 0
+        metadata_mode = stat.S_IMODE((logger.session_dir / "meta.json").stat().st_mode)
+        assert metadata_mode & 0o077 == 0
+
+        # A second save appends to the existing log without loosening it.
+        await logger.save_interaction(
+            messages=messages + [LLMMessage(role=Role.user, content="again")],
+            stats=AgentStats(steps=2),
+            config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+        messages_mode = stat.S_IMODE(
+            (logger.session_dir / "messages.jsonl").stat().st_mode
+        )
+        assert messages_mode & 0o077 == 0
 
 
 class TestSessionLoggerResetSession:

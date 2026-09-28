@@ -108,9 +108,9 @@ MUTATED_PAYLOAD = {
 
 @pytest_asyncio.fixture
 async def connectors_agent(
-    tmp_path: Path,
+    tmp_path: Path, experimental_harness: bool
 ) -> AsyncIterator[tuple[VibeAcpAgent, str, FakeMCPResource]]:
-    agent = VibeAcpAgent()
+    agent = VibeAcpAgent(experimental_harness=experimental_harness)
     client = FakeClient()
     agent.on_connect(client)
     client.on_connect(agent)

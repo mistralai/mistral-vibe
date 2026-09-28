@@ -26,7 +26,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from pydantic import ValidationError
 
@@ -382,6 +382,16 @@ class AgentLoopHooksMixin:
             skip_reason=skip_reason,
             cancelled=f"<{CANCELLATION_TAG}>" in skip_reason,
             tool_call_id=tool_call.call_id,
+            decision=cast(Literal["execute", "skip"], decision.verdict.value),
+            approval_type=cast(
+                Literal["always", "never", "ask"], decision.approval_type.value
+            ),
+            approval_source=cast(
+                Literal["config", "smart", "user", "bypass", "never"],
+                decision.approval_source.value,
+            )
+            if decision.approval_source
+            else None,
         )
         self._handle_tool_response(
             tool_call, skip_reason, "skipped", decision, span=span

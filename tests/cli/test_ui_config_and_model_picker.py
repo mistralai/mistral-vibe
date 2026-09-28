@@ -12,9 +12,11 @@ from vibe.app_server.protocol import (
     ConfigFieldsReadResponse,
     ConfigFieldWire,
     ConfigLayerValueWire,
+    RuntimeMutationStatus,
 )
 from vibe.cli.textual_ui.app import BottomApp
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress
+from vibe.cli.textual_ui.widgets.messages import ErrorMessage
 from vibe.cli.textual_ui.widgets.model_picker import ModelPickerApp
 from vibe.cli.textual_ui.widgets.thinking_picker import ThinkingPickerApp
 from vibe.core.config import ModelConfig
@@ -274,13 +276,15 @@ async def test_model_picker_select_default_persists_empty_alias() -> None:
         await _open_model_picker(pilot, app)
 
         with patch.object(
-            app.app_server.resources.config, "update", new=AsyncMock()
-        ) as update_config:
+            app.app_server.resources.config, "write_model", new=AsyncMock()
+        ) as write_model:
             await pilot.press("up")
             await pilot.press("enter")
-            await wait_until(pilot, lambda: update_config.await_count == 1)
+            await wait_until(pilot, lambda: write_model.await_count == 1)
 
-        update_config.assert_awaited_once_with({"active_model": ""})
+        # The typed pick, not a pointer write: an empty alias is how the picker
+        # says "follow the default", and the app-server decides where it lands.
+        write_model.assert_awaited_once_with(model_alias="")
 
 
 @pytest.mark.asyncio
@@ -408,3 +412,68 @@ async def test_thinking_picker_select_high() -> None:
             await pilot.pause(0.2)
 
         set_thinking.assert_awaited_once_with("high")
+
+
+@pytest.mark.asyncio
+async def test_a_pick_parked_by_a_running_turn_skips_the_reload() -> None:
+    """*Prepare*: A model pick the app-server parks until the turn ends.
+    *Do*: Select it from the picker.
+    *Assert*: No reload follows. ``config/reload`` demands an idle session, so
+    running one behind a parked pick answers with a conflict the user reads as
+    the pick having failed. It has not: the session announces the pick with
+    ``runtime/updated`` once it takes over.
+    """
+    app = build_test_vibe_app(config=_make_config_with_models())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await _open_model_picker(pilot, app)
+
+        write_model = AsyncMock(return_value=RuntimeMutationStatus.PENDING)
+        reload_config = AsyncMock(
+            side_effect=AssertionError("A turn is already running")
+        )
+        with (
+            patch.object(
+                app.app_server.resources.config, "write_model", new=write_model
+            ),
+            patch.object(app.app_server.resources.config, "reload", new=reload_config),
+        ):
+            await pilot.press("down")
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: write_model.await_count == 1)
+            await pilot.pause(0.2)
+
+        assert reload_config.await_count == 0
+        assert list(app.query(ErrorMessage)) == []
+
+
+@pytest.mark.asyncio
+async def test_a_thinking_pick_parked_by_a_running_turn_skips_the_reload() -> None:
+    """*Prepare*: A thinking level the app-server parks until the turn ends.
+    *Do*: Select it from the picker.
+    *Assert*: No reload follows, for the same reason a parked model pick runs
+    none: both travel on the one write.
+    """
+    app = build_test_vibe_app(config=_make_config_with_models())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_thinking()
+        await pilot.pause(0.2)
+
+        set_thinking = AsyncMock(return_value=RuntimeMutationStatus.PENDING)
+        reload_config = AsyncMock(
+            side_effect=AssertionError("A turn is already running")
+        )
+        with (
+            patch.object(
+                app.app_server.resources.config, "set_thinking", new=set_thinking
+            ),
+            patch.object(app.app_server.resources.config, "reload", new=reload_config),
+        ):
+            await pilot.press("down")
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: set_thinking.await_count == 1)
+            await pilot.pause(0.2)
+
+        assert reload_config.await_count == 0
+        assert list(app.query(ErrorMessage)) == []

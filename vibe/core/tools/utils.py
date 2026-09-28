@@ -23,6 +23,7 @@ from vibe.core.tools.permissions import (
     RequiredPermission,
 )
 from vibe.core.workspace import Workspace
+from vibe.permissions import PathGrantScope, path_grant_pattern, path_pattern_matches
 from vibe.utils.paths import (
     normalize_windows_input_path,
     normalize_windows_path,
@@ -80,6 +81,17 @@ def resolve_tool_path(raw: str | None, cwd: Path) -> Path:
     path = _make_absolute(raw, cwd)
     # resolve() would anchor a Windows path held by a POSIX host to the process cwd.
     return path.resolve() if path.is_absolute() else path
+
+
+def shell_path_scope_root(path_str: str) -> str | None:
+    """Return a recursive grant root only for a known, traversable directory."""
+    target = Path(path_str)
+    try:
+        if target.is_dir() and os.access(target, os.R_OK | os.X_OK):
+            return str(target)
+    except OSError:
+        pass
+    return None
 
 
 def ambient_workspace() -> Workspace:
@@ -147,7 +159,7 @@ def resolve_path_permission(
             return PermissionContext(permission=ToolPermission.NEVER)
 
     for pattern in allowlist:
-        if fnmatch.fnmatch(file_str, pattern):
+        if path_pattern_matches(file_str, pattern):
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
     return None
@@ -218,15 +230,14 @@ def resolve_file_tool_permission(
     if not is_path_within_workdir(path_str, workspace=workspace):
         if config_permission == ToolPermission.NEVER:
             return PermissionContext(permission=ToolPermission.NEVER)
-        resolved = file_path.resolve()
-        parent_dir = str(resolved.parent)
-        parent_glob = str(Path(parent_dir) / "*")
+        resolved = str(file_path.resolve())
         required.append(
             RequiredPermission(
                 scope=PermissionScope.OUTSIDE_DIRECTORY,
-                invocation_pattern=parent_glob,
-                session_pattern=parent_glob,
-                label=f"outside workdir ({parent_glob})",
+                invocation_pattern=resolved,
+                session_pattern=path_grant_pattern(resolved, PathGrantScope.EXACT),
+                label=f"outside workdir ({resolved})",
+                path_scope_root=shell_path_scope_root(resolved),
             )
         )
 

@@ -137,6 +137,9 @@ class VibeProjectsStore:
         data["version"] = data.get("version", 1)
         data["projects"] = list(entries)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # The project registry names every local project, so it is created
+        # owner-only; an existing file keeps its current mode.
+        self._path.touch(mode=0o600, exist_ok=True)
         with self._path.open("wb") as file:
             tomli_w.dump(data, file)
 

@@ -27,21 +27,25 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
 
 _REFRESHING_LABEL = "refreshing"
+_MANAGE_CONNECTORS_OPTION_ID = "action:manage-connectors"
 _LIST_VIEW_HELP_TOOLS = (
     f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Show tools  "
-    f"{shortcut('d')} Disable  {shortcut('e')} Enable  {shortcut('Esc')} Close"
+    f"{shortcut('d')} Disable  {shortcut('e')} Enable  {shortcut('r')} Refresh  "
+    f"{shortcut('Esc')} Close"
 )
 _LIST_VIEW_HELP_AUTH = (
     f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Connect  "
-    f"{shortcut('d')} Disable  {shortcut('e')} Enable  {shortcut('Esc')} Close"
+    f"{shortcut('d')} Disable  {shortcut('e')} Enable  {shortcut('r')} Refresh  "
+    f"{shortcut('Esc')} Close"
 )
 _DETAIL_VIEW_HELP = (
     f"{shortcut('↑↓/jk')} Navigate  {shortcut('d')} Disable  "
-    f"{shortcut('e')} Enable  {shortcut('Backspace')} Back  {shortcut('Esc')} Close"
+    f"{shortcut('e')} Enable  {shortcut('r')} Refresh  "
+    f"{shortcut('Backspace')} Back  {shortcut('Esc')} Close"
 )
 _DETAIL_VIEW_HELP_NO_TOOLS = (
-    f"{shortcut('↑↓/jk')} Navigate  {shortcut('Backspace')} Back  "
-    f"{shortcut('Esc')} Close"
+    f"{shortcut('↑↓/jk')} Navigate  {shortcut('r')} Refresh  "
+    f"{shortcut('Backspace')} Back  {shortcut('Esc')} Close"
 )
 _BACKGROUND_REFRESH_INTERVAL_SECONDS = 60.0
 
@@ -96,6 +100,7 @@ class MCPApp(Container):
         Binding("backspace", "back", "Back", show=False),
         Binding("d", "disable", "Disable", show=False),
         Binding("e", "enable", "Enable", show=False),
+        Binding("r", "refresh", "Refresh", show=False),
     ]
 
     class MCPClosed(Message):
@@ -199,6 +204,10 @@ class MCPApp(Container):
         event.stop()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option.id == _MANAGE_CONNECTORS_OPTION_ID:
+            if url := self._state.manage_connectors_url:
+                self.app.open_url(url)
+            return
         target = _source_from_option_id(event.option.id or "")
         if target is not None:
             name, kind = target
@@ -238,6 +247,14 @@ class MCPApp(Container):
 
     def action_enable(self) -> None:
         self._set_highlighted_disabled(disabled=False)
+
+    def action_refresh(self) -> None:
+        # No callback means this browser was opened without a live session, so
+        # there is nothing to re-fetch. _start_refresh already ignores that case
+        # and coalesces against an in-flight refresh.
+        if self._refresh_callback is None:
+            return
+        self._start_refresh()
 
     def _start_refresh(self) -> None:
         if self._refresh_callback is None or self._refreshing:
@@ -371,7 +388,18 @@ class MCPApp(Container):
         if connectors:
             if servers:
                 option_list.add_option(Option(Text("", no_wrap=True), disabled=True))
-            self._add_source_group(option_list, "Workspace Connectors", connectors)
+            manage_option = None
+            if self._state.manage_connectors_url:
+                manage_option = Option(
+                    Text("+ Add more connectors in Studio", style="underline"),
+                    id=_MANAGE_CONNECTORS_OPTION_ID,
+                )
+            self._add_source_group(
+                option_list,
+                "Available Connectors",
+                connectors,
+                lead_option=manage_option,
+            )
         if not servers and not connectors:
             option_list.add_option(
                 Option(
@@ -383,20 +411,37 @@ class MCPApp(Container):
             )
             option_list.highlighted = None
             return
+        # Land on the first server/connector row, never the "manage" action, so
+        # an accidental Enter can't open the browser.
         option_list.highlighted = next(
             (
                 index
                 for index, option in enumerate(option_list.options)
-                if not option.disabled
+                if option.id is not None
+                and _source_from_option_id(option.id) is not None
             ),
-            0,
+            next(
+                (
+                    index
+                    for index, option in enumerate(option_list.options)
+                    if not option.disabled
+                ),
+                0,
+            ),
         )
 
     def _add_source_group(
-        self, option_list: OptionList, title: str, sources: Sequence[MCPSourceSummary]
+        self,
+        option_list: OptionList,
+        title: str,
+        sources: Sequence[MCPSourceSummary],
+        *,
+        lead_option: Option | None = None,
     ) -> None:
         option_list.add_option(Option(Text(title, style="bold"), disabled=True))
-        max_name = max(len(source.name) for source in sources)
+        if lead_option is not None:
+            option_list.add_option(lead_option)
+        max_name = max(len(source.display_name) for source in sources)
         max_transport = max(len(source.transport) + 2 for source in sources)
         tool_labels = {}
         for source in sources:
@@ -422,7 +467,7 @@ class MCPApp(Container):
         for source in sources:
             label = Text(no_wrap=True)
             type_tag = f"[{source.transport}]"
-            label.append(f"  {source.name:<{max_name}}")
+            label.append(f"  {source.display_name:<{max_name}}")
             label.append(f"  {type_tag:<{max_transport}}", style="dim")
             if max_owner:
                 label.append(f"  {owner_tags[source.name]:<{max_owner}}", style="dim")
@@ -440,7 +485,9 @@ class MCPApp(Container):
         self._viewing_kind = source.kind
         self.query_one("#mcp-search-row", Horizontal).display = False
         prefix = "Connector" if source.kind is MCPSourceKind.CONNECTOR else "MCP Server"
-        self.query_one("#mcp-title", NoMarkupStatic).update(f"{prefix}: {source.name}")
+        self.query_one("#mcp-title", NoMarkupStatic).update(
+            f"{prefix}: {source.display_name}"
+        )
         if source.error:
             self._set_help_text(_DETAIL_VIEW_HELP_NO_TOOLS)
             option_list.add_option(Option("Failed to bootstrap", disabled=True))
@@ -598,7 +645,12 @@ def _sort_sources_for_menu(
 ) -> list[MCPSourceSummary]:
     return sorted(
         sources,
-        key=lambda source: (not source.tools, source.name.casefold(), source.name),
+        # Order by the visible title; name is the stable tiebreaker.
+        key=lambda source: (
+            not source.tools,
+            source.display_name.casefold(),
+            source.name,
+        ),
     )
 
 
@@ -612,7 +664,7 @@ def _filter_sources(
     scored = [
         (match.score, index, source)
         for index, source in enumerate(ordered)
-        if (match := fuzzy_match(needle, source.name)).matched
+        if (match := fuzzy_match(needle, source.display_name)).matched
     ]
     scored.sort(key=lambda item: (-item[0], item[1]))
     return [source for _, _, source in scored]

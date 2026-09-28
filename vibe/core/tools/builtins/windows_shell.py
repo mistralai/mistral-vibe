@@ -59,6 +59,7 @@ from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows, kill_async_subprocess
 from vibe.core.workspace import Workspace
 from vibe.observability.logging import logger
+from vibe.permissions import path_grant_pattern_matches
 from vibe.utils.io import decode_console_safe
 from vibe.utils.tool_presentation import ToolEffectKind
 
@@ -288,7 +289,11 @@ def _split_windows_command_parts(command: str) -> list[str]:
                 _flush_windows_command_part(parts, buffer)
                 index += 2
                 continue
-            if char in {"&", "|", ";", "\n", "\r"}:
+            # ``2>&1`` and ``*>&1`` duplicate an existing stream; the ampersand
+            # is part of the redirect rather than a command separator.
+            if char in {"&", "|", ";", "\n", "\r"} and not (
+                char == "&" and buffer and buffer[-1] == ">"
+            ):
                 _flush_windows_command_part(parts, buffer)
                 index += 1
                 continue
@@ -565,7 +570,20 @@ def _windows_redirection_targets(command: str) -> list[str]:
     return targets
 
 
-def _windows_path_parent(
+def _windows_file_redirection_targets(command: str) -> list[str]:
+    """Return output redirects that can write a file.
+
+    PowerShell's null variable and CMD's null device discard output. Descriptor
+    duplication is filtered by ``_read_windows_redirection_target``.
+    """
+    return [
+        target
+        for target in _windows_redirection_targets(command)
+        if target.casefold() not in {"$null", "nul", "nul:"}
+    ]
+
+
+def _windows_path(
     token: str,
     *,
     command_cwd: Path,
@@ -591,7 +609,7 @@ def _windows_path_parent(
     windows_path = PureWindowsPath(value)
     host_path = Path(value)
     if windows_path.is_absolute() and not host_path.is_absolute():
-        return str(windows_path.parent), False
+        return str(windows_path), False
     if windows_path.drive and not windows_path.root:
         return None, True
 
@@ -604,7 +622,7 @@ def _windows_path_parent(
         str(resolved), scratchpad_dir=scratchpad_dir
     ):
         return None, False
-    return str(resolved) if resolved.is_dir() else str(resolved.parent), False
+    return str(resolved), False
 
 
 def _analyze_windows_paths(
@@ -615,23 +633,23 @@ def _analyze_windows_paths(
     scratchpad_dir: Path | None,
     environment: dict[str, str],
 ) -> tuple[set[str], set[str]]:
-    dirs: set[str] = set()
+    paths: set[str] = set()
     dynamic_paths: set[str] = set()
     if not is_path_within_workdir(
         str(command_cwd), workspace=workspace
     ) and not is_scratchpad_path(str(command_cwd), scratchpad_dir=scratchpad_dir):
-        dirs.add(str(command_cwd))
+        paths.add(str(command_cwd))
 
     def collect(token: str) -> None:
-        parent, dynamic = _windows_path_parent(
+        path, dynamic = _windows_path(
             token,
             command_cwd=command_cwd,
             workspace=workspace,
             scratchpad_dir=scratchpad_dir,
             environment=environment,
         )
-        if parent is not None:
-            dirs.add(parent)
+        if path is not None:
+            paths.add(path)
         if dynamic:
             dynamic_paths.add(token)
 
@@ -642,7 +660,7 @@ def _analyze_windows_paths(
         executable, arguments = _windows_invoked_command(tokens)
         if executable != _windows_basename(executable):
             collect(executable)
-        for target in _windows_redirection_targets(part):
+        for target in _windows_file_redirection_targets(part):
             collect(target)
 
         command = _windows_command_name(executable)
@@ -657,7 +675,7 @@ def _analyze_windows_paths(
                 if token.startswith("-") or command in _WINDOWS_SLASH_OPTION_COMMANDS:
                     continue
             collect(token)
-    return dirs, dynamic_paths
+    return paths, dynamic_paths
 
 
 def _get_windows_env_overrides(overrides: dict[str, str] | None) -> dict[str, str]:
@@ -747,7 +765,7 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         return False
 
     def _build_windows_context_permissions(
-        self, shell: str | None, env: dict[str, str] | None
+        self, command_parts: list[str], shell: str | None, env: dict[str, str] | None
     ) -> list[RequiredPermission]:
         required: list[RequiredPermission] = []
         if shell:
@@ -767,6 +785,19 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
                     label=f"custom environment ({names})",
                 )
             )
+        redirection_targets = {
+            target
+            for part in command_parts
+            for target in _windows_file_redirection_targets(part)
+        }
+        required.extend(
+            self._build_command_required_permission(
+                invocation_pattern=f"output redirection: {target}",
+                session_pattern=f"output redirection: {target}",
+                label=f"output redirection ({target})",
+            )
+            for target in sorted(redirection_targets)
+        )
         return required
 
     def _resolve_windows_permission(
@@ -781,33 +812,44 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         if not command_parts:
             return None
 
-        guardrail_permission = self._resolve_guardrail_permission(command_parts)
+        command_cwd = resolve_tool_path(cwd, self.cwd)
+        guardrail_permission = self._resolve_guardrail_permission(
+            command_parts, command_cwd=command_cwd, preserve_backslashes=True
+        )
         if (
             guardrail_permission
             and guardrail_permission.permission == ToolPermission.NEVER
         ):
             return guardrail_permission
 
-        command_cwd = resolve_tool_path(cwd, self.cwd)
-        outside_dirs, dynamic_paths = _analyze_windows_paths(
+        outside_paths, dynamic_paths = _analyze_windows_paths(
             command_parts,
             command_cwd=command_cwd,
             workspace=self.workspace,
             scratchpad_dir=self.scratchpad_dir,
             environment={**os.environ, **(env or {})},
         )
-        context_required = self._build_windows_context_permissions(shell, env)
+        outside_paths = {
+            path
+            for path in outside_paths
+            if not any(
+                path_grant_pattern_matches(path, pattern)
+                for pattern in self.config.allowlist
+            )
+        }
+        context_required = self._build_windows_context_permissions(
+            command_parts, shell, env
+        )
         if (
             self._is_unconditionally_allowed(
-                command_parts, outside_dirs | dynamic_paths, context_required
+                command_parts, outside_paths | dynamic_paths, context_required
             )
             and not guardrail_permission
         ):
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
-        required = self._build_required_permissions(
-            command_parts, outside_dirs, context_required
-        )
+        required = self._build_required_permissions(command_parts, outside_paths)
+        required.extend(context_required)
         required.extend(
             self._build_command_required_permission(
                 invocation_pattern=f"dynamic path: {path}",

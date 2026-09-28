@@ -9,7 +9,6 @@ from vibe.cli.constants import CLIPBOARD_IMAGE_PASTE_SUPPORTED_SYSTEM
 
 @dataclass(frozen=True)
 class CommandContext:
-    vibe_code_enabled: bool = False
     registry_skills_enabled: bool = False
     experimental_harness: bool = False
 
@@ -142,15 +141,11 @@ class CommandRegistry:
                 aliases=frozenset(["/teleport"]),
                 description="Teleport session to Vibe Code Web",
                 handler="_teleport_command",
-                is_available=lambda ctx: (
-                    ctx.vibe_code_enabled and not ctx.experimental_harness
-                ),
             ),
             "remote-project": Command(
                 aliases=frozenset(["/remote-project"]),
                 description="Select the Vibe Code Web project for this repository",
                 handler="_vibe_code_project_command",
-                is_available=lambda ctx: ctx.vibe_code_enabled,
             ),
             "proxy-setup": Command(
                 aliases=frozenset(["/proxy-setup"]),
@@ -190,6 +185,12 @@ class CommandRegistry:
                 handler="_reload_plugins",
                 is_available=lambda ctx: ctx.experimental_harness,
             ),
+            "todo": Command(
+                aliases=frozenset(["/todo"]),
+                description="Show the current todo list",
+                handler="_show_todos",
+                is_available=lambda ctx: ctx.experimental_harness,
+            ),
             "voice": Command(
                 aliases=frozenset(["/voice"]),
                 description="Configure voice settings",
@@ -209,6 +210,15 @@ class CommandRegistry:
                 aliases=frozenset(["/rewind"]),
                 description="Rewind to a previous message (or press Esc twice)",
                 handler="_start_rewind_mode",
+            ),
+            "branch": Command(
+                aliases=frozenset(["/branch"]),
+                description=(
+                    "Fork the current conversation into a new resumable session, "
+                    "leaving this session unchanged. Resume the copy with "
+                    "`vibe --resume <id>`."
+                ),
+                handler="_branch_session",
             ),
             "retry": Command(
                 aliases=frozenset(["/retry"]),

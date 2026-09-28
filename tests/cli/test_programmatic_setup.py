@@ -14,6 +14,7 @@ from vibe.cli import (
     programmatic as programmatic_mod,
 )
 from vibe.core.config import MissingAPIKeyError, VibeConfigSchema, harness_files
+from vibe.core.config.builder import ConfigMergeError
 from vibe.core.config.layer import ConfigStorageError
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.git.worktree import ManagedWorktree, WorktreeRepository
@@ -149,6 +150,24 @@ def test_unreadable_config_file_exits_with_storage_guidance(
     out = capsys.readouterr().out
     assert "Cannot read" in out
     assert "VIBE_HOME" in out
+
+
+def test_invalid_config_merge_exits_without_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def raise_merge_error() -> ConfigOrchestrator[VibeConfigSchema]:
+        raise ConfigMergeError("mcp_servers", "user-toml", "list", {})
+
+    monkeypatch.setattr(cli_mod, "build_default_orchestrator", raise_merge_error)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_mod.load_config_orchestrator_or_exit()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "mcp_servers from user-toml must be a list" in captured.out
+    assert "Use [[mcp_servers]]" in captured.out
+    assert "Traceback" not in captured.out + captured.err
 
 
 def test_interactive_trust_flag_is_delegated_without_launcher_mutation(
@@ -603,7 +622,7 @@ def test_run_cli_passes_max_tokens_to_run_programmatic(
     call: dict[str, object] = {}
     config = build_test_vibe_config()
 
-    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
     monkeypatch.setattr(
         cli_mod, "load_config_orchestrator_or_exit", lambda: load_orchestrator(config)
     )
@@ -633,7 +652,7 @@ def test_run_cli_auto_approve_is_a_harness_option_without_changing_agent(
     config = build_test_vibe_config(default_agent="plan")
     orchestrator = load_orchestrator(config)
 
-    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
     monkeypatch.setattr(
         cli_mod, "load_config_orchestrator_or_exit", lambda: orchestrator
     )
@@ -670,7 +689,7 @@ def test_run_cli_auto_approve_without_an_agent_selects_the_auto_approve_profile(
     call: dict[str, object] = {}
     orchestrator = load_orchestrator(build_test_vibe_config(default_agent="plan"))
 
-    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
     monkeypatch.setattr(
         cli_mod, "load_config_orchestrator_or_exit", lambda: orchestrator
     )
@@ -703,7 +722,7 @@ def test_run_cli_forwards_experimental_harness_selection(
     config = build_test_vibe_config()
     orchestrator = load_orchestrator(config)
 
-    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
     monkeypatch.setattr(
         cli_mod, "load_config_orchestrator_or_exit", lambda: orchestrator
     )
@@ -731,7 +750,7 @@ def _patch_run_cli_for_config(
 ) -> dict[str, object]:
     call: dict[str, object] = {}
     orchestrator = load_orchestrator(config)
-    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
     monkeypatch.setattr(
         cli_mod, "load_config_orchestrator_or_exit", lambda: orchestrator
     )
@@ -809,7 +828,7 @@ def test_run_cli_runs_update_prompt_before_interactive_start(
     config = build_test_vibe_config()
     calls: list[str] = []
 
-    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
     monkeypatch.setattr(
         cli_mod, "load_config_orchestrator_or_exit", lambda: load_orchestrator(config)
     )
@@ -841,7 +860,7 @@ def test_run_cli_setup_resolves_config_before_onboarding(
     orchestrator = load_orchestrator(build_test_vibe_config())
     calls: list[str] = []
 
-    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
 
     def load_config() -> ConfigOrchestrator[VibeConfigSchema]:
         calls.append("config")
@@ -881,7 +900,7 @@ def test_run_cli_check_upgrade_loads_config_without_requiring_api_key(
     assert args.check_upgrade is True
     assert args.initial_prompt is None
 
-    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(cli_mod, "bootstrap_vibe_home", lambda: None)
     monkeypatch.setattr(
         cli_mod,
         "load_config_orchestrator_or_exit",

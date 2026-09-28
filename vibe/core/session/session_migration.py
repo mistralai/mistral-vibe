@@ -29,7 +29,7 @@ async def migrate_sessions(session_config: SessionLoggingConfig) -> int:
             messages = session_json["messages"]
 
             session_dir = Path(save_dir) / session_file.stem
-            session_dir.mkdir()
+            session_dir.mkdir(mode=0o700)
 
             await SessionLogger.persist_metadata(metadata, session_dir)
             await SessionLogger.persist_messages(messages, session_dir)

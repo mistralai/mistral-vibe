@@ -17,20 +17,27 @@ from vibe.app_server.models import (
     SessionLogSummary,
 )
 from vibe.app_server.protocol import (
+    AgentInstallParams,
+    AgentsListResponse,
     AgentSwitchParams,
     CallbackResultError,
     CallbackResultParams,
     CallbackResultResponse,
     ConfigMutationResponse,
+    ConfigReadParams,
+    ConfigReadResponse,
     ConfigReloadParams,
     ConfigWriteParams,
     ConfigWriteResponse,
     ContextInjectParams,
     ContextInjectResponse,
     EmptyResponse,
+    ModelConfigWriteParams,
     ProtocolErrorCode,
     RuntimeMutationResponse,
     RuntimeUpdatedParams,
+    SessionArchiveParams,
+    SessionArchiveResponse,
     SessionCompactParams,
     SessionCompactResponse,
     SessionContinueParams,
@@ -40,6 +47,9 @@ from vibe.app_server.protocol import (
     SessionHistoryClearParams,
     SessionListParams,
     SessionListResponse,
+    SessionMarkAsSeenParams,
+    SessionPinParams,
+    SessionPinResponse,
     SessionReadParams,
     SessionReadResponse,
     SessionResumeParams,
@@ -386,12 +396,24 @@ class SessionBackend(Protocol):
         self, params: AgentSwitchParams
     ) -> SessionBackendResult[RuntimeMutationResponse]: ...
 
+    async def install_agent(
+        self, params: AgentInstallParams
+    ) -> SessionBackendResult[AgentsListResponse]: ...
+
+    async def uninstall_agent(
+        self, params: AgentInstallParams
+    ) -> SessionBackendResult[AgentsListResponse]: ...
+
     async def update_settings(
         self, params: SessionSettingsUpdateParams
     ) -> SessionBackendResult[EmptyResponse]: ...
 
     async def write_config(
         self, params: ConfigWriteParams
+    ) -> SessionBackendResult[ConfigWriteResponse]: ...
+
+    async def write_model_config(
+        self, params: ModelConfigWriteParams
     ) -> SessionBackendResult[ConfigWriteResponse]: ...
 
     async def reload_config(
@@ -534,6 +556,34 @@ class SessionBackendHost(Protocol):
     ) -> SessionTitleUpdateResponse: ...
 
     async def shutdown(self) -> None: ...
+
+
+@runtime_checkable
+class SessionBackendHostPin(Protocol):
+    """Optional selected-backend ownership of durable session pinning."""
+
+    async def pin(self, params: SessionPinParams) -> SessionPinResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostSeenState(Protocol):
+    """Optional selected-backend ownership of durable session seen state."""
+
+    async def mark_as_seen(self, params: SessionMarkAsSeenParams) -> EmptyResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostConfigRead(Protocol):
+    """Optional selected-backend ownership of a stored session's configuration."""
+
+    async def read_config(self, params: ConfigReadParams) -> ConfigReadResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostArchive(Protocol):
+    """Optional selected-backend ownership of durable session archiving."""
+
+    async def archive(self, params: SessionArchiveParams) -> SessionArchiveResponse: ...
 
 
 @runtime_checkable

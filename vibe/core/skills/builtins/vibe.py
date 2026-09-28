@@ -100,6 +100,9 @@ install: `uv tool install mistral-vibe`.
   falls back to latest in cwd).
 - `vibe --resume [SESSION_ID]`: specific session; without an id, opens a picker.
 - In-session: `/resume` (alias `/continue`).
+- `/branch` - Fork the current conversation into a new resumable session,
+  leaving this session unchanged. Resume the copy in another terminal with
+  `vibe --resume <id>` (the id is printed when the branch is created).
 
 #### Session titles
 
@@ -166,7 +169,7 @@ active_model = "mistral-medium-3.5"  # Model alias to pin; omit or set "" to fol
 theme = "auto"  # Follow terminal background, then OS light/dark preference
 disable_welcome_banner_animation = false
 autocopy_to_clipboard = true  # Enable automatic copying of selected text to clipboard
-file_watcher_for_autocomplete = false
+file_watcher_for_autocomplete = true  # Refresh @ suggestions after workspace changes
 ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
 show_greeting = true  # Show "Hello {name}" greeting below the banner at startup (Mistral providers, once per 24h)
 log_level = "WARNING"  # Optional. DEBUG | INFO | WARNING | ERROR | CRITICAL — log level for ~/.vibe/logs/vibe.log
@@ -251,6 +254,10 @@ emits_finish_reason = false  # set false for OpenAI-compatible endpoints that en
 ### Models
 
 ```toml
+# Restrict selectable models by their canonical API names, not their aliases.
+# Glob patterns and regular expressions prefixed with "re:" are supported.
+allowed_models = ["mistral-vibe-cli-*"]
+
 [[models]]
 name = "mistral-vibe-cli-latest"
 provider = "mistral"
@@ -267,6 +274,17 @@ supports_images = true            # vision-capable; allows @-mentioned images
 name = "devstral"
 provider = "llamacpp"
 alias = "local"
+
+# Optional override, requires --experimental-harness. A non-vision active model
+# already picks up any supports_images model on its OWN provider automatically;
+# set this only to point somewhere else, which is also the only way to cross
+# providers. Ignored whenever the active model has supports_images = true --
+# that model sees the image itself.
+[vision_model]
+name = "mistral-vibe-cli-latest"
+provider = "mistral"
+alias = "vision"
+supports_images = true            # required
 ```
 
 ### Tool Configuration
@@ -399,6 +417,13 @@ Otherwise the server uses OAuth and starts browser login by default. Pass
 Use `vibe mcp remove <name>` to remove a server from the user configuration;
 stored OAuth credentials are deleted when available.
 
+With `VIBE_CLI=rust`, shell `mcp add` uses the OAuth-only `/mcp add` syntax:
+`vibe mcp add https://mcp.linear.app/mcp --name linear --no-login`.
+It accepts repeatable `--scope`, `--transport`, and `--allow-insecure-http`;
+without `--no-login`, it starts browser login. Both `add` and `remove NAME`
+update user config without a chat session. Use `VIBE_CLI=python vibe mcp add`
+for the stdio/static-auth flags above. `remove` is argv-only, not a slash command.
+
 Hosted OAuth MCP servers can also be added from inside Vibe:
 
 ```text
@@ -463,10 +488,22 @@ and the API key env var is set. Toggle the master switch or hide individual
 connectors / tools:
 
 The legacy backend keeps a discovered connector disabled until it has an
-explicit `[[connectors]]` entry. The Unified backend selected with
-`--experimental-harness` enables ready connectors by default in memory. It
-does not write that default to TOML, and the master switch plus explicit
-connector, tool, allowlist, and denylist settings always take precedence.
+explicit `[[connectors]]` entry. The Unified Harness backend (selected via
+`--experimental-harness` or through the GrowthBook rollout) enables ready
+connectors by default in memory. It does not write that default to TOML, and
+the master switch plus explicit connector, tool, allowlist, and denylist
+settings always take precedence. Use `--legacy-harness` to force the legacy
+backend if you are enrolled in the rollout and prefer the old behavior.
+
+The `/connectors` (alias `/mcp`) list shows an "Add more connectors in Studio"
+link under the connectors group; selecting it opens the tenant's connectors
+console (`console_base_url/build/connectors`) pre-scoped to the caller's org
+and workspace. The link is hidden when the org/workspace cannot be resolved
+(no Mistral provider/key, or identity lookup unavailable).
+
+Connectors are listed and titled by their backend `display_name` (falling back
+to the connector name); the stable alias still keys config, tool names, and
+selection.
 
 ```toml
 enable_connectors = true          # Master switch (default: true)
@@ -742,6 +779,8 @@ vibe --max-tokens N                 # Max total session tokens (programmatic mod
 vibe --enabled-tools TOOL           # Enable specific tools (repeatable)
 vibe --disabled-tools TOOL          # Disable specific tools (repeatable)
 vibe --output text|json|streaming   # Output format (programmatic mode)
+vibe --experimental-harness        # Force the Unified Harness backend (requires internal installation)
+vibe --legacy-harness             # Force the legacy Python harness, overriding the GrowthBook rollout
 ```
 
 ## Built-in Agents
@@ -767,7 +806,47 @@ There are two kinds of agents:
 - **explore**: Read-only codebase exploration subagent with grep, file reading,
   and skill loading. Spawned by the model, not selectable by the user.
 
-Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
+With the Unified Harness, the interactive prompt lists each known subagent with
+its name, type, live status, and latest measured context size. Opening a
+subagent also shows its active status above the prompt and its context use in the
+bottom-right gauge. With an empty or locally edited prompt, press Down from its
+last line to focus the list; unsent text stays in the prompt. Use Up and Down to
+highlight a row, then press Enter to
+open it; with the mouse, hover to highlight and click to open. Select **Main
+conversation** to return, or press Escape from a subagent view. Ctrl+C adds a
+local-only, error-styled user message explaining that subagents cannot be
+controlled directly; return to Main and ask the main agent to stop one. Press
+Ctrl+C again to quit Vibe. After
+opening Main conversation, press Up from its row to focus the prompt. While a
+subagent view is open, Up stops at the Main row. Idle subagents remain listed as
+**ready** because the main agent can send them more instructions. Explicitly
+stopped subagents leave the list after you return to Main. The first subagent
+update does not add a local information message. When a subagent becomes ready,
+its transcript shows a local information message explaining how to give it a
+new goal or stop it from Main. Set `show_subagent_status_list = false` in
+`config.toml`, or change it through `/config`, to hide this UI.
+
+Custom agents are TOML files in `~/.vibe/agents/NAME.toml` or a project's
+`.vibe/agents/NAME.toml`. A file with `agent_type = "subagent"` is offered to the
+model to spawn; anything else is a mode the user selects. Both kinds read
+`description`, `enabled_tools`, `disabled_tools`, and per-tool `permission`, plus
+a prompt: `instructions` for prompt text written inline, or `system_prompt_id`
+naming a `.md` file in `.vibe/prompts/` or `~/.vibe/prompts/`. `instructions`
+wins when both are present.
+
+A mode's prompt is fixed when the conversation starts. Selecting the mode with
+`--agent`, or switching to it with Shift+Tab before the first message, runs it on
+its own prompt. Switching to it later changes its tools, permissions and model
+but keeps the prompt the conversation began with; `/clear` then runs the new
+mode's prompt from the start.
+
+On the Unified Harness a custom subagent runs on built-in tools only, with no
+MCP, connector, or plugin tools, and a per-tool `allowlist` or `denylist` caps
+the tool at "ask" rather than narrowing it, because the child runs under the
+parent's configuration. An agent file that cannot be honored (no description, a
+prompt id that resolves nowhere) is dropped and reported in the session's config
+issues. The built-in `explore` subagent is not offered there: a plain spawn
+already starts a child that inherits the parent's prompt and tools.
 
 ## Built-in Slash Commands
 
@@ -804,15 +883,21 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/copy` - Copy the last agent message to the clipboard
 - `/paste-image` - Paste an image from the OS clipboard into the prompt.
   **macOS only** — the command is not registered on Linux or Windows.
+- `/todo` - Open the full todo list. The current item is already
+  pinned to a single line under the input; this shows every item grouped by
+  status. Registered only under `--experimental-harness`, where todo updates are
+  logged in the transcript as a one-line delta instead of a full reprint.
 - `/voice` - Configure voice settings
 - `/mcp` (or `/connectors`) - Display MCP servers and connector status. The
   browser opens on the first item; press Up or Left to move into the fuzzy-search
   bar, and Up again to wrap to the last item. Pass a server or connector name to
   list its tools or open its auth panel when authentication is required
 - `/mcp add <url>` - Add a hosted OAuth MCP server. Supports `--name <alias>`,
-  repeatable `--scope <scope>`, `--transport <http|streamable-http>`, and
-  `--no-login`. Starts OAuth login by default. OAuth-only; use
-  `vibe mcp add <name> --url <url> --api-key-env <var>` for API-key/static auth.
+  repeatable `--scope <scope>`, `--transport <http|streamable-http>`,
+  `--no-login`, and `--allow-insecure-http` (permit a plaintext `http://` URL on
+  a non-localhost host such as a LAN server). Starts OAuth login by default.
+  OAuth-only; use `vibe mcp add <name> --url <url> --api-key-env <var>` for
+  API-key/static auth.
 - `vibe mcp remove <name>` - Remove an MCP server from the user configuration
   and delete its stored OAuth credentials when available.
 - `/mcp status` - Display MCP auth state (`ok`, `needs_auth`, `static`, `stdio`)
@@ -839,12 +924,11 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/proxy-setup` - Configure proxy and SSL certificate settings
 - `/leanstall` - Install the Lean 4 agent (leanstral)
 - `/unleanstall` - Uninstall the Lean 4 agent
-- `/plugins` - Display the plugins this session is running (experimental harness
-  mode only). Shows each plugin's name, scope, source format, content digest, and
+- `/plugins` - Display the plugins this session is running (Unified Harness only). Shows each plugin's name, scope, source format, content digest, and
   components (skills, MCP servers, agents, hooks, knowledge, connectors, tools).
   Press `r` inside the view to reload.
 - `/reload-plugins` - Re-pin this session's plugins and report what changed
-  (experimental harness mode only). Re-discovers plugins from disk, re-pins the
+  (Unified Harness only). Re-discovers plugins from disk, re-pins the
   snapshot, and prints a diff of added, removed, and updated plugins.
 - `/data-retention` - Show data retention information
 - `/teleport` - Teleport session to Vibe Code Web (only available when Vibe Code is enabled)
@@ -854,10 +938,13 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 
 ## File Mentions (`@`)
 
-Type `@` in the chat input to autocomplete files and folders from the
-project tree. Pressing Tab/Enter inserts the chosen path. Your message text
-is sent as-is (the `@path` stays in the prompt); behavior then depends on
-the mention kind:
+Type `@` in the chat input to autocomplete files and folders. A bare `@`
+lists non-hidden immediate children directly from the filesystem for fast
+browsing. Once you type a path character, Git workspaces use tracked and
+non-ignored untracked paths, including nested `.gitignore` rules; outside Git
+the picker falls back to the project tree. Pressing Tab/Enter inserts the
+chosen path. Your message text is sent as-is (the `@path` stays in the prompt);
+behavior then depends on the mention kind:
 
 - **Text files** trigger a synthetic `read_file` tool call injected right
   after your message, so the file content arrives as a fresh tool result
@@ -873,24 +960,41 @@ the mention kind:
 Image attachments:
 
 - Require `supports_images = true` on the active model in `config.toml`.
-  By default this is enabled only on `mistral-vibe-cli-latest`. Sending
-  images to a non-vision model raises a clear error and the message is
-  not added to the conversation.
+  The legacy loop rejects an image its model cannot read; under
+  `--experimental-harness` the send always goes through, and the agent is
+  shown a description of the image or, failing that, a link to the file.
+- The describer is picked automatically: any `supports_images` model on
+  the active model's **own** provider, no config needed. Same provider
+  means same key and same endpoint, so no image goes anywhere the session
+  was not already talking. A `vision_model` in `config.toml` overrides
+  that choice and is the only way to reach another provider.
+- Each image is then described once as the turn's input is prepared, and
+  the agent receives the text inside an `<image alias="...">` block in
+  place of the pixels. The user's prompt steers what the describer looks
+  for, and the description is reused for the rest of the session. The
+  describer never reasons, whatever its `thinking` says: the trace is
+  charged against the description budget and buys nothing on a
+  transcription.
+- A describe that fails does not fail the turn. The agent gets a
+  placeholder saying the image could not be read, and a warning names the
+  image and the provider's reason.
+- With no describer reachable the image is left alone, and the harness
+  hands the model a `file://` link to it instead of the pixels.
 - Snapshotted into `<session_dir>/attachments/<sha1>.<ext>` so that
   resumed sessions stay reproducible even if the source file is moved.
 - Capped at 10 MiB per image and 8 images per message.
 - Out-of-project paths work via `@/abs/path/to.png` (the picker only
   suggests project files, but the `@`-parser accepts absolute paths).
   Drag-and-drop from Finder into Terminal, iTerm2, or Ghostty is
-  intercepted at paste time: if the pasted content is a single bare
-  path to an image file (raw, `\\ `-escaped, or quoted), the input
-  automatically prepends `@` (and quotes paths containing spaces).
-  Non-image paths are pasted verbatim so non-image use cases are not
-  affected.
+  intercepted at paste time: if the pasted content is a standalone existing
+  absolute or home-relative file or folder (or a newline-delimited list of
+  them), the input automatically prepends `@` and quotes paths containing
+  spaces. This applies to text files, folders, and images; pasted prose,
+  relative paths, and missing paths are left unchanged.
 - **Image copy/paste from the clipboard** (**macOS only** for now):
-  writes the image to `<session_dir>/attachments/clipboard-<ts>.png`
-  (or the system temp dir when no session is active) and inserts an
-  `@<path>` token at the cursor. Two entry points:
+  writes the image to a persistent temporary PNG, inserts an `@<path>` token
+  at the cursor, then snapshots it under the session attachments on submit.
+  Two entry points:
   1. `Ctrl+V` keybinding inside the prompt.
   2. `/paste-image` slash command.
 
@@ -930,9 +1034,9 @@ voice, proxy) require idle, then write through the app server directly after
 the user confirms the picker.
 
 Commands not on the side-channel allowlist (e.g. `/clear`, `/compact`,
-`/rewind`, `/resume`, `/reload`, `/leanstall`, `/unleanstall`, `/teleport`,
-`/remote-project`, `/retry`, `/plugins`, `/reload-plugins`) are rejected while busy and can be retried when
-the session is idle.
+`/rewind`, `/resume`, `/branch`, `/reload`, `/leanstall`, `/unleanstall`,
+`/teleport`, `/remote-project`, `/retry`, `/plugins`, `/reload-plugins`) are rejected while busy and can be
+retried when the session is idle.
 
 While the queue is non-empty and the agent is busy, pressing **Up**
 enters queue selection mode: the last queued item is highlighted and
@@ -1065,6 +1169,7 @@ Each skill is a directory containing a `SKILL.md` file with YAML frontmatter.
 name: my-skill
 description: What this skill does and when to use it.
 user-invocable: true
+disable-model-invocation: false
 allowed-tools: bash read
 ---
 
@@ -1095,6 +1200,11 @@ Skills with `user-invocable: false` are model-only: they are hidden from the
 slash menu and `/skill-name` will not resolve them (it is treated as a plain
 prompt). The model can still load them via the `skill` tool.
 
+Skills with `disable-model-invocation: true` stay in the slash menu but are
+hidden from the model and cannot be loaded through the `skill` tool. Skills
+using OpenAI's `agents/openai.yaml` convention can set
+`policy.allow_implicit_invocation: false` for the same provider-independent behavior.
+
 A `/` at the very start of the input opens the slash menu (commands and skills).
 A `/word` typed mid-prompt (not the first word) instead shows an inline ghost-text
 preview of the best-matching skill name; press `Tab` to accept it. Only skills are
@@ -1103,6 +1213,9 @@ offered inline, and no popup is shown.
 ## Environment Variables
 
 - `VIBE_HOME` - Override the Vibe home directory (default: `~/.vibe`)
+- `GIT_PYTHON_GIT_EXECUTABLE` - Absolute path to a trusted custom or portable
+  Git executable. Automatic Git discovery ignores relative PATH entries and
+  executables inside the current project.
 - `MISTRAL_API_KEY` - API key for Mistral provider
 - `VIBE_ACTIVE_MODEL` - Override active model
 - `VIBE_*` - Any config field can be overridden with the `VIBE_` prefix
@@ -1134,8 +1247,11 @@ directories. The trust database is stored in `~/.vibe/trusted_folders.toml`.
 Project-local config (`.vibe/` directory) is only loaded when the current
 directory is explicitly trusted.
 
-Interactive mode prompts to trust unknown folders. The prompt targets the
-closest ancestor of the cwd (the cwd itself included) containing a `.git`
+Interactive mode prompts to trust unknown folders. Use Up/Down or the mouse
+wheel to scroll its detected-file list. Its text supports drag, double-click,
+and triple-click selection; dragging near a list edge scrolls while extending
+the selection. The prompt targets the closest
+ancestor of the cwd (the cwd itself included) containing a `.git`
 entry; the search excludes the user's home directory and the filesystem
 root, and falls back to the cwd if no qualifying ancestor is found.
 Programmatic mode (`-p`/`--prompt`) never prompts: the folder is untrusted.

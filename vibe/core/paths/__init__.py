@@ -23,6 +23,8 @@ from vibe.core.paths._vibe_home import (
     WHOAMI_CACHE_FILE,
     WORKTREES_DIR,
     GlobalPath,
+    bootstrap_vibe_home,
+    restrict_vibe_home_permissions,
 )
 from vibe.core.paths.conventions import AGENTS_MD_FILENAME
 
@@ -46,6 +48,8 @@ __all__ = [
     "WORKTREES_DIR",
     "GlobalPath",
     "LocalConfigDirs",
+    "bootstrap_vibe_home",
     "dedup_paths",
     "find_local_config_dirs",
+    "restrict_vibe_home_permissions",
 ]

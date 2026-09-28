@@ -68,6 +68,20 @@ explicitly targeting the session override changes that override directly.
 Session metadata is synchronized from the effective model only when the next
 user turn starts or is enqueued.
 
+The thinking level travels with the model pick and is session-scoped the same
+way, except that it lives under a model entry rather than beside it: the
+app server mirrors the session's level into the runtime override layer as a
+field of the active model, so a level picked in one session is not the level
+another session reopens on. Session metadata records it at the same turn
+boundary as the model, and records the effective level, so a model change moves
+the recorded level to the model now active.
+
+A model declared by a layer above the override — an agent profile, an admin
+policy — is exempt: that layer both outranks the override and may be replaced
+while the session runs, which would leave the override as the model's only and
+incomplete definition. The level of such a model stays the layer's to set, and
+the session neither scopes nor records it.
+
 An `active_model` alias absent from the merged model catalog is normalized to
 the empty, unpinned sentinel. Normal default resolution then applies, including
 the routed default and `allowed_models`; the invalid source value is left

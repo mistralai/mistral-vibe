@@ -166,7 +166,7 @@ active_model = "mistral-medium-3.5"  # Model alias to pin; omit or set "" to fol
 theme = "auto"  # Follow terminal background, then OS light/dark preference
 disable_welcome_banner_animation = false
 autocopy_to_clipboard = true  # Enable automatic copying of selected text to clipboard
-file_watcher_for_autocomplete = false
+file_watcher_for_autocomplete = true  # Refresh @ suggestions after workspace changes
 ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
 show_greeting = true  # Show "Hello {name}" greeting below the banner at startup (Mistral providers, once per 24h)
 log_level = "WARNING"  # Optional. DEBUG | INFO | WARNING | ERROR | CRITICAL — log level for ~/.vibe/logs/vibe.log
@@ -249,6 +249,10 @@ emits_finish_reason = false  # set false for OpenAI-compatible endpoints that en
 ### Models
 
 ```toml
+# Restrict selectable models by their canonical API names, not their aliases.
+# Glob patterns and regular expressions prefixed with "re:" are supported.
+allowed_models = ["mistral-vibe-cli-*"]
+
 [[models]]
 name = "mistral-vibe-cli-latest"
 provider = "mistral"
@@ -265,6 +269,17 @@ supports_images = true            # vision-capable; allows @-mentioned images
 name = "devstral"
 provider = "llamacpp"
 alias = "local"
+
+# Optional override, requires --experimental-harness. A non-vision active model
+# already picks up any supports_images model on its OWN provider automatically;
+# set this only to point somewhere else, which is also the only way to cross
+# providers. Ignored whenever the active model has supports_images = true --
+# that model sees the image itself.
+[vision_model]
+name = "mistral-vibe-cli-latest"
+provider = "mistral"
+alias = "vision"
+supports_images = true            # required
 ```
 
 ### Tool Configuration
@@ -461,10 +476,12 @@ and the API key env var is set. Toggle the master switch or hide individual
 connectors / tools:
 
 The legacy backend keeps a discovered connector disabled until it has an
-explicit `[[connectors]]` entry. The Unified backend selected with
-`--experimental-harness` enables ready connectors by default in memory. It
-does not write that default to TOML, and the master switch plus explicit
-connector, tool, allowlist, and denylist settings always take precedence.
+explicit `[[connectors]]` entry. The Unified Harness backend (selected via
+`--experimental-harness` or through the GrowthBook rollout) enables ready
+connectors by default in memory. It does not write that default to TOML, and
+the master switch plus explicit connector, tool, allowlist, and denylist
+settings always take precedence. Use `--legacy-harness` to force the legacy
+backend if you are enrolled in the rollout and prefer the old behavior.
 
 ```toml
 enable_connectors = true          # Master switch (default: true)
@@ -741,6 +758,8 @@ vibe --max-tokens N                 # Max total session tokens (programmatic mod
 vibe --enabled-tools TOOL           # Enable specific tools (repeatable)
 vibe --disabled-tools TOOL          # Disable specific tools (repeatable)
 vibe --output text|json|streaming   # Output format (programmatic mode)
+vibe --experimental-harness        # Force the Unified Harness backend (requires internal installation)
+vibe --legacy-harness             # Force the legacy Python harness, overriding the GrowthBook rollout
 ```
 
 ## Built-in Agents
@@ -809,9 +828,11 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
   bar, and Up again to wrap to the last item. Pass a server or connector name to
   list its tools or open its auth panel when authentication is required
 - `/mcp add <url>` - Add a hosted OAuth MCP server. Supports `--name <alias>`,
-  repeatable `--scope <scope>`, `--transport <http|streamable-http>`, and
-  `--no-login`. Starts OAuth login by default. OAuth-only; use
-  `vibe mcp add <name> --url <url> --api-key-env <var>` for API-key/static auth.
+  repeatable `--scope <scope>`, `--transport <http|streamable-http>`,
+  `--no-login`, and `--allow-insecure-http` (permit a plaintext `http://` URL on
+  a non-localhost host such as a LAN server). Starts OAuth login by default.
+  OAuth-only; use `vibe mcp add <name> --url <url> --api-key-env <var>` for
+  API-key/static auth.
 - `vibe mcp remove <name>` - Remove an MCP server from the user configuration
   and delete its stored OAuth credentials when available.
 - `/mcp status` - Display MCP auth state (`ok`, `needs_auth`, `static`, `stdio`)
@@ -838,12 +859,11 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/proxy-setup` - Configure proxy and SSL certificate settings
 - `/leanstall` - Install the Lean 4 agent (leanstral)
 - `/unleanstall` - Uninstall the Lean 4 agent
-- `/plugins` - Display the plugins this session is running (experimental harness
-  mode only). Shows each plugin's name, scope, source format, content digest, and
+- `/plugins` - Display the plugins this session is running (Unified Harness only). Shows each plugin's name, scope, source format, content digest, and
   components (skills, MCP servers, agents, hooks, knowledge, connectors, tools).
   Press `r` inside the view to reload.
 - `/reload-plugins` - Re-pin this session's plugins and report what changed
-  (experimental harness mode only). Re-discovers plugins from disk, re-pins the
+  (Unified Harness only). Re-discovers plugins from disk, re-pins the
   snapshot, and prints a diff of added, removed, and updated plugins.
 - `/data-retention` - Show data retention information
 - `/teleport` - Teleport session to Vibe Code Web (only available when Vibe Code is enabled)
@@ -853,10 +873,13 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 
 ## File Mentions (`@`)
 
-Type `@` in the chat input to autocomplete files and folders from the
-project tree. Pressing Tab/Enter inserts the chosen path. Your message text
-is sent as-is (the `@path` stays in the prompt); behavior then depends on
-the mention kind:
+Type `@` in the chat input to autocomplete files and folders. A bare `@`
+lists non-hidden immediate children directly from the filesystem for fast
+browsing. Once you type a path character, Git workspaces use tracked and
+non-ignored untracked paths, including nested `.gitignore` rules; outside Git
+the picker falls back to the project tree. Pressing Tab/Enter inserts the
+chosen path. Your message text is sent as-is (the `@path` stays in the prompt);
+behavior then depends on the mention kind:
 
 - **Text files** trigger a synthetic `read_file` tool call injected right
   after your message, so the file content arrives as a fresh tool result
@@ -872,20 +895,37 @@ the mention kind:
 Image attachments:
 
 - Require `supports_images = true` on the active model in `config.toml`.
-  By default this is enabled only on `mistral-vibe-cli-latest`. Sending
-  images to a non-vision model raises a clear error and the message is
-  not added to the conversation.
+  The legacy loop rejects an image its model cannot read; under
+  `--experimental-harness` the send always goes through, and the agent is
+  shown a description of the image or, failing that, a link to the file.
+- The describer is picked automatically: any `supports_images` model on
+  the active model's **own** provider, no config needed. Same provider
+  means same key and same endpoint, so no image goes anywhere the session
+  was not already talking. A `vision_model` in `config.toml` overrides
+  that choice and is the only way to reach another provider.
+- Each image is then described once as the turn's input is prepared, and
+  the agent receives the text inside an `<image alias="...">` block in
+  place of the pixels. The user's prompt steers what the describer looks
+  for, and the description is reused for the rest of the session. The
+  describer never reasons, whatever its `thinking` says: the trace is
+  charged against the description budget and buys nothing on a
+  transcription.
+- A describe that fails does not fail the turn. The agent gets a
+  placeholder saying the image could not be read, and a warning names the
+  image and the provider's reason.
+- With no describer reachable the image is left alone, and the harness
+  hands the model a `file://` link to it instead of the pixels.
 - Snapshotted into `<session_dir>/attachments/<sha1>.<ext>` so that
   resumed sessions stay reproducible even if the source file is moved.
 - Capped at 10 MiB per image and 8 images per message.
 - Out-of-project paths work via `@/abs/path/to.png` (the picker only
   suggests project files, but the `@`-parser accepts absolute paths).
   Drag-and-drop from Finder into Terminal, iTerm2, or Ghostty is
-  intercepted at paste time: if the pasted content is a single bare
-  path to an image file (raw, `\ `-escaped, or quoted), the input
-  automatically prepends `@` (and quotes paths containing spaces).
-  Non-image paths are pasted verbatim so non-image use cases are not
-  affected.
+  intercepted at paste time: if the pasted content is a standalone existing
+  absolute or home-relative file or folder (or a newline-delimited list of
+  them), the input automatically prepends `@` and quotes paths containing
+  spaces. This applies to text files, folders, and images; pasted prose,
+  relative paths, and missing paths are left unchanged.
 - **Image copy/paste from the clipboard** (**macOS only** for now):
   writes the image to `<session_dir>/attachments/clipboard-<ts>.png`
   (or the system temp dir when no session is active) and inserts an
@@ -1084,6 +1124,11 @@ Two entry points:
 Skills with `user-invocable: false` are model-only: they are hidden from the
 slash menu and `/skill-name` will not resolve them (it is treated as a plain
 prompt). The model can still load them via the `skill` tool.
+
+Skills with `disable-model-invocation: true` stay in the slash menu but are
+hidden from the model and cannot be loaded through the `skill` tool. Skills
+using OpenAI's `agents/openai.yaml` convention can set
+`policy.allow_implicit_invocation: false` for the same provider-independent behavior.
 
 A `/` at the very start of the input opens the slash menu (commands and skills).
 A `/word` typed mid-prompt (not the first word) instead shows an inline ghost-text

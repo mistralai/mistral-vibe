@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 from rich import print as rprint
+from rich.markup import escape
 
 from vibe import __version__
 from vibe.cli.session_exit import print_session_resume_message
@@ -26,7 +27,7 @@ from vibe.core.config import MissingAPIKeyError, VibeConfigSchema, load_dotenv_v
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.layer import ConfigStorageError
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.paths import HISTORY_FILE
+from vibe.core.paths import HISTORY_FILE, bootstrap_vibe_home
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.telemetry.types import LaunchContext
 from vibe.observability.logging import logger
@@ -90,7 +91,7 @@ def load_config_orchestrator_or_exit() -> ConfigOrchestrator[VibeConfigSchema]:
         )
         sys.exit(1)
     except ValueError as e:
-        rprint(f"[yellow]{e}[/]")
+        rprint(f"[yellow]{escape(str(e))}[/]")
         sys.exit(1)
 
 
@@ -114,16 +115,6 @@ def require_api_key_or_onboard(
         return run_onboarding(
             launch_context=_build_cli_launch_context(), orchestrator=orchestrator
         )
-
-
-def bootstrap_config_files() -> None:
-    history_file = HISTORY_FILE.path
-    if not history_file.exists():
-        try:
-            history_file.parent.mkdir(parents=True, exist_ok=True)
-            history_file.write_text("Hello Vibe!\n", "utf-8")
-        except Exception as e:
-            rprint(f"[yellow]Could not create history file: {e}[/]")
 
 
 def _agent_selection(args: argparse.Namespace) -> tuple[str | None, bool]:
@@ -238,6 +229,8 @@ def _run_interactive_mode(
     args: argparse.Namespace,
     stdin_prompt: str | None,
     update_cache_repository: UpdateCacheRepository,
+    *,
+    autocopy_to_clipboard: bool,
 ) -> None:
     from vibe.app_server.local import (
         ClientDescriptor,
@@ -302,6 +295,7 @@ def _run_interactive_mode(
                     args.continue_session or isinstance(args.resume, str)
                 ),
                 prompt_for_workspace_trust=not trust_workspace,
+                autocopy_to_clipboard=autocopy_to_clipboard,
                 resume_session_id=(
                     args.resume if isinstance(args.resume, str) else None
                 ),
@@ -426,7 +420,7 @@ def run_cli(args: argparse.Namespace) -> None:
     sentry_enabled = False
 
     load_dotenv_values()
-    bootstrap_config_files()
+    bootstrap_vibe_home()
 
     if args.setup:
         from vibe.setup.onboarding import run_onboarding
@@ -466,6 +460,7 @@ def run_cli(args: argparse.Namespace) -> None:
                 args=args,
                 stdin_prompt=stdin_prompt,
                 update_cache_repository=update_cache_repository,
+                autocopy_to_clipboard=config.autocopy_to_clipboard,
             )
         else:
             _run_programmatic_mode(args=args, stdin_prompt=stdin_prompt)

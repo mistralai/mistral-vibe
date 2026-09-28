@@ -14,7 +14,7 @@ from vibe.app_server.models import (
 )
 from vibe.cli.textual_ui.widgets.messages import ErrorMessage, UserCommandMessage
 
-_ERROR = "Failed to load workspace connectors (HTTP 502).\nServer response: Bad Gateway"
+_ERROR = "Failed to load connectors (HTTP 502).\nServer response: Bad Gateway"
 
 
 def _capture_mounted(app, monkeypatch: pytest.MonkeyPatch) -> list[object]:

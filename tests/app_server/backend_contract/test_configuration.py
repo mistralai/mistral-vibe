@@ -41,6 +41,23 @@ async def test_session_configuration_updates_and_reloads_through_the_backend(
 
 
 @pytest.mark.asyncio
+async def test_a_model_pick_goes_through_the_typed_write(
+    backend_contract_session: AppServerSession,
+) -> None:
+    """*Prepare*: A session on its configured model.
+    *Do*: Pick the thinking level, the way `/thinking` does.
+    *Assert*: It lands. The CLI used to post a JSON pointer it escaped itself at
+    `config/write`, which a running turn refuses outright; the typed operation
+    is the one the app-server can park until the turn ends.
+    """
+    config = backend_contract_session.resources.config
+
+    await config.write_model(reasoning_effort="low")
+
+    assert config.current.active_model.thinking == "low"
+
+
+@pytest.mark.asyncio
 async def test_config_updates_refresh_the_public_runtime_tool_catalog(
     backend_contract_session: AppServerSession,
 ) -> None:
@@ -360,9 +377,7 @@ def _stored_active_model(
     session_root: Path, session_id: str, experimental_harness: bool
 ) -> str | None:
     if experimental_harness:
-        from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-            UnifiedSessionStore,
-        )
+        from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
 
         return (
             UnifiedSessionStore(session_root, session_id)
@@ -378,9 +393,7 @@ def _session_model_is_persisted(
     session_root: Path, session_id: str, experimental_harness: bool
 ) -> bool:
     if experimental_harness:
-        from mistralai_vibe_local_harness.vibe._storage import (  # pyright: ignore[reportMissingImports]
-            UnifiedSessionStore,
-        )
+        from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
 
         return UnifiedSessionStore(session_root, session_id).exists
     return any(session_root.glob(f"*_{session_id[:8]}/meta.json"))
@@ -438,3 +451,59 @@ async def test_config_mutations_conflict_while_a_turn_is_running(
         await turn
 
     assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_agent_install_and_uninstall_round_trip_through_the_backend(
+    backend_contract_session: AppServerSession,
+) -> None:
+    def agent_names() -> set[str]:
+        return {agent.name for agent in backend_contract_session.resources.agents.all}
+
+    assert "lean" not in agent_names()
+
+    await backend_contract_session.resources.agents.set_installed(
+        "lean", installed=True
+    )
+    await backend_contract_session.resources.runtime.refresh()
+
+    assert "lean" in agent_names()
+
+    await backend_contract_session.resources.agents.set_installed(
+        "lean", installed=False
+    )
+    await backend_contract_session.resources.runtime.refresh()
+
+    assert "lean" not in agent_names()
+
+
+@pytest.mark.asyncio
+async def test_agent_install_rejects_unknown_agent_names(
+    backend_contract_session: AppServerSession, experimental_harness: bool
+) -> None:
+    if not experimental_harness:
+        pytest.skip("validation semantics are unified-harness only")
+    with pytest.raises(AppServerResponseError) as exc_info:
+        await backend_contract_session.resources.agents.set_installed(
+            "no-such-agent", installed=True
+        )
+
+    assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert "no-such-agent" in exc_info.value.error.message
+
+
+@pytest.mark.asyncio
+async def test_agent_uninstall_switches_away_from_the_active_agent(
+    backend_contract_session: AppServerSession, experimental_harness: bool
+) -> None:
+    if not experimental_harness:
+        pytest.skip("active-agent switch semantics are unified-harness only")
+    resources = backend_contract_session.resources
+    await resources.agents.set_installed("lean", installed=True)
+    active = await resources.agents.switch("lean")
+    assert active.name == "lean"
+
+    await resources.agents.set_installed("lean", installed=False)
+
+    assert "lean" not in {agent.name for agent in resources.agents.all}
+    assert resources.agents.active.name != "lean"

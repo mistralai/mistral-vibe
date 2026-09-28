@@ -172,10 +172,16 @@ class Skill(
             raise ToolError("Skill manager not available")
 
         skill_manager = ctx.skill_manager
-        skill_info = skill_manager.get_skill(args.name)
+        skill_info = skill_manager.get_model_invocable_skill(args.name)
 
         if skill_info is None:
-            available = ", ".join(sorted(skill_manager.available_skills.keys()))
+            available = ", ".join(
+                sorted(
+                    name
+                    for name, skill in skill_manager.available_skills.items()
+                    if skill.model_invocable
+                )
+            )
             raise ToolError(
                 f'Skill "{args.name}" not found. Available skills: {available or "none"}'
             )

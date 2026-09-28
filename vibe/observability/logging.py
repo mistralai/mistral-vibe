@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from io import TextIOWrapper
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
+from typing import Any
 
 from vibe.config_values import DEFAULT_LOG_LEVEL
 
@@ -51,7 +53,24 @@ class StructuredLogFormatter(logging.Formatter):
         return line
 
 
-class _VibeFileHandler(RotatingFileHandler):
+class OwnerOnlyRotatingFileHandler(RotatingFileHandler):
+    """A rotating handler whose files are always created owner-only.
+
+    Rotation reopens the file with umask-derived modes, so every open
+    re-asserts the creation mode; an existing file keeps its current mode.
+    """
+
+    def _open(self) -> TextIOWrapper[Any]:
+        try:
+            os.close(
+                os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            )
+        except FileExistsError:
+            pass
+        return super()._open()
+
+
+class _VibeFileHandler(OwnerOnlyRotatingFileHandler):
     pass
 
 
@@ -80,7 +99,7 @@ def init_file_logging(
         ):
             continue
         if shared_handler is None:
-            resolved_log_file.parent.mkdir(parents=True, exist_ok=True)
+            resolved_log_file.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
             max_bytes = int(os.environ.get("LOG_MAX_BYTES", 10 * 1024 * 1024))
             shared_handler = _VibeFileHandler(
                 resolved_log_file, maxBytes=max_bytes, backupCount=0, encoding="utf-8"
@@ -214,6 +233,7 @@ def decode_log_message(encoded: str) -> str:
 __all__ = [
     "LOG_LEVELS",
     "LogLevelChain",
+    "OwnerOnlyRotatingFileHandler",
     "StructuredLogFormatter",
     "decode_log_message",
     "encode_log_message",

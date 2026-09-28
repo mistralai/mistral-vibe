@@ -62,6 +62,7 @@ from vibe.core.config.schema import (
     WithConcatMerge,
     WithDeepMerge,
     WithReplaceMerge,
+    WithShallowMerge,
     WithUnionMerge,
 )
 from vibe.core.paths import GLOBAL_ENV_FILE
@@ -292,6 +293,15 @@ class VibeConfigSchema(ConfigSchema):
     @classmethod
     def validate_merged(cls, data: dict[str, Any], *, origins: dict[str, str]) -> Self:
         config = super().validate_merged(data, origins=origins)
+        # Model validators run before origins are assigned.
+        if (
+            config.origin_of("allowed_models") == AdminConfigLayer.NAME
+            and config.allowed_models
+            and not config.available_models()
+        ):
+            raise ValueError(
+                "Admin allowed_models matches none of the configured models."
+            )
         if config.origin_of("auto_compact_threshold") != AdminConfigLayer.NAME:
             return config
 
@@ -338,12 +348,22 @@ class VibeConfigSchema(ConfigSchema):
     allowed_models: Annotated[list[str], WithReplaceMerge()] = Field(
         default_factory=list,
         description=(
-            "An explicit list of model aliases/patterns to allow. If set, only these"
+            "An explicit list of model names/patterns to allow. If set, only these"
             " models are selectable. An empty list allows all configured models."
             " Supports glob patterns (e.g., 'mistral-*') and regex with 're:' prefix."
         ),
     )
-    compaction_model: Annotated[ModelConfig | None, WithReplaceMerge()] = None
+    compaction_model: Annotated[ModelConfig | None, WithShallowMerge()] = None
+    vision_model: Annotated[ModelConfig | None, WithShallowMerge()] = Field(
+        default=None,
+        description=(
+            "Vision-capable model that describes attached images for an active"
+            " model that cannot see them. Only needed to override the default,"
+            " which is any vision-capable model on the active model's own"
+            " provider; set this to reach a different provider."
+            " Requires --experimental-harness."
+        ),
+    )
     auto_compact_threshold: Annotated[int, WithReplaceMerge()] = Field(
         default=DEFAULT_AUTO_COMPACT_THRESHOLD,
         description=(
@@ -454,7 +474,7 @@ class VibeConfigSchema(ConfigSchema):
         default=BuiltinAgentName.ACCEPT_EDITS,
         description=(
             "Agent profile to use when no --agent flag is passed. "
-            "Builtin: ask, plan, accept-edits, auto-approve. "
+            "Builtin: ask, plan, accept-edits, smart-approve, auto-approve. "
             "Applies in both interactive and programmatic (-p/--prompt) mode."
         ),
     )
@@ -512,12 +532,6 @@ class VibeConfigSchema(ConfigSchema):
         ),
     )
 
-    # Internal
-    vibe_code_enabled: Annotated[bool, WithReplaceMerge()] = True
-    vibe_code_api_key_env_var: Annotated[str, WithReplaceMerge()] = (
-        DEFAULT_MISTRAL_API_ENV_KEY
-    )
-
     # Tracing
     enable_otel: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
@@ -554,13 +568,20 @@ class VibeConfigSchema(ConfigSchema):
         description="Show greeting at startup (Mistral providers only, once per 24h).",
     )
     autocopy_to_clipboard: Annotated[bool, WithReplaceMerge()] = True
-    file_watcher_for_autocomplete: Annotated[bool, WithReplaceMerge()] = False
+    file_watcher_for_autocomplete: Annotated[bool, WithReplaceMerge()] = True
     ask_confirmation_on_exit: Annotated[bool, WithReplaceMerge()] = True
     displayed_workdir: Annotated[str, WithReplaceMerge()] = ""
     context_warnings: Annotated[bool, WithReplaceMerge()] = False
     voice_mode_enabled: Annotated[bool, WithReplaceMerge()] = False
     narrator_enabled: Annotated[bool, WithReplaceMerge()] = False
     show_thinking_nodes: Annotated[bool, WithReplaceMerge()] = False
+    show_subagent_status_list: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        description=(
+            "Show the subagent status list and read-only transcript views in the "
+            "interactive prompt."
+        ),
+    )
     worktree_limit: Annotated[int, WithReplaceMerge()] = Field(
         default=15,
         ge=0,
@@ -602,14 +623,18 @@ class VibeConfigSchema(ConfigSchema):
         str | None, WithReplaceMerge(), BeforeValidator(_normalize_log_level)
     ] = None
 
-    # Nested configs (REPLACE — simple nested models, no merge semantics)
-    project_context: Annotated[ProjectContextConfig, WithReplaceMerge()] = Field(
+    # Nested configs: a bag of independent settings, so a layer overrides only
+    # the keys it names. Shallow rather than deep on purpose -- these are flat
+    # scalars today, and deep merging would silently extend per-key merging to
+    # the first dict-valued setting anyone adds, where a user could then shadow
+    # an inherited key but never remove it.
+    project_context: Annotated[ProjectContextConfig, WithShallowMerge()] = Field(
         default_factory=ProjectContextConfig
     )
-    session_logging: Annotated[SessionLoggingConfig, WithReplaceMerge()] = Field(
+    session_logging: Annotated[SessionLoggingConfig, WithShallowMerge()] = Field(
         default_factory=SessionLoggingConfig
     )
-    experiments: Annotated[ExperimentsConfig, WithReplaceMerge()] = Field(
+    experiments: Annotated[ExperimentsConfig, WithShallowMerge()] = Field(
         default_factory=ExperimentsConfig
     )
 
@@ -642,10 +667,15 @@ class VibeConfigSchema(ConfigSchema):
         allowed = {
             alias: model
             for alias, model in self.models.items()
-            if name_matches(alias, self.allowed_models)
+            if name_matches(model.name, self.allowed_models)
         }
-        # A filter that matches nothing degrades to "allow all" rather than
-        # bricking model selection; the mismatch already surfaces as a warning.
+        if self.origin_of("allowed_models") == "admin":
+            # An administrator's policy must fail closed: an invalid policy must
+            # not allow a user-configured model to run.
+            return allowed
+        # A filter that matches nothing in a non-enforced config degrades to
+        # "allow all" rather than bricking model selection; the mismatch already
+        # surfaces as a warning.
         return allowed or self.models
 
     def get_active_model(self) -> ModelConfig:
@@ -675,14 +705,33 @@ class VibeConfigSchema(ConfigSchema):
             f"Provider '{model.provider}' for model '{model.name}' not found in configuration."
         )
 
-    @property
-    def vibe_code_api_key(self) -> str:
-        return resolve_api_key(self.vibe_code_api_key_env_var) or ""
-
     def get_compaction_model(self) -> ModelConfig:
         if self.compaction_model is not None:
             return self.compaction_model
         return self.get_active_model()
+
+    def get_vision_fallback_model(self) -> ModelConfig | None:
+        try:
+            active = self.get_active_model()
+        except ValueError:
+            return self.vision_model
+        # Describing an image the model is about to receive anyway only loses
+        # detail.
+        if active.supports_images:
+            return None
+        if self.vision_model is not None:
+            return self.vision_model
+        # Same provider means same key and same endpoint, so a blind model
+        # picks up vision with no config and no image leaves where the session
+        # was already talking. Crossing providers stays the user's call.
+        return next(
+            (
+                model
+                for model in self.available_models().values()
+                if model.supports_images and model.provider == active.provider
+            ),
+            None,
+        )
 
     def connectors_by_name(self) -> dict[str, ConnectorConfig]:
         return {c.name: c for c in self.connectors}
@@ -707,6 +756,12 @@ class VibeConfigSchema(ConfigSchema):
         except ValueError:
             pass
         return next((p for p in self.providers if p.backend == Backend.MISTRAL), None)
+
+    def resolve_mistral_api_key(self) -> str:
+        provider = self.get_mistral_provider()
+        if provider is None:
+            return ""
+        return resolve_api_key(provider.api_key_env_var) or ""
 
     def is_active_model_mistral(self) -> bool:
         try:
@@ -884,7 +939,9 @@ class VibeConfigSchema(ConfigSchema):
         for pattern in self.allowed_models:
             if not (pattern or "").strip():
                 continue
-            if any(name_matches(alias, [pattern]) for alias in self.models):
+            if any(
+                name_matches(model.name, [pattern]) for model in self.models.values()
+            ):
                 continue
             logger.warning(
                 "Allowed model '%s' matches none of your configured models.", pattern
@@ -892,6 +949,23 @@ class VibeConfigSchema(ConfigSchema):
             self._validation_warnings.append(
                 f"Allowed model '{pattern}' matches none of your configured models."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_disallowed_active_model(self) -> VibeConfigSchema:
+        if not self.active_model or self.active_model in self.available_models():
+            return self
+        fallback = self.resolve_default_model_alias()
+        logger.warning(
+            "Active model '%s' is excluded by allowed_models; "
+            "falling back to default model '%s'.",
+            self.active_model,
+            fallback,
+        )
+        self._validation_warnings.append(
+            f"Active model '{self.active_model}' is excluded by allowed_models "
+            f"— falling back to default model '{fallback}'."
+        )
         return self
 
     @model_validator(mode="after")
@@ -910,6 +984,21 @@ class VibeConfigSchema(ConfigSchema):
                 f"'{compaction_provider.name}' but active model uses provider "
                 f"'{active_provider.name}'. They must share the same provider."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_vision_model(self) -> VibeConfigSchema:
+        if self.vision_model is None:
+            return self
+        if not self.vision_model.supports_images:
+            raise ValueError(
+                f"Vision model '{self.vision_model.alias}' must set "
+                "supports_images = true."
+            )
+        # Deliberately no same-provider check, unlike `compaction_model`:
+        # crossing providers is the whole point of setting this, and the
+        # description is a standalone completion on its own backend.
+        self.get_provider_for_model(self.vision_model)
         return self
 
     @model_validator(mode="after")

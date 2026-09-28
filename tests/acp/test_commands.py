@@ -19,7 +19,6 @@ import pytest
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.agent import VibeAcpAgent
-from vibe.acp.commands.registry import AcpCommandContext
 from vibe.acp.commands.teleport import TELEPORT_PUSH_OPTION_ID
 from vibe.acp.exceptions import COMPACTION_FAILED, CompactionError
 from vibe.app_server.models import (
@@ -168,7 +167,6 @@ async def test_teleport_failure_completes_the_acp_tool_call(
 ) -> None:
     created = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
     session = acp_agent_loop.sessions[created.session_id]
-    session.commands.refresh(AcpCommandContext(vibe_code_enabled=True))
     vibe_code = session.app_server.resources.vibe_code
     monkeypatch.setattr(
         vibe_code, "open_projects", AsyncMock(return_value=(None, "project-id"))
@@ -214,7 +212,6 @@ async def test_teleport_projects_every_stage_and_uses_push_specific_permission(
 ) -> None:
     created = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
     session = acp_agent_loop.sessions[created.session_id]
-    session.commands.refresh(AcpCommandContext(vibe_code_enabled=True))
     vibe_code = session.app_server.resources.vibe_code
     monkeypatch.setattr(
         vibe_code, "open_projects", AsyncMock(return_value=(None, "project-id"))
@@ -302,7 +299,6 @@ async def test_teleport_precondition_error_is_a_terminal_command_reply(
 ) -> None:
     created = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
     session = acp_agent_loop.sessions[created.session_id]
-    session.commands.refresh(AcpCommandContext(vibe_code_enabled=True))
     monkeypatch.setattr(
         session.app_server.resources.vibe_code,
         "open_projects",
@@ -335,7 +331,6 @@ async def test_teleport_start_error_completes_the_acp_tool_call(
 ) -> None:
     created = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
     session = acp_agent_loop.sessions[created.session_id]
-    session.commands.refresh(AcpCommandContext(vibe_code_enabled=True))
     vibe_code = session.app_server.resources.vibe_code
     monkeypatch.setattr(
         vibe_code, "open_projects", AsyncMock(return_value=(None, "project-id"))

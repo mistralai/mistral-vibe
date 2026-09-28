@@ -11,6 +11,7 @@ import uuid
 import yaml
 
 from vibe.core.config.harness_files._paths import GLOBAL_REGISTRY_SKILLS_CACHE_DIR
+from vibe.core.skills.models import DISABLE_MODEL_INVOCATION_FIELD
 from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
 from vibe.core.skills.registry.models import RegistrySkillItem
 from vibe.observability.logging import logger
@@ -130,6 +131,13 @@ def _materialize(item: RegistrySkillItem, name: str) -> Path | None:
     return dest
 
 
+def _invocation_policy_metadata(frontmatter: dict[str, object]) -> dict[str, bool]:
+    value = frontmatter.get(DISABLE_MODEL_INVOCATION_FIELD)
+    if not isinstance(value, bool):
+        return {}
+    return {DISABLE_MODEL_INVOCATION_FIELD: value}
+
+
 def _build_skill_markdown(name: str, item: RegistrySkillItem, body: str) -> str:
     description = item.resolved_description or f"Shared workspace skill '{name}'."
     extra = {
@@ -137,8 +145,18 @@ def _build_skill_markdown(name: str, item: RegistrySkillItem, body: str) -> str:
         "skill_id": item.skill_id,
         "version": str(item.version),
     }
+    generated_metadata: dict[str, object] = {
+        "name": name,
+        "description": description,
+        "metadata": extra,
+    }
+    try:
+        source_metadata, _ = parse_skill_markdown(item.skill.skill_body)
+    except SkillParseError:
+        source_metadata = {}
+    generated_metadata.update(_invocation_policy_metadata(source_metadata))
     frontmatter = yaml.safe_dump(
-        {"name": name, "description": description, "metadata": extra},
+        generated_metadata,
         default_flow_style=False,
         allow_unicode=True,
         sort_keys=False,
@@ -203,14 +221,13 @@ def _export_local(skill_id: str, version: int, target: Path) -> None:
         frontmatter, body = parse_skill_markdown(read_safe(skill_file).text)
     except SkillParseError:
         return
+    exported_metadata: dict[str, object] = {
+        "name": frontmatter.get("name") or target.name,
+        "description": frontmatter.get("description") or "",
+    }
+    exported_metadata.update(_invocation_policy_metadata(frontmatter))
     front = yaml.safe_dump(
-        {
-            "name": frontmatter.get("name") or target.name,
-            "description": frontmatter.get("description") or "",
-        },
-        default_flow_style=False,
-        allow_unicode=True,
-        sort_keys=False,
+        exported_metadata, default_flow_style=False, allow_unicode=True, sort_keys=False
     )
     skill_file.write_text(f"---\n{front}---\n\n{body.strip()}\n", encoding="utf-8")
 

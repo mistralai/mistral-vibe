@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from threading import Event
 
 import pytest
+from textual.pilot import Pilot
 from textual.widgets import Markdown
 
+from vibe.cli.autocompletion.path_completion import PathCompletionController
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import (
     CompletionPopup,
@@ -197,6 +201,44 @@ async def test_path_completion_popup_shows_up_to_ten_results(
         assert popup.styles.display == "block"
 
 
+async def wait_for_path_completions(pilot: Pilot) -> None:
+    await asyncio.wrap_future(PathCompletionController._executor.submit(lambda: None))
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["tab", "enter"])
+async def test_pending_path_query_does_not_accept_stale_suggestion(
+    vibe_app: VibeApp, file_tree: Path, key: str
+) -> None:
+    async with vibe_app.run_test() as pilot:
+        chat_input = vibe_app.query_one(ChatInputContainer)
+        popup = vibe_app.query_one(CompletionPopup)
+
+        await pilot.press("@")
+        await wait_for_path_completions(pilot)
+        ensure_selected_command(popup, "README.md")
+
+        release = Event()
+        blocker = PathCompletionController._executor.submit(release.wait)
+        try:
+            await pilot.press(*"sr")
+            await pilot.press(key)
+
+            assert chat_input.value == "@sr"
+        finally:
+            release.set()
+            await asyncio.wrap_future(blocker)
+            await wait_for_path_completions(pilot)
+
+        await pilot.press(key)
+        await wait_for_path_completions(pilot)
+
+        assert chat_input.value == "@src/"
+        assert popup.styles.display == "block"
+        assert "src/main.py" in popup.content_text
+
+
 @pytest.mark.asyncio
 async def test_pressing_tab_on_directory_keeps_popup_visible_with_contents(
     vibe_app: VibeApp, file_tree: Path
@@ -206,8 +248,9 @@ async def test_pressing_tab_on_directory_keeps_popup_visible_with_contents(
         popup = vibe_app.query_one(CompletionPopup)
 
         await pilot.press(*"@sr")
+        await wait_for_path_completions(pilot)
         await pilot.press("tab")
-        await pilot.pause(0.2)
+        await wait_for_path_completions(pilot)
 
         assert chat_input.value == "@src/"
         popup_content = popup.content_text
@@ -224,8 +267,9 @@ async def test_pressing_tab_writes_selected_path_name_and_hides_popup(
         popup = vibe_app.query_one(CompletionPopup)
 
         await pilot.press(*"Print @REA")
+        await wait_for_path_completions(pilot)
         await pilot.press("tab")
-        await pilot.pause(0.2)
+        await wait_for_path_completions(pilot)
 
         assert chat_input.value == "Print @README.md "
         assert popup.styles.display == "none"
@@ -240,6 +284,7 @@ async def test_pressing_enter_writes_selected_path_name_and_hides_popup(
         popup = vibe_app.query_one(CompletionPopup)
 
         await pilot.press(*"Print @src/m")
+        await wait_for_path_completions(pilot)
         await pilot.press("enter")
 
         assert chat_input.value == "Print @src/main.py "
@@ -313,6 +358,7 @@ async def test_does_not_trigger_completion_when_navigating_history(
         message_to_fill_history = "Yet another message to fill history"
 
         await pilot.press(*message_with_path)
+        await wait_for_path_completions(pilot)
         await pilot.press("tab", "enter")
         await pilot.press(*message_to_fill_history)
         await pilot.press("enter")

@@ -11,7 +11,7 @@ import tempfile
 from threading import Lock
 from typing import BinaryIO
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from vibe.core.paths import WORKTREES_DIR
 from vibe.core.session.session_lease import (
@@ -30,6 +30,7 @@ from vibe.observability.logging import logger
 # name cannot collide with one.
 CLAIMS_DIR_NAME = ".claims"
 RECORD_FILENAME = "record.json"
+RECOVERY_FILENAME = "recovery.json"
 HOLDERS_DIR_NAME = "holders"
 _BUCKET_AND_NAME_PARTS = 2
 _STARTING_HOLDER = ".starting"
@@ -53,6 +54,12 @@ class WorktreeRecord(BaseModel):
     base_commit: str | None = None
     branch_created: bool
     claimed_at: datetime
+    # The aggregate flag lets startup pruning finish an interrupted reap. The
+    # maps make per-session cancellation reject a delayed request with the same
+    # identity without cancelling another archived session sharing this tree.
+    reap_requested: bool = False
+    reap_requests: dict[str, str] = Field(default_factory=dict)
+    reap_cancellations: set[str] = Field(default_factory=set)
 
     @classmethod
     def new(
@@ -64,6 +71,33 @@ class WorktreeRecord(BaseModel):
             repo_root=repo_root,
             branch_created=branch_created,
             claimed_at=utc_now(),
+        )
+
+
+class WorktreeRecoveryRecord(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    version: int = 1
+    name: str
+    branch: str
+    repo_root: Path
+    base_commit: str
+    snapshot_ref: str
+    removed_at: datetime
+
+    @classmethod
+    def new(
+        cls, record: WorktreeRecord, *, snapshot_ref: str
+    ) -> WorktreeRecoveryRecord:
+        if record.base_commit is None:
+            raise WorktreeRecordError("Cannot recover an incomplete worktree claim.")
+        return cls(
+            name=record.name,
+            branch=record.branch,
+            repo_root=record.repo_root,
+            base_commit=record.base_commit,
+            snapshot_ref=snapshot_ref,
+            removed_at=utc_now(),
         )
 
 
@@ -141,28 +175,15 @@ class WorktreeClaim:
     def directory(self) -> Path:
         return _claims_root() / self.bucket / self.name
 
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        root = _claims_root()
+        root.mkdir(parents=True, exist_ok=True)
+        with _lease_directory_lock(root):
+            yield
+
     def write(self, record: WorktreeRecord) -> None:
-        directory = self.directory
-        directory.mkdir(parents=True, exist_ok=True)
-        target = directory / RECORD_FILENAME
-        temporary: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                suffix=".json.tmp",
-                dir=str(directory),
-                delete=False,
-                encoding="utf-8",
-            ) as handle:
-                temporary = Path(handle.name)
-                handle.write(record.model_dump_json(indent=2))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, target)
-            temporary = None
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+        self._write_json(RECORD_FILENAME, record)
 
     def read(self) -> WorktreeRecord | None:
         target = self.directory / RECORD_FILENAME
@@ -178,6 +199,28 @@ class WorktreeClaim:
             # The file stays put because it may be the only remaining breadcrumb.
             logger.warning("Ignoring unreadable worktree record at %s", target)
             return None
+
+    def has_recovery(self) -> bool:
+        return (self.directory / RECOVERY_FILENAME).exists()
+
+    def write_recovery(self, recovery: WorktreeRecoveryRecord) -> None:
+        self._write_json(RECOVERY_FILENAME, recovery)
+
+    def read_recovery(self) -> WorktreeRecoveryRecord | None:
+        target = self.directory / RECOVERY_FILENAME
+        try:
+            raw = target.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            return WorktreeRecoveryRecord.model_validate_json(raw)
+        except ValueError:
+            logger.warning("Ignoring unreadable worktree recovery at %s", target)
+            return None
+
+    def delete_recovery(self) -> None:
+        (self.directory / RECOVERY_FILENAME).unlink(missing_ok=True)
+        self._discard_empty_directories()
 
     def delete(self) -> None:
         self.finish_starting()
@@ -228,7 +271,9 @@ class WorktreeClaim:
         return self._live_holders(exclude={_STARTING_HOLDER})
 
     def mark_starting(self) -> None:
-        self._acquire_holder(self._holder_path(_STARTING_HOLDER))
+        self._acquire_holder(
+            self._holder_path(_STARTING_HOLDER), reference_counted=False
+        )
 
     def finish_starting(self) -> None:
         self._release_holder(self._holder_path(_STARTING_HOLDER))
@@ -237,11 +282,15 @@ class WorktreeClaim:
     def is_starting(self) -> bool:
         return bool(self._live_holders(include={_STARTING_HOLDER}))
 
-    def _acquire_holder(self, holder: Path) -> None:
+    def _acquire_holder(self, holder: Path, *, reference_counted: bool = True) -> None:
         holder.parent.mkdir(parents=True, exist_ok=True)
         with _holder_registry_lock():
             with _HELD_FILES_LOCK:
                 if held := _HELD_FILES.get(holder):
+                    if not reference_counted:
+                        raise WorktreeRecordError(
+                            f"Worktree holder {holder.name!r} is already active."
+                        )
                     _HELD_FILES[holder] = (held[0], held[1] + 1)
                     return
                 file = holder.open("a+b")
@@ -292,6 +341,29 @@ class WorktreeClaim:
                 if _holder_is_live(entry):
                     live.add(entry.name)
         return frozenset(live)
+
+    def _write_json(self, filename: str, model: BaseModel) -> None:
+        directory = self.directory
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / filename
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".json.tmp",
+                dir=str(directory),
+                delete=False,
+                encoding="utf-8",
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(model.model_dump_json(indent=2))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+            temporary = None
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
 
 @contextmanager

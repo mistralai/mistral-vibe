@@ -27,7 +27,6 @@ from vibe.cli.voice_manager.voice_manager_port import (
 )
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key
-from vibe.utils.audio import portaudio_install_hint
 from vibe.utils.platform import get_platform_id
 
 if TYPE_CHECKING:
@@ -123,10 +122,7 @@ class VoiceManager:
         except AlreadyRecordingError:
             raise RecordingStartError("Recording is already in progress")
         except AudioBackendUnavailableError as exc:
-            message = f"Audio backend is unavailable: {exc}"
-            if "portaudio" in str(exc).lower():
-                message += portaudio_install_hint()
-            raise RecordingStartError(message) from exc
+            raise RecordingStartError(f"Audio backend is unavailable: {exc}") from exc
         except NoAudioInputDeviceError:
             raise RecordingStartError(
                 "No audio input device found." + _mic_access_hint()

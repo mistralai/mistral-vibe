@@ -67,7 +67,11 @@ class AppServerClient:
         self._pending: dict[str, asyncio.Future[_ClientResponse]] = {}
         self._response_boundaries: dict[str, Callable[[dict[str, Any]], None]] = {}
         self._abandoned_request_ids: set[str] = set()
-        self._incoming: asyncio.Queue[_IncomingMessage] = asyncio.Queue(maxsize=256)
+        # Bounding this deadlocks the connection: the reader resolves request
+        # futures, and `incoming()` consumers request mid-message
+        # (`AppServerSession._resync`), so a burst parks the reader on a full
+        # queue. Backpressure belongs at the transports. See ADR 0009.
+        self._incoming: asyncio.Queue[_IncomingMessage] = asyncio.Queue()
         self._incoming_closed = asyncio.Event()
         self._incoming_error: Exception | None = None
         self._received_sequence = 0

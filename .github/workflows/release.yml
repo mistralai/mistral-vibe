@@ -6,30 +6,74 @@ on:
   workflow_dispatch:
 
 jobs:
-  release-pypy:
-    name: Release to Pypi
+  configure:
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/mistral-vibe
     permissions:
-      id-token: write
       contents: read
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set matrix
+        id: set-matrix
+        run: |
+          # One wheel per OS/arch (the bundled vibe-rs makes it platform-specific); Linux uses digest-pinned manylinux_2_28 containers.
+          # cargo_flags: Linux builds without voice (cpal needs ALSA/libasound,
+          # absent from manylinux); macOS/Windows use CoreAudio/WASAPI, so voice ships.
+          matrix='{
+            "include": [
+              {"runner": "ubuntu-22.04", "os": "linux", "arch": "x86_64", "container": "quay.io/pypa/manylinux_2_28_x86_64@sha256:65140ef21cef92d0c13d001708afd7d304d7a154f7120d039df99dac708f3ffb", "cargo_flags": "--no-default-features"},
+              {"runner": "ubuntu-22.04-arm", "os": "linux", "arch": "aarch64", "container": "quay.io/pypa/manylinux_2_28_aarch64@sha256:360bf4ec4349372e9bcfb123bf11bcc4f085072bfa4f3b946d98f5a28f9c03b0", "cargo_flags": "--no-default-features"},
+              {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64", "cargo_flags": ""},
+              {"runner": "macos-14", "os": "darwin", "arch": "aarch64", "cargo_flags": ""},
+              {"runner": "windows-2022", "os": "windows", "arch": "x86_64", "cargo_flags": ""}
+            ]
+          }'
+          echo "matrix=$(echo $matrix | jq -c .)" >> $GITHUB_OUTPUT
+
+  build-wheels:
+    needs: configure
+    name: "Build wheel: ${{ matrix.os }}-${{ matrix.arch }}"
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || '' }}
+    env:
+      # Per-matrix: empty for macOS/Windows (voice on), --no-default-features
+      # for Linux (voice off). See the matrix comment in the configure job.
+      CARGO_BUILD_FLAGS: ${{ matrix.cargo_flags }}
+      # macOS only: tag wheels macosx_11_0 (ignored on Linux/Windows) so they
+      # install on macOS 11+ instead of only the runner's OS version.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      - name: Install uv with caching
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
       - name: Set up Python
+        if: ${{ matrix.os != 'linux' }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - name: Install Python (Linux)
+        if: ${{ matrix.os == 'linux' }}
+        shell: bash
+        run: uv python install 3.12
 
-      - name: Install dependencies
-        run: uv sync --locked --dev
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
 
       - name: Inject Sentry DSN
         shell: bash
@@ -39,15 +83,71 @@ jobs:
           REQUIRE_SENTRY_DSN: "true"
         run: bash ./scripts/ci/inject-sentry-dsn.sh
 
-      - name: Build package
-        run: uv build
+      - name: Build wheel
+        shell: bash
+        run: uv build --wheel --out-dir dist
 
-      - name: Upload artifacts
+      - name: Validate installed wheel
+        shell: bash
+        run: |
+          uv venv .release-smoke
+          wheel=$(find dist -name '*.whl')
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python=".release-smoke/Scripts/python.exe"
+            vibe=".release-smoke/Scripts/vibe"
+          else
+            python=".release-smoke/bin/python"
+            vibe=".release-smoke/bin/vibe"
+          fi
+          uv pip install --python "$python" "$wheel"
+          "$python" scripts/ci/validate-combined-wheel.py
+          "$vibe" --version
+          VIBE_CLI=rust "$vibe" --version
+
+      - name: Upload wheel artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: dist
-          path: dist/
+          name: wheel-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  release-pypi:
+    name: Release to PyPI
+    needs: [build-wheels]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mistral-vibe
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Download all distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: "wheel-*"
+          merge-multiple: true
+
+      - name: List distributions
+        shell: bash
+        run: |
+          ls -l dist
+          test "$(find dist -name '*.whl' | wc -l)" -eq 5
+          test "$(find dist -name '*.tar.gz' | wc -l)" -eq 0
+          # Keep the macosx_11_0 entries in sync with MACOSX_DEPLOYMENT_TARGET in build-wheels.
+          for platform in manylinux_2_28_x86_64 manylinux_2_28_aarch64 \
+                          macosx_11_0_x86_64 macosx_11_0_arm64 win_amd64; do
+            set -- dist/mistral_vibe-*-cp312-abi3-"$platform".whl
+            if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+              echo "Expected exactly one cp312-abi3-$platform wheel" >&2
+              exit 1
+            fi
+          done
 
       - name: Publish distribution to PyPI
         if: github.repository == 'mistralai/mistral-vibe'
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: dist

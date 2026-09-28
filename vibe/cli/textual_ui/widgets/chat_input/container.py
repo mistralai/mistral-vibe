@@ -22,6 +22,7 @@ from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
+from vibe.cli.textual_ui.widgets.chat_input.subagent_list import SubagentList
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.voice_manager.voice_manager_port import VoiceManagerPort
 
@@ -33,7 +34,7 @@ SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
 }
 
 
-class ChatInputContainer(Vertical):
+class ChatInputContainer(Vertical):  # noqa: PLR0904 - cohesive input surface API
     ID_INPUT_BOX = "input-box"
 
     class Submitted(Message):
@@ -138,6 +139,8 @@ class ChatInputContainer(Vertical):
 
             yield self._body
 
+        yield SubagentList(id="subagent-list")
+
     def on_mount(self) -> None:
         if not self._body:
             return
@@ -150,6 +153,20 @@ class ChatInputContainer(Vertical):
         self, _event: ChatInputBody.CompletionResetRequested
     ) -> None:
         self._completion_manager.reset()
+
+    def on_chat_text_area_navigate_below(
+        self, event: ChatTextArea.NavigateBelow
+    ) -> None:
+        event.stop()
+        subagent_list = self.query_one(SubagentList)
+        if not subagent_list.focus_first() and self.input_widget is not None:
+            self.input_widget.set_app_focus(True)
+
+    def on_subagent_list_focus_input_requested(
+        self, event: SubagentList.FocusInputRequested
+    ) -> None:
+        event.stop()
+        self.focus_input()
 
     @property
     def input_widget(self) -> ChatTextArea | None:
@@ -182,6 +199,21 @@ class ChatInputContainer(Vertical):
     def focus_input(self) -> None:
         if self._body:
             self._body.focus_input()
+
+    def set_subagent_view(
+        self, active: bool, *, restore_input_focus: bool = True
+    ) -> None:
+        input_box = self.query_one(f"#{self.ID_INPUT_BOX}")
+        if not active:
+            input_box.display = True
+            if restore_input_focus:
+                self.focus_input()
+            return
+        if self.input_widget is not None:
+            self.input_widget.set_app_focus(False)
+        input_box.display = False
+        self.clear_completion_suggestions()
+        self.query_one(SubagentList).focus()
 
     def render_completion_suggestions(
         self, suggestions: list[CompletionEntry], selected_index: int

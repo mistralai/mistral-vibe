@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import stat
 
 import pytest
 
@@ -10,6 +12,24 @@ from vibe.app_server._unified_scheduled_loops import (
     ScheduledLoopStoreError,
     UnifiedScheduledLoops,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+async def test_scheduled_loops_store_file_is_owner_only(tmp_path: Path) -> None:
+    """*Prepare*: A persistent Unified loop store with no file yet.
+    *Do*: Create one scheduled loop, which persists the store.
+    *Assert*: The store file is created owner-only.
+    """
+    # Prepare
+    path = tmp_path / "scheduled-loops.json"
+    loops = UnifiedScheduledLoops(path, persistent=lambda: True)
+
+    # Do
+    await loops.create("30s", "check the build")
+
+    # Assert
+    assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
 
 
 @pytest.mark.asyncio

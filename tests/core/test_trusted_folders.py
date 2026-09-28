@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import stat
 import tomllib
 from unittest.mock import patch
 
@@ -28,6 +30,27 @@ class TestTrustedFoldersManager:
         manager = TrustedFoldersManager()
         assert manager.is_trusted(tmp_path) is None
         assert trusted_file.is_file()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+    def test_creates_owner_only_trust_store(self, tmp_path: Path) -> None:
+        """The trust store is a security-decision record, so it lands owner-only."""
+        trusted_file = TRUSTED_FOLDERS_FILE.path
+        trusted_file.unlink(missing_ok=True)
+
+        TrustedFoldersManager()
+
+        assert stat.S_IMODE(trusted_file.stat().st_mode) & 0o077 == 0
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+    def test_keeps_existing_file_mode(self, tmp_path: Path) -> None:
+        trusted_file = TRUSTED_FOLDERS_FILE.path
+        trusted_file.parent.mkdir(parents=True, exist_ok=True)
+        trusted_file.write_text("trusted = []\n", encoding="utf-8")
+        trusted_file.chmod(0o644)
+
+        TrustedFoldersManager().add_trusted(tmp_path)
+
+        assert stat.S_IMODE(trusted_file.stat().st_mode) == 0o644
 
     def test_loads_existing_file(self, tmp_path: Path) -> None:
         trusted_file = TRUSTED_FOLDERS_FILE.path

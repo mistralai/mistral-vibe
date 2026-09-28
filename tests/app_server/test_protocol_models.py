@@ -27,6 +27,7 @@ from vibe.app_server.protocol import (
     CallbackResultError,
     CallbackResultResponse,
     EventWatermarkResponse,
+    FeedbackShouldShowResponse,
     InitializeParams,
     InvalidParamsData,
     InvalidParamsIssue,
@@ -107,6 +108,21 @@ def test_wire_models_serialize_camel_case_and_reject_snake_case_wire_keys() -> N
         validate_wire(SessionHistoryListParams, {"session_id": "session-1"})
 
 
+def test_feedback_response_serializes_cooldown_and_accepts_legacy_shape() -> None:
+    response = FeedbackShouldShowResponse(show=True, snooze_duration_seconds=604_800)
+
+    assert response.model_dump(mode="json") == {
+        "show": True,
+        "snoozeDurationSeconds": 604_800,
+    }
+    assert (
+        validate_wire(
+            FeedbackShouldShowResponse, {"show": True}
+        ).snooze_duration_seconds
+        is None
+    )
+
+
 def test_public_session_state_carries_optional_retry_state() -> None:
     session = PublicSession(
         id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
@@ -150,6 +166,18 @@ def test_public_session_harness_field_defaults_to_none() -> None:
 
     assert session.harness is None
     assert session.model_dump(mode="json")["harness"] is None
+
+
+def test_public_session_serializes_nullable_bumped_at() -> None:
+    session = PublicSession(
+        id="session-1",
+        status=IdleSessionStatus(),
+        created_at=1,
+        updated_at=1,
+        bumped_at=42,
+    )
+
+    assert session.model_dump(mode="json")["bumpedAt"] == 42
 
 
 @pytest.mark.parametrize("harness", ["legacy", "unified"])

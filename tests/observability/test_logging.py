@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 from logging.handlers import RotatingFileHandler
+import os
 from pathlib import Path
+import stat
 from textwrap import dedent
 
 import pytest
@@ -10,6 +12,7 @@ import pytest
 from vibe.observability.logging import (
     LOG_LEVELS,
     LogLevelChain,
+    OwnerOnlyRotatingFileHandler,
     StructuredLogFormatter,
     _VibeFileHandler,
     decode_log_message,
@@ -496,3 +499,33 @@ class TestRuntimeLogLevel:
         chain = get_log_level_chain()
         assert isinstance(chain, LogLevelChain)
         set_config_log_level(None)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+class TestOwnerOnlyLogFile:
+    def test_creates_owner_only_log_file(
+        self, log_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        test_logger = logging.getLogger("test_owner_only_log")
+        test_logger.setLevel(logging.DEBUG)
+
+        init_file_logging(log_file, target_logger=test_logger)
+        test_logger.info("Test log entry")
+
+        assert stat.S_IMODE(log_file.stat().st_mode) & 0o077 == 0
+
+    def test_reopen_after_rotation_keeps_owner_only(self, log_file: Path) -> None:
+        handler = OwnerOnlyRotatingFileHandler(
+            log_file, maxBytes=100, backupCount=0, encoding="utf-8"
+        )
+        try:
+            assert stat.S_IMODE(log_file.stat().st_mode) & 0o077 == 0
+
+            log_file.unlink()
+            stream = handler._open()
+            stream.close()
+
+            assert stat.S_IMODE(log_file.stat().st_mode) & 0o077 == 0
+        finally:
+            handler.close()

@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
+import logging
 from pathlib import Path
 import threading
 from threading import Event
@@ -38,12 +39,81 @@ from vibe.app_server.connector_catalog import (
 )
 from vibe.app_server.protocol import ProtocolErrorCode
 from vibe.core.config import ConnectorConfig, VibeConfigSchema
+from vibe.core.identity import IdentityResult
+
+
+@pytest.mark.asyncio
+async def test_manage_connectors_url_builds_console_share_link(monkeypatch) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    provider = connector_catalog._ConnectorProvider(
+        fingerprint="fp", base_url="https://api.mistral.ai", api_key="k"
+    )
+    identity = IdentityResult.model_validate({
+        "id": "user-1",
+        "organization": {"id": "org-1", "name": "Org"},
+        "workspace": {"id": "ws-1", "name": "Workspace"},
+    })
+    monkeypatch.setattr(
+        connector_catalog, "_resolve_provider", lambda _config: provider
+    )
+    resolve = AsyncMock(return_value=identity)
+    monkeypatch.setattr(connector_catalog._IDENTITY_CACHE, "resolve", resolve)
+
+    url = await connector_catalog._manage_connectors_url(config)
+
+    # Identity must be fetched from the versioned API base (.../v1/users/me),
+    # not the bare connectors bootstrap server root.
+    assert resolve.await_args is not None
+    mistral_provider = config.get_mistral_provider()
+    assert mistral_provider is not None
+    identity_base = resolve.await_args.kwargs["base_url"]
+    assert identity_base == mistral_provider.api_base
+    assert identity_base.rstrip("/").endswith("/v1")
+
+    assert url is not None
+    assert url.startswith(f"{config.console_base_url}/build/connectors?shareContext=")
+    from urllib.parse import parse_qs, urlsplit
+
+    share_context = parse_qs(urlsplit(url).query)["shareContext"][0]
+    assert json.loads(share_context) == {
+        "organizationId": "org-1",
+        "workspaceId": "ws-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_manage_connectors_url_none_without_mistral_provider(monkeypatch) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    monkeypatch.setattr(connector_catalog, "_resolve_provider", lambda _config: None)
+
+    assert await connector_catalog._manage_connectors_url(config) is None
+
+
+@pytest.mark.asyncio
+async def test_manage_connectors_url_none_when_identity_incomplete(monkeypatch) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    provider = connector_catalog._ConnectorProvider(
+        fingerprint="fp", base_url="https://api.mistral.ai", api_key="k"
+    )
+    identity = IdentityResult.model_validate({
+        "id": "user-1",
+        "organization": {"id": "org-1", "name": "Org"},
+    })
+    monkeypatch.setattr(
+        connector_catalog, "_resolve_provider", lambda _config: provider
+    )
+    monkeypatch.setattr(
+        connector_catalog._IDENTITY_CACHE, "resolve", AsyncMock(return_value=identity)
+    )
+
+    assert await connector_catalog._manage_connectors_url(config) is None
 
 
 def _connector(
     *,
     connector_id: str = "connector-1",
     name: str = "wiki",
+    display_name: str | None = None,
     ready: bool = True,
     protocol: str | None = "mcp",
     tool_name: str = "search",
@@ -65,9 +135,50 @@ def _connector(
         ],
         "bootstrap_errors": bootstrap_errors,
     }
+    if display_name is not None:
+        connector["display_name"] = display_name
     if protocol is not None:
         connector["protocol"] = protocol
     return connector
+
+
+def test_resolve_uses_backend_display_name_but_stable_alias() -> None:
+    catalog = connector_catalog._resolve_catalog(
+        {"connectors": [_connector(name="wiki", display_name="Company Wiki")]},
+        "fingerprint",
+    )
+
+    connector = catalog.connectors[0]
+    assert connector.display_name == "Company Wiki"
+    # Alias stays derived from name, not the (possibly localized) display_name,
+    # so connector ids/config/tool names don't churn.
+    assert connector.alias == "wiki"
+
+
+def test_resolve_falls_back_when_display_name_absent() -> None:
+    """Older backends omit display_name; parsing tolerates it."""
+    catalog = connector_catalog._resolve_catalog(
+        {"connectors": [_connector(name="wiki")]}, "fingerprint"
+    )
+
+    connector = catalog.connectors[0]
+    assert connector.display_name == "wiki"
+    assert connector.alias == "wiki"
+
+
+def test_connector_cache_round_trip_preserves_display_name() -> None:
+    live = connector_catalog._resolve_catalog(
+        {"connectors": [_connector(name="wiki", display_name="Company Wiki")]},
+        "fingerprint",
+    )
+    entry = connector_catalog._cache_entry(live, stored_at=1_000)
+    hit = connector_catalog._parse_cache_entry("fingerprint", entry, now=1_000)
+
+    assert hit is not None
+    cached = hit.catalog.connectors[0]
+    assert cached.alias == "wiki"
+    assert cached.display_name == "Company Wiki"
+    assert hit.catalog.revision == live.revision
 
 
 @pytest.mark.asyncio
@@ -102,12 +213,21 @@ async def test_connector_bootstrap_processing_runs_off_the_event_loop(
 
     # Assert
     assert payload == {"connectors": []}
+    client.get.assert_awaited_once_with(
+        "https://api.example.test/v1/connectors/bootstrap",
+        headers={"Authorization": "Bearer secret"},
+        params={
+            "include_auth_actionable_connectors": "true",
+            "builtin_connectors": "web_search",
+            "supports_mcp": "true",
+        },
+    )
     assert construction_threads[0] != event_loop_thread
     assert parsing_threads[0] != event_loop_thread
 
 
 @pytest.mark.asyncio
-async def test_connector_catalog_skips_explicit_non_mcp_connectors(
+async def test_connector_catalog_trusts_server_capability_filter(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
@@ -131,6 +251,7 @@ async def test_connector_catalog_skips_explicit_non_mcp_connectors(
     assert catalog is not None
     assert [connector.raw_id for connector in catalog.connectors] == [
         "empty",
+        "http",
         "legacy",
         "mcp",
     ]
@@ -508,22 +629,8 @@ def test_concurrent_connector_cache_writers_preserve_account_entries(
         _v2_entry({"connectors": []}, stored_at=1_101),
         _v2_entry({"connectors": "not-a-list"}),
         _v2_entry({"connectors": [_connector()]}, stored_at=500),
-        _v2_entry({"connectors": [_connector() for _ in range(257)]}),
-        _v2_entry({
-            "connectors": [
-                {
-                    **_connector(),
-                    "tools": [
-                        {
-                            "name": "oversized",
-                            "inputSchema": {"description": "x" * (64 * 1_024)},
-                        }
-                    ],
-                }
-            ]
-        }),
     ],
-    ids=["future", "malformed", "expired", "connector-limit", "schema-limit"],
+    ids=["future", "malformed", "expired"],
 )
 def test_connector_cache_rejects_unsafe_records(
     tmp_path: Path, entry: dict[str, object]
@@ -542,6 +649,33 @@ def test_connector_cache_rejects_unsafe_records(
 
     # Assert
     assert result is None
+
+
+def test_connector_cache_drops_faulty_connector_but_keeps_siblings(
+    tmp_path: Path,
+) -> None:
+    # A cached record with one invalid connector must not poison the whole cache
+    # read: the faulty row is dropped and its healthy sibling survives.
+    entry = _v2_entry({
+        "connectors": [
+            _connector(name="wiki"),
+            {
+                **_connector(connector_id="c-dup", name="dup"),
+                "tools": [
+                    {"name": "same", "inputSchema": {}},
+                    {"name": "same", "inputSchema": {}},
+                ],
+            },
+        ]
+    })
+    fingerprint = "f" * 64
+    cache_path = tmp_path / "connectors.json"
+    cache_path.write_text(json.dumps({fingerprint: entry}), encoding="utf-8")
+
+    result = ConnectorCatalogCache(cache_path).read(fingerprint, now=1_100)
+
+    assert result is not None
+    assert [connector.alias for connector in result.catalog.connectors] == ["wiki"]
 
 
 @pytest.mark.asyncio
@@ -604,6 +738,7 @@ async def test_successful_bootstrap_writes_redacted_bounded_v2(
     assert set(connector) == {
         "auth_action",
         "diagnostics",
+        "display_name",
         "id",
         "name",
         "protocol",
@@ -656,9 +791,9 @@ async def test_failed_forced_refresh_preserves_last_catalog(
 def test_connector_aliases_are_collision_safe_and_missing_ids_are_ignored(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """*Prepare*: A legacy cache with colliding display names and one connector without an ID.
+    """*Prepare*: A cache with colliding display names and one connector without an ID.
     *Do*: Resolve it into the immutable host catalog.
-    *Assert*: Aliases are deterministic and only service identities enter the catalog.
+    *Assert*: Aliases are deterministic and only connectors with IDs enter the catalog.
     """
     # Prepare
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
@@ -752,28 +887,223 @@ async def test_connector_collision_suffix_stays_within_public_name_limit(
     assert len(aliases[1]) == 256
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("names", [("search", "search"), ("search", " search ")])
-async def test_connector_catalog_rejects_duplicate_trimmed_tool_names(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, names: tuple[str, str]
+def test_resolve_drops_connector_with_duplicate_trimmed_tool_names(
+    names: tuple[str, str],
 ) -> None:
-    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
-    connector = _connector()
-    connector["tools"] = [
+    faulty = _connector(connector_id="c-dup", name="dup")
+    faulty["tools"] = [
         {"name": name, "description": name, "inputSchema": {}} for name in names
     ]
 
-    async def fetch(_base_url: str, _api_key: str) -> object:
-        return {"connectors": [connector]}
-
-    service = ConnectorCatalogService(
-        implicit_source_enabled=False,
-        cache_path=tmp_path / "connectors.json",
-        fetch_bootstrap=fetch,
+    catalog = connector_catalog._resolve_catalog(
+        {"connectors": [_connector(name="wiki"), faulty]}, "fingerprint"
     )
 
-    with pytest.raises(ConnectorCatalogValidationError, match="duplicate tool names"):
-        await service.resolve_catalog(_orchestrator())
+    # The faulty connector is dropped; its healthy sibling still loads.
+    assert [connector.alias for connector in catalog.connectors] == ["wiki"]
+
+
+def test_resolve_drops_connector_exceeding_tool_limit() -> None:
+    over_limit = _connector(connector_id="c-many", name="many")
+    over_limit["tools"] = [
+        {"name": f"tool_{index}", "description": "x", "inputSchema": {}}
+        for index in range(connector_catalog._MAX_TOOLS_PER_CONNECTOR + 1)
+    ]
+
+    catalog = connector_catalog._resolve_catalog(
+        {"connectors": [over_limit, _connector(name="wiki")]}, "fingerprint"
+    )
+
+    assert [connector.alias for connector in catalog.connectors] == ["wiki"]
+
+
+def test_resolve_drops_oversized_tool_but_keeps_connector() -> None:
+    connector = _connector(connector_id="c-big", name="big")
+    connector["tools"] = [
+        {"name": "ok", "description": "x", "inputSchema": {}},
+        {
+            "name": "huge",
+            "description": "x",
+            # Padding beyond the 64 KiB cap; only this tool is dropped.
+            "inputSchema": {"type": "object", "pad": "x" * (65 * 1024)},
+        },
+    ]
+
+    catalog = connector_catalog._resolve_catalog(
+        {"connectors": [connector]}, "fingerprint"
+    )
+
+    # The connector survives with its healthy tool; the oversized one is gone.
+    assert len(catalog.connectors) == 1
+    assert [tool.raw_name for tool in catalog.connectors[0].tools] == ["ok"]
+
+
+def test_resolve_drops_unnamed_tool_but_keeps_connector() -> None:
+    connector = _connector(connector_id="c-x", name="x")
+    connector["tools"] = [
+        {"name": "ok", "description": "x", "inputSchema": {}},
+        {"name": "   ", "description": "blank", "inputSchema": {}},
+    ]
+
+    catalog = connector_catalog._resolve_catalog(
+        {"connectors": [connector]}, "fingerprint"
+    )
+
+    assert len(catalog.connectors) == 1
+    assert [tool.raw_name for tool in catalog.connectors[0].tools] == ["ok"]
+
+
+def test_resolve_drops_all_faulty_connectors_yielding_empty_catalog() -> None:
+    faulty = _connector(connector_id="c-bad", name="bad")
+    faulty["tools"] = [{"name": "n", "description": "n", "inputSchema": {}}] * 2
+
+    catalog = connector_catalog._resolve_catalog(
+        {"connectors": [faulty]}, "fingerprint"
+    )
+
+    assert catalog.connectors == ()
+
+
+def test_resolve_tail_truncates_over_cap_catalog() -> None:
+    over_cap = connector_catalog._MAX_CONNECTORS + 5
+    payload = {
+        "connectors": [
+            _connector(connector_id=f"c-{index:04d}", name=f"conn{index:04d}")
+            for index in range(over_cap)
+        ]
+    }
+
+    catalog = connector_catalog._resolve_catalog(payload, "fingerprint")
+
+    # The tail beyond the cap is dropped after the deterministic id sort, so the
+    # catalog keeps the first _MAX_CONNECTORS instead of being rejected wholesale.
+    assert len(catalog.connectors) == connector_catalog._MAX_CONNECTORS
+    assert catalog.connectors[0].raw_id == "c-0000"
+    assert (
+        catalog.connectors[-1].raw_id
+        == f"c-{connector_catalog._MAX_CONNECTORS - 1:04d}"
+    )
+
+
+def test_resolve_drops_duplicate_id_connectors_but_keeps_unique_siblings() -> None:
+    # A duplicated id has an ambiguous identity, so every copy is dropped while
+    # uniquely identified siblings still load.
+    payload = {
+        "connectors": [
+            _connector(connector_id="same", name="a"),
+            _connector(connector_id="same", name="b"),
+            _connector(connector_id="unique", name="c"),
+        ]
+    }
+
+    catalog = connector_catalog._resolve_catalog(payload, "fingerprint")
+
+    assert [connector.raw_id for connector in catalog.connectors] == ["unique"]
+
+
+def test_resolve_still_aborts_on_broken_envelope() -> None:
+    # A connectors field that is not a list is whole-payload corruption, so
+    # resolution stays fatal rather than guessing at partial recovery.
+    with pytest.raises(ConnectorCatalogValidationError, match="malformed"):
+        connector_catalog._resolve_catalog({"connectors": "nope"}, "fingerprint")
+
+
+def test_resolve_drops_malformed_connector_but_keeps_siblings() -> None:
+    # A connector whose wire shape is invalid (tools is not a list) is dropped
+    # without taking its healthy sibling down.
+    malformed = {"id": "c-bad", "name": "bad", "tools": "not-a-list"}
+
+    catalog = connector_catalog._resolve_catalog(
+        {"connectors": [malformed, _connector(name="wiki")]}, "fingerprint"
+    )
+
+    assert [connector.alias for connector in catalog.connectors] == ["wiki"]
+
+
+def test_resolve_drops_malformed_tool_but_keeps_connector() -> None:
+    # A tool missing its required name key is dropped on its own; the connector
+    # keeps its healthy tool instead of the whole payload failing to parse.
+    connector = _connector(connector_id="c-x", name="x")
+    connector["tools"] = [
+        {"name": "ok", "description": "x", "inputSchema": {}},
+        {"description": "no name key", "inputSchema": {}},
+    ]
+
+    catalog = connector_catalog._resolve_catalog(
+        {"connectors": [connector]}, "fingerprint"
+    )
+
+    assert len(catalog.connectors) == 1
+    assert [tool.raw_name for tool in catalog.connectors[0].tools] == ["ok"]
+
+
+def test_resolve_keeps_alias_stable_when_colliding_sibling_dropped() -> None:
+    # `a-id` sorts before `b-id` and shares the normalized alias; dropping it for
+    # bad tools must not promote the survivor from `dup_2` to `dup`, which would
+    # break any selection persisted against `dup_2`.
+    dropped = _connector(connector_id="a-id", name="dup")
+    dropped["tools"] = [
+        {"name": "same", "description": "x", "inputSchema": {}},
+        {"name": "same", "description": "x", "inputSchema": {}},
+    ]
+    survivor = _connector(connector_id="b-id", name="dup")
+
+    catalog = connector_catalog._resolve_catalog(
+        {"connectors": [dropped, survivor]}, "fingerprint"
+    )
+
+    assert [(c.raw_id, c.alias) for c in catalog.connectors] == [("b-id", "dup_2")]
+
+
+def test_resolve_truncation_keeps_healthy_tail_over_invalid_head() -> None:
+    # Fill every cap slot with invalid connectors that sort first, then a single
+    # healthy connector in the tail. Filtering before truncating keeps the
+    # healthy one instead of yielding an empty catalog.
+    max_connectors = connector_catalog._MAX_CONNECTORS
+
+    def faulty(index: int) -> dict[str, object]:
+        connector = _connector(connector_id=f"c-{index:04d}", name=f"bad{index}")
+        connector["tools"] = [
+            {"name": "same", "description": "x", "inputSchema": {}},
+            {"name": "same", "description": "x", "inputSchema": {}},
+        ]
+        return connector
+
+    payload = {
+        "connectors": [faulty(index) for index in range(max_connectors)]
+        + [_connector(connector_id=f"c-{max_connectors:04d}", name="healthy")]
+    }
+
+    catalog = connector_catalog._resolve_catalog(payload, "fingerprint")
+
+    assert [connector.raw_id for connector in catalog.connectors] == [
+        f"c-{max_connectors:04d}"
+    ]
+
+
+def test_resolve_aggregates_dropped_tool_warnings(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Many unusable tools on one connector emit a single summary warning, not one
+    # line per tool, to bound the log volume on a bad refresh.
+    connector = _connector(connector_id="c", name="c")
+    connector["tools"] = [
+        {"name": "   ", "description": "blank", "inputSchema": {}} for _ in range(5)
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="vibe"):
+        connector_catalog._resolve_catalog({"connectors": [connector]}, "fingerprint")
+
+    tool_drop_logs = [
+        record
+        for record in caplog.records
+        if getattr(record, "connector_drop_reason", None) == "tools_dropped"
+    ]
+    assert len(tool_drop_logs) == 1
+    assert getattr(tool_drop_logs[0], "connector_tool_drop_counts", None) == {
+        "unnamed_tool": 5
+    }
 
 
 def test_connector_selection_preserves_explicit_policy_precedence() -> None:

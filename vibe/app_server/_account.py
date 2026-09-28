@@ -167,14 +167,6 @@ class _Plan:
             self.kind is AccountPlanKind.MISTRAL_CODE and self.normalized_name == "F"
         )
 
-    @property
-    def teleport_eligible(self) -> bool:
-        return (
-            self.kind is AccountPlanKind.CHAT
-            and self.normalized_name in _PAID_CHAT_PLANS
-            and not self.prompt_switching_to_pro_plan
-        )
-
 
 class AccountHost(Protocol):
     """What ``AccountController`` needs of its session. ``AgentLoop`` satisfies
@@ -323,19 +315,14 @@ class AccountController:
         elif plan.offers_upgrade:
             plan_offer = upgrade
 
-        teleport_action: AccountAction | None = None
-        if not plan.teleport_eligible:
-            teleport_action = (
-                switch_key if plan.prompt_switching_to_pro_plan else upgrade
-            )
-
+        teleport_eligible = plan.kind is not AccountPlanKind.MISTRAL_CODE
         return tenant_update, AccountView(
             status=AccountStatus.READY,
             plan=AccountPlanView(kind=plan.kind, name=plan.name, title=plan.title),
             plan_offer=plan_offer,
             rate_limit_action=(upgrade if plan.rate_limit_upgrade_available else None),
-            teleport_eligible=plan.teleport_eligible,
-            teleport_action=teleport_action,
+            teleport_eligible=teleport_eligible,
+            teleport_action=None if teleport_eligible else switch_key,
         )
 
 

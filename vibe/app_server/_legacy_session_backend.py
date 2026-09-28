@@ -53,6 +53,8 @@ from vibe.app_server.events import (
 )
 from vibe.app_server.models import PublicCallbackEntry, PublicSessionState
 from vibe.app_server.protocol import (
+    AgentInstallParams,
+    AgentsListResponse,
     AgentSwitchParams,
     CallbackResultError,
     CallbackResultParams,
@@ -66,6 +68,7 @@ from vibe.app_server.protocol import (
     EmptyResponse,
     EventNotificationParams,
     MCPAuthRequiredParams,
+    ModelConfigWriteParams,
     Notification,
     ProtocolErrorCode,
     RuntimeMutationResponse,
@@ -703,6 +706,20 @@ class LegacySessionBackend:
             "session/agent/update", params, RuntimeMutationResponse
         )
 
+    async def install_agent(
+        self, params: AgentInstallParams
+    ) -> SessionBackendResult[AgentsListResponse]:
+        return await self._resource_request(
+            "agents/install", params, AgentsListResponse
+        )
+
+    async def uninstall_agent(
+        self, params: AgentInstallParams
+    ) -> SessionBackendResult[AgentsListResponse]:
+        return await self._resource_request(
+            "agents/uninstall", params, AgentsListResponse
+        )
+
     async def update_settings(
         self, params: SessionSettingsUpdateParams
     ) -> SessionBackendResult[EmptyResponse]:
@@ -712,6 +729,13 @@ class LegacySessionBackend:
         self, params: ConfigWriteParams
     ) -> SessionBackendResult[ConfigWriteResponse]:
         return await self._resource_request("config/write", params, ConfigWriteResponse)
+
+    async def write_model_config(
+        self, params: ModelConfigWriteParams
+    ) -> SessionBackendResult[ConfigWriteResponse]:
+        return await self._resource_request(
+            "config/model/write", params, ConfigWriteResponse
+        )
 
     async def reload_config(
         self, params: ConfigReloadParams

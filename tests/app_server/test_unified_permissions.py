@@ -7,6 +7,8 @@ the two to the behaviour ``AgentLoop.approve_always`` already has.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,11 @@ pytest.importorskip("mistralai_vibe_local_harness.vibe")
 # at module scope -- it builds `PermissionOutcome`, so importing the resolver is
 # importing it. `mistralai-vibe-local-harness` is an optional extra, and an environment
 # without it must skip this module rather than fail to collect it.
+from vibe.app_server._provided_tools import (
+    TODO_TOOL_NAME,
+    VIBE_PROVIDED_TOOL_NAMES,
+    VIBE_TOOL_GROUP,
+)
 from vibe.app_server._unified_permissions import (
     RUST_BUILTIN_TOOL_SOURCES,
     UnifiedPermissionResolver,
@@ -33,9 +40,13 @@ from vibe.app_server._unified_permissions import (
 
 
 def _resolver(
-    tmp_path: Path, **tools: dict[str, Any]
+    tmp_path: Path, routes: Mapping[str, str] | None = None, **tools: dict[str, Any]
 ) -> tuple[UnifiedPermissionResolver, FakeConfigOrchestrator[Any]]:
-    """The bridge as ``build_unified_session_context`` assembles it."""
+    """The bridge as ``build_unified_session_context`` assembles it.
+
+    ``routes`` stands in for the MCP snapshot the adapter registers: Runtime
+    route to the name Vibe published the tool under.
+    """
     orchestrator = FakeConfigOrchestrator(build_test_vibe_config(tools=tools))
     store = PermissionStore()
     manager = ToolManager(
@@ -45,7 +56,10 @@ def _resolver(
         harness_files=HarnessFilesManager().for_session(tmp_path),
         permission_getter=store.get_tool_permission,
     )
-    return UnifiedPermissionResolver(manager, store, orchestrator), orchestrator
+    resolver = UnifiedPermissionResolver(manager, store, orchestrator)
+    if routes:
+        resolver.provided_names.register("mcp", routes)
+    return resolver, orchestrator
 
 
 def _granted(outcome: Any) -> tuple[RequiredPermission, ...]:
@@ -252,14 +266,13 @@ async def test_a_command_no_shell_can_read_is_scoped_to_itself(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_a_permanent_grant_for_an_unreadable_command_outlives_the_session(
+async def test_a_permanent_grant_cannot_auto_allow_unreadable_shell_syntax(
     tmp_path: Path,
 ) -> None:
-    """*Prepare*: A resolver, and the same unreadable command approved for good.
+    """*Prepare*: Persist an unreadable command in the shell allowlist.
     *Do*: Resolve it again against a fresh store, as the next session would.
-    *Assert*: It runs. The shells match their allowlists against a *parsed*
-    command, and this one parses to nothing, so only the resolver can read back
-    the entry it wrote -- without that, "always" would prompt every session.
+    *Assert*: It still asks. Invalid syntax must fail closed before allowlist
+    matching because a real shell may execute behavior the parser omitted.
     """
     # Prepare
     resolver, orchestrator = _resolver(tmp_path)
@@ -272,7 +285,7 @@ async def test_a_permanent_grant_for_an_unreadable_command_outlives_the_session(
     again = await next_session.resolve("file_system.bash", {"command": "&&"})
 
     # Assert
-    assert again.decision == "allow"
+    assert again.decision == "ask"
 
 
 @pytest.mark.parametrize("command", ["", "   "])
@@ -491,6 +504,128 @@ async def test_a_permanent_grant_writes_the_pattern_to_the_allowlist(
 
 
 @pytest.mark.asyncio
+async def test_a_grant_for_a_command_with_an_expansion_covers_the_next_one(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver, and a bash call whose argument is a variable.
+    *Do*: Grant the ask, then resolve the same command with a different argument.
+    *Assert*: It runs without asking. Recording the literal string instead made
+    every one of these a single-use allow -- the shape that drives users to
+    ``bypass_approval``.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path)
+    outcome = await resolver.resolve("file_system.bash", {"command": "npm test $SUITE"})
+    assert [
+        permission["sessionPattern"] for permission in outcome.required_permissions
+    ] == ["npm test *"]
+    await resolver.grant("file_system.bash", _granted(outcome), permanent=False)
+
+    # Do
+    again = await resolver.resolve("file_system.bash", {"command": "npm test $OTHER"})
+
+    # Assert
+    assert again.decision == "allow"
+
+
+@pytest.mark.asyncio
+async def test_a_grant_for_a_dynamic_program_name_covers_nothing_else(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver, and a bash call whose subcommand is a variable.
+    *Do*: Grant the ask, then resolve a different subcommand of the same program.
+    *Assert*: It asks again. ``git $SUB`` extracts to ``git``, so generalising it
+    would mean ``git *`` -- one approval for every subcommand there is.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path)
+    outcome = await resolver.resolve("file_system.bash", {"command": "git $SUB"})
+    assert [
+        permission["sessionPattern"] for permission in outcome.required_permissions
+    ] == ["git $SUB"]
+    await resolver.grant("file_system.bash", _granted(outcome), permanent=False)
+
+    # Do
+    other = await resolver.resolve("file_system.bash", {"command": "git push --force"})
+
+    # Assert
+    assert other.decision == "ask"
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_path_grant_is_written_to_the_shell_allowlist(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver, and a bash call reading a file outside the workspace.
+    *Do*: Grant it permanently, then resolve the same call on a fresh session.
+    *Assert*: The typed path grant is in the shell allowlist, and the next session
+    allows the file without asking. The shell reads ``vibe-path`` entries back.
+    """
+    # Prepare
+    resolver, orchestrator = _resolver(tmp_path)
+    outside = Path("/etc/hosts")
+    command = f"cat {outside}"
+    outcome = await resolver.resolve("file_system.bash", {"command": command})
+    assert [permission["scope"] for permission in outcome.required_permissions] == [
+        PermissionScope.OUTSIDE_DIRECTORY.value
+    ]
+    [path_grant] = [
+        str(permission["sessionPattern"]) for permission in outcome.required_permissions
+    ]
+
+    # Do
+    await resolver.grant("file_system.bash", _granted(outcome), permanent=True)
+
+    # Assert
+    bash_config = orchestrator.config.tools["bash"]
+    assert path_grant in bash_config["allowlist"]
+    assert bash_config.get("permission") != ToolPermission.ALWAYS.value
+    next_session, _ = _resolver(tmp_path, bash={"allowlist": bash_config["allowlist"]})
+    again = await next_session.resolve("file_system.bash", {"command": command})
+    assert again.decision == "allow"
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_grant_persists_command_and_path_scopes(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """*Prepare*: A resolver, and a bash call needing a command and an outside path.
+    *Do*: Grant it permanently, then resolve it on a fresh session.
+    *Assert*: Both patterns reach the allowlist, and the next session no longer
+    asks for the outside path. A path grant is an entry the shell reads back.
+    """
+    # Prepare
+    resolver, orchestrator = _resolver(tmp_path, bash={"allowlist": []})
+    command = "grep $PATTERN /etc/hosts"
+    outcome = await resolver.resolve("file_system.bash", {"command": command})
+    assert sorted(
+        str(permission["scope"]) for permission in outcome.required_permissions
+    ) == [
+        PermissionScope.COMMAND_PATTERN.value,
+        PermissionScope.OUTSIDE_DIRECTORY.value,
+    ]
+    path_grant = next(
+        str(permission["sessionPattern"])
+        for permission in outcome.required_permissions
+        if permission["scope"] == PermissionScope.OUTSIDE_DIRECTORY.value
+    )
+
+    # Do
+    with caplog.at_level(logging.WARNING):
+        await resolver.grant("file_system.bash", _granted(outcome), permanent=True)
+
+    # Assert
+    allowlist = orchestrator.config.tools["bash"]["allowlist"]
+    assert allowlist == sorted(["grep", path_grant])
+    assert PermissionScope.OUTSIDE_DIRECTORY.value not in caplog.text
+    next_session, _ = _resolver(tmp_path, bash={"allowlist": allowlist})
+    again = await next_session.resolve("file_system.bash", {"command": command})
+    assert PermissionScope.OUTSIDE_DIRECTORY.value not in [
+        permission["scope"] for permission in again.required_permissions
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_permanent_grant_with_nothing_to_scope_to_writes_the_permission(
     tmp_path: Path,
 ) -> None:
@@ -528,6 +663,196 @@ async def test_a_builtin_with_no_tool_behind_it_is_left_to_the_mode(
 
     # Assert
     assert outcome.decision == "ask"
+
+
+@pytest.mark.asyncio
+async def test_a_provided_tool_asks_by_default(tmp_path: Path) -> None:
+    """*Prepare*: A resolver with nothing configured for an MCP tool.
+    *Do*: Resolve its route.
+    *Assert*: It asks -- the default permission is the whole verdict.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path, {"mcp_linear.get_issue": "linear_get_issue"})
+
+    # Do
+    outcome = await resolver.resolve("mcp_linear.get_issue", {"id": "VIBE-1"})
+
+    # Assert
+    assert outcome.decision == "ask"
+    assert outcome.required_permissions == ()
+
+
+@pytest.mark.asyncio
+async def test_an_always_configured_provided_tool_runs(tmp_path: Path) -> None:
+    """*Prepare*: An MCP tool and a connector tool configured ``always``, under the
+    names Vibe publishes them as, with both catalogues registered.
+    *Do*: Resolve them by the Runtime routes the harness gates them under.
+    *Assert*: Both allow, so the route reaches the configured name -- and one
+    catalogue's registration did not displace the other's.
+    """
+    # Prepare
+    resolver, _ = _resolver(
+        tmp_path,
+        {"mcp_linear.get_issue": "linear_get_issue"},
+        **{
+            "linear_get_issue": {"permission": "always"},
+            "connector_github_create_issue": {"permission": "always"},
+        },
+    )
+    resolver.provided_names.register(
+        "connector", {"connector_github.create_issue": "connector_github_create_issue"}
+    )
+
+    # Do
+    mcp = await resolver.resolve("mcp_linear.get_issue", {"id": "VIBE-1"})
+    connector = await resolver.resolve("connector_github.create_issue", {})
+
+    # Assert
+    assert mcp.decision == "allow"
+    assert connector.decision == "allow"
+
+
+@pytest.mark.asyncio
+async def test_a_never_configured_provided_tool_is_denied_not_asked(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: An MCP tool whose remote name is not an identifier, so the
+    Runtime routes it under a name that is not the one Vibe configured.
+    *Do*: Resolve its route.
+    *Assert*: It denies, naming the tool the way the user configured it. Deriving
+    the name from the route instead would read an unwritten key and ask.
+    """
+    # Prepare
+    resolver, _ = _resolver(
+        tmp_path,
+        {"mcp_github.create_pr": "github_create-pr"},
+        **{"github_create-pr": {"permission": "never"}},
+    )
+
+    # Do
+    outcome = await resolver.resolve("mcp_github.create_pr", {})
+
+    # Assert
+    assert outcome.decision == "deny"
+    assert outcome.reason == "Tool 'github_create-pr' is permanently disabled"
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_tool_group_is_configured_by_its_own_route(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A plugin's own provided tool configured ``never``.
+    *Do*: Resolve its route.
+    *Assert*: It denies -- a plugin group has no published name to translate to.
+    """
+    # Prepare
+    resolver, _ = _resolver(tmp_path, **{"deploy.ship_it": {"permission": "never"}})
+
+    # Do
+    outcome = await resolver.resolve("deploy.ship_it", {})
+
+    # Assert
+    assert outcome.decision == "deny"
+
+
+@pytest.mark.asyncio
+async def test_a_session_grant_covers_the_provided_tool_it_was_given_for(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver over the ordinary catalogue.
+    *Do*: Grant one provided tool, then resolve it and a sibling route.
+    *Assert*: The granted tool runs and the sibling still asks.
+    """
+    # Prepare
+    resolver, _ = _resolver(
+        tmp_path,
+        {
+            "mcp_linear.get_issue": "linear_get_issue",
+            "mcp_linear.create_issue": "linear_create_issue",
+        },
+    )
+
+    # Do
+    ask = await resolver.resolve("mcp_linear.get_issue", {"id": "VIBE-1"})
+    assert ask.decision == "ask"
+    await resolver.grant("mcp_linear.get_issue", (), permanent=False)
+
+    # Assert
+    assert (
+        await resolver.resolve("mcp_linear.get_issue", {"id": "VIBE-2"})
+    ).decision == ("allow")
+    assert (await resolver.resolve("mcp_linear.create_issue", {})).decision == "ask"
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_provided_grant_writes_the_tool_permission(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A resolver over the ordinary catalogue.
+    *Do*: Grant a provided tool permanently.
+    *Assert*: The permission lands under the published name, not the route.
+    """
+    # Prepare
+    resolver, orchestrator = _resolver(
+        tmp_path, {"mcp_linear.get_issue": "linear_get-issue"}
+    )
+
+    # Do
+    await resolver.grant("mcp_linear.get_issue", (), permanent=True)
+
+    # Assert
+    assert orchestrator.config.tools["linear_get-issue"]["permission"] == (
+        ToolPermission.ALWAYS.value
+    )
+    assert "mcp_linear.get_issue" not in orchestrator.config.tools
+
+
+@pytest.mark.asyncio
+async def test_an_unrouted_provided_tool_falls_back_to_its_route(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A registry holding one catalogue, re-registered without a route
+    the previous revision published.
+    *Do*: Resolve the dropped route and the surviving one.
+    *Assert*: The dropped route reads its own name -- nothing configured there,
+    so it asks -- while the surviving one still reaches its published name.
+    """
+    # Prepare
+    resolver, _ = _resolver(
+        tmp_path,
+        {"mcp_github.create_pr": "github_create-pr", "mcp_github.list": "github_list"},
+        **{
+            "github_create-pr": {"permission": "never"},
+            "github_list": {"permission": "never"},
+        },
+    )
+    resolver.provided_names.register("mcp", {"mcp_github.list": "github_list"})
+
+    # Do / Assert
+    assert (await resolver.resolve("mcp_github.create_pr", {})).decision == "ask"
+    assert (await resolver.resolve("mcp_github.list", {})).decision == "deny"
+
+
+@pytest.mark.asyncio
+async def test_the_unified_todo_tool_obeys_the_permission_configured_for_todo(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: ``[tools.todo]`` set either way, with Vibe's own group registered.
+    *Do*: Resolve the route the Runtime gates the tool under on the Unified path.
+    *Assert*: The configured permission answers, as it does on the legacy harness.
+    Nothing else reads ``vibe.todo``, so a missing registration would silently ask
+    against a key the user never wrote.
+    """
+    # Prepare
+    denied, _ = _resolver(tmp_path, **{"todo": {"permission": "never"}})
+    allowed, _ = _resolver(tmp_path, **{"todo": {"permission": "always"}})
+    for resolver in (denied, allowed):
+        resolver.provided_names.register(VIBE_TOOL_GROUP, VIBE_PROVIDED_TOOL_NAMES)
+    route = f"{VIBE_TOOL_GROUP}.{TODO_TOOL_NAME}"
+
+    # Do / Assert
+    assert (await denied.resolve(route, {"action": "read"})).decision == "deny"
+    assert (await allowed.resolve(route, {"action": "read"})).decision == "allow"
 
 
 def test_scope_names_survive_the_round_trip() -> None:

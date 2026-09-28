@@ -18,6 +18,7 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
+from vibe import __version__
 from vibe.core.config import MCPHttp, MCPStdio, MCPStreamableHttp, VibeConfigSchema
 from vibe.core.tools.base import BaseToolConfig, BaseToolState, InvokeContext
 from vibe.core.tools.mcp import (
@@ -149,7 +150,10 @@ class TestParseCallResult:
 
 class TestMCPHttpClient:
     def test_create_vibe_mcp_http_client_uses_vibe_ssl_context(self):
-        headers = {"Authorization": "Bearer token"}
+        headers = {
+            "Authorization": "Bearer token",
+            "User-Agent": "MistralAI-MCPClient/1.0",
+        }
         ssl_context = object()
         fake_client = object()
         with (
@@ -170,6 +174,15 @@ class TestMCPHttpClient:
         assert kwargs["verify"] is ssl_context
         assert kwargs["timeout"].connect == 30.0
         assert kwargs["timeout"].read == 300.0
+
+    def test_create_vibe_mcp_http_client_sets_vibe_cli_user_agent_by_default(self):
+        with patch(
+            "vibe.core.tools.mcp.tools.VibeAsyncHTTPClient", return_value=object()
+        ) as async_client:
+            create_vibe_mcp_http_client({"Authorization": "Bearer token"})
+
+        kwargs = async_client.call_args.kwargs
+        assert kwargs["headers"]["User-Agent"] == f"MistralAI-VibeCLI/{__version__}"
 
     @pytest.mark.asyncio
     async def test_list_tools_http_uses_vibe_mcp_http_client(self):

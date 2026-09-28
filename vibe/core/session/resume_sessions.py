@@ -20,6 +20,8 @@ class ResumeSessionInfo:
     title: str | None = None
     start_time: str | None = None
     end_time: str | None = None
+    bumped_at: str | None = None
+    pinned_at: str | None = None
     updated_at: str = ""
     parent_session_id: str | None = None
 
@@ -39,6 +41,8 @@ def list_local_resume_sessions(
             title=session.get("title"),
             start_time=session.get("start_time"),
             end_time=session.get("end_time"),
+            bumped_at=session.get("bumped_at"),
+            pinned_at=session.get("pinned_at"),
             updated_at=session["updated_at"],
         )
         for session in SessionLoader.list_sessions(config.session_logging, cwd=cwd)

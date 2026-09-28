@@ -135,6 +135,12 @@ def _vibe_content_block(block: SessionContentBlock) -> ContentBlock:
             assert_never(block)
 
 
+def image_attachment_from_session_block(
+    block: SessionImageContentBlock,
+) -> ImageAttachment:
+    return _vibe_image_attachment(block)
+
+
 def _vibe_image_attachment(block: SessionImageContentBlock) -> ImageAttachment:
     if block.uri.startswith("data:"):
         header, separator, data = block.uri.partition(",")
@@ -163,6 +169,7 @@ def _vibe_image_attachment(block: SessionImageContentBlock) -> ImageAttachment:
 
 
 __all__ = [
+    "image_attachment_from_session_block",
     "session_content_blocks",
     "session_content_blocks_from_vibe",
     "vibe_content_blocks",

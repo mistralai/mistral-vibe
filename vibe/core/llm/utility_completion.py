@@ -72,7 +72,7 @@ def _fast_utility_provider(config: VibeConfigSchema) -> ProviderConfig | None:
 
 def _fast_model_allowed(config: VibeConfigSchema) -> bool:
     return not config.allowed_models or name_matches(
-        _FAST_MODEL.alias, config.allowed_models
+        _FAST_MODEL.name, config.allowed_models
     )
 
 

@@ -1,4 +1,4 @@
-"""Smart-approve activation over the experimental Unified Harness backend.
+"""Smart-approve activation over the Unified Harness backend.
 
 Activation is the `--smart-approve` CLI flag, which selects the smart-approve
 agent; the Runtime then gates each tool call with the risk classifier via the
@@ -88,7 +88,7 @@ def test_classify_verdict_reaches_the_log_file(tmp_path: Path) -> None:
     *Assert*: The classifier's verdict line is written to the vibe log file.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from mistralai_vibe_local_harness.vibe import (  # pyright: ignore[reportMissingImports]
+    from mistralai_vibe_local_harness.vibe import (
         ClassificationTier,
         ClassificationVerdict,
         LocalRuntimeAdapterConfig,

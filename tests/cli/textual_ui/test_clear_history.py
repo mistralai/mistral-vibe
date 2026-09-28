@@ -5,10 +5,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from tests.conftest import build_test_vibe_app
-from vibe.app_server.models import AgentStatsSnapshot, SessionLogSummary
+from vibe.app_server.models import AgentStatsSnapshot, SessionLogSummary, TodoEffectItem
 from vibe.cli.textual_ui.app import VibeApp
+from vibe.cli.textual_ui.todo_tracker import TodoTracker
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress
 from vibe.cli.textual_ui.widgets.messages import UserCommandMessage
+from vibe.cli.textual_ui.widgets.todo_status import TodoStatusRow
 
 _SPENT_TOKENS = 50_000
 _CONTEXT_WINDOW = 200_000
@@ -188,6 +190,57 @@ async def test_clear_history_leaves_the_gauge_alone_when_clear_fails(
         assert (
             vibe_app.query_one(ContextProgress).tokens.current_tokens == _SPENT_TOKENS
         )
+
+
+def _pin_a_todo(vibe_app: VibeApp) -> TodoStatusRow:
+    vibe_app._todo_tracker = TodoTracker()
+    vibe_app._todo_tracker.seed([TodoEffectItem(id="1", content="port the protocol")])
+    vibe_app._refresh_todo_status()
+    return vibe_app.query_one(TodoStatusRow)
+
+
+@pytest.mark.asyncio
+async def test_clear_history_hides_the_pinned_todo_row(vibe_app: VibeApp) -> None:
+    """The clear starts a fresh harness session, whose todo list is empty."""
+    async with vibe_app.run_test() as pilot:
+        _set_session_log(vibe_app, enabled=True, persisted=True)
+        row = _pin_a_todo(vibe_app)
+        await pilot.pause()
+        assert row.display is True
+
+        vibe_app.app_server.clear_history = AsyncMock()
+        vibe_app._reset_message_widgets = AsyncMock()
+        vibe_app._mount_and_scroll = AsyncMock()
+        vibe_app._handle_user_message = AsyncMock()
+
+        await vibe_app._clear_history()
+        await pilot.pause()
+
+        assert vibe_app._todo_tracker is not None
+        assert vibe_app._todo_tracker.todos == []
+        assert row.display is False
+
+
+@pytest.mark.asyncio
+async def test_clear_history_keeps_the_todos_when_clear_fails(
+    vibe_app: VibeApp,
+) -> None:
+    """A failed clear keeps the session, so its todo list is still the live one."""
+    async with vibe_app.run_test() as pilot:
+        _set_session_log(vibe_app, enabled=True, persisted=True)
+        row = _pin_a_todo(vibe_app)
+        await pilot.pause()
+
+        vibe_app.app_server.clear_history = AsyncMock(
+            side_effect=RuntimeError("server down")
+        )
+        vibe_app._reset_message_widgets = AsyncMock()
+        vibe_app._mount_and_scroll = AsyncMock()
+
+        await vibe_app._clear_history()
+        await pilot.pause()
+
+        assert row.display is True
 
 
 @pytest.mark.asyncio

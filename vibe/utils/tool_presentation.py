@@ -1,9 +1,29 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from enum import StrEnum, auto
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from pydantic.alias_generators import to_camel
+
+from vibe.permissions import PathGrantScope, PermissionScope, RequiredPermission
+
+
+def path_scope_label(
+    required_permissions: Sequence[RequiredPermission],
+    scope: PathGrantScope,
+    *,
+    for_session: bool,
+) -> str:
+    """Describe every path target affected by a scoped approval."""
+    target_count = sum(
+        permission.scope is PermissionScope.OUTSIDE_DIRECTORY
+        for permission in required_permissions
+    )
+    if scope is PathGrantScope.DIRECTORY_RECURSIVE:
+        return "these folders" if target_count > 1 else "this folder"
+    target = "these paths" if target_count > 1 else "this file"
+    return f"{target} only" if for_session else target
 
 
 class PresentationModel(BaseModel):
@@ -48,6 +68,9 @@ class EffectResultDisplay(PresentationModel):
     verb: str = ""
     message: str
     warnings: list[str] = Field(default_factory=list)
+    # Why the call ran without asking (smart approve). Not a warning: the
+    # call succeeded and was authorised, so it must not read as a problem.
+    approval_note: str | None = None
     suffix: str = ""
 
     @property

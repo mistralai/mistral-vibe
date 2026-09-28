@@ -7,6 +7,7 @@ from vibe.app_server.models import (
     MANUAL_SHELL_TOOL_NAME,
     CompletedEffectState,
     EffectResultDisplay,
+    PublicCheckpointEntry,
     PublicEffectEntry,
     PublicEntryGenerationStatus,
     PublicHistoryEntry,
@@ -37,6 +38,19 @@ def _message(index: int, content: str = "hello") -> PublicMessageEntry:
         generation_status=PublicEntryGenerationStatus.COMPLETED,
         role="assistant",
         content=[TextContentBlock(text=content)],
+    )
+
+
+def _model_change(index: int) -> PublicCheckpointEntry:
+    return PublicCheckpointEntry(
+        id=f"checkpoint-model-change-{index}",
+        session_id="s1",
+        created_at=index,
+        updated_at=index,
+        generation_status=PublicEntryGenerationStatus.COMPLETED,
+        kind="model_change",
+        message="Model changed to gpt-5.6-sol",
+        details={"model": "gpt-5.6-sol"},
     )
 
 
@@ -151,6 +165,21 @@ def test_visible_history_widgets_count_includes_tool_group() -> None:
     )
     count = visible_history_widgets_count(widgets)
     assert count == 2  # 1 ToolGroup + 1 AssistantMessage
+
+
+def test_visible_history_widgets_count_includes_a_model_change() -> None:
+    """A model change is reconstructed history, not chrome mounted beside it.
+
+    ``should_resume_history`` reads a count of zero as "nothing is on screen"
+    and resumes the transcript again, so a view whose visible entries are all
+    model changes would be rebuilt underneath the user.
+    """
+    batch: list[PublicHistoryEntry] = [_model_change(0)]
+    widgets = build_history_widgets(
+        batch, start_index=0, history_widget_indices=_indices(), tools_collapsed=True
+    )
+
+    assert visible_history_widgets_count(widgets) == 1
 
 
 def test_visible_history_indices_descends_into_group() -> None:

@@ -9,11 +9,14 @@ from textual.widgets import Static
 
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
+import vibe.cli.textual_ui.widgets.chat_input.paste_path as paste_path_module
 from vibe.cli.textual_ui.widgets.chat_input.paste_path import (
     maybe_prepend_at_for_image_path,
+    maybe_prepend_at_for_path,
     rewrite_bare_image_paths_in_text,
 )
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
+from vibe.core.autocompletion.path_prompt import build_path_prompt_payload
 
 
 def test_bare_absolute_image_path_gets_at_prefix(tmp_path: Path) -> None:
@@ -52,6 +55,75 @@ def test_non_image_file_path_is_left_untouched(tmp_path: Path) -> None:
     rewritten = maybe_prepend_at_for_image_path(str(txt))
 
     assert rewritten == str(txt)
+
+
+def test_standalone_text_file_becomes_a_mention(tmp_path: Path) -> None:
+    text_file = tmp_path / "notes.md"
+    text_file.write_text("hi")
+
+    assert maybe_prepend_at_for_path(str(text_file)) == f"@{text_file}"
+
+
+def test_standalone_folder_becomes_a_mention(tmp_path: Path) -> None:
+    folder = tmp_path / "docs"
+    folder.mkdir()
+
+    assert maybe_prepend_at_for_path(str(folder)) == f"@{folder}"
+
+
+@pytest.mark.parametrize(
+    "filename", ["note@draft.md", "report#final.md", "my'quoted\"note.md"]
+)
+def test_standalone_path_with_mention_syntax_is_quoted_and_attached(
+    tmp_path: Path, filename: str
+) -> None:
+    path = tmp_path / filename
+    path.write_text("", encoding="utf-8")
+
+    mention = maybe_prepend_at_for_path(str(path))
+    payload = build_path_prompt_payload(mention)
+
+    assert mention.startswith("@'")
+    assert [resource.path for resource in payload.resources] == [path]
+
+
+def test_newline_delimited_path_list_becomes_mentions(tmp_path: Path) -> None:
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_text("", encoding="utf-8")
+    second.write_text("", encoding="utf-8")
+
+    assert maybe_prepend_at_for_path(f"{first}\n{second}\n") == f"@{first} @{second}"
+
+
+def test_standalone_missing_path_is_left_untouched(tmp_path: Path) -> None:
+    pasted = str(tmp_path / "missing.md")
+
+    assert maybe_prepend_at_for_path(pasted) == pasted
+
+
+@pytest.mark.parametrize("name", ["src", "docs", "README.md"])
+def test_standalone_relative_path_is_left_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / name
+    if path.suffix:
+        path.write_text("", encoding="utf-8")
+    else:
+        path.mkdir()
+
+    assert maybe_prepend_at_for_path(name) == name
+
+
+def test_windows_path_keeps_backslashes_literal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "has\\ space.txt"
+    path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(paste_path_module, "is_windows", lambda: True)
+
+    assert maybe_prepend_at_for_path(str(path)) == f"@'{path}'"
 
 
 def test_missing_image_path_is_left_untouched(tmp_path: Path) -> None:
@@ -111,7 +183,7 @@ async def test_paste_event_inserts_at_prefixed_path_into_chat_input(
 
 
 @pytest.mark.asyncio
-async def test_paste_event_leaves_non_image_paths_untouched(
+async def test_paste_event_turns_text_file_into_a_mention(
     vibe_app: VibeApp, tmp_path: Path
 ) -> None:
     txt = tmp_path / "notes.md"
@@ -124,7 +196,7 @@ async def test_paste_event_leaves_non_image_paths_untouched(
         text_area.post_message(events.Paste(text=str(txt)))
         await pilot.pause()
 
-        assert chat_input.value == str(txt)
+        assert chat_input.value == f"@{txt}"
 
 
 def test_rewrite_bare_image_paths_handles_bare_path(tmp_path: Path) -> None:
@@ -254,7 +326,7 @@ async def test_paste_during_app_blur_forwards_to_chat_input(
 
 
 @pytest.mark.asyncio
-async def test_paste_during_app_blur_forwards_non_image_path_untouched(
+async def test_paste_during_app_blur_forwards_text_file_as_a_mention(
     vibe_app: VibeApp, tmp_path: Path
 ) -> None:
     txt = tmp_path / "notes.md"
@@ -276,7 +348,7 @@ async def test_paste_during_app_blur_forwards_non_image_path_untouched(
         vibe_app.post_message(events.AppFocus())
         await pilot.pause()
 
-        assert chat_input.value == str(txt)
+        assert chat_input.value == f"@{txt}"
 
 
 @pytest.mark.asyncio
@@ -329,7 +401,7 @@ async def test_normal_paste_with_focused_widget_not_intercepted(
         vibe_app.post_message(events.Paste(text=str(txt)))
         await pilot.pause()
 
-        assert chat_input.value == str(txt)
+        assert chat_input.value == f"@{txt}"
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ import pytest
 
 from tests.conftest import build_test_agent_loop
 from tests.stubs.app_server import build_test_app_server
+from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._legacy_session_backend import (
     LegacySessionBackend,
     LegacySessionBackendHost,
@@ -16,6 +17,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendError,
     SessionBackendHost,
     SessionBackendQueuedTurnSteering,
+    SessionBackendResult,
 )
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.events import HistoryEntryAdded, ServerWarning
@@ -23,9 +25,15 @@ from vibe.app_server.models import PublicError, TextContentBlock
 from vibe.app_server.protocol import (
     ClientCapabilities,
     ClientInfo,
+    ConfigWriteParams,
+    ConfigWriteResponse,
     ContextInjectParams,
+    EmptyResponse,
+    ModelConfigWriteParams,
     ProtocolErrorCode,
+    RuntimeMutationStatus,
     ServerWarningParams,
+    SessionMarkAsSeenParams,
     SessionReadParams,
     SessionSettingsUpdateParams,
 )
@@ -40,6 +48,7 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "enqueue_turn",
         "guard_request",
         "inject_context",
+        "install_agent",
         "interrupt_turn",
         "read",
         "read_turn_queue",
@@ -54,13 +63,18 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "steer_turn",
         "subscribe",
         "switch_agent",
+        "uninstall_agent",
         "update_settings",
         "write_config",
+        "write_model_config",
     }
 
     assert _SESSION_BACKEND_METHODS == {
+        "agents/install",
+        "agents/uninstall",
         "callback/result",
         "config/reload",
+        "config/model/write",
         "config/write",
         "session/agent/update",
         "session/compact",
@@ -130,6 +144,65 @@ def test_app_server_rejects_empty_session_backend_host_factory_result() -> None:
 
     with pytest.raises(TypeError, match="must return a SessionBackendHost"):
         AppServer(server_transport, session_backend_host_factory=empty_factory)
+
+
+@pytest.mark.asyncio
+async def test_pin_requires_the_optional_host_capability() -> None:
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
+    )
+
+    with pytest.raises(RequestFailure) as exc_info:
+        await server._dispatch_backend_host_operation(
+            "session/pin", {"sessionId": "saved-session", "pinned": True}
+        )
+
+    assert exc_info.value.code is ProtocolErrorCode.METHOD_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_mark_as_seen_requires_the_optional_host_capability() -> None:
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
+    )
+
+    with pytest.raises(RequestFailure) as exc_info:
+        await server._dispatch_backend_host_operation(
+            "session/markAsSeen", {"sessionId": "saved-session"}
+        )
+
+    assert exc_info.value.code is ProtocolErrorCode.METHOD_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_mark_as_seen_routes_to_the_selected_backend_host() -> None:
+    received: SessionMarkAsSeenParams | None = None
+
+    class SeenStateHost:
+        async def mark_as_seen(self, params: SessionMarkAsSeenParams) -> EmptyResponse:
+            nonlocal received
+            received = params
+            return EmptyResponse()
+
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        session_backend_host_factory=lambda _: cast(
+            SessionBackendHost, SeenStateHost()
+        ),
+    )
+
+    result = await server._dispatch_backend_host_operation(
+        "session/markAsSeen", {"sessionId": "saved-session"}
+    )
+
+    assert received == SessionMarkAsSeenParams(session_id="saved-session")
+    assert result is not None
+    assert result.response == EmptyResponse()
 
 
 @pytest.mark.asyncio
@@ -287,6 +360,65 @@ async def test_legacy_backend_subscription_forwards_direct_events_and_closes() -
     with pytest.raises(StopAsyncIteration):
         await next_event
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_parked_config_write_does_not_announce_the_runtime() -> None:
+    """*Prepare*: A backend that parks what it is written, as a mid-turn pick is.
+    *Do*: Dispatch both config writes.
+    *Assert*: Neither announces `runtime/updated`. The snapshot on the response
+    is what the session *will* run, which is what the caller asked for; telling
+    every subscriber would say the running turn had already moved to it.
+    """
+    client_transport, server_transport = memory_transport_pair()
+    server = build_test_app_server(build_test_agent_loop(), server_transport)
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    session = await AppServerSession.start(
+        client,
+        client_info=ClientInfo(name="test", version="0"),
+        capabilities=ClientCapabilities(),
+    )
+    try:
+        root = server._require_root()
+        assert isinstance(root, LegacySessionBackend)
+        parked = SessionBackendResult(
+            response=ConfigWriteResponse(
+                runtime=root.runtime_updated_params().runtime,
+                status=RuntimeMutationStatus.PENDING,
+            )
+        )
+
+        class _ParkingBackend:
+            async def write_config(
+                self, params: ConfigWriteParams
+            ) -> SessionBackendResult[ConfigWriteResponse]:
+                return parked
+
+            async def write_model_config(
+                self, params: ModelConfigWriteParams
+            ) -> SessionBackendResult[ConfigWriteResponse]:
+                return parked
+
+        backend = cast(SessionBackend, _ParkingBackend())
+        written = await server._dispatch_backend_config(
+            backend,
+            "config/write",
+            ConfigWriteParams(session_id=session.session_id, ops=[]).model_dump(
+                mode="json", by_alias=True
+            ),
+        )
+        picked = await server._dispatch_backend_config(
+            backend,
+            "config/model/write",
+            ModelConfigWriteParams(
+                session_id=session.session_id, model_alias="other"
+            ).model_dump(mode="json", by_alias=True),
+        )
+
+        assert written is not None and written.runtime_updated is False
+        assert picked is not None and picked.runtime_updated is False
+    finally:
+        await session.close()
 
 
 def _accept_session_backend(backend: SessionBackend) -> None:
