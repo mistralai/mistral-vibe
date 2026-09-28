@@ -61,7 +61,9 @@ class AgentProfile:
 
 
 def _plan_overrides() -> dict[str, Any]:
-    plans_pattern = str(PLANS_DIR.path / "*")
+    # File tools resolve the target path before matching, so the pattern must be
+    # resolved too or a symlinked home never matches it.
+    plans_pattern = str(PLANS_DIR.path.resolve() / "*")
     return {
         "tools": {
             "write_file": {"permission": "never", "allowlist": [plans_pattern]},
