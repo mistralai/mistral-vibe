@@ -3127,7 +3127,26 @@ def canonical_json(value: JsonValue) -> bytes:
             ).encode()
         except UnicodeEncodeError:
             pass
-    return rfc8785.dumps(value)
+    try:
+        return rfc8785.dumps(value)
+    except rfc8785.IntegerDomainError:
+        # RFC 8785 cannot represent integers beyond +-2^53, but tool results
+        # routinely carry 64-bit identifiers. Digest those as decimal strings
+        # instead of failing the whole turn; payloads that were accepted before
+        # never reach this branch, so their digests are unchanged.
+        return rfc8785.dumps(_with_unsafe_integers_as_strings(value))
+
+
+def _with_unsafe_integers_as_strings(value: JsonValue) -> JsonValue:
+    if type(value) is int and value not in _CANONICAL_INTEGER_RANGE:
+        return str(value)
+    if isinstance(value, dict):
+        return {
+            key: _with_unsafe_integers_as_strings(item) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_with_unsafe_integers_as_strings(item) for item in value]
+    return value
 
 
 def _standard_encoder_is_canonical(value: JsonValue) -> bool:

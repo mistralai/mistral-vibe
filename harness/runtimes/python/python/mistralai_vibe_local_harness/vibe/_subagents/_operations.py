@@ -6,9 +6,9 @@ import hashlib
 from typing import Literal, cast
 
 from pydantic import Field, JsonValue
-import rfc8785
 
 from mistralai_vibe_local_harness.protocol import RustRuntimeBuiltinToolCallAction
+from mistralai_vibe_local_harness.vibe._storage import canonical_json
 from mistralai_vibe_local_harness.vibe._subagents._models import (
     ChildSessionRecord,
     ChildTombstone,
@@ -60,7 +60,7 @@ class AgentInput(SubagentModel):
 
 def request_digest(action: RustRuntimeBuiltinToolCallAction) -> str:
     payload = {"name": action.call.name, "arguments": action.call.arguments}
-    return hashlib.sha256(rfc8785.dumps(payload)).hexdigest()
+    return hashlib.sha256(canonical_json(payload)).hexdigest()
 
 
 def child_session_id(parent_session_id: str, action_id: str) -> str:
